@@ -215,3 +215,46 @@ async def get_sae_service(
 
 # Type alias for injected SAEService
 SAEServiceDep = Annotated["SAEService", Depends(get_sae_service)]
+
+
+# =============================================================================
+# Monitoring Service dependency
+# =============================================================================
+
+# Singleton monitoring service (stored in app state)
+_monitoring_service = None
+
+
+async def get_monitoring_service(
+    sae_service: SAEServiceDep,
+    request: Request,
+) -> "MonitoringService":
+    """
+    Dependency that provides a MonitoringService.
+
+    The monitoring service is a singleton stored in app state to preserve
+    history and statistics across requests.
+
+    Args:
+        sae_service: Injected SAE service.
+        request: FastAPI request for accessing app state.
+
+    Returns:
+        MonitoringService instance.
+    """
+    global _monitoring_service
+
+    if _monitoring_service is None:
+        from millm.services.monitoring_service import MonitoringService
+        from millm.sockets.progress import progress_emitter
+
+        _monitoring_service = MonitoringService(
+            sae_service=sae_service,
+            emitter=progress_emitter,
+        )
+
+    return _monitoring_service
+
+
+# Type alias for injected MonitoringService
+MonitoringServiceDep = Annotated["MonitoringService", Depends(get_monitoring_service)]

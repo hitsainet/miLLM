@@ -342,9 +342,35 @@ async def toggle_steering(
 
 
 @router.delete(
+    "/steering/{feature_idx}",
+    response_model=ApiResponse[SteeringStatus],
+    summary="Clear single feature steering",
+    description="Clear steering for a single feature.",
+)
+async def clear_feature_steering(
+    feature_idx: int,
+    service: SAEServiceDep,
+) -> ApiResponse[SteeringStatus]:
+    """
+    Clear steering for a single feature.
+
+    Removes steering configuration for the specified feature index.
+    """
+    service.clear_steering(feature_idx)
+
+    attachment = service.get_attachment_status()
+    values = service.get_steering_values() if attachment.is_attached else {}
+
+    return ApiResponse.ok(SteeringStatus(
+        enabled=attachment.steering_enabled,
+        values=values,
+    ))
+
+
+@router.delete(
     "/steering",
     response_model=ApiResponse[SteeringStatus],
-    summary="Clear steering",
+    summary="Clear all steering",
     description="Clear all steering values.",
 )
 async def clear_steering(

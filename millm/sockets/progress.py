@@ -360,6 +360,79 @@ class ProgressEmitter:
         )
         logger.info("emitted_sae_detached", sae_id=sae_id)
 
+    # =========================================================================
+    # Monitoring Events
+    # =========================================================================
+
+    def emit_activation_update(
+        self,
+        timestamp: str,
+        features: list[tuple[int, float]],
+        request_id: Optional[str] = None,
+        position: int = 0,
+    ) -> None:
+        """
+        Emit feature activation update event.
+
+        This is a synchronous method for use in the forward pass.
+        Emits to connected clients watching the "monitoring" room.
+
+        Args:
+            timestamp: ISO format timestamp
+            features: List of (feature_idx, value) tuples for top features
+            request_id: Associated inference request ID
+            position: Token position in sequence
+        """
+        if self._sio is None:
+            return
+
+        import asyncio
+
+        data = {
+            "timestamp": timestamp,
+            "features": [{"idx": idx, "value": val} for idx, val in features],
+            "requestId": request_id,
+            "position": position,
+        }
+
+        # Schedule async emit (don't block forward pass)
+        try:
+            loop = asyncio.get_event_loop()
+            if loop.is_running():
+                asyncio.create_task(
+                    self._sio.emit("monitoring:activation", data)
+                )
+            else:
+                loop.run_until_complete(
+                    self._sio.emit("monitoring:activation", data)
+                )
+        except Exception:
+            # Don't let emission errors affect inference
+            pass
+
+    async def emit_monitoring_state_changed(
+        self,
+        enabled: bool,
+        monitored_features: Optional[list[int]] = None,
+    ) -> None:
+        """
+        Emit monitoring state changed event.
+
+        Args:
+            enabled: Whether monitoring is now enabled
+            monitored_features: List of monitored feature indices
+        """
+        if self._sio is None:
+            return
+
+        await self._sio.emit(
+            "monitoring:state",
+            {
+                "enabled": enabled,
+                "monitoredFeatures": monitored_features,
+            },
+        )
+
 
 # Global emitter instance - will be configured with sio on app startup
 progress_emitter = ProgressEmitter()

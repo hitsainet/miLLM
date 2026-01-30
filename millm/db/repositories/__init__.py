@@ -6,5 +6,6 @@ keeping database logic separate from business logic.
 """
 
 from millm.db.repositories.model_repository import ModelRepository
+from millm.db.repositories.sae_repository import SAERepository
 
-__all__ = ["ModelRepository"]
+__all__ = ["ModelRepository", "SAERepository"]

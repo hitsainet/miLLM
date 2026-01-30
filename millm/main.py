@@ -125,6 +125,10 @@ All errors return a standard response format:
                 "description": "Model management operations - download, load, unload, delete",
             },
             {
+                "name": "saes",
+                "description": "SAE management operations - download, attach, steer, monitor",
+            },
+            {
                 "name": "system",
                 "description": "System health and status endpoints",
             },

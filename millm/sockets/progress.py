@@ -246,6 +246,120 @@ class ProgressEmitter:
         )
         logger.info("emitted_unload_complete", model_id=model_id)
 
+    # =========================================================================
+    # SAE Events
+    # =========================================================================
+
+    async def emit_sae_download_progress(
+        self,
+        sae_id: str,
+        percent: int,
+    ) -> None:
+        """
+        Emit SAE download progress event.
+
+        Args:
+            sae_id: ID of the SAE being downloaded
+            percent: Progress percentage (0-100)
+        """
+        if self._sio is None:
+            return
+
+        await self._sio.emit(
+            "sae:download:progress",
+            {
+                "saeId": sae_id,
+                "percent": percent,
+            },
+        )
+
+    async def emit_sae_download_complete(self, sae_id: str) -> None:
+        """
+        Emit SAE download complete event.
+
+        Args:
+            sae_id: ID of the SAE that finished downloading
+        """
+        if self._sio is None:
+            return
+
+        await self._sio.emit(
+            "sae:download:complete",
+            {
+                "saeId": sae_id,
+            },
+        )
+        logger.info("emitted_sae_download_complete", sae_id=sae_id)
+
+    async def emit_sae_download_error(
+        self,
+        sae_id: str,
+        error: str,
+    ) -> None:
+        """
+        Emit SAE download error event.
+
+        Args:
+            sae_id: ID of the SAE
+            error: Error message
+        """
+        if self._sio is None:
+            return
+
+        await self._sio.emit(
+            "sae:download:error",
+            {
+                "saeId": sae_id,
+                "error": error,
+            },
+        )
+        logger.warning("emitted_sae_download_error", sae_id=sae_id, error=error)
+
+    async def emit_sae_attached(
+        self,
+        sae_id: str,
+        layer: int,
+        memory_mb: int,
+    ) -> None:
+        """
+        Emit SAE attached event.
+
+        Args:
+            sae_id: ID of the attached SAE
+            layer: Layer where SAE is attached
+            memory_mb: Memory used in MB
+        """
+        if self._sio is None:
+            return
+
+        await self._sio.emit(
+            "sae:attached",
+            {
+                "saeId": sae_id,
+                "layer": layer,
+                "memoryMb": memory_mb,
+            },
+        )
+        logger.info("emitted_sae_attached", sae_id=sae_id, layer=layer)
+
+    async def emit_sae_detached(self, sae_id: str) -> None:
+        """
+        Emit SAE detached event.
+
+        Args:
+            sae_id: ID of the detached SAE
+        """
+        if self._sio is None:
+            return
+
+        await self._sio.emit(
+            "sae:detached",
+            {
+                "saeId": sae_id,
+            },
+        )
+        logger.info("emitted_sae_detached", sae_id=sae_id)
+
 
 # Global emitter instance - will be configured with sio on app startup
 progress_emitter = ProgressEmitter()

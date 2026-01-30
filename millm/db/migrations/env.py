@@ -16,7 +16,7 @@ from millm.core.config import settings
 from millm.db.base import Base
 
 # Import all models to ensure they're registered with Base.metadata
-from millm.db.models import Model  # noqa: F401
+from millm.db.models import Model, SAE, SAEAttachment  # noqa: F401
 
 # Alembic Config object
 config = context.config

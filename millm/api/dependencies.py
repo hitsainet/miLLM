@@ -160,3 +160,58 @@ def get_inference_service() -> "InferenceService":
 
 # Type alias for injected InferenceService
 InferenceServiceDep = Annotated["InferenceService", Depends(get_inference_service)]
+
+
+# =============================================================================
+# SAE Service dependency
+# =============================================================================
+
+
+async def get_sae_repository(
+    session: DbSession,
+) -> "SAERepository":
+    """
+    Dependency that provides an SAERepository.
+
+    Args:
+        session: Injected database session.
+
+    Returns:
+        SAERepository instance for the request.
+    """
+    from millm.db.repositories.sae_repository import SAERepository
+
+    return SAERepository(session)
+
+
+# Type alias for injected SAERepository
+SAERepo = Annotated["SAERepository", Depends(get_sae_repository)]
+
+
+async def get_sae_service(
+    repository: SAERepo,
+    request: Request,
+) -> "SAEService":
+    """
+    Dependency that provides an SAEService.
+
+    Args:
+        repository: Injected SAE repository.
+        request: FastAPI request for accessing app state.
+
+    Returns:
+        SAEService instance for the request.
+    """
+    from millm.core.config import settings
+    from millm.services.sae_service import SAEService
+    from millm.sockets.progress import progress_emitter
+
+    return SAEService(
+        repository=repository,
+        cache_dir=settings.SAE_CACHE_DIR,
+        emitter=progress_emitter,
+    )
+
+
+# Type alias for injected SAEService
+SAEServiceDep = Annotated["SAEService", Depends(get_sae_service)]

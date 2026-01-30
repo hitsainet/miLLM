@@ -5,5 +5,6 @@ Services contain business logic and coordinate between repositories and ML compo
 """
 
 from millm.services.model_service import ModelService
+from millm.services.sae_service import SAEService
 
-__all__ = ["ModelService"]
+__all__ = ["ModelService", "SAEService"]

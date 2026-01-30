@@ -258,3 +258,55 @@ async def get_monitoring_service(
 
 # Type alias for injected MonitoringService
 MonitoringServiceDep = Annotated["MonitoringService", Depends(get_monitoring_service)]
+
+
+# =============================================================================
+# Profile Service dependency
+# =============================================================================
+
+
+async def get_profile_repository(
+    session: DbSession,
+) -> "ProfileRepository":
+    """
+    Dependency that provides a ProfileRepository.
+
+    Args:
+        session: Injected database session.
+
+    Returns:
+        ProfileRepository instance for the request.
+    """
+    from millm.db.repositories.profile_repository import ProfileRepository
+
+    return ProfileRepository(session)
+
+
+# Type alias for injected ProfileRepository
+ProfileRepo = Annotated["ProfileRepository", Depends(get_profile_repository)]
+
+
+async def get_profile_service(
+    repository: ProfileRepo,
+    sae_service: SAEServiceDep,
+) -> "ProfileService":
+    """
+    Dependency that provides a ProfileService.
+
+    Args:
+        repository: Injected profile repository.
+        sae_service: Injected SAE service.
+
+    Returns:
+        ProfileService instance for the request.
+    """
+    from millm.services.profile_service import ProfileService
+
+    return ProfileService(
+        repository=repository,
+        sae_service=sae_service,
+    )
+
+
+# Type alias for injected ProfileService
+ProfileServiceDep = Annotated["ProfileService", Depends(get_profile_service)]

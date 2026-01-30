@@ -223,6 +223,13 @@ class ProfileNotFoundError(MiLLMError):
     status_code = 404
 
 
+class ProfileAlreadyExistsError(MiLLMError):
+    """Raised when attempting to create a profile that already exists."""
+
+    code = "PROFILE_ALREADY_EXISTS"
+    status_code = 409
+
+
 class ProfileCompatibilityError(MiLLMError):
     """Raised when profile is incompatible with current configuration."""
 
@@ -278,6 +285,7 @@ ERROR_CLASSES: dict[str, type[MiLLMError]] = {
     "INVALID_FEATURE_INDEX": InvalidFeatureIndexError,
     "INVALID_STEERING_VALUE": InvalidSteeringValueError,
     "PROFILE_NOT_FOUND": ProfileNotFoundError,
+    "PROFILE_ALREADY_EXISTS": ProfileAlreadyExistsError,
     "PROFILE_INCOMPATIBLE": ProfileCompatibilityError,
     "INVALID_PROFILE_FORMAT": InvalidProfileFormatError,
     "VALIDATION_ERROR": ValidationError,

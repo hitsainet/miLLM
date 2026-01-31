@@ -150,22 +150,22 @@
 
 ### Phase 2: Type Definitions
 
-- [ ] 5.0 Define API types
-  - [ ] 5.1 Create `src/types/api.ts`
-  - [ ] 5.2 Define ModelInfo and LoadModelRequest
-  - [ ] 5.3 Define SAEInfo and DownloadSAERequest
-  - [ ] 5.4 Define SteeringState and steering requests
-  - [ ] 5.5 Define MonitoringConfig and ActivationRecord
-  - [ ] 5.6 Define FeatureStatistics
-  - [ ] 5.7 Define Profile and profile requests
-  - [ ] 5.8 Define ProfileExport
+- [x] 5.0 Define API types
+  - [x] 5.1 Create `src/types/api.ts`
+  - [x] 5.2 Define ModelInfo and LoadModelRequest
+  - [x] 5.3 Define SAEInfo and DownloadSAERequest
+  - [x] 5.4 Define SteeringState and steering requests
+  - [x] 5.5 Define MonitoringConfig and ActivationRecord
+  - [x] 5.6 Define FeatureStatistics
+  - [x] 5.7 Define Profile and profile requests
+  - [x] 5.8 Define ProfileExport
 
-- [ ] 6.0 Define UI types
-  - [ ] 6.1 Create `src/types/ui.ts`
-  - [ ] 6.2 Define Theme type
-  - [ ] 6.3 Define Toast interface
-  - [ ] 6.4 Define NavItem interface
-  - [ ] 6.5 Define ConnectionStatus type
+- [x] 6.0 Define UI types
+  - [x] 6.1 Create `src/types/ui.ts`
+  - [x] 6.2 Define Theme type
+  - [x] 6.3 Define Toast interface
+  - [x] 6.4 Define NavItem interface
+  - [x] 6.5 Define ConnectionStatus type
 
 ### Phase 3: State Management
 

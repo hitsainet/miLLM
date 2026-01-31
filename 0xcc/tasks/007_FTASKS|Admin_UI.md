@@ -287,27 +287,27 @@
 
 ### Phase 6: Layout Components
 
-- [ ] 19.0 Create Sidebar component
-  - [ ] 19.1 Create `src/components/layout/Sidebar.tsx`
-  - [ ] 19.2 Define navigation items array
-  - [ ] 19.3 Implement logo section
-  - [ ] 19.4 Implement NavLink items with active state
-  - [ ] 19.5 Implement collapse toggle
-  - [ ] 19.6 Handle collapsed state styling
+- [x] 19.0 Create Sidebar component
+  - [x] 19.1 Create `src/components/layout/Sidebar.tsx`
+  - [x] 19.2 Define navigation items array
+  - [x] 19.3 Implement logo section
+  - [x] 19.4 Implement NavLink items with active state
+  - [x] 19.5 Implement collapse toggle
+  - [x] 19.6 Handle collapsed state styling
   - [ ] 19.7 Write Sidebar tests
 
-- [ ] 20.0 Create Header component
-  - [ ] 20.1 Create `src/components/layout/Header.tsx`
-  - [ ] 20.2 Implement page title from route
-  - [ ] 20.3 Implement connection status badge
-  - [ ] 20.4 Implement theme toggle button
+- [x] 20.0 Create Header component
+  - [x] 20.1 Create `src/components/layout/Header.tsx`
+  - [x] 20.2 Implement page title from route
+  - [x] 20.3 Implement connection status badge
+  - [x] 20.4 Implement theme toggle button
   - [ ] 20.5 Write Header tests
 
-- [ ] 21.0 Create Layout component
-  - [ ] 21.1 Create `src/components/layout/Layout.tsx`
-  - [ ] 21.2 Compose Sidebar, Header, and Outlet
-  - [ ] 21.3 Handle sidebar collapsed margin
-  - [ ] 21.4 Add ToastContainer
+- [x] 21.0 Create Layout component
+  - [x] 21.1 Create `src/components/layout/Layout.tsx`
+  - [x] 21.2 Compose Sidebar, Header, and Outlet
+  - [x] 21.3 Handle sidebar collapsed margin
+  - [x] 21.4 Add ToastContainer
   - [ ] 21.5 Write Layout tests
 
 ### Phase 7: Custom Hooks

@@ -49,8 +49,8 @@ COPY alembic.ini /app/
 RUN useradd --create-home --shell /bin/bash millm \
     && chown -R millm:millm /app
 
-# Create model cache directory
-RUN mkdir -p /app/model_cache && chown -R millm:millm /app/model_cache
+# Create model and SAE cache directories
+RUN mkdir -p /app/model_cache /app/sae_cache && chown -R millm:millm /app/model_cache /app/sae_cache
 
 # Switch to non-root user
 USER millm

@@ -323,15 +323,38 @@ class SAEService:
                 )
 
     def _make_progress_callback(self, sae_id: str):
-        """Create progress callback for download."""
+        """
+        Create progress callback for download.
+
+        The callback may be called from a thread executor, so we use
+        run_coroutine_threadsafe to safely schedule async operations.
+        """
+        # Capture the event loop at callback creation time (when we're in async context)
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            loop = None
+
         def callback(progress: dict[str, Any]) -> None:
             if self.emitter and progress.get("status") == "downloading":
-                asyncio.create_task(
-                    self.emitter.emit_sae_download_progress(
-                        sae_id=sae_id,
-                        percent=progress.get("percent", 0),
-                    )
+                coro = self.emitter.emit_sae_download_progress(
+                    sae_id=sae_id,
+                    percent=progress.get("percent", 0),
                 )
+                if loop and loop.is_running():
+                    # Schedule from thread to main event loop
+                    asyncio.run_coroutine_threadsafe(coro, loop)
+                else:
+                    # Fallback: try to create task if we're in async context
+                    try:
+                        asyncio.create_task(coro)
+                    except RuntimeError:
+                        # No event loop available, skip progress emission
+                        logger.debug(
+                            "skipping_progress_emit",
+                            reason="no_event_loop",
+                            sae_id=sae_id,
+                        )
         return callback
 
     # =========================================================================

@@ -138,15 +138,15 @@
   - [x] 3.5 Install lucide-react for icons
   - [x] 3.6 Install dev dependencies (vitest, @testing-library/react)
 
-- [ ] 4.0 Set up directory structure
-  - [ ] 4.1 Create `src/components/` subdirectories
-  - [ ] 4.2 Create `src/hooks/` directory
-  - [ ] 4.3 Create `src/pages/` directory
-  - [ ] 4.4 Create `src/services/` directory
-  - [ ] 4.5 Create `src/stores/` directory
-  - [ ] 4.6 Create `src/types/` directory
-  - [ ] 4.7 Create `src/utils/` directory
-  - [ ] 4.8 Create `tests/` directory structure
+- [x] 4.0 Set up directory structure
+  - [x] 4.1 Create `src/components/` subdirectories
+  - [x] 4.2 Create `src/hooks/` directory
+  - [x] 4.3 Create `src/pages/` directory
+  - [x] 4.4 Create `src/services/` directory
+  - [x] 4.5 Create `src/stores/` directory
+  - [x] 4.6 Create `src/types/` directory
+  - [x] 4.7 Create `src/utils/` directory
+  - [x] 4.8 Create `tests/` directory structure
 
 ### Phase 2: Type Definitions
 

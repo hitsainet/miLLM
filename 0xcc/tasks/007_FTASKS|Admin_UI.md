@@ -194,29 +194,29 @@
 
 ### Phase 4: Services
 
-- [ ] 9.0 Create API client
-  - [ ] 9.1 Create `src/services/api.ts`
-  - [ ] 9.2 Implement ApiError class
-  - [ ] 9.3 Implement generic request function
-  - [ ] 9.4 Implement model API methods
-  - [ ] 9.5 Implement SAE API methods
-  - [ ] 9.6 Implement steering API methods
-  - [ ] 9.7 Implement monitoring API methods
-  - [ ] 9.8 Implement profile API methods
-  - [ ] 9.9 Export api singleton
+- [x] 9.0 Create API client
+  - [x] 9.1 Create `src/services/api.ts`
+  - [x] 9.2 Implement ApiError class
+  - [x] 9.3 Implement generic request function
+  - [x] 9.4 Implement model API methods
+  - [x] 9.5 Implement SAE API methods
+  - [x] 9.6 Implement steering API methods
+  - [x] 9.7 Implement monitoring API methods
+  - [x] 9.8 Implement profile API methods
+  - [x] 9.9 Export api singleton
 
-- [ ] 10.0 Create WebSocket client
-  - [ ] 10.1 Create `src/services/socket.ts`
-  - [ ] 10.2 Define event type interfaces
-  - [ ] 10.3 Implement SocketClient class
-  - [ ] 10.4 Implement connect() with reconnection
-  - [ ] 10.5 Implement joinRooms()
-  - [ ] 10.6 Implement model event handlers
-  - [ ] 10.7 Implement SAE event handlers
-  - [ ] 10.8 Implement steering event handlers
-  - [ ] 10.9 Implement monitoring event handlers
-  - [ ] 10.10 Implement disconnect() and reconnect()
-  - [ ] 10.11 Export socketClient singleton
+- [x] 10.0 Create WebSocket client
+  - [x] 10.1 Create `src/services/socket.ts`
+  - [x] 10.2 Define event type interfaces
+  - [x] 10.3 Implement SocketClient class
+  - [x] 10.4 Implement connect() with reconnection
+  - [x] 10.5 Implement joinRooms()
+  - [x] 10.6 Implement model event handlers
+  - [x] 10.7 Implement SAE event handlers
+  - [x] 10.8 Implement steering event handlers
+  - [x] 10.9 Implement monitoring event handlers
+  - [x] 10.10 Implement disconnect() and reconnect()
+  - [x] 10.11 Export socketClient singleton
 
 ### Phase 5: Common Components
 

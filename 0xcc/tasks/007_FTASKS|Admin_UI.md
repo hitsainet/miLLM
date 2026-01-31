@@ -169,28 +169,28 @@
 
 ### Phase 3: State Management
 
-- [ ] 7.0 Create server store
-  - [ ] 7.1 Create `src/stores/serverStore.ts`
-  - [ ] 7.2 Define ServerState interface
-  - [ ] 7.3 Define ServerActions interface
-  - [ ] 7.4 Implement connection state actions
-  - [ ] 7.5 Implement model state actions
-  - [ ] 7.6 Implement SAE state actions
-  - [ ] 7.7 Implement steering state actions
-  - [ ] 7.8 Implement monitoring state actions
-  - [ ] 7.9 Implement profile state actions
-  - [ ] 7.10 Add reset action
+- [x] 7.0 Create server store
+  - [x] 7.1 Create `src/stores/serverStore.ts`
+  - [x] 7.2 Define ServerState interface
+  - [x] 7.3 Define ServerActions interface
+  - [x] 7.4 Implement connection state actions
+  - [x] 7.5 Implement model state actions
+  - [x] 7.6 Implement SAE state actions
+  - [x] 7.7 Implement steering state actions
+  - [x] 7.8 Implement monitoring state actions
+  - [x] 7.9 Implement profile state actions
+  - [x] 7.10 Add reset action
 
-- [ ] 8.0 Create UI store
-  - [ ] 8.1 Create `src/stores/uiStore.ts`
-  - [ ] 8.2 Define UIState interface
-  - [ ] 8.3 Define UIActions interface
-  - [ ] 8.4 Implement theme actions
-  - [ ] 8.5 Implement sidebar actions
-  - [ ] 8.6 Implement modal actions
-  - [ ] 8.7 Implement toast actions
-  - [ ] 8.8 Implement monitoring pause action
-  - [ ] 8.9 Add persistence middleware for preferences
+- [x] 8.0 Create UI store
+  - [x] 8.1 Create `src/stores/uiStore.ts`
+  - [x] 8.2 Define UIState interface
+  - [x] 8.3 Define UIActions interface
+  - [x] 8.4 Implement theme actions
+  - [x] 8.5 Implement sidebar actions
+  - [x] 8.6 Implement modal actions
+  - [x] 8.7 Implement toast actions
+  - [x] 8.8 Implement monitoring pause action
+  - [x] 8.9 Add persistence middleware for preferences
 
 ### Phase 4: Services
 

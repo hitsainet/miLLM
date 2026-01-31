@@ -312,46 +312,46 @@
 
 ### Phase 7: Custom Hooks
 
-- [ ] 22.0 Create useToast hook
-  - [ ] 22.1 Create `src/hooks/useToast.ts`
-  - [ ] 22.2 Implement success, error, warning, info methods
-  - [ ] 22.3 Memoize with useCallback
+- [x] 22.0 Create useToast hook
+  - [x] 22.1 Create `src/hooks/useToast.ts`
+  - [x] 22.2 Implement success, error, warning, info methods
+  - [x] 22.3 Memoize with useCallback
 
-- [ ] 23.0 Create useModels hook
-  - [ ] 23.1 Create `src/hooks/useModels.ts`
-  - [ ] 23.2 Implement useQuery for model fetch
-  - [ ] 23.3 Implement useMutation for load/unload
-  - [ ] 23.4 Handle optimistic updates
-  - [ ] 23.5 Handle errors with toast
+- [x] 23.0 Create useModels hook
+  - [x] 23.1 Create `src/hooks/useModels.ts`
+  - [x] 23.2 Implement useQuery for model fetch
+  - [x] 23.3 Implement useMutation for load/unload
+  - [x] 23.4 Handle optimistic updates
+  - [x] 23.5 Handle errors with toast
 
-- [ ] 24.0 Create useSAE hook
-  - [ ] 24.1 Create `src/hooks/useSAE.ts`
-  - [ ] 24.2 Implement useQuery for SAE list
-  - [ ] 24.3 Implement mutations for download, attach, detach, delete
-  - [ ] 24.4 Handle optimistic updates
-  - [ ] 24.5 Handle errors with toast
+- [x] 24.0 Create useSAE hook
+  - [x] 24.1 Create `src/hooks/useSAE.ts`
+  - [x] 24.2 Implement useQuery for SAE list
+  - [x] 24.3 Implement mutations for download, attach, detach, delete
+  - [x] 24.4 Handle optimistic updates
+  - [x] 24.5 Handle errors with toast
 
-- [ ] 25.0 Create useSteering hook
-  - [ ] 25.1 Create `src/hooks/useSteering.ts`
-  - [ ] 25.2 Implement useQuery for steering state
-  - [ ] 25.3 Implement mutations for set, batch, clear, toggle
-  - [ ] 25.4 Handle optimistic updates with rollback
-  - [ ] 25.5 Handle errors with toast
+- [x] 25.0 Create useSteering hook
+  - [x] 25.1 Create `src/hooks/useSteering.ts`
+  - [x] 25.2 Implement useQuery for steering state
+  - [x] 25.3 Implement mutations for set, batch, clear, toggle
+  - [x] 25.4 Handle optimistic updates with rollback
+  - [x] 25.5 Handle errors with toast
 
-- [ ] 26.0 Create useMonitoring hook
-  - [ ] 26.1 Create `src/hooks/useMonitoring.ts`
-  - [ ] 26.2 Implement useQuery for monitoring config
-  - [ ] 26.3 Implement mutations for configure, enable
-  - [ ] 26.4 Implement history and statistics queries
-  - [ ] 26.5 Handle errors with toast
+- [x] 26.0 Create useMonitoring hook
+  - [x] 26.1 Create `src/hooks/useMonitoring.ts`
+  - [x] 26.2 Implement useQuery for monitoring config
+  - [x] 26.3 Implement mutations for configure, enable
+  - [x] 26.4 Implement history and statistics queries
+  - [x] 26.5 Handle errors with toast
 
-- [ ] 27.0 Create useProfiles hook
-  - [ ] 27.1 Create `src/hooks/useProfiles.ts`
-  - [ ] 27.2 Implement useQuery for profile list
-  - [ ] 27.3 Implement CRUD mutations
-  - [ ] 27.4 Implement activate/deactivate mutations
-  - [ ] 27.5 Implement export/import methods
-  - [ ] 27.6 Handle errors with toast
+- [x] 27.0 Create useProfiles hook
+  - [x] 27.1 Create `src/hooks/useProfiles.ts`
+  - [x] 27.2 Implement useQuery for profile list
+  - [x] 27.3 Implement CRUD mutations
+  - [x] 27.4 Implement activate/deactivate mutations
+  - [x] 27.5 Implement export/import methods
+  - [x] 27.6 Handle errors with toast
 
 ### Phase 8: Dashboard Page
 

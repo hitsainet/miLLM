@@ -984,6 +984,26 @@ class ModelService:
         """
         return self.loader.loaded_model_id
 
+    def get_loaded_model_info(self) -> Optional[dict]:
+        """
+        Get runtime info for the currently loaded model.
+
+        Returns:
+            Dict with num_parameters, memory_footprint, device, dtype if loaded,
+            None otherwise.
+        """
+        if not self.loader.is_loaded or self.loader.state.current is None:
+            return None
+
+        loaded = self.loader.state.current
+        return {
+            "model_id": loaded.model_id,
+            "num_parameters": loaded.num_parameters,
+            "memory_footprint": loaded.memory_used_mb * 1024 * 1024,  # Convert MB to bytes
+            "device": loaded.device,
+            "dtype": loaded.dtype,
+        }
+
     # =========================================================================
     # Delete Operations
     # =========================================================================

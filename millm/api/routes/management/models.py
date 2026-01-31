@@ -39,8 +39,11 @@ async def list_models(
 
     Returns all models in the database, including their current status.
     Download progress is included for models currently downloading.
+    Runtime properties (num_parameters, device, etc.) included for loaded models.
     """
     models = await service.list_models()
+    loaded_info = service.get_loaded_model_info()
+
     responses = []
     for m in models:
         response = ModelResponse.from_model(m)
@@ -48,6 +51,12 @@ async def list_models(
         progress = service.get_download_progress(m.id)
         if progress is not None:
             response.download_progress = progress
+        # Inject runtime properties for loaded model
+        if loaded_info and loaded_info["model_id"] == m.id:
+            response.num_parameters = loaded_info["num_parameters"]
+            response.memory_footprint = loaded_info["memory_footprint"]
+            response.device = loaded_info["device"]
+            response.dtype = loaded_info["dtype"]
         responses.append(response)
     return ApiResponse.ok(responses)
 

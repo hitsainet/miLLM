@@ -27,6 +27,9 @@ class LoadedModel:
     tokenizer: Any  # AutoTokenizer
     loaded_at: datetime
     memory_used_mb: int = 0
+    num_parameters: int = 0
+    device: str = "unknown"
+    dtype: str = "unknown"
 
 
 class LoadedModelState:
@@ -211,10 +214,41 @@ class ModelLoadContext:
         if torch.cuda.is_available():
             memory_used_mb = int(torch.cuda.memory_allocated() / (1024 * 1024))
 
+        # Get model properties
+        num_parameters = 0
+        try:
+            num_parameters = self.model.num_parameters()
+        except Exception:
+            pass
+
+        # Get device info
+        device_str = "unknown"
+        try:
+            if hasattr(self.model, "device"):
+                device_str = str(self.model.device)
+            elif hasattr(self.model, "hf_device_map"):
+                devices = set(self.model.hf_device_map.values())
+                device_str = ", ".join(str(d) for d in devices) if devices else "auto"
+        except Exception:
+            pass
+
+        # Get dtype info
+        dtype_str = "unknown"
+        try:
+            if hasattr(self.model, "dtype"):
+                dtype_str = str(self.model.dtype).replace("torch.", "")
+            elif hasattr(self.model, "config") and hasattr(self.model.config, "torch_dtype"):
+                dtype_str = str(self.model.config.torch_dtype).replace("torch.", "")
+        except Exception:
+            pass
+
         logger.info(
             "model_load_complete",
             model_id=self.model_id,
             memory_used_mb=memory_used_mb,
+            num_parameters=num_parameters,
+            device=device_str,
+            dtype=dtype_str,
         )
 
         return LoadedModel(
@@ -223,6 +257,9 @@ class ModelLoadContext:
             tokenizer=self.tokenizer,
             loaded_at=datetime.utcnow(),
             memory_used_mb=memory_used_mb,
+            num_parameters=num_parameters,
+            device=device_str,
+            dtype=dtype_str,
         )
 
 

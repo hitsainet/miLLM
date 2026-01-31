@@ -157,6 +157,23 @@ class ModelResponse(BaseModel):
         default=None,
         description="When the model was loaded into memory",
     )
+    # Runtime properties (only populated when model is loaded)
+    num_parameters: int | None = Field(
+        default=None,
+        description="Number of model parameters (only available when loaded)",
+    )
+    memory_footprint: int | None = Field(
+        default=None,
+        description="Actual memory usage in bytes (only available when loaded)",
+    )
+    device: str | None = Field(
+        default=None,
+        description="Device the model is loaded on (only available when loaded)",
+    )
+    dtype: str | None = Field(
+        default=None,
+        description="Data type of model weights (only available when loaded)",
+    )
 
     model_config = {"from_attributes": True}
 

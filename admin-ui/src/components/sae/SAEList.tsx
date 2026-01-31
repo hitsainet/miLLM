@@ -5,13 +5,13 @@ import type { SAEInfo } from '@/types';
 
 interface SAEListProps {
   saes: SAEInfo[];
-  attachedSAEId?: number;
-  onAttach: (id: number) => void;
+  attachedSAEId?: string;
+  onAttach: (sae: SAEInfo) => void;
   onDetach: () => void;
-  onDelete: (id: number) => void;
-  attachingId?: number;
+  onDelete: (id: string) => void;
+  attachingId?: string;
   isDetaching?: boolean;
-  deletingId?: number;
+  deletingId?: string;
   canAttach?: boolean;
 }
 
@@ -56,7 +56,7 @@ export function SAEList({
             key={sae.id}
             sae={sae}
             isAttached={sae.id === attachedSAEId}
-            onAttach={() => onAttach(sae.id)}
+            onAttach={() => onAttach(sae)}
             onDetach={onDetach}
             onDelete={() => onDelete(sae.id)}
             isAttaching={attachingId === sae.id}

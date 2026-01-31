@@ -35,7 +35,7 @@ interface ServerState {
   saes: SAEInfo[];
   attachedSAE: SAEInfo | null;
   saeLoading: boolean;
-  saeDownloadProgress: Record<number, number>;
+  saeDownloadProgress: Record<string, number>;
 
   // Steering state
   steering: SteeringState;
@@ -78,12 +78,12 @@ interface ServerActions {
   // SAE actions
   setSAEs: (saes: SAEInfo[]) => void;
   addSAE: (sae: SAEInfo) => void;
-  updateSAE: (id: number, updates: Partial<SAEInfo>) => void;
-  removeSAE: (id: number) => void;
+  updateSAE: (id: string, updates: Partial<SAEInfo>) => void;
+  removeSAE: (id: string) => void;
   setAttachedSAE: (sae: SAEInfo | null) => void;
   setSAELoading: (loading: boolean) => void;
-  setSAEDownloadProgress: (saeId: number, progress: number) => void;
-  clearSAEDownloadProgress: (saeId: number) => void;
+  setSAEDownloadProgress: (saeId: string, progress: number) => void;
+  clearSAEDownloadProgress: (saeId: string) => void;
 
   // Steering actions
   setSteering: (steering: SteeringState) => void;

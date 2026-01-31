@@ -68,25 +68,38 @@ export interface ModelPreviewResponse {
 }
 
 // SAE types
-export type SAEStatus = 'ready' | 'attached' | 'downloading' | 'error';
+export type SAEStatus = 'cached' | 'attached' | 'downloading' | 'error';
 
 export interface SAEInfo {
-  id: number;
+  id: string;
+  repository_id: string;
+  revision: string;
   name: string;
-  repo_id: string;
-  filename: string;
-  layer: number;
-  num_features: number;
-  size_mb: number;
-  local_path: string;
-  linked_model_id: number | null;
-  linked_model_name: string | null;
+  format: string;
+  d_in: number;
+  d_sae: number;
+  trained_on: string | null;
+  trained_layer: number | null;
+  file_size_bytes: number | null;
   status: SAEStatus;
+  error_message: string | null;
   created_at: string;
   updated_at: string;
-  // Extended properties
-  d_model?: number;
-  download_progress?: number;
+}
+
+export interface AttachmentStatus {
+  is_attached: boolean;
+  sae_id: string | null;
+  layer: number | null;
+  memory_usage_mb: number | null;
+  steering_enabled: boolean;
+  monitoring_enabled: boolean;
+}
+
+export interface SAEListResponse {
+  saes: SAEInfo[];
+  total: number;
+  attachment: AttachmentStatus;
 }
 
 export interface DownloadSAERequest {
@@ -116,7 +129,8 @@ export interface PreviewSAEResponse {
 }
 
 export interface AttachSAERequest {
-  sae_id: number;
+  sae_id: string;
+  layer: number;
 }
 
 // Steering types

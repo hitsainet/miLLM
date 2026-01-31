@@ -204,6 +204,13 @@ class SAEService:
                     repository_id=repository_id,
                 )
                 return existing.id
+            elif existing.status == SAEStatus.ATTACHED:
+                logger.info(
+                    "sae_already_attached",
+                    sae_id=existing.id,
+                    repository_id=repository_id,
+                )
+                return existing.id
             elif existing.status == SAEStatus.DOWNLOADING:
                 logger.info(
                     "sae_already_downloading",
@@ -211,6 +218,14 @@ class SAEService:
                     repository_id=repository_id,
                 )
                 return existing.id
+            elif existing.status == SAEStatus.ERROR:
+                # Delete the failed SAE and retry download
+                logger.info(
+                    "sae_retrying_failed_download",
+                    sae_id=existing.id,
+                    repository_id=repository_id,
+                )
+                await self.repository.delete(existing.id)
 
         # Generate SAE ID
         sae_id = self._downloader.generate_sae_id(repository_id, revision)

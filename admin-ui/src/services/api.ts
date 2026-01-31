@@ -20,6 +20,7 @@ import type {
   ModelDownloadRequest,
   ModelPreviewResponse,
   SAEInfo,
+  SAEListResponse,
   DownloadSAERequest,
   PreviewSAERequest,
   PreviewSAEResponse,
@@ -247,17 +248,26 @@ export const modelApi = {
  */
 export const saeApi = {
   /**
-   * Lists all downloaded SAEs.
-   * @returns Promise resolving to array of SAE information
+   * Lists all downloaded SAEs with attachment status.
+   * @returns Promise resolving to SAE list response with attachment info
    */
-  list: () => request<SAEInfo[]>('/saes'),
+  list: async (): Promise<SAEInfo[]> => {
+    const response = await request<SAEListResponse>('/saes');
+    return response.saes;
+  },
+
+  /**
+   * Lists all SAEs with full response including attachment status.
+   * @returns Promise resolving to full SAE list response
+   */
+  listWithAttachment: () => request<SAEListResponse>('/saes'),
 
   /**
    * Gets detailed information about a specific SAE.
    * @param id - SAE ID
    * @returns Promise resolving to SAE information
    */
-  get: (id: number) => request<SAEInfo>(`/saes/${id}`),
+  get: (id: string) => request<SAEInfo>(`/saes/${id}`),
 
   /**
    * Initiates download of an SAE from HuggingFace.
@@ -285,24 +295,31 @@ export const saeApi = {
    * Attaches an SAE to the currently loaded model.
    * Enables feature steering and monitoring capabilities.
    * Only one SAE can be attached at a time.
-   * @param req - Attach request with SAE ID
-   * @returns Promise resolving to updated SAE information
+   * @param req - Attach request with SAE ID and layer
+   * @returns Promise resolving to attach response
    */
   attach: (req: AttachSAERequest) =>
-    request<SAEInfo>('/saes/attach', {
-      method: 'POST',
-      body: JSON.stringify(req),
-    }),
+    request<{ status: string; sae_id: string; layer: number; memory_usage_mb: number; warnings: string[] }>(
+      `/saes/${req.sae_id}/attach`,
+      {
+        method: 'POST',
+        body: JSON.stringify({ layer: req.layer }),
+      }
+    ),
 
   /**
    * Detaches the currently attached SAE.
    * Disables feature steering until another SAE is attached.
+   * @param saeId - SAE ID to detach
    * @returns Promise resolving when detachment is complete
    */
-  detach: () =>
-    request<void>('/saes/detach', {
-      method: 'POST',
-    }),
+  detach: (saeId?: string) =>
+    request<{ status: string; sae_id: string; memory_freed_mb: number }>(
+      `/saes/${saeId}/detach`,
+      {
+        method: 'POST',
+      }
+    ),
 
   /**
    * Deletes an SAE from local storage.
@@ -310,8 +327,8 @@ export const saeApi = {
    * @param id - SAE ID to delete
    * @returns Promise resolving when deletion is complete
    */
-  delete: (id: number) =>
-    request<void>(`/saes/${id}`, {
+  delete: (id: string) =>
+    request<{ status: string; sae_id: string; freed_disk_mb: number }>(`/saes/${id}`, {
       method: 'DELETE',
     }),
 
@@ -320,7 +337,7 @@ export const saeApi = {
    * @param id - SAE ID with active download
    * @returns Promise resolving when cancellation is processed
    */
-  cancelDownload: (id: number) =>
+  cancelDownload: (id: string) =>
     request<void>(`/saes/${id}/cancel`, {
       method: 'POST',
     }),

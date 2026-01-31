@@ -2,7 +2,7 @@ import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { saeApi } from '@/services/api';
 import { useServerStore } from '@/stores/serverStore';
 import { useToast } from './useToast';
-import type { DownloadSAERequest } from '@/types';
+import type { DownloadSAERequest, AttachSAERequest } from '@/types';
 
 export function useSAE() {
   const queryClient = useQueryClient();
@@ -12,11 +12,16 @@ export function useSAE() {
   const saesQuery = useQuery({
     queryKey: ['saes'],
     queryFn: async () => {
-      const saes = await saeApi.list();
-      setSAEs(saes);
-      const attached = saes.find((s) => s.status === 'attached');
-      if (attached) setAttachedSAE(attached);
-      return saes;
+      const response = await saeApi.listWithAttachment();
+      setSAEs(response.saes);
+      // Find attached SAE from the attachment status
+      if (response.attachment.is_attached && response.attachment.sae_id) {
+        const attached = response.saes.find((s) => s.id === response.attachment.sae_id);
+        if (attached) setAttachedSAE(attached);
+      } else {
+        setAttachedSAE(null);
+      }
+      return response.saes;
     },
   });
 
@@ -32,15 +37,14 @@ export function useSAE() {
   });
 
   const attachMutation = useMutation({
-    mutationFn: (saeId: number) => {
+    mutationFn: (req: AttachSAERequest) => {
       setSAELoading(true);
-      return saeApi.attach({ sae_id: saeId });
+      return saeApi.attach(req);
     },
-    onSuccess: (sae) => {
-      setAttachedSAE(sae);
+    onSuccess: () => {
       setSAELoading(false);
       queryClient.invalidateQueries({ queryKey: ['saes'] });
-      toast.success(`SAE "${sae.name}" attached`);
+      toast.success('SAE attached');
     },
     onError: (error: Error) => {
       setSAELoading(false);
@@ -49,7 +53,7 @@ export function useSAE() {
   });
 
   const detachMutation = useMutation({
-    mutationFn: () => saeApi.detach(),
+    mutationFn: (saeId: string) => saeApi.detach(saeId),
     onSuccess: () => {
       setAttachedSAE(null);
       queryClient.invalidateQueries({ queryKey: ['saes'] });
@@ -61,7 +65,7 @@ export function useSAE() {
   });
 
   const deleteMutation = useMutation({
-    mutationFn: (id: number) => saeApi.delete(id),
+    mutationFn: (id: string) => saeApi.delete(id),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['saes'] });
       toast.success('SAE deleted');
@@ -72,7 +76,7 @@ export function useSAE() {
   });
 
   const cancelMutation = useMutation({
-    mutationFn: (id: number) => saeApi.cancelDownload(id),
+    mutationFn: (id: string) => saeApi.cancelDownload(id),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['saes'] });
       toast.info('SAE download cancelled');

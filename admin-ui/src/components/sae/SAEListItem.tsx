@@ -59,23 +59,33 @@ export function SAEListItem({
             )}
           </div>
           <div className="flex items-center gap-3 mt-1 text-xs text-slate-500">
-            <span>Layer {sae.layer}</span>
-            <span>•</span>
-            <span>{sae.num_features?.toLocaleString()} features</span>
-            {sae.d_model && (
+            {sae.trained_layer !== null && (
+              <>
+                <span>Layer {sae.trained_layer}</span>
+                <span>•</span>
+              </>
+            )}
+            <span>{sae.d_sae?.toLocaleString()} features</span>
+            {sae.d_in > 0 && (
               <>
                 <span>•</span>
-                <span>d_model: {sae.d_model}</span>
+                <span>d_in: {sae.d_in}</span>
+              </>
+            )}
+            {sae.status === 'error' && sae.error_message && (
+              <>
+                <span>•</span>
+                <span className="text-red-400">Error: {sae.error_message}</span>
               </>
             )}
           </div>
           <a
-            href={`https://huggingface.co/${sae.repo_id}`}
+            href={`https://huggingface.co/${sae.repository_id}`}
             target="_blank"
             rel="noopener noreferrer"
             className="text-xs text-primary-400/70 hover:text-primary-400 flex items-center gap-1 mt-1"
           >
-            {sae.repo_id}
+            {sae.repository_id}
             <ExternalLink className="w-3 h-3" />
           </a>
         </div>
@@ -85,10 +95,10 @@ export function SAEListItem({
         {sae.status === 'downloading' ? (
           <div className="flex items-center gap-2">
             <Spinner size="sm" />
-            <span className="text-xs text-slate-400">
-              {sae.download_progress ? `${sae.download_progress}%` : 'Downloading...'}
-            </span>
+            <span className="text-xs text-slate-400">Downloading...</span>
           </div>
+        ) : sae.status === 'error' ? (
+          <Badge variant="danger" size="sm">Error</Badge>
         ) : (
           <>
             {isAttached ? (

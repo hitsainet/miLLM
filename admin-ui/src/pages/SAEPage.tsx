@@ -8,7 +8,7 @@ import {
   AttachedSAECard,
 } from '@components/sae';
 import { Card, Spinner } from '@components/common';
-import type { DownloadSAERequest } from '@/types';
+import type { DownloadSAERequest, SAEInfo } from '@/types';
 
 export function SAEPage() {
   const { loadedModel, attachedSAE } = useServerStore();
@@ -23,27 +23,31 @@ export function SAEPage() {
     deleteSAE,
   } = useSAE();
 
-  const [attachingId, setAttachingId] = useState<number | undefined>();
-  const [deletingId, setDeletingId] = useState<number | undefined>();
+  const [attachingId, setAttachingId] = useState<string | undefined>();
+  const [deletingId, setDeletingId] = useState<string | undefined>();
 
   const handleDownload = async (data: DownloadSAERequest) => {
     await downloadSAE(data);
   };
 
-  const handleAttach = async (saeId: number) => {
-    setAttachingId(saeId);
+  const handleAttach = async (sae: SAEInfo) => {
+    setAttachingId(sae.id);
     try {
-      await attachSAE(saeId);
+      // Use trained_layer if available, default to layer 0
+      const layer = sae.trained_layer ?? 0;
+      await attachSAE({ sae_id: sae.id, layer });
     } finally {
       setAttachingId(undefined);
     }
   };
 
   const handleDetach = async () => {
-    await detachSAE();
+    if (attachedSAE) {
+      await detachSAE(attachedSAE.id);
+    }
   };
 
-  const handleDelete = async (saeId: number) => {
+  const handleDelete = async (saeId: string) => {
     setDeletingId(saeId);
     try {
       await deleteSAE(saeId);

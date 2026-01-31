@@ -220,69 +220,69 @@
 
 ### Phase 5: Common Components
 
-- [ ] 11.0 Create Button component
-  - [ ] 11.1 Create `src/components/common/Button.tsx`
-  - [ ] 11.2 Define ButtonProps with variant, size, loading
-  - [ ] 11.3 Implement variant styles (primary, secondary, danger, ghost)
-  - [ ] 11.4 Implement size styles (sm, md, lg)
-  - [ ] 11.5 Handle loading state with spinner
-  - [ ] 11.6 Support left/right icons
+- [x] 11.0 Create Button component
+  - [x] 11.1 Create `src/components/common/Button.tsx`
+  - [x] 11.2 Define ButtonProps with variant, size, loading
+  - [x] 11.3 Implement variant styles (primary, secondary, danger, ghost)
+  - [x] 11.4 Implement size styles (sm, md, lg)
+  - [x] 11.5 Handle loading state with spinner
+  - [x] 11.6 Support left/right icons
   - [ ] 11.7 Write Button tests
 
-- [ ] 12.0 Create Card component
-  - [ ] 12.1 Create `src/components/common/Card.tsx`
-  - [ ] 12.2 Define CardProps with padding options
-  - [ ] 12.3 Implement base Card component
-  - [ ] 12.4 Implement CardHeader subcomponent
+- [x] 12.0 Create Card component
+  - [x] 12.1 Create `src/components/common/Card.tsx`
+  - [x] 12.2 Define CardProps with padding options
+  - [x] 12.3 Implement base Card component
+  - [x] 12.4 Implement CardHeader subcomponent
   - [ ] 12.5 Write Card tests
 
-- [ ] 13.0 Create Input component
-  - [ ] 13.1 Create `src/components/common/Input.tsx`
-  - [ ] 13.2 Define InputProps with label, error, helper
-  - [ ] 13.3 Implement styled input with focus states
-  - [ ] 13.4 Handle error display
-  - [ ] 13.5 Support left/right addons
+- [x] 13.0 Create Input component
+  - [x] 13.1 Create `src/components/common/Input.tsx`
+  - [x] 13.2 Define InputProps with label, error, helper
+  - [x] 13.3 Implement styled input with focus states
+  - [x] 13.4 Handle error display
+  - [x] 13.5 Support left/right addons
   - [ ] 13.6 Write Input tests
 
-- [ ] 14.0 Create Select component
-  - [ ] 14.1 Create `src/components/common/Select.tsx`
-  - [ ] 14.2 Define SelectProps with options
-  - [ ] 14.3 Implement styled select
-  - [ ] 14.4 Support placeholder option
+- [x] 14.0 Create Select component
+  - [x] 14.1 Create `src/components/common/Select.tsx`
+  - [x] 14.2 Define SelectProps with options
+  - [x] 14.3 Implement styled select
+  - [x] 14.4 Support placeholder option
   - [ ] 14.5 Write Select tests
 
-- [ ] 15.0 Create Slider component
-  - [ ] 15.1 Create `src/components/common/Slider.tsx`
-  - [ ] 15.2 Define SliderProps with min, max, step, label
-  - [ ] 15.3 Implement range input with custom styling
-  - [ ] 15.4 Handle local state during drag
-  - [ ] 15.5 Emit onChange on release
-  - [ ] 15.6 Show value display
+- [x] 15.0 Create Slider component
+  - [x] 15.1 Create `src/components/common/Slider.tsx`
+  - [x] 15.2 Define SliderProps with min, max, step, label
+  - [x] 15.3 Implement range input with custom styling
+  - [x] 15.4 Handle local state during drag
+  - [x] 15.5 Emit onChange on release
+  - [x] 15.6 Show value display
   - [ ] 15.7 Write Slider tests
 
-- [ ] 16.0 Create Modal component
-  - [ ] 16.1 Create `src/components/common/Modal.tsx`
-  - [ ] 16.2 Define ModalProps with id, title, footer
-  - [ ] 16.3 Implement overlay with backdrop
-  - [ ] 16.4 Implement modal content with header, body, footer
-  - [ ] 16.5 Handle Escape key close
-  - [ ] 16.6 Handle overlay click close
-  - [ ] 16.7 Prevent body scroll when open
+- [x] 16.0 Create Modal component
+  - [x] 16.1 Create `src/components/common/Modal.tsx`
+  - [x] 16.2 Define ModalProps with id, title, footer
+  - [x] 16.3 Implement overlay with backdrop
+  - [x] 16.4 Implement modal content with header, body, footer
+  - [x] 16.5 Handle Escape key close
+  - [x] 16.6 Handle overlay click close
+  - [x] 16.7 Prevent body scroll when open
   - [ ] 16.8 Write Modal tests
 
-- [ ] 17.0 Create Toast system
-  - [ ] 17.1 Create `src/components/common/Toast.tsx`
-  - [ ] 17.2 Implement ToastItem component
-  - [ ] 17.3 Implement ToastContainer component
-  - [ ] 17.4 Auto-dismiss with timer
-  - [ ] 17.5 Support success, error, warning, info variants
-  - [ ] 17.6 Add slide-in animation
+- [x] 17.0 Create Toast system
+  - [x] 17.1 Create `src/components/common/Toast.tsx`
+  - [x] 17.2 Implement ToastItem component
+  - [x] 17.3 Implement ToastContainer component
+  - [x] 17.4 Auto-dismiss with timer
+  - [x] 17.5 Support success, error, warning, info variants
+  - [x] 17.6 Add slide-in animation
   - [ ] 17.7 Write Toast tests
 
-- [ ] 18.0 Create utility components
-  - [ ] 18.1 Create `src/components/common/Spinner.tsx`
-  - [ ] 18.2 Create `src/components/common/Badge.tsx`
-  - [ ] 18.3 Create `src/components/common/EmptyState.tsx`
+- [x] 18.0 Create utility components
+  - [x] 18.1 Create `src/components/common/Spinner.tsx`
+  - [x] 18.2 Create `src/components/common/Badge.tsx`
+  - [x] 18.3 Create `src/components/common/EmptyState.tsx`
   - [ ] 18.4 Write tests for utility components
 
 ### Phase 6: Layout Components

@@ -6,6 +6,7 @@ components to manage model lifecycle operations.
 """
 
 import asyncio
+import os
 import time
 from concurrent.futures import Future, ThreadPoolExecutor
 from datetime import datetime
@@ -827,7 +828,12 @@ class ModelService:
             # Load the model
             from millm.core.config import settings
 
-            full_cache_path = f"{settings.MODEL_CACHE_DIR}/{cache_path}"
+            # Handle both absolute and relative cache paths
+            # (database may store either depending on when model was downloaded)
+            if os.path.isabs(cache_path):
+                full_cache_path = cache_path
+            else:
+                full_cache_path = f"{settings.MODEL_CACHE_DIR}/{cache_path}"
 
             loaded = self.loader.load(
                 model_id=model_id,

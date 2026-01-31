@@ -45,9 +45,17 @@ class SocketClient {
   private reconnectAttempts = 0;
   private maxReconnectAttempts = 5;
   private reconnectDelay = 1000;
+  private disconnectTimeout: ReturnType<typeof setTimeout> | null = null;
 
   connect(url: string = ''): void {
-    if (this.socket?.connected) {
+    // Cancel any pending disconnect (handles React StrictMode double-invoke)
+    if (this.disconnectTimeout) {
+      clearTimeout(this.disconnectTimeout);
+      this.disconnectTimeout = null;
+    }
+
+    // If already connected or connecting, don't create new socket
+    if (this.socket?.connected || this.socket?.active) {
       return;
     }
 
@@ -132,10 +140,14 @@ class SocketClient {
     );
 
     // Model load events
-    this.socket.on('model:load:progress', (data: LoadProgressEvent) => {
-      // Could update a loading progress indicator
-      serverStore.setModelLoading(true);
-    });
+    this.socket.on(
+      'model:load:progress',
+      // eslint-disable-next-line @typescript-eslint/no-unused-vars
+      (_data: LoadProgressEvent) => {
+        // Could update a loading progress indicator
+        serverStore.setModelLoading(true);
+      }
+    );
 
     this.socket.on('model:load:complete', (data: ModelInfo) => {
       serverStore.setLoadedModel(data);
@@ -255,6 +267,28 @@ class SocketClient {
   }
 
   disconnect(): void {
+    // Use delayed disconnect to handle React StrictMode double-invoke
+    // If connect() is called within 100ms, the disconnect is cancelled
+    if (this.disconnectTimeout) {
+      clearTimeout(this.disconnectTimeout);
+    }
+
+    this.disconnectTimeout = setTimeout(() => {
+      if (this.socket) {
+        this.socket.disconnect();
+        this.socket = null;
+      }
+      useServerStore.getState().setConnectionStatus('disconnected');
+      this.disconnectTimeout = null;
+    }, 100);
+  }
+
+  disconnectImmediate(): void {
+    // For cases where immediate disconnect is needed
+    if (this.disconnectTimeout) {
+      clearTimeout(this.disconnectTimeout);
+      this.disconnectTimeout = null;
+    }
     if (this.socket) {
       this.socket.disconnect();
       this.socket = null;
@@ -263,7 +297,7 @@ class SocketClient {
   }
 
   reconnect(): void {
-    this.disconnect();
+    this.disconnectImmediate();
     this.connect();
   }
 
@@ -275,7 +309,8 @@ class SocketClient {
     event: K,
     handler: SocketEventHandlers[K]
   ): void {
-    this.socket?.on(event, handler as (...args: unknown[]) => void);
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    this.socket?.on(event, handler as any);
   }
 
   off<K extends keyof SocketEventHandlers>(event: K): void {

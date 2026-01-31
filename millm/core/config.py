@@ -22,11 +22,11 @@ class Settings(BaseSettings):
     # Database
     DATABASE_URL: str = "postgresql+asyncpg://postgres:postgres@localhost:5432/millm"
 
-    # Model cache directory
-    MODEL_CACHE_DIR: str = "/data/models"
+    # Model cache directory (matches docker-compose volume mount)
+    MODEL_CACHE_DIR: str = "/app/model_cache"
 
-    # SAE cache directory
-    SAE_CACHE_DIR: str = "/data/sae"
+    # SAE cache directory (matches docker-compose volume mount)
+    SAE_CACHE_DIR: str = "/app/sae_cache"
 
     # HuggingFace
     HF_TOKEN: Optional[str] = None

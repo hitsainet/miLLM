@@ -85,7 +85,12 @@ class SAE(Base):
 
     # State
     status: Mapped[SAEStatus] = mapped_column(
-        Enum(SAEStatus, name="saestatus", create_constraint=True),
+        Enum(
+            SAEStatus,
+            name="saestatus",
+            create_constraint=True,
+            values_callable=lambda obj: [e.value for e in obj],
+        ),
         default=SAEStatus.CACHED,
         nullable=False,
         index=True,

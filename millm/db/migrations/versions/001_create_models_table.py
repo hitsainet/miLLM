@@ -21,88 +21,65 @@ depends_on: Union[str, Sequence[str], None] = None
 
 def upgrade() -> None:
     """Create the models table with all columns and constraints."""
-    # Create enum types
-    op.execute("CREATE TYPE modelsource AS ENUM ('huggingface', 'local')")
-    op.execute("CREATE TYPE quantizationtype AS ENUM ('Q4', 'Q8', 'FP16')")
-    op.execute(
-        "CREATE TYPE modelstatus AS ENUM ('downloading', 'ready', 'loading', 'loaded', 'error')"
-    )
+    # Create enum types using DO blocks to check existence first
+    op.execute("""
+        DO $$ BEGIN
+            CREATE TYPE modelsource AS ENUM ('huggingface', 'local');
+        EXCEPTION
+            WHEN duplicate_object THEN null;
+        END $$;
+    """)
+    op.execute("""
+        DO $$ BEGIN
+            CREATE TYPE quantizationtype AS ENUM ('Q4', 'Q8', 'FP16');
+        EXCEPTION
+            WHEN duplicate_object THEN null;
+        END $$;
+    """)
+    op.execute("""
+        DO $$ BEGIN
+            CREATE TYPE modelstatus AS ENUM ('downloading', 'ready', 'loading', 'loaded', 'error');
+        EXCEPTION
+            WHEN duplicate_object THEN null;
+        END $$;
+    """)
 
-    # Create models table
-    op.create_table(
-        "models",
-        sa.Column("id", sa.Integer(), primary_key=True, autoincrement=True),
-        sa.Column("name", sa.String(255), nullable=False),
-        sa.Column(
-            "source",
-            sa.Enum("huggingface", "local", name="modelsource", create_type=False),
-            nullable=False,
-        ),
-        sa.Column("repo_id", sa.String(255), nullable=True),
-        sa.Column("local_path", sa.String(500), nullable=True),
-        sa.Column("params", sa.String(50), nullable=True),
-        sa.Column("architecture", sa.String(100), nullable=True),
-        sa.Column(
-            "quantization",
-            sa.Enum("Q4", "Q8", "FP16", name="quantizationtype", create_type=False),
-            nullable=False,
-        ),
-        sa.Column("disk_size_mb", sa.Integer(), nullable=True),
-        sa.Column("estimated_memory_mb", sa.Integer(), nullable=True),
-        sa.Column("cache_path", sa.String(500), nullable=False),
-        sa.Column("config_json", JSONB(), nullable=True),
-        sa.Column("trust_remote_code", sa.Boolean(), default=False, nullable=False),
-        sa.Column(
-            "status",
-            sa.Enum(
-                "downloading",
-                "ready",
-                "loading",
-                "loaded",
-                "error",
-                name="modelstatus",
-                create_type=False,
-            ),
-            default="ready",
-            nullable=False,
-        ),
-        sa.Column("error_message", sa.Text(), nullable=True),
-        sa.Column("created_at", sa.DateTime(), default=sa.func.now(), nullable=False),
-        sa.Column(
-            "updated_at",
-            sa.DateTime(),
-            default=sa.func.now(),
-            onupdate=sa.func.now(),
-            nullable=False,
-        ),
-        sa.Column("loaded_at", sa.DateTime(), nullable=True),
-    )
+    # Create models table using raw SQL to avoid SQLAlchemy enum recreation issues
+    op.execute("""
+        CREATE TABLE models (
+            id SERIAL PRIMARY KEY,
+            name VARCHAR(255) NOT NULL,
+            source modelsource NOT NULL,
+            repo_id VARCHAR(255),
+            local_path VARCHAR(500),
+            params VARCHAR(50),
+            architecture VARCHAR(100),
+            quantization quantizationtype NOT NULL,
+            disk_size_mb INTEGER,
+            estimated_memory_mb INTEGER,
+            cache_path VARCHAR(500) NOT NULL,
+            config_json JSONB,
+            trust_remote_code BOOLEAN NOT NULL DEFAULT FALSE,
+            status modelstatus NOT NULL DEFAULT 'ready',
+            error_message TEXT,
+            created_at TIMESTAMP NOT NULL DEFAULT NOW(),
+            updated_at TIMESTAMP NOT NULL DEFAULT NOW(),
+            loaded_at TIMESTAMP,
+            CONSTRAINT uq_repo_quantization UNIQUE (repo_id, quantization),
+            CONSTRAINT uq_local_path UNIQUE (local_path)
+        )
+    """)
 
-    # Create unique constraints
-    op.create_unique_constraint(
-        "uq_repo_quantization", "models", ["repo_id", "quantization"]
-    )
-    op.create_unique_constraint("uq_local_path", "models", ["local_path"])
-
-    # Create indexes for common queries
-    op.create_index("idx_models_status", "models", ["status"])
-    op.create_index("idx_models_repo_id", "models", ["repo_id"])
-    op.create_index("idx_models_source", "models", ["source"])
+    # Create indexes
+    op.execute("CREATE INDEX idx_models_status ON models (status)")
+    op.execute("CREATE INDEX idx_models_repo_id ON models (repo_id)")
+    op.execute("CREATE INDEX idx_models_source ON models (source)")
 
 
 def downgrade() -> None:
     """Drop the models table and enum types."""
-    # Drop indexes
-    op.drop_index("idx_models_source")
-    op.drop_index("idx_models_repo_id")
-    op.drop_index("idx_models_status")
-
-    # Drop constraints
-    op.drop_constraint("uq_local_path", "models", type_="unique")
-    op.drop_constraint("uq_repo_quantization", "models", type_="unique")
-
-    # Drop table
-    op.drop_table("models")
+    # Drop table (cascades indexes and constraints)
+    op.execute("DROP TABLE IF EXISTS models CASCADE")
 
     # Drop enum types
     op.execute("DROP TYPE IF EXISTS modelstatus")

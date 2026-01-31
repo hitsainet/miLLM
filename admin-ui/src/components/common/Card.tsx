@@ -32,8 +32,10 @@ export function Card({
   );
 }
 
-interface CardHeaderProps {
-  children: ReactNode;
+export interface CardHeaderProps {
+  children?: ReactNode;
+  title?: string;
+  subtitle?: string;
   icon?: ReactNode;
   action?: ReactNode;
   className?: string;
@@ -41,6 +43,8 @@ interface CardHeaderProps {
 
 export function CardHeader({
   children,
+  title,
+  subtitle,
   icon,
   action,
   className = '',
@@ -49,9 +53,16 @@ export function CardHeader({
     <div
       className={`flex items-center justify-between mb-4 ${className}`}
     >
-      <div className="flex items-center gap-2 text-sm font-semibold text-slate-100">
+      <div className="flex items-center gap-2">
         {icon && <span className="text-primary-400">{icon}</span>}
-        {children}
+        {title || subtitle ? (
+          <div>
+            {title && <div className="text-sm font-semibold text-slate-100">{title}</div>}
+            {subtitle && <div className="text-xs text-slate-500">{subtitle}</div>}
+          </div>
+        ) : (
+          <span className="text-sm font-semibold text-slate-100">{children}</span>
+        )}
       </div>
       {action}
     </div>

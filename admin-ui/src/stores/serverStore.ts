@@ -6,14 +6,24 @@ import type {
   MonitoringConfig,
   Profile,
   FeatureSteering,
+  FeatureActivation,
   ActivationRecord,
   FeatureStatistics,
 } from '@/types';
 import type { ConnectionStatus } from '@/types/ui';
 
+// System metrics interface for computed property
+export interface SystemMetrics {
+  gpuMemoryUsed: number;
+  gpuMemoryTotal: number;
+  gpuUtilization: number;
+  gpuTemperature: number;
+}
+
 interface ServerState {
   // Connection
   connectionStatus: ConnectionStatus;
+  serverUrl: string;
 
   // Model state
   models: ModelInfo[];
@@ -36,6 +46,7 @@ interface ServerState {
   activationHistory: ActivationRecord[];
   featureStatistics: FeatureStatistics[];
   monitoringLoading: boolean;
+  latestActivations: FeatureActivation[];
 
   // Profiles
   profiles: Profile[];
@@ -52,6 +63,7 @@ interface ServerState {
 interface ServerActions {
   // Connection actions
   setConnectionStatus: (status: ConnectionStatus) => void;
+  setServerUrl: (url: string) => void;
 
   // Model actions
   setModels: (models: ModelInfo[]) => void;
@@ -89,6 +101,12 @@ interface ServerActions {
   clearActivationHistory: () => void;
   setFeatureStatistics: (stats: FeatureStatistics[]) => void;
   setMonitoringLoading: (loading: boolean) => void;
+  setLatestActivations: (activations: FeatureActivation[]) => void;
+
+  // Computed property getters (aliases for backward compatibility)
+  readonly steeringState: SteeringState;
+  readonly monitoringConfig: MonitoringConfig;
+  readonly systemMetrics: SystemMetrics;
 
   // Profile actions
   setProfiles: (profiles: Profile[]) => void;
@@ -112,6 +130,7 @@ interface ServerActions {
 
 const initialState: ServerState = {
   connectionStatus: 'disconnected',
+  serverUrl: '',
   models: [],
   loadedModel: null,
   modelLoading: false,
@@ -135,6 +154,7 @@ const initialState: ServerState = {
   activationHistory: [],
   featureStatistics: [],
   monitoringLoading: false,
+  latestActivations: [],
   profiles: [],
   activeProfile: null,
   profilesLoading: false,
@@ -149,6 +169,7 @@ export const useServerStore = create<ServerState & ServerActions>((set) => ({
 
   // Connection actions
   setConnectionStatus: (status) => set({ connectionStatus: status }),
+  setServerUrl: (url) => set({ serverUrl: url }),
 
   // Model actions
   setModels: (models) => set({ models }),
@@ -174,7 +195,8 @@ export const useServerStore = create<ServerState & ServerActions>((set) => ({
     })),
   clearDownloadProgress: (modelId) =>
     set((state) => {
-      const { [modelId]: _, ...rest } = state.downloadProgress;
+      // eslint-disable-next-line @typescript-eslint/no-unused-vars
+      const { [modelId]: removed, ...rest } = state.downloadProgress;
       return { downloadProgress: rest };
     }),
 
@@ -202,7 +224,8 @@ export const useServerStore = create<ServerState & ServerActions>((set) => ({
     })),
   clearSAEDownloadProgress: (saeId) =>
     set((state) => {
-      const { [saeId]: _, ...rest } = state.saeDownloadProgress;
+      // eslint-disable-next-line @typescript-eslint/no-unused-vars
+      const { [saeId]: removed, ...rest } = state.saeDownloadProgress;
       return { saeDownloadProgress: rest };
     }),
 
@@ -251,6 +274,23 @@ export const useServerStore = create<ServerState & ServerActions>((set) => ({
   clearActivationHistory: () => set({ activationHistory: [] }),
   setFeatureStatistics: (stats) => set({ featureStatistics: stats }),
   setMonitoringLoading: (loading) => set({ monitoringLoading: loading }),
+  setLatestActivations: (activations) => set({ latestActivations: activations }),
+
+  // Computed properties (getters)
+  get steeringState() {
+    return this.steering;
+  },
+  get monitoringConfig() {
+    return this.monitoring;
+  },
+  get systemMetrics(): SystemMetrics {
+    return {
+      gpuMemoryUsed: this.gpuMemoryUsed,
+      gpuMemoryTotal: this.gpuMemoryTotal,
+      gpuUtilization: this.gpuUtilization,
+      gpuTemperature: this.gpuTemperature,
+    };
+  },
 
   // Profile actions
   setProfiles: (profiles) => set({ profiles }),

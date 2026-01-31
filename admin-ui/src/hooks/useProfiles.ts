@@ -7,7 +7,7 @@ import type { CreateProfileRequest, UpdateProfileRequest, ProfileExport } from '
 export function useProfiles() {
   const queryClient = useQueryClient();
   const toast = useToast();
-  const { setProfiles, setActiveProfile, setProfilesLoading } = useServerStore();
+  const { setProfiles, setActiveProfile } = useServerStore();
 
   const profilesQuery = useQuery({
     queryKey: ['profiles'],
@@ -106,13 +106,24 @@ export function useProfiles() {
     error: profilesQuery.error?.message,
     refetch: profilesQuery.refetch,
     create: createMutation.mutate,
+    createProfile: createMutation.mutateAsync,
     update: updateMutation.mutate,
+    updateProfile: (id: number, data: UpdateProfileRequest) =>
+      updateMutation.mutateAsync({ id, data }),
     delete: deleteMutation.mutate,
+    deleteProfile: deleteMutation.mutateAsync,
     activate: activateMutation.mutate,
+    activateProfile: activateMutation.mutateAsync,
     deactivate: deactivateMutation.mutate,
+    deactivateProfile: deactivateMutation.mutateAsync,
     exportProfile,
     importProfile: importMutation.mutate,
     isCreating: createMutation.isPending,
+    isUpdating: updateMutation.isPending,
+    isDeleting: deleteMutation.isPending,
+    isActivating: activateMutation.isPending,
+    isDeactivating: deactivateMutation.isPending,
+    isExporting: false, // Export is sync
     isImporting: importMutation.isPending,
   };
 }

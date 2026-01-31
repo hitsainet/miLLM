@@ -78,7 +78,12 @@ class Model(Base):
     # Core fields
     name: Mapped[str] = mapped_column(String(255), nullable=False)
     source: Mapped[ModelSource] = mapped_column(
-        Enum(ModelSource, name="modelsource", create_constraint=True),
+        Enum(
+            ModelSource,
+            name="modelsource",
+            create_constraint=True,
+            values_callable=lambda obj: [e.value for e in obj],
+        ),
         nullable=False,
     )
     repo_id: Mapped[str | None] = mapped_column(String(255), nullable=True)
@@ -88,7 +93,12 @@ class Model(Base):
     params: Mapped[str | None] = mapped_column(String(50), nullable=True)
     architecture: Mapped[str | None] = mapped_column(String(100), nullable=True)
     quantization: Mapped[QuantizationType] = mapped_column(
-        Enum(QuantizationType, name="quantizationtype", create_constraint=True),
+        Enum(
+            QuantizationType,
+            name="quantizationtype",
+            create_constraint=True,
+            values_callable=lambda obj: [e.value for e in obj],
+        ),
         nullable=False,
     )
 
@@ -103,7 +113,12 @@ class Model(Base):
 
     # State
     status: Mapped[ModelStatus] = mapped_column(
-        Enum(ModelStatus, name="modelstatus", create_constraint=True),
+        Enum(
+            ModelStatus,
+            name="modelstatus",
+            create_constraint=True,
+            values_callable=lambda obj: [e.value for e in obj],
+        ),
         default=ModelStatus.READY,
         nullable=False,
     )

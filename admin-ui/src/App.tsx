@@ -1,26 +1,95 @@
-function App() {
+import { useEffect } from 'react';
+import { BrowserRouter, Routes, Route, Navigate } from 'react-router-dom';
+import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
+import { Layout } from '@components/layout';
+import ErrorBoundary from '@components/common/ErrorBoundary';
+import {
+  DashboardPage,
+  ModelsPage,
+  SAEPage,
+  SteeringPage,
+  MonitoringPage,
+  ProfilesPage,
+  SettingsPage,
+} from '@pages/index';
+import { useUIStore } from '@stores/uiStore';
+import { socketClient } from '@services/socket';
+
+// Create React Query client with defaults
+const queryClient = new QueryClient({
+  defaultOptions: {
+    queries: {
+      staleTime: 10 * 1000, // 10 seconds
+      retry: 2,
+      refetchOnWindowFocus: false,
+    },
+    mutations: {
+      retry: 1,
+    },
+  },
+});
+
+function AppContent() {
+  const { theme } = useUIStore();
+
+  // Apply theme to document
+  useEffect(() => {
+    document.documentElement.classList.remove('light', 'dark');
+    document.documentElement.classList.add(theme);
+  }, [theme]);
+
+  // Connect WebSocket on mount
+  useEffect(() => {
+    socketClient.connect();
+
+    return () => {
+      socketClient.disconnect();
+    };
+  }, []);
+
   return (
-    <div className="min-h-screen flex items-center justify-center">
-      <div className="card max-w-md">
-        <div className="card-header">
-          <span className="text-primary-400">miLLM</span> Admin UI
-        </div>
-        <p className="text-slate-400 mb-4">
-          Tailwind CSS is working correctly!
-        </p>
-        <div className="flex gap-2">
-          <span className="badge-success">Success</span>
-          <span className="badge-warning">Warning</span>
-          <span className="badge-primary">Primary</span>
-          <span className="badge-purple">Attached</span>
-        </div>
-        <div className="mt-4 flex gap-2">
-          <button className="btn-primary">Primary</button>
-          <button className="btn-secondary">Secondary</button>
-        </div>
-      </div>
-    </div>
-  )
+    <BrowserRouter>
+      <Routes>
+        <Route element={<Layout />}>
+          <Route index element={<Navigate to="/dashboard" replace />} />
+          <Route path="/dashboard" element={<DashboardPage />} />
+          <Route path="/models" element={<ModelsPage />} />
+          <Route path="/sae" element={<SAEPage />} />
+          <Route path="/steering" element={<SteeringPage />} />
+          <Route path="/monitoring" element={<MonitoringPage />} />
+          <Route path="/profiles" element={<ProfilesPage />} />
+          <Route path="/settings" element={<SettingsPage />} />
+          <Route path="*" element={<Navigate to="/dashboard" replace />} />
+        </Route>
+      </Routes>
+    </BrowserRouter>
+  );
 }
 
-export default App
+/**
+ * Root application component.
+ *
+ * Wraps the application with:
+ * - ErrorBoundary for catching and displaying errors
+ * - QueryClientProvider for React Query data fetching
+ *
+ * @returns The root application component
+ */
+function App() {
+  return (
+    <ErrorBoundary
+      onError={(error, errorInfo) => {
+        // Log errors to console in production
+        // In a real app, you might send this to an error tracking service
+        console.error('Application error:', error);
+        console.error('Error info:', errorInfo);
+      }}
+    >
+      <QueryClientProvider client={queryClient}>
+        <AppContent />
+      </QueryClientProvider>
+    </ErrorBoundary>
+  );
+}
+
+export default App;

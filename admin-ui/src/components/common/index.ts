@@ -8,3 +8,4 @@ export { ToastContainer } from './Toast';
 export { Spinner, LoadingOverlay } from './Spinner';
 export { Badge, StatusBadge } from './Badge';
 export { EmptyState } from './EmptyState';
+export { default as ErrorBoundary, withErrorBoundary } from './ErrorBoundary';

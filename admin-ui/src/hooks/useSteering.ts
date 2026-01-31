@@ -7,7 +7,7 @@ import type { FeatureSteering } from '@/types';
 export function useSteering() {
   const queryClient = useQueryClient();
   const toast = useToast();
-  const { setSteering, setSteeringLoading } = useServerStore();
+  const { setSteering } = useServerStore();
 
   const steeringQuery = useQuery({
     queryKey: ['steering'],
@@ -96,11 +96,22 @@ export function useSteering() {
     error: steeringQuery.error?.message,
     refetch: steeringQuery.refetch,
     setFeature: setFeatureMutation.mutate,
+    setFeatureStrength: setFeatureMutation.mutateAsync,
     batchUpdate: batchMutation.mutate,
+    batchSetFeatures: batchMutation.mutateAsync,
     removeFeature: removeFeatureMutation.mutate,
     clear: clearMutation.mutate,
+    clearFeatures: clearMutation.mutateAsync,
     enable: enableMutation.mutate,
+    enableSteering: enableMutation.mutateAsync,
     disable: disableMutation.mutate,
+    disableSteering: disableMutation.mutateAsync,
+    isSetting: setFeatureMutation.isPending,
+    isBatchSetting: batchMutation.isPending,
+    isRemoving: removeFeatureMutation.isPending,
+    isClearing: clearMutation.isPending,
+    isEnabling: enableMutation.isPending,
+    isDisabling: disableMutation.isPending,
     isUpdating:
       setFeatureMutation.isPending ||
       batchMutation.isPending ||

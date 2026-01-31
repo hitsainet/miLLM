@@ -4,6 +4,7 @@ import type { ChangeEvent } from 'react';
 interface SliderProps {
   value: number;
   onChange: (value: number) => void;
+  onChangeEnd?: (value: number) => void;
   min?: number;
   max?: number;
   step?: number;
@@ -17,6 +18,7 @@ interface SliderProps {
 export function Slider({
   value,
   onChange,
+  onChangeEnd,
   min = 0,
   max = 100,
   step = 1,
@@ -44,7 +46,8 @@ export function Slider({
   const handleMouseUp = useCallback(() => {
     setIsDragging(false);
     onChange(localValue);
-  }, [localValue, onChange]);
+    onChangeEnd?.(localValue);
+  }, [localValue, onChange, onChangeEnd]);
 
   // Sync local value with prop when not dragging
   const displayValue = isDragging ? localValue : value;

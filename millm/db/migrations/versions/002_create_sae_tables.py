@@ -20,76 +20,56 @@ depends_on: Union[str, Sequence[str], None] = None
 
 def upgrade() -> None:
     """Create the SAE and SAE attachment tables."""
-    # Create SAE status enum
-    op.execute("CREATE TYPE saestatus AS ENUM ('downloading', 'cached', 'attached', 'error')")
+    # Create SAE status enum using DO block for safety
+    op.execute("""
+        DO $$ BEGIN
+            CREATE TYPE saestatus AS ENUM ('downloading', 'cached', 'attached', 'error');
+        EXCEPTION
+            WHEN duplicate_object THEN null;
+        END $$;
+    """)
 
-    # Create SAEs table
-    op.create_table(
-        "saes",
-        sa.Column("id", sa.String(100), primary_key=True),
-        sa.Column("repository_id", sa.String(255), nullable=False),
-        sa.Column("revision", sa.String(100), nullable=False, server_default="main"),
-        sa.Column("name", sa.String(255), nullable=False),
-        sa.Column("format", sa.String(50), nullable=False, server_default="saelens"),
-        sa.Column("d_in", sa.Integer(), nullable=False),
-        sa.Column("d_sae", sa.Integer(), nullable=False),
-        sa.Column("trained_on", sa.String(255), nullable=True),
-        sa.Column("trained_layer", sa.Integer(), nullable=True),
-        sa.Column("file_size_bytes", sa.BigInteger(), nullable=True),
-        sa.Column("cache_path", sa.String(500), nullable=False),
-        sa.Column(
-            "status",
-            sa.Enum(
-                "downloading",
-                "cached",
-                "attached",
-                "error",
-                name="saestatus",
-                create_type=False,
-            ),
-            server_default="cached",
-            nullable=False,
-        ),
-        sa.Column("error_message", sa.Text(), nullable=True),
-        sa.Column("created_at", sa.DateTime(), server_default=sa.func.now(), nullable=False),
-        sa.Column(
-            "updated_at",
-            sa.DateTime(),
-            server_default=sa.func.now(),
-            onupdate=sa.func.now(),
-            nullable=False,
-        ),
-    )
+    # Create SAEs table using raw SQL
+    op.execute("""
+        CREATE TABLE saes (
+            id VARCHAR(100) PRIMARY KEY,
+            repository_id VARCHAR(255) NOT NULL,
+            revision VARCHAR(100) NOT NULL DEFAULT 'main',
+            name VARCHAR(255) NOT NULL,
+            format VARCHAR(50) NOT NULL DEFAULT 'saelens',
+            d_in INTEGER NOT NULL,
+            d_sae INTEGER NOT NULL,
+            trained_on VARCHAR(255),
+            trained_layer INTEGER,
+            file_size_bytes BIGINT,
+            cache_path VARCHAR(500) NOT NULL,
+            status saestatus NOT NULL DEFAULT 'cached',
+            error_message TEXT,
+            created_at TIMESTAMP NOT NULL DEFAULT NOW(),
+            updated_at TIMESTAMP NOT NULL DEFAULT NOW()
+        )
+    """)
 
     # Create indexes for SAEs table
-    op.create_index("idx_saes_repository_id", "saes", ["repository_id"])
-    op.create_index("idx_saes_status", "saes", ["status"])
+    op.execute("CREATE INDEX idx_saes_repository_id ON saes (repository_id)")
+    op.execute("CREATE INDEX idx_saes_status ON saes (status)")
 
-    # Create SAE attachments table
-    op.create_table(
-        "sae_attachments",
-        sa.Column("id", sa.Integer(), primary_key=True, autoincrement=True),
-        sa.Column(
-            "sae_id",
-            sa.String(100),
-            sa.ForeignKey("saes.id", ondelete="CASCADE"),
-            nullable=False,
-        ),
-        sa.Column(
-            "model_id",
-            sa.Integer(),
-            sa.ForeignKey("models.id", ondelete="CASCADE"),
-            nullable=False,
-        ),
-        sa.Column("layer", sa.Integer(), nullable=False),
-        sa.Column("attached_at", sa.DateTime(), server_default=sa.func.now(), nullable=False),
-        sa.Column("detached_at", sa.DateTime(), nullable=True),
-        sa.Column("memory_usage_mb", sa.Integer(), nullable=True),
-        sa.Column("is_active", sa.Boolean(), server_default="true", nullable=False),
-    )
+    # Create SAE attachments table using raw SQL
+    op.execute("""
+        CREATE TABLE sae_attachments (
+            id SERIAL PRIMARY KEY,
+            sae_id VARCHAR(100) NOT NULL REFERENCES saes(id) ON DELETE CASCADE,
+            model_id INTEGER NOT NULL REFERENCES models(id) ON DELETE CASCADE,
+            layer INTEGER NOT NULL,
+            attached_at TIMESTAMP NOT NULL DEFAULT NOW(),
+            detached_at TIMESTAMP,
+            memory_usage_mb INTEGER,
+            is_active BOOLEAN NOT NULL DEFAULT TRUE
+        )
+    """)
 
     # Create indexes for SAE attachments table
-    op.create_index("idx_sae_attachments_sae_id", "sae_attachments", ["sae_id"])
+    op.execute("CREATE INDEX idx_sae_attachments_sae_id ON sae_attachments (sae_id)")
 
     # Create partial unique index for single active attachment
     # This ensures only one active attachment can exist at a time
@@ -104,19 +84,9 @@ def upgrade() -> None:
 
 def downgrade() -> None:
     """Drop the SAE tables and enum types."""
-    # Drop indexes
-    op.execute("DROP INDEX IF EXISTS idx_single_active_attachment")
-    op.drop_index("idx_sae_attachments_sae_id")
-
-    # Drop SAE attachments table
-    op.drop_table("sae_attachments")
-
-    # Drop SAE indexes
-    op.drop_index("idx_saes_status")
-    op.drop_index("idx_saes_repository_id")
-
-    # Drop SAEs table
-    op.drop_table("saes")
+    # Drop tables (cascades indexes)
+    op.execute("DROP TABLE IF EXISTS sae_attachments CASCADE")
+    op.execute("DROP TABLE IF EXISTS saes CASCADE")
 
     # Drop enum types
     op.execute("DROP TYPE IF EXISTS saestatus")

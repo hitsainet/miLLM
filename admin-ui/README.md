@@ -1,73 +1,117 @@
-# React + TypeScript + Vite
+# miLLM Admin UI
 
-This template provides a minimal setup to get React working in Vite with HMR and some ESLint rules.
+Administrative web interface for the miLLM (Mechanistic Interpretability LLM) server.
 
-Currently, two official plugins are available:
+## Features
 
-- [@vitejs/plugin-react](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react) uses [Babel](https://babeljs.io/) (or [oxc](https://oxc.rs) when used in [rolldown-vite](https://vite.dev/guide/rolldown)) for Fast Refresh
-- [@vitejs/plugin-react-swc](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react-swc) uses [SWC](https://swc.rs/) for Fast Refresh
+- **Models Management**: Download, load, and manage Hugging Face models with quantization support
+- **SAE Management**: Download and attach Sparse Autoencoders for feature steering
+- **Feature Steering**: Adjust feature activation strengths to influence model behavior
+- **Monitoring**: Real-time observation of feature activations during inference
+- **Profiles**: Save and load steering configurations for quick switching
+- **Dashboard**: Overview of system status and active configurations
 
-## React Compiler
+## Tech Stack
 
-The React Compiler is not enabled on this template because of its impact on dev & build performances. To add it, see [this documentation](https://react.dev/learn/react-compiler/installation).
+- **React 19** with TypeScript
+- **Vite** for fast development and building
+- **Tailwind CSS** for styling
+- **Zustand** for state management
+- **React Query** for server state
+- **Socket.IO** for real-time WebSocket communication
+- **Vitest** for testing
 
-## Expanding the ESLint configuration
+## Getting Started
 
-If you are developing a production application, we recommend updating the configuration to enable type-aware lint rules:
+### Prerequisites
 
-```js
-export default defineConfig([
-  globalIgnores(['dist']),
-  {
-    files: ['**/*.{ts,tsx}'],
-    extends: [
-      // Other configs...
+- Node.js 20+
+- npm or yarn
 
-      // Remove tseslint.configs.recommended and replace with this
-      tseslint.configs.recommendedTypeChecked,
-      // Alternatively, use this for stricter rules
-      tseslint.configs.strictTypeChecked,
-      // Optionally, add this for stylistic rules
-      tseslint.configs.stylisticTypeChecked,
+### Installation
 
-      // Other configs...
-    ],
-    languageOptions: {
-      parserOptions: {
-        project: ['./tsconfig.node.json', './tsconfig.app.json'],
-        tsconfigRootDir: import.meta.dirname,
-      },
-      // other options...
-    },
-  },
-])
+```bash
+npm install
 ```
 
-You can also install [eslint-plugin-react-x](https://github.com/Rel1cx/eslint-react/tree/main/packages/plugins/eslint-plugin-react-x) and [eslint-plugin-react-dom](https://github.com/Rel1cx/eslint-react/tree/main/packages/plugins/eslint-plugin-react-dom) for React-specific lint rules:
+### Development
 
-```js
-// eslint.config.js
-import reactX from 'eslint-plugin-react-x'
-import reactDom from 'eslint-plugin-react-dom'
+Start the development server:
 
-export default defineConfig([
-  globalIgnores(['dist']),
-  {
-    files: ['**/*.{ts,tsx}'],
-    extends: [
-      // Other configs...
-      // Enable lint rules for React
-      reactX.configs['recommended-typescript'],
-      // Enable lint rules for React DOM
-      reactDom.configs.recommended,
-    ],
-    languageOptions: {
-      parserOptions: {
-        project: ['./tsconfig.node.json', './tsconfig.app.json'],
-        tsconfigRootDir: import.meta.dirname,
-      },
-      // other options...
-    },
-  },
-])
+```bash
+npm run dev
 ```
+
+The UI will be available at `http://localhost:3000`. The dev server proxies API requests to `http://localhost:8000` (the backend).
+
+### Building
+
+Build for production:
+
+```bash
+npm run build
+```
+
+### Testing
+
+```bash
+# Run tests once
+npm run test
+
+# Run tests in watch mode
+npm run test:watch
+
+# Run tests with coverage
+npm run test:coverage
+```
+
+### Linting and Type Checking
+
+```bash
+# Lint
+npm run lint
+
+# Type check
+npm run typecheck
+```
+
+## Project Structure
+
+```
+src/
+├── components/          # React components
+│   ├── common/         # Shared UI components (Button, Card, Input, etc.)
+│   ├── dashboard/      # Dashboard page components
+│   ├── layout/         # Layout components (Header, Sidebar, etc.)
+│   ├── models/         # Model management components
+│   ├── monitoring/     # Monitoring page components
+│   ├── profiles/       # Profile management components
+│   ├── sae/            # SAE management components
+│   └── steering/       # Steering page components
+├── hooks/              # Custom React hooks
+├── pages/              # Route page components
+├── services/           # API and WebSocket clients
+├── stores/             # Zustand state stores
+├── types/              # TypeScript type definitions
+└── utils/              # Utility functions
+```
+
+## API Integration
+
+The UI connects to the miLLM backend via:
+
+- **REST API** (`/api/*`): CRUD operations for models, SAEs, profiles, steering
+- **WebSocket** (`/socket.io`): Real-time events for progress, monitoring, and system metrics
+
+## Environment Configuration
+
+The development server is configured to proxy requests:
+
+- `/api` → `http://localhost:8000` (REST API)
+- `/socket.io` → `http://localhost:8000` (WebSocket)
+
+For production, the UI should be served alongside the backend or configured with appropriate CORS settings.
+
+## License
+
+See the main project LICENSE file.

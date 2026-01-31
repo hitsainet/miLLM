@@ -28,6 +28,13 @@ export interface ModelInfo {
   status: ModelStatus;
   created_at: string;
   updated_at: string;
+  // Extended properties
+  num_parameters?: number;
+  memory_footprint?: number;
+  device?: string;
+  dtype?: string;
+  architecture?: string;
+  download_progress?: number;
 }
 
 export interface LoadModelRequest {
@@ -37,19 +44,27 @@ export interface LoadModelRequest {
 }
 
 export interface ModelDownloadRequest {
-  repo_id: string;
+  source: ModelSource;
+  repo_id?: string;
+  local_path?: string;
   quantization: QuantizationType;
+  device?: 'auto' | 'cuda' | 'cpu';
   trust_remote_code?: boolean;
   hf_token?: string;
 }
 
+export interface SizeEstimate {
+  disk_mb: number;
+  memory_mb: number;
+}
+
 export interface ModelPreviewResponse {
-  repo_id: string;
   name: string;
-  params: string;
-  estimated_memory_mb: Record<QuantizationType, number>;
-  available_memory_mb: number;
-  can_load: Record<QuantizationType, boolean>;
+  params: string | null;
+  architecture: string | null;
+  requires_trust_remote_code: boolean;
+  is_gated: boolean;
+  estimated_sizes: Record<QuantizationType, SizeEstimate> | null;
 }
 
 // SAE types
@@ -69,11 +84,15 @@ export interface SAEInfo {
   status: SAEStatus;
   created_at: string;
   updated_at: string;
+  // Extended properties
+  d_model?: number;
+  download_progress?: number;
 }
 
 export interface DownloadSAERequest {
   repo_id: string;
   filename?: string;
+  layer?: number;
   linked_model_id?: number;
   hf_token?: string;
 }
@@ -112,10 +131,16 @@ export interface MonitoringConfig {
   feature_indices: number[] | null;
 }
 
+export interface FeatureActivation {
+  feature_index: number;
+  activation: number;
+  label?: string;
+}
+
 export interface ActivationRecord {
   timestamp: string;
   request_id: string;
-  activations: Record<number, number>;
+  activations: FeatureActivation[];
 }
 
 export interface FeatureStatistics {
@@ -143,11 +168,11 @@ export interface Profile {
   id: number;
   name: string;
   description?: string;
-  model_repo_id: string;
-  sae_repo_id: string;
-  sae_layer: number;
+  model_repo_id?: string;
+  sae_repo_id?: string;
+  sae_layer?: number;
   features: FeatureSteering[];
-  is_active: boolean;
+  is_active?: boolean;
   created_at: string;
   updated_at: string;
 }
@@ -215,7 +240,7 @@ export interface LoadProgressEvent {
 export interface ActivationEvent {
   timestamp: string;
   request_id: string;
-  activations: Record<number, number>;
+  activations: FeatureActivation[];
 }
 
 export interface SystemMetricsEvent {

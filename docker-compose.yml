@@ -1,6 +1,27 @@
 version: "3.8"
 
 services:
+  # Nginx Reverse Proxy
+  nginx:
+    image: nginx:alpine
+    container_name: millm-nginx
+    restart: unless-stopped
+    ports:
+      - "${NGINX_HTTP_PORT:-80}:80"
+      - "${NGINX_HTTPS_PORT:-443}:443"
+    volumes:
+      - ./nginx/nginx.conf:/etc/nginx/nginx.conf:ro
+      - ./nginx/certs:/etc/nginx/certs:ro
+      - nginx_logs:/var/log/nginx
+    depends_on:
+      - api
+      - frontend
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://localhost/nginx-health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
   # PostgreSQL Database
   db:
     image: postgres:16-alpine
@@ -47,15 +68,19 @@ services:
       - DATABASE_URL=postgresql+asyncpg://${POSTGRES_USER:-millm}:${POSTGRES_PASSWORD:-millm_dev}@db:5432/${POSTGRES_DB:-millm}
       - REDIS_URL=redis://redis:6379/0
       - MODEL_CACHE_DIR=/app/model_cache
+      - SAE_CACHE_DIR=/app/sae_cache
       - HOST=0.0.0.0
       - PORT=8000
       - DEBUG=${DEBUG:-false}
       - LOG_LEVEL=${LOG_LEVEL:-INFO}
-      - CORS_ORIGINS=${CORS_ORIGINS:-http://localhost:3000,http://localhost:5173}
+      - CORS_ORIGINS=${CORS_ORIGINS:-http://localhost:3000,http://localhost:5173,http://millm.mcslab.io,https://millm.mcslab.io}
     ports:
-      - "${API_PORT:-8000}:8000"
+      - "${API_PORT:-8000}:8000"  # Exposed for development; nginx proxies in production
+    expose:
+      - "8000"
     volumes:
       - model_cache:/app/model_cache
+      - sae_cache:/app/sae_cache
       - ./millm:/app/millm:ro  # For development - mount source code
     depends_on:
       db:
@@ -77,11 +102,13 @@ services:
     working_dir: /app
     command: sh -c "npm install && npm run dev -- --host 0.0.0.0"
     environment:
-      - VITE_API_URL=http://localhost:${API_PORT:-8000}
+      - VITE_API_URL=${VITE_API_URL:-http://millm.mcslab.io}
     ports:
-      - "${FRONTEND_PORT:-5173}:5173"
+      - "${FRONTEND_PORT:-3000}:3000"  # Exposed for development; nginx proxies in production
+    expose:
+      - "3000"
     volumes:
-      - ./frontend:/app
+      - ./admin-ui:/app
       - frontend_node_modules:/app/node_modules
     depends_on:
       - api
@@ -93,8 +120,12 @@ volumes:
     name: millm-redis-data
   model_cache:
     name: millm-model-cache
+  sae_cache:
+    name: millm-sae-cache
   frontend_node_modules:
     name: millm-frontend-node-modules
+  nginx_logs:
+    name: millm-nginx-logs
 
 networks:
   default:

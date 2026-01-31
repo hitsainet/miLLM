@@ -7,8 +7,7 @@ import type { ConfigureMonitoringRequest } from '@/types';
 export function useMonitoring() {
   const queryClient = useQueryClient();
   const toast = useToast();
-  const { setMonitoring, setActivationHistory, setFeatureStatistics, setMonitoringLoading } =
-    useServerStore();
+  const { setMonitoring, setActivationHistory, setFeatureStatistics } = useServerStore();
 
   const configQuery = useQuery({
     queryKey: ['monitoring', 'config'],
@@ -86,13 +85,21 @@ export function useMonitoring() {
     history: historyQuery.data?.records ?? [],
     statistics: historyQuery.data?.statistics ?? [],
     isLoading: configQuery.isLoading,
+    isLoadingHistory: historyQuery.isLoading,
+    isLoadingStats: historyQuery.isLoading,
     error: configQuery.error?.message,
     refetch: configQuery.refetch,
     configure: configureMutation.mutate,
+    configureMonitoring: configureMutation.mutateAsync,
     enable: enableMutation.mutate,
+    enableMonitoring: enableMutation.mutateAsync,
     disable: disableMutation.mutate,
-    clearHistory: clearHistoryMutation.mutate,
+    disableMonitoring: disableMutation.mutateAsync,
+    clearHistory: clearHistoryMutation.mutateAsync,
     isConfiguring: configureMutation.isPending,
+    isEnabling: enableMutation.isPending,
+    isDisabling: disableMutation.isPending,
+    isClearing: clearHistoryMutation.isPending,
   };
 }
 

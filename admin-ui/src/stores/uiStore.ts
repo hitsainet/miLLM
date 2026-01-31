@@ -17,6 +17,7 @@ interface UIState {
 
   // Monitoring pause state
   monitoringPaused: boolean;
+  isMonitoringPaused: boolean; // Alias
 }
 
 interface UIActions {
@@ -42,6 +43,7 @@ interface UIActions {
   // Monitoring pause actions
   setMonitoringPaused: (paused: boolean) => void;
   toggleMonitoringPaused: () => void;
+  toggleMonitoringPause: () => void; // Alias
 }
 
 const generateId = () => Math.random().toString(36).substring(2, 9);
@@ -61,6 +63,7 @@ export const useUIStore = create<UIState & UIActions>()(
       },
       toasts: [],
       monitoringPaused: false,
+      isMonitoringPaused: false,
 
       // Theme actions
       setTheme: (theme) => set({ theme }),
@@ -103,9 +106,18 @@ export const useUIStore = create<UIState & UIActions>()(
       clearToasts: () => set({ toasts: [] }),
 
       // Monitoring pause actions
-      setMonitoringPaused: (monitoringPaused) => set({ monitoringPaused }),
+      setMonitoringPaused: (paused) =>
+        set({ monitoringPaused: paused, isMonitoringPaused: paused }),
       toggleMonitoringPaused: () =>
-        set((state) => ({ monitoringPaused: !state.monitoringPaused })),
+        set((state) => ({
+          monitoringPaused: !state.monitoringPaused,
+          isMonitoringPaused: !state.isMonitoringPaused,
+        })),
+      toggleMonitoringPause: () =>
+        set((state) => ({
+          monitoringPaused: !state.monitoringPaused,
+          isMonitoringPaused: !state.isMonitoringPaused,
+        })),
     }),
     {
       name: 'millm-ui-preferences',

@@ -22,7 +22,7 @@ export function useSAE() {
 
   const downloadMutation = useMutation({
     mutationFn: (req: DownloadSAERequest) => saeApi.download(req),
-    onSuccess: (sae) => {
+    onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['saes'] });
       toast.info(`Downloading SAE...`);
     },
@@ -88,12 +88,18 @@ export function useSAE() {
     error: saesQuery.error?.message,
     refetch: saesQuery.refetch,
     download: downloadMutation.mutate,
+    downloadSAE: downloadMutation.mutateAsync,
     attach: attachMutation.mutate,
+    attachSAE: attachMutation.mutateAsync,
     detach: detachMutation.mutate,
+    detachSAE: detachMutation.mutateAsync,
     delete: deleteMutation.mutate,
+    deleteSAE: deleteMutation.mutateAsync,
     cancel: cancelMutation.mutate,
     isDownloading: downloadMutation.isPending,
     isAttaching: attachMutation.isPending,
+    isDetaching: detachMutation.isPending,
+    isDeleting: deleteMutation.isPending,
   };
 }
 

@@ -1,11 +1,12 @@
-import { forwardRef } from 'react';
+import { forwardRef, useId } from 'react';
 import type { InputHTMLAttributes, ReactNode } from 'react';
 import type { InputSize } from '@/types/ui';
 
-interface InputProps extends InputHTMLAttributes<HTMLInputElement> {
+export interface InputProps extends InputHTMLAttributes<HTMLInputElement> {
   label?: string;
   error?: string;
   helper?: string;
+  helperText?: string; // Alias for helper
   leftAddon?: ReactNode;
   rightAddon?: ReactNode;
   inputSize?: InputSize;
@@ -23,6 +24,7 @@ export const Input = forwardRef<HTMLInputElement, InputProps>(
       label,
       error,
       helper,
+      helperText,
       leftAddon,
       rightAddon,
       inputSize = 'md',
@@ -32,7 +34,8 @@ export const Input = forwardRef<HTMLInputElement, InputProps>(
     },
     ref
   ) => {
-    const inputId = id || `input-${Math.random().toString(36).slice(2)}`;
+    const generatedId = useId();
+    const inputId = id || generatedId;
 
     return (
       <div className="w-full">
@@ -69,8 +72,8 @@ export const Input = forwardRef<HTMLInputElement, InputProps>(
           )}
         </div>
         {error && <p className="mt-1 text-xs text-red-400">{error}</p>}
-        {helper && !error && (
-          <p className="mt-1 text-xs text-slate-500">{helper}</p>
+        {(helper || helperText) && !error && (
+          <p className="mt-1 text-xs text-slate-500">{helper || helperText}</p>
         )}
       </div>
     );

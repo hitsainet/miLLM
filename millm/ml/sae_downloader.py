@@ -399,19 +399,70 @@ class SAEDownloader:
             ) from e
 
     def _is_sae_file(self, path: str) -> bool:
-        """Check if file path is an SAE file (params.npz, weights, etc.)."""
-        sae_patterns = [
+        """
+        Check if file path is an SAE file (params.npz, weights, etc.).
+
+        SAE files are typically:
+        - params.npz (SAELens format)
+        - sae_weights.safetensors / sae_weights.pt
+        - cfg.json (SAE config)
+        - sparsity.npz
+        - Files in layer_N/width_Nk directories
+
+        Model files to exclude:
+        - model-NNNNN-of-NNNNN.safetensors (sharded model weights)
+        - model.safetensors (single model weight file)
+        - pytorch_model.bin / pytorch_model-*.bin
+        - generation_config.json, tokenizer_config.json, etc.
+        """
+        import re
+
+        path_lower = path.lower()
+
+        # Explicit exclusions for model files
+        model_patterns = [
+            r"model-\d+-of-\d+\.safetensors",  # Sharded model weights
+            r"model\.safetensors$",  # Single model weight file
+            r"pytorch_model.*\.bin",  # PyTorch model files
+            r"generation_config\.json",
+            r"tokenizer_config\.json",
+            r"tokenizer\.json",
+            r"tokenizer\.model",
+            r"special_tokens_map\.json",
+            r"vocab\.json",
+            r"merges\.txt",
+            r"added_tokens\.json",
+            r"model\.safetensors\.index\.json",  # Model index file
+        ]
+        for pattern in model_patterns:
+            if re.search(pattern, path_lower):
+                return False
+
+        # Explicit SAE file patterns
+        sae_specific_patterns = [
             "params.npz",
             "sae_weights.pt",
             "sae_weights.safetensors",
             "cfg.json",
-            "config.json",
             "sparsity.npz",
-            ".pt",
-            ".safetensors",
         ]
-        path_lower = path.lower()
-        return any(pattern in path_lower for pattern in sae_patterns)
+        if any(pattern in path_lower for pattern in sae_specific_patterns):
+            return True
+
+        # SAE files in layer/width directory structure
+        # e.g., "layer_12/width_16k/average_l0_50/params.npz"
+        if re.search(r"layer[_-]?\d+", path_lower) and (
+            path_lower.endswith(".npz")
+            or path_lower.endswith(".pt")
+            or path_lower.endswith(".safetensors")
+        ):
+            return True
+
+        # config.json in a layer directory is likely SAE config
+        if "config.json" in path_lower and re.search(r"layer[_-]?\d+", path_lower):
+            return True
+
+        return False
 
     def _parse_sae_path(self, path: str) -> tuple[int | None, str | None]:
         """

@@ -1,9 +1,11 @@
-import { Server, Info, X, AlertTriangle, CheckCircle, HardDrive, Cpu } from 'lucide-react';
+import { useState } from 'react';
+import { Server, Info, Play } from 'lucide-react';
 import { useModels } from '@hooks/useModels';
 import { useServerStore } from '@stores/serverStore';
-import { ModelLoadForm, LoadedModelCard } from '@components/models';
+import { ModelLoadForm, LoadedModelCard, ModelDetailsModal } from '@components/models';
 import type { ModelLoadFormData } from '@components/models';
-import { Card, CardHeader, Spinner, EmptyState, Button } from '@components/common';
+import { Card, CardHeader, Spinner, EmptyState, Badge } from '@components/common';
+import type { ModelInfo } from '@/types';
 
 export function ModelsPage() {
   const { loadedModel } = useServerStore();
@@ -12,15 +14,21 @@ export function ModelsPage() {
     isLoading,
     downloadModel,
     isDownloading,
-    loadModel,
+    load,
     isLoadingModel,
     unloadModel,
     isUnloading,
+    delete: deleteModel,
+    isDeleting,
     previewModel,
     isPreviewingModel,
     previewData,
     clearPreview,
   } = useModels();
+
+  // State for selected model in modal
+  const [selectedModel, setSelectedModel] = useState<ModelInfo | null>(null);
+  const [isModalOpen, setIsModalOpen] = useState(false);
 
   const handleLoadModel = async (data: ModelLoadFormData) => {
     await downloadModel({
@@ -35,11 +43,62 @@ export function ModelsPage() {
 
   const handlePreview = async (repo_id: string) => {
     await previewModel(repo_id);
+    setSelectedModel(null); // Clear any selected model
+    setIsModalOpen(true);
   };
 
   const handleUnload = async () => {
-    if (loadedModel) {
+    if (loadedModel && loadedModel.id !== undefined) {
       await unloadModel(loadedModel.id);
+    }
+  };
+
+  const handleModelClick = (model: ModelInfo) => {
+    setSelectedModel(model);
+    clearPreview(); // Clear any preview data
+    setIsModalOpen(true);
+  };
+
+  const handleCloseModal = () => {
+    setIsModalOpen(false);
+    setSelectedModel(null);
+    clearPreview();
+  };
+
+  const handleLoadFromModal = (id: number) => {
+    load(id);
+  };
+
+  const handleUnloadFromModal = (id: number) => {
+    if (id === undefined || id === null) {
+      console.error('Cannot unload: model ID is undefined');
+      return;
+    }
+    unloadModel(id).then(() => {
+      // Refresh selected model state
+      setSelectedModel(null);
+    });
+  };
+
+  const handleDeleteFromModal = (id: number) => {
+    deleteModel(id);
+    handleCloseModal();
+  };
+
+  const getStatusBadge = (status: ModelInfo['status']) => {
+    switch (status) {
+      case 'loaded':
+        return <Badge variant="success">Loaded</Badge>;
+      case 'ready':
+        return <Badge variant="primary">Ready</Badge>;
+      case 'downloading':
+        return <Badge variant="warning">Downloading</Badge>;
+      case 'loading':
+        return <Badge variant="warning">Loading</Badge>;
+      case 'error':
+        return <Badge variant="danger">Error</Badge>;
+      default:
+        return <Badge>{status}</Badge>;
     }
   };
 
@@ -69,96 +128,11 @@ export function ModelsPage() {
         />
       )}
 
-      {/* Model Preview Card */}
-      {previewData && (
-        <Card>
-          <div className="flex items-start justify-between">
-            <CardHeader
-              title={`Preview: ${previewData.name}`}
-              subtitle="Model information from Hugging Face"
-              icon={<Info className="w-5 h-5 text-primary-400" />}
-            />
-            <button
-              onClick={clearPreview}
-              className="p-2 text-slate-400 hover:text-slate-200 hover:bg-slate-700/50 rounded-lg transition-colors"
-            >
-              <X className="w-4 h-4" />
-            </button>
-          </div>
-
-          <div className="grid grid-cols-2 md:grid-cols-4 gap-4 mb-4">
-            <div className="bg-slate-800/50 rounded-lg p-3">
-              <p className="text-xs text-slate-500 mb-1">Parameters</p>
-              <p className="text-lg font-semibold text-slate-200">{previewData.params || 'Unknown'}</p>
-            </div>
-            <div className="bg-slate-800/50 rounded-lg p-3">
-              <p className="text-xs text-slate-500 mb-1">Architecture</p>
-              <p className="text-lg font-semibold text-slate-200">{previewData.architecture || 'Unknown'}</p>
-            </div>
-            <div className="bg-slate-800/50 rounded-lg p-3">
-              <p className="text-xs text-slate-500 mb-1">Gated</p>
-              <p className={`text-lg font-semibold ${previewData.is_gated ? 'text-yellow-400' : 'text-green-400'}`}>
-                {previewData.is_gated ? 'Yes (Token Required)' : 'No'}
-              </p>
-            </div>
-            <div className="bg-slate-800/50 rounded-lg p-3">
-              <p className="text-xs text-slate-500 mb-1">Trust Remote Code</p>
-              <p className={`text-lg font-semibold ${previewData.requires_trust_remote_code ? 'text-yellow-400' : 'text-green-400'}`}>
-                {previewData.requires_trust_remote_code ? 'Required' : 'Not Required'}
-              </p>
-            </div>
-          </div>
-
-          {previewData.requires_trust_remote_code && (
-            <div className="flex items-center gap-2 p-3 bg-yellow-500/10 border border-yellow-500/30 rounded-lg mb-4">
-              <AlertTriangle className="w-4 h-4 text-yellow-400 flex-shrink-0" />
-              <p className="text-sm text-yellow-300">
-                This model requires "Trust Remote Code" to be enabled. Make sure you trust the model source.
-              </p>
-            </div>
-          )}
-
-          {previewData.estimated_sizes && (
-            <div>
-              <h4 className="text-sm font-medium text-slate-300 mb-3">Estimated Requirements by Quantization</h4>
-              <div className="grid grid-cols-3 gap-3">
-                {(['Q4', 'Q8', 'FP16'] as const).map((quant) => {
-                  const size = previewData.estimated_sizes?.[quant];
-                  if (!size) return null;
-                  return (
-                    <div key={quant} className="bg-slate-800/30 border border-slate-700/50 rounded-lg p-3">
-                      <div className="flex items-center justify-between mb-2">
-                        <span className="text-sm font-medium text-slate-200">{quant}</span>
-                        {quant === 'Q4' && (
-                          <span className="text-xs bg-primary-500/20 text-primary-300 px-2 py-0.5 rounded">
-                            Recommended
-                          </span>
-                        )}
-                      </div>
-                      <div className="space-y-1">
-                        <div className="flex items-center gap-2 text-xs text-slate-400">
-                          <HardDrive className="w-3 h-3" />
-                          <span>Disk: {(size.disk_mb / 1024).toFixed(1)} GB</span>
-                        </div>
-                        <div className="flex items-center gap-2 text-xs text-slate-400">
-                          <Cpu className="w-3 h-3" />
-                          <span>VRAM: {(size.memory_mb / 1024).toFixed(1)} GB</span>
-                        </div>
-                      </div>
-                    </div>
-                  );
-                })}
-              </div>
-            </div>
-          )}
-        </Card>
-      )}
-
       {/* Downloaded Models List */}
       <Card>
         <CardHeader
           title="Downloaded Models"
-          subtitle="Models available locally"
+          subtitle="Click on a model to view details and actions"
           icon={<Server className="w-5 h-5 text-slate-400" />}
         />
 
@@ -167,11 +141,15 @@ export function ModelsPage() {
             {models.map((model) => (
               <div
                 key={model.id}
+                onClick={() => handleModelClick(model)}
                 className={`
-                  flex items-center justify-between p-3 rounded-lg border
+                  flex items-center justify-between p-3 rounded-lg border cursor-pointer
+                  transition-all duration-150
                   ${model.status === 'loaded'
-                    ? 'bg-green-500/5 border-green-500/20'
-                    : 'bg-slate-800/30 border-slate-700/50'
+                    ? 'bg-green-500/5 border-green-500/20 hover:bg-green-500/10'
+                    : model.status === 'error'
+                    ? 'bg-red-500/5 border-red-500/20 hover:bg-red-500/10'
+                    : 'bg-slate-800/30 border-slate-700/50 hover:bg-slate-800/50 hover:border-slate-600/50'
                   }
                 `}
               >
@@ -180,6 +158,8 @@ export function ModelsPage() {
                     p-2 rounded-lg
                     ${model.status === 'loaded'
                       ? 'bg-green-500/10 text-green-400'
+                      : model.status === 'error'
+                      ? 'bg-red-500/10 text-red-400'
                       : 'bg-slate-700/50 text-slate-400'
                     }
                   `}>
@@ -187,13 +167,18 @@ export function ModelsPage() {
                   </div>
                   <div>
                     <h4 className="text-sm font-medium text-slate-200">{model.name}</h4>
-                    <p className="text-xs text-slate-500">{model.repo_id}</p>
+                    <p className="text-xs text-slate-500">
+                      {model.repo_id}
+                      {model.params && ` • ${model.params}`}
+                      {model.quantization && ` • ${model.quantization}`}
+                    </p>
                   </div>
                 </div>
                 <div className="flex items-center gap-3">
+                  {/* Download Progress */}
                   {model.status === 'downloading' && (
                     <div className="flex items-center gap-3">
-                      <div className="w-32 bg-slate-700/50 rounded-full h-2 overflow-hidden">
+                      <div className="w-24 bg-slate-700/50 rounded-full h-2 overflow-hidden">
                         <div
                           className="bg-primary-500 h-full rounded-full transition-all duration-300"
                           style={{ width: `${model.download_progress || 0}%` }}
@@ -205,18 +190,38 @@ export function ModelsPage() {
                       <Spinner size="sm" />
                     </div>
                   )}
-                  {model.status === 'loaded' && (
-                    <span className="text-xs font-medium text-green-400 bg-green-500/10 px-2 py-1 rounded">
-                      Loaded
-                    </span>
+
+                  {/* Loading indicator */}
+                  {model.status === 'loading' && (
+                    <div className="flex items-center gap-2">
+                      <Spinner size="sm" />
+                      <span className="text-xs text-yellow-400">Loading...</span>
+                    </div>
                   )}
-                  {model.status === 'ready' && (
+
+                  {/* Status Badge */}
+                  {getStatusBadge(model.status)}
+
+                  {/* Quick actions */}
+                  {(model.status === 'ready' || model.status === 'error') && (
                     <button
-                      onClick={() => loadModel(model.id)}
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        load(model.id);
+                      }}
                       disabled={isLoadingModel || loadedModel !== null}
-                      className="text-xs text-primary-400 hover:text-primary-300 disabled:text-slate-500 disabled:cursor-not-allowed"
+                      className={`
+                        flex items-center gap-1 px-2 py-1 rounded text-xs font-medium
+                        transition-colors
+                        ${loadedModel !== null
+                          ? 'text-slate-500 cursor-not-allowed'
+                          : 'text-primary-400 hover:text-primary-300 hover:bg-primary-500/10'
+                        }
+                      `}
+                      title={loadedModel !== null ? 'Unload current model first' : 'Load model'}
                     >
-                      {loadedModel !== null ? 'Unload current first' : 'Load'}
+                      <Play className="w-3 h-3" />
+                      Load
                     </button>
                   )}
                 </div>
@@ -246,6 +251,21 @@ export function ModelsPage() {
           </div>
         </div>
       </Card>
+
+      {/* Model Details Modal */}
+      <ModelDetailsModal
+        model={selectedModel}
+        previewData={previewData}
+        isOpen={isModalOpen}
+        onClose={handleCloseModal}
+        onLoad={handleLoadFromModal}
+        onUnload={handleUnloadFromModal}
+        onDelete={handleDeleteFromModal}
+        isLoadingModel={isLoadingModel}
+        isUnloading={isUnloading}
+        isDeleting={isDeleting}
+        loadedModel={loadedModel}
+      />
     </div>
   );
 }

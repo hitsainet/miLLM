@@ -3,7 +3,7 @@ import type { ReactNode } from 'react';
 import { X } from 'lucide-react';
 import { useUIStore } from '@/stores/uiStore';
 
-interface ModalProps {
+export interface ModalProps {
   id: string;
   title?: string;
   children: ReactNode;
@@ -11,6 +11,8 @@ interface ModalProps {
   size?: 'sm' | 'md' | 'lg' | 'xl';
   closeOnOverlay?: boolean;
   closeOnEscape?: boolean;
+  isOpen?: boolean;
+  onClose?: () => void;
 }
 
 const sizeStyles = {
@@ -28,24 +30,28 @@ export function Modal({
   size = 'md',
   closeOnOverlay = true,
   closeOnEscape = true,
+  isOpen: controlledIsOpen,
+  onClose,
 }: ModalProps) {
   const { modal, closeModal } = useUIStore();
-  const isOpen = modal.id === id;
+  // Support both controlled and store-based modal state
+  const isOpen = controlledIsOpen !== undefined ? controlledIsOpen : modal.id === id;
+  const handleClose = onClose || closeModal;
 
   const handleEscape = useCallback(
     (e: KeyboardEvent) => {
       if (e.key === 'Escape' && closeOnEscape && isOpen) {
-        closeModal();
+        handleClose();
       }
     },
-    [closeOnEscape, isOpen, closeModal]
+    [closeOnEscape, isOpen, handleClose]
   );
 
   const handleOverlayClick = useCallback(() => {
     if (closeOnOverlay) {
-      closeModal();
+      handleClose();
     }
-  }, [closeOnOverlay, closeModal]);
+  }, [closeOnOverlay, handleClose]);
 
   useEffect(() => {
     if (isOpen) {
@@ -84,7 +90,7 @@ export function Modal({
           <div className="flex items-center justify-between px-6 py-4 border-b border-slate-700/50">
             <h2 className="text-lg font-semibold text-slate-100">{title}</h2>
             <button
-              onClick={closeModal}
+              onClick={handleClose}
               className="p-1 text-slate-400 hover:text-slate-200 hover:bg-slate-800 rounded-lg transition-colors"
             >
               <X className="w-5 h-5" />

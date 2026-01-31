@@ -19,11 +19,13 @@ export function useModels() {
       if (loaded) setLoadedModel(loaded);
       return models;
     },
-    // Poll every 2 seconds when there's a downloading model to show progress
+    // Poll every 2 seconds when there's a downloading or loading model to show progress
     refetchInterval: (query) => {
       const models = query.state.data;
-      const hasDownloading = models?.some((m) => m.status === 'downloading');
-      return hasDownloading ? 2000 : false;
+      const hasActiveOperation = models?.some(
+        (m) => m.status === 'downloading' || m.status === 'loading'
+      );
+      return hasActiveOperation ? 2000 : false;
     },
   });
 

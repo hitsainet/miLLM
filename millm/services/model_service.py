@@ -285,10 +285,30 @@ class ModelService:
         last_error: Optional[Exception] = None
         stop_progress_monitor = threading.Event()
 
+        # Get expected download size for progress tracking
+        expected_size = 0
+        try:
+            expected_size = self.downloader.get_expected_download_size(
+                repo_id=request.repo_id,
+                token=request.hf_token,
+            )
+            logger.info(
+                "download_expected_size",
+                model_id=model_id,
+                expected_bytes=expected_size,
+                expected_mb=expected_size // (1024 * 1024) if expected_size else 0,
+            )
+        except Exception as e:
+            logger.warning(
+                "failed_to_get_expected_size",
+                model_id=model_id,
+                error=str(e),
+            )
+
         # Start progress monitoring thread
         progress_thread = threading.Thread(
             target=self._monitor_download_progress,
-            args=(model_id, request.repo_id, request.quantization.value, stop_progress_monitor),
+            args=(model_id, request.repo_id, request.quantization.value, stop_progress_monitor, expected_size),
             daemon=True,
         )
         progress_thread.start()
@@ -428,6 +448,7 @@ class ModelService:
         repo_id: str,
         quantization: str,
         stop_event: "threading.Event",
+        expected_size: int = 0,
     ) -> None:
         """
         Monitor download progress by checking directory size.
@@ -440,92 +461,97 @@ class ModelService:
             repo_id: HuggingFace repository ID
             quantization: Quantization type
             stop_event: Event to signal when to stop monitoring
+            expected_size: Expected total download size in bytes (0 if unknown)
         """
         import threading
         from pathlib import Path
 
         from millm.core.config import settings
 
-        # Get the target directory path
-        safe_name = repo_id.replace("/", "--") + f"--{quantization}"
-        download_dir = Path(settings.MODEL_CACHE_DIR) / "huggingface" / safe_name
+        # Get the target directory path (same as downloader._get_local_dir)
+        download_dir = self.downloader.get_local_dir_path(repo_id, quantization)
 
         # Track previous size for progress calculation
         last_progress = 0
+        last_size = 0
         check_interval = 1.0  # Check every second
+        stall_counter = 0
+
+        logger.info(
+            "download_progress_monitor_started",
+            model_id=model_id,
+            download_dir=str(download_dir),
+            expected_size=expected_size,
+        )
 
         while not stop_event.is_set():
             try:
-                # Calculate current size of download directory
+                # Calculate current size of download directory (including partial files)
                 current_size = 0
+                file_count = 0
                 if download_dir.exists():
                     for file in download_dir.rglob("*"):
                         if file.is_file():
                             try:
                                 current_size += file.stat().st_size
+                                file_count += 1
                             except OSError:
                                 pass  # File might be in use
 
-                # Convert to MB for comparison
-                current_mb = current_size // (1024 * 1024)
-
-                # Get estimated total size from model info (stored during download start)
-                # We use estimated_memory_mb as a rough proxy (actual download is usually larger)
-                # For now, estimate based on growth rate and file count
-                if current_mb > 0:
-                    # Check if we have any .safetensors or .bin files being downloaded
-                    # This gives us a sense of total model files
-                    model_files = list(download_dir.glob("*.safetensors*")) + \
-                                  list(download_dir.glob("*.bin*")) + \
-                                  list(download_dir.glob("model-*"))
-
-                    # Count incomplete downloads (files with .incomplete suffix)
-                    incomplete_files = list(download_dir.rglob("*.incomplete"))
-
-                    if incomplete_files:
-                        # Still downloading - estimate based on incomplete file ratio
-                        total_files = len(model_files) + len(incomplete_files)
-                        if total_files > 0:
-                            complete_ratio = len(model_files) / total_files
-                            # Weight current file progress too
-                            progress = int(complete_ratio * 100)
-                            progress = max(1, min(99, progress))  # Keep between 1-99
-                        else:
-                            progress = 5  # Just started
+                # Calculate progress
+                progress = 0
+                if expected_size > 0 and current_size > 0:
+                    # Use actual size-based progress
+                    progress = int((current_size / expected_size) * 100)
+                    progress = max(1, min(99, progress))  # Keep between 1-99 while downloading
+                elif current_size > 0:
+                    # No expected size - use heuristic based on file count and size growth
+                    if current_size > last_size:
+                        # Still downloading - increment progress slowly
+                        progress = min(last_progress + 1, 95)
+                        stall_counter = 0
                     else:
-                        # No incomplete files but download still running
-                        # Could be finalizing or just starting
-                        if model_files:
-                            progress = 95  # Almost done
+                        # Size not growing - might be stalled or finalizing
+                        stall_counter += 1
+                        if stall_counter > 5:
+                            progress = max(last_progress, 5)  # Keep last progress
                         else:
-                            progress = 5  # Just starting
+                            progress = last_progress
+                else:
+                    # No files yet - just started
+                    progress = 1
 
-                    # Ensure progress only increases
-                    if progress > last_progress:
-                        last_progress = progress
-                        self._download_progress[model_id] = progress
+                # Track size change
+                last_size = current_size
 
-                        # Emit WebSocket progress event
-                        if self.emitter and self._main_loop:
-                            try:
-                                asyncio.run_coroutine_threadsafe(
-                                    self.emitter.emit_download_progress(
-                                        model_id=model_id,
-                                        progress=progress,
-                                        downloaded_bytes=current_size,
-                                        total_bytes=None,  # Unknown
-                                    ),
-                                    self._main_loop,
-                                )
-                            except Exception:
-                                pass  # Don't let emit errors break monitoring
+                # Ensure progress only increases
+                if progress > last_progress:
+                    last_progress = progress
+                    self._download_progress[model_id] = progress
 
-                        logger.debug(
-                            "download_progress_update",
-                            model_id=model_id,
-                            progress=progress,
-                            current_mb=current_mb,
-                        )
+                    # Emit WebSocket progress event
+                    if self.emitter and self._main_loop:
+                        try:
+                            asyncio.run_coroutine_threadsafe(
+                                self.emitter.emit_download_progress(
+                                    model_id=model_id,
+                                    progress=progress,
+                                    downloaded_bytes=current_size,
+                                    total_bytes=expected_size if expected_size > 0 else None,
+                                ),
+                                self._main_loop,
+                            )
+                        except Exception:
+                            pass  # Don't let emit errors break monitoring
+
+                    logger.debug(
+                        "download_progress_update",
+                        model_id=model_id,
+                        progress=progress,
+                        current_bytes=current_size,
+                        expected_bytes=expected_size,
+                        file_count=file_count,
+                    )
 
             except Exception as e:
                 logger.debug(

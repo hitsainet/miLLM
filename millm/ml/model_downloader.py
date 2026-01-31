@@ -7,7 +7,7 @@ and error handling for common scenarios (gated models, missing repos).
 
 import shutil
 from pathlib import Path
-from typing import Callable, Optional
+from typing import Any, Callable, Optional
 
 import structlog
 from huggingface_hub import HfApi, snapshot_download
@@ -24,6 +24,7 @@ from millm.core.errors import (
     InvalidTokenError,
     RepoNotFoundError,
 )
+from millm.core.resilience import huggingface_circuit, CircuitOpenError
 
 logger = structlog.get_logger()
 
@@ -49,6 +50,23 @@ class ModelDownloader:
         self.cache_dir = Path(cache_dir or settings.MODEL_CACHE_DIR)
         self.cache_dir.mkdir(parents=True, exist_ok=True)
         self.hf_api = HfApi()
+
+    @staticmethod
+    @huggingface_circuit
+    def _snapshot_download_with_circuit(
+        repo_id: str,
+        local_dir: str,
+        token: Optional[str],
+        resume: bool,
+    ) -> None:
+        """Download with circuit breaker protection."""
+        snapshot_download(
+            repo_id=repo_id,
+            local_dir=local_dir,
+            local_dir_use_symlinks=False,
+            token=token,
+            resume_download=resume,
+        )
 
     def _get_local_dir(self, repo_id: str, quantization: str) -> Path:
         """Generate the local directory path for a model."""
@@ -120,14 +138,13 @@ class ModelDownloader:
         )
 
         try:
-            # Use snapshot_download for reliable downloading
-            # It handles resume, parallel downloads, and caching
-            snapshot_download(
+            # Use circuit-breaker-protected snapshot_download for reliable downloading
+            # It handles resume, parallel downloads, caching, and failure detection
+            self._snapshot_download_with_circuit(
                 repo_id=repo_id,
                 local_dir=str(local_dir),
-                local_dir_use_symlinks=False,
                 token=token or settings.HF_TOKEN,
-                resume_download=resume,
+                resume=resume,
             )
 
             logger.info(
@@ -136,6 +153,18 @@ class ModelDownloader:
                 local_dir=str(local_dir),
             )
             return str(local_dir)
+
+        except CircuitOpenError as e:
+            logger.error(
+                "circuit_open_download_blocked",
+                repo_id=repo_id,
+                error=str(e),
+            )
+            raise DownloadFailedError(
+                "HuggingFace service is temporarily unavailable after multiple failures. "
+                "Please try again later.",
+                details={"repo_id": repo_id, "circuit_error": str(e)},
+            )
 
         except RepositoryNotFoundError as e:
             logger.warning("repo_not_found", repo_id=repo_id, error=str(e))
@@ -185,6 +214,11 @@ class ModelDownloader:
                 details={"repo_id": repo_id, "error": str(e)},
             )
 
+    @huggingface_circuit
+    def _get_model_info_with_circuit(self, repo_id: str, token: Optional[str]) -> Any:
+        """Get model info with circuit breaker protection."""
+        return self.hf_api.model_info(repo_id, token=token)
+
     def get_model_info(
         self,
         repo_id: str,
@@ -205,7 +239,7 @@ class ModelDownloader:
             GatedModelError: Model is gated and no valid token provided
         """
         try:
-            info = self.hf_api.model_info(repo_id, token=token or settings.HF_TOKEN)
+            info = self._get_model_info_with_circuit(repo_id, token=token or settings.HF_TOKEN)
 
             return {
                 "name": info.modelId.split("/")[-1] if info.modelId else repo_id.split("/")[-1],
@@ -218,6 +252,13 @@ class ModelDownloader:
                 "downloads": getattr(info, "downloads", 0),
                 "likes": getattr(info, "likes", 0),
             }
+
+        except CircuitOpenError as e:
+            logger.error("circuit_open_info_blocked", repo_id=repo_id, error=str(e))
+            raise DownloadFailedError(
+                "HuggingFace service is temporarily unavailable. Please try again later.",
+                details={"repo_id": repo_id, "circuit_error": str(e)},
+            )
 
         except RepositoryNotFoundError:
             raise RepoNotFoundError(
@@ -320,3 +361,50 @@ class ModelDownloader:
                 total += file.stat().st_size
 
         return total
+
+    def get_expected_download_size(
+        self,
+        repo_id: str,
+        token: Optional[str] = None,
+    ) -> int:
+        """
+        Get the expected total download size for a model repository.
+
+        Args:
+            repo_id: HuggingFace repo (e.g., "google/gemma-2-2b")
+            token: HuggingFace access token for gated models
+
+        Returns:
+            Expected total size in bytes, or 0 if unable to determine
+        """
+        try:
+            info = self.hf_api.model_info(repo_id, token=token or settings.HF_TOKEN, files_metadata=True)
+
+            total_size = 0
+            if info.siblings:
+                for sibling in info.siblings:
+                    if hasattr(sibling, "size") and sibling.size:
+                        total_size += sibling.size
+
+            return total_size
+
+        except Exception as e:
+            logger.warning(
+                "failed_to_get_expected_size",
+                repo_id=repo_id,
+                error=str(e),
+            )
+            return 0
+
+    def get_local_dir_path(self, repo_id: str, quantization: str) -> Path:
+        """
+        Get the local directory path for a model (public access).
+
+        Args:
+            repo_id: HuggingFace repo
+            quantization: Q4, Q8, or FP16
+
+        Returns:
+            Path to local directory
+        """
+        return self._get_local_dir(repo_id, quantization)

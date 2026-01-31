@@ -130,13 +130,13 @@
   - [x] 2.6 Update `tsconfig.json` with path mappings
   - [x] 2.7 Verify Tailwind classes work
 
-- [ ] 3.0 Install application dependencies
-  - [ ] 3.1 Install Zustand for state management
-  - [ ] 3.2 Install React Query for server state
-  - [ ] 3.3 Install React Router for navigation
-  - [ ] 3.4 Install socket.io-client for WebSocket
-  - [ ] 3.5 Install @heroicons/react for icons
-  - [ ] 3.6 Install dev dependencies (vitest, @testing-library/react)
+- [x] 3.0 Install application dependencies
+  - [x] 3.1 Install Zustand for state management
+  - [x] 3.2 Install React Query for server state
+  - [x] 3.3 Install React Router for navigation
+  - [x] 3.4 Install socket.io-client for WebSocket
+  - [x] 3.5 Install lucide-react for icons
+  - [x] 3.6 Install dev dependencies (vitest, @testing-library/react)
 
 - [ ] 4.0 Set up directory structure
   - [ ] 4.1 Create `src/components/` subdirectories

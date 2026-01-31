@@ -80,6 +80,42 @@ class ModelService:
         # Track active loads
         self._loading_model_id: Optional[int] = None
 
+        # Reference to main event loop for thread-safe async operations
+        self._main_loop: Optional[asyncio.AbstractEventLoop] = None
+
+        # Track download progress (in-memory, model_id -> progress percentage)
+        self._download_progress: dict[int, int] = {}
+
+    def _run_async_from_thread(self, coro: Any) -> Any:
+        """
+        Run an async coroutine from a background thread.
+
+        Uses asyncio.run_coroutine_threadsafe() to safely schedule the coroutine
+        on the main event loop and wait for its result.
+
+        Args:
+            coro: The coroutine to run
+
+        Returns:
+            The result of the coroutine
+        """
+        if self._main_loop is None:
+            raise RuntimeError("Main event loop not set")
+        future = asyncio.run_coroutine_threadsafe(coro, self._main_loop)
+        return future.result(timeout=30.0)  # 30 second timeout for DB operations
+
+    def get_download_progress(self, model_id: int) -> int | None:
+        """
+        Get the current download progress for a model.
+
+        Args:
+            model_id: The model's database ID
+
+        Returns:
+            Progress percentage (0-100) if downloading, None otherwise.
+        """
+        return self._download_progress.get(model_id)
+
     async def list_models(self) -> list[Model]:
         """
         Get all models from the database.
@@ -220,7 +256,9 @@ class ModelService:
         )
 
         # Start background download
+        # Store the main loop for thread-safe async operations
         loop = asyncio.get_event_loop()
+        self._main_loop = loop
         future = loop.run_in_executor(
             self._executor,
             self._download_worker,
@@ -242,104 +280,121 @@ class ModelService:
         Runs in thread pool. Updates database and emits events upon completion/failure.
         Implements retry logic with exponential backoff for transient failures.
         """
+        import threading
+
         last_error: Optional[Exception] = None
+        stop_progress_monitor = threading.Event()
 
-        for attempt in range(MAX_DOWNLOAD_RETRIES):
-            try:
-                # Check if cancelled before starting
-                if model_id in self._cancelled_downloads:
-                    self._cancelled_downloads.discard(model_id)
-                    self._cleanup_partial_download(request.repo_id, request.quantization.value)
-                    raise DownloadCancelledError("Download was cancelled")
+        # Start progress monitoring thread
+        progress_thread = threading.Thread(
+            target=self._monitor_download_progress,
+            args=(model_id, request.repo_id, request.quantization.value, stop_progress_monitor),
+            daemon=True,
+        )
+        progress_thread.start()
 
-                logger.info(
-                    "download_attempt",
-                    model_id=model_id,
-                    attempt=attempt + 1,
-                    max_attempts=MAX_DOWNLOAD_RETRIES,
-                )
+        # Initialize progress tracking
+        self._download_progress[model_id] = 0
 
-                # Perform download
-                cache_path = self.downloader.download(
-                    repo_id=request.repo_id,
-                    quantization=request.quantization.value,
-                    token=request.hf_token,
-                    trust_remote_code=request.trust_remote_code,
-                )
+        try:
+            for attempt in range(MAX_DOWNLOAD_RETRIES):
+                try:
+                    # Check if cancelled before starting
+                    if model_id in self._cancelled_downloads:
+                        self._cancelled_downloads.discard(model_id)
+                        self._cleanup_partial_download(request.repo_id, request.quantization.value)
+                        raise DownloadCancelledError("Download was cancelled")
 
-                # Check if cancelled after download
-                if model_id in self._cancelled_downloads:
-                    self._cancelled_downloads.discard(model_id)
-                    self._cleanup_partial_download(request.repo_id, request.quantization.value)
-                    raise DownloadCancelledError("Download was cancelled")
+                    logger.info(
+                        "download_attempt",
+                        model_id=model_id,
+                        attempt=attempt + 1,
+                        max_attempts=MAX_DOWNLOAD_RETRIES,
+                    )
 
-                # Get disk size
-                disk_size_bytes = self.downloader.get_cache_size(
-                    request.repo_id,
-                    request.quantization.value,
-                )
-                disk_size_mb = disk_size_bytes // (1024 * 1024)
+                    # Perform download
+                    cache_path = self.downloader.download(
+                        repo_id=request.repo_id,
+                        quantization=request.quantization.value,
+                        token=request.hf_token,
+                        trust_remote_code=request.trust_remote_code,
+                    )
 
-                # Update database
-                asyncio.run(
-                    self._update_download_complete(
+                    # Check if cancelled after download
+                    if model_id in self._cancelled_downloads:
+                        self._cancelled_downloads.discard(model_id)
+                        self._cleanup_partial_download(request.repo_id, request.quantization.value)
+                        raise DownloadCancelledError("Download was cancelled")
+
+                    # Mark progress as 100%
+                    self._download_progress[model_id] = 100
+
+                    # Get disk size
+                    disk_size_bytes = self.downloader.get_cache_size(
+                        request.repo_id,
+                        request.quantization.value,
+                    )
+                    disk_size_mb = disk_size_bytes // (1024 * 1024)
+
+                    # Update database (thread-safe async call)
+                    self._run_async_from_thread(
+                        self._update_download_complete(
+                            model_id=model_id,
+                            cache_path=cache_path,
+                            disk_size_mb=disk_size_mb,
+                        )
+                    )
+
+                    logger.info(
+                        "download_complete",
                         model_id=model_id,
                         cache_path=cache_path,
                         disk_size_mb=disk_size_mb,
                     )
-                )
 
-                logger.info(
-                    "download_complete",
-                    model_id=model_id,
-                    cache_path=cache_path,
-                    disk_size_mb=disk_size_mb,
-                )
+                    return cache_path
 
-                return cache_path
+                except DownloadCancelledError:
+                    self._run_async_from_thread(self._update_download_cancelled(model_id))
+                    raise
 
-            except DownloadCancelledError:
-                asyncio.run(self._update_download_cancelled(model_id))
-                raise
-
-            except Exception as e:
-                last_error = e
-                logger.warning(
-                    "download_attempt_failed",
-                    model_id=model_id,
-                    attempt=attempt + 1,
-                    error=str(e),
-                    retrying=attempt < MAX_DOWNLOAD_RETRIES - 1,
-                )
-
-                # Check if error is retryable (network errors, timeouts)
-                if not self._is_retryable_error(e):
-                    break
-
-                # Check if cancelled while waiting to retry
-                if model_id in self._cancelled_downloads:
-                    self._cancelled_downloads.discard(model_id)
-                    self._cleanup_partial_download(request.repo_id, request.quantization.value)
-                    raise DownloadCancelledError("Download was cancelled")
-
-                # Calculate backoff delay
-                if attempt < MAX_DOWNLOAD_RETRIES - 1:
-                    delay = min(
-                        RETRY_BASE_DELAY * (2 ** attempt),
-                        RETRY_MAX_DELAY,
-                    )
-                    logger.info(
-                        "download_retry_delay",
+                except Exception as e:
+                    last_error = e
+                    logger.warning(
+                        "download_attempt_failed",
                         model_id=model_id,
-                        delay_seconds=delay,
+                        attempt=attempt + 1,
+                        error=str(e),
+                        retrying=attempt < MAX_DOWNLOAD_RETRIES - 1,
                     )
-                    time.sleep(delay)
 
-                    # Clean up partial download before retry
-                    self._cleanup_partial_download(request.repo_id, request.quantization.value)
+                    # Check if error is retryable (network errors, timeouts)
+                    if not self._is_retryable_error(e):
+                        break
 
-        # All retries exhausted - clean up and report failure
-        try:
+                    # Check if cancelled while waiting to retry
+                    if model_id in self._cancelled_downloads:
+                        self._cancelled_downloads.discard(model_id)
+                        self._cleanup_partial_download(request.repo_id, request.quantization.value)
+                        raise DownloadCancelledError("Download was cancelled")
+
+                    # Calculate backoff delay
+                    if attempt < MAX_DOWNLOAD_RETRIES - 1:
+                        delay = min(
+                            RETRY_BASE_DELAY * (2 ** attempt),
+                            RETRY_MAX_DELAY,
+                        )
+                        logger.info(
+                            "download_retry_delay",
+                            model_id=model_id,
+                            delay_seconds=delay,
+                        )
+                        time.sleep(delay)
+
+                        # Clean up partial download before retry
+                        self._cleanup_partial_download(request.repo_id, request.quantization.value)
+
+            # All retries exhausted - clean up and report failure
             self._cleanup_partial_download(request.repo_id, request.quantization.value)
 
             if last_error:
@@ -349,7 +404,7 @@ class ModelService:
                     error=str(last_error),
                     attempts=MAX_DOWNLOAD_RETRIES,
                 )
-                asyncio.run(
+                self._run_async_from_thread(
                     self._update_download_error(
                         model_id=model_id,
                         error_code=getattr(last_error, "code", "DOWNLOAD_FAILED"),
@@ -359,9 +414,128 @@ class ModelService:
                 raise last_error
 
             return ""
+
         finally:
+            # Stop progress monitoring and clean up
+            stop_progress_monitor.set()
             self._active_downloads.pop(model_id, None)
             self._cancelled_downloads.discard(model_id)
+            self._download_progress.pop(model_id, None)
+
+    def _monitor_download_progress(
+        self,
+        model_id: int,
+        repo_id: str,
+        quantization: str,
+        stop_event: "threading.Event",
+    ) -> None:
+        """
+        Monitor download progress by checking directory size.
+
+        Runs in a separate thread and periodically checks the download directory
+        to estimate progress. Emits WebSocket events with progress updates.
+
+        Args:
+            model_id: The model's database ID
+            repo_id: HuggingFace repository ID
+            quantization: Quantization type
+            stop_event: Event to signal when to stop monitoring
+        """
+        import threading
+        from pathlib import Path
+
+        from millm.core.config import settings
+
+        # Get the target directory path
+        safe_name = repo_id.replace("/", "--") + f"--{quantization}"
+        download_dir = Path(settings.MODEL_CACHE_DIR) / "huggingface" / safe_name
+
+        # Track previous size for progress calculation
+        last_progress = 0
+        check_interval = 1.0  # Check every second
+
+        while not stop_event.is_set():
+            try:
+                # Calculate current size of download directory
+                current_size = 0
+                if download_dir.exists():
+                    for file in download_dir.rglob("*"):
+                        if file.is_file():
+                            try:
+                                current_size += file.stat().st_size
+                            except OSError:
+                                pass  # File might be in use
+
+                # Convert to MB for comparison
+                current_mb = current_size // (1024 * 1024)
+
+                # Get estimated total size from model info (stored during download start)
+                # We use estimated_memory_mb as a rough proxy (actual download is usually larger)
+                # For now, estimate based on growth rate and file count
+                if current_mb > 0:
+                    # Check if we have any .safetensors or .bin files being downloaded
+                    # This gives us a sense of total model files
+                    model_files = list(download_dir.glob("*.safetensors*")) + \
+                                  list(download_dir.glob("*.bin*")) + \
+                                  list(download_dir.glob("model-*"))
+
+                    # Count incomplete downloads (files with .incomplete suffix)
+                    incomplete_files = list(download_dir.rglob("*.incomplete"))
+
+                    if incomplete_files:
+                        # Still downloading - estimate based on incomplete file ratio
+                        total_files = len(model_files) + len(incomplete_files)
+                        if total_files > 0:
+                            complete_ratio = len(model_files) / total_files
+                            # Weight current file progress too
+                            progress = int(complete_ratio * 100)
+                            progress = max(1, min(99, progress))  # Keep between 1-99
+                        else:
+                            progress = 5  # Just started
+                    else:
+                        # No incomplete files but download still running
+                        # Could be finalizing or just starting
+                        if model_files:
+                            progress = 95  # Almost done
+                        else:
+                            progress = 5  # Just starting
+
+                    # Ensure progress only increases
+                    if progress > last_progress:
+                        last_progress = progress
+                        self._download_progress[model_id] = progress
+
+                        # Emit WebSocket progress event
+                        if self.emitter and self._main_loop:
+                            try:
+                                asyncio.run_coroutine_threadsafe(
+                                    self.emitter.emit_download_progress(
+                                        model_id=model_id,
+                                        progress=progress,
+                                        downloaded_bytes=current_size,
+                                        total_bytes=None,  # Unknown
+                                    ),
+                                    self._main_loop,
+                                )
+                            except Exception:
+                                pass  # Don't let emit errors break monitoring
+
+                        logger.debug(
+                            "download_progress_update",
+                            model_id=model_id,
+                            progress=progress,
+                            current_mb=current_mb,
+                        )
+
+            except Exception as e:
+                logger.debug(
+                    "download_progress_monitor_error",
+                    model_id=model_id,
+                    error=str(e),
+                )
+
+            # Wait for next check or stop signal
+            stop_event.wait(timeout=check_interval)
 
     def _is_retryable_error(self, error: Exception) -> bool:
         """
@@ -595,7 +769,9 @@ class ModelService:
             )
 
         # Start background load
+        # Store the main loop for thread-safe async operations
         loop = asyncio.get_event_loop()
+        self._main_loop = loop
         loop.run_in_executor(
             self._executor,
             self._load_worker,
@@ -635,8 +811,8 @@ class ModelService:
                 trust_remote_code=trust_remote_code,
             )
 
-            # Update database
-            asyncio.run(
+            # Update database (thread-safe async call)
+            self._run_async_from_thread(
                 self._update_load_complete(
                     model_id=model_id,
                     memory_used_mb=loaded.memory_used_mb,
@@ -651,7 +827,7 @@ class ModelService:
 
         except Exception as e:
             logger.error("load_failed", model_id=model_id, error=str(e))
-            asyncio.run(
+            self._run_async_from_thread(
                 self._update_load_error(
                     model_id=model_id,
                     error_code=getattr(e, "code", "MODEL_LOAD_FAILED"),

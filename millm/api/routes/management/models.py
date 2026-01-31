@@ -15,6 +15,7 @@ from millm.api.schemas.model import (
     ModelPreviewRequest,
     ModelPreviewResponse,
     ModelResponse,
+    SizeEstimate,
 )
 
 router = APIRouter(prefix="/api/models", tags=["models"])
@@ -37,9 +38,18 @@ async def list_models(
     List all downloaded models.
 
     Returns all models in the database, including their current status.
+    Download progress is included for models currently downloading.
     """
     models = await service.list_models()
-    return ApiResponse.ok([ModelResponse.from_model(m) for m in models])
+    responses = []
+    for m in models:
+        response = ModelResponse.from_model(m)
+        # Inject download progress for downloading models
+        progress = service.get_download_progress(m.id)
+        if progress is not None:
+            response.download_progress = progress
+        responses.append(response)
+    return ApiResponse.ok(responses)
 
 
 @router.post(
@@ -82,7 +92,12 @@ async def get_model(
         model_id: The model's unique identifier.
     """
     model = await service.get_model(model_id)
-    return ApiResponse.ok(ModelResponse.from_model(model))
+    response = ModelResponse.from_model(model)
+    # Inject download progress for downloading models
+    progress = service.get_download_progress(model_id)
+    if progress is not None:
+        response.download_progress = progress
+    return ApiResponse.ok(response)
 
 
 @router.delete(
@@ -182,14 +197,47 @@ async def preview_model(
     """
     info = await service.preview_model(request)
 
+    # Calculate estimated sizes based on params
+    estimated_sizes = None
+    params_str = info.get("params", "")
+    if params_str:
+        # Parse params like "2.5B", "9B", "3B" to estimate memory
+        try:
+            multiplier = 1.0
+            if params_str.endswith("B"):
+                params_num = float(params_str[:-1])
+            elif params_str.endswith("M"):
+                params_num = float(params_str[:-1]) / 1000
+            else:
+                params_num = float(params_str)
+
+            # Estimate: ~0.5 bytes/param for Q4, ~1 byte for Q8, ~2 bytes for FP16
+            base_gb = params_num  # params in billions
+            estimated_sizes = {
+                "Q4": SizeEstimate(
+                    disk_mb=int(base_gb * 500),  # ~0.5 GB per billion params
+                    memory_mb=int(base_gb * 600),  # slightly more for runtime
+                ),
+                "Q8": SizeEstimate(
+                    disk_mb=int(base_gb * 1000),  # ~1 GB per billion params
+                    memory_mb=int(base_gb * 1200),
+                ),
+                "FP16": SizeEstimate(
+                    disk_mb=int(base_gb * 2000),  # ~2 GB per billion params
+                    memory_mb=int(base_gb * 2400),
+                ),
+            }
+        except (ValueError, TypeError):
+            pass
+
     # Build preview response
     preview = ModelPreviewResponse(
         name=info.get("name", ""),
-        repo_id=info.get("repo_id", request.repo_id),
         params=info.get("params"),
         architecture=info.get("architecture"),
         is_gated=info.get("is_gated", False),
         requires_trust_remote_code=info.get("requires_trust_remote_code", False),
+        estimated_sizes=estimated_sizes,
     )
 
     return ApiResponse.ok(preview)

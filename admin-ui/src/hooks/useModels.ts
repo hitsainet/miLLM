@@ -1,8 +1,9 @@
+import { useState } from 'react';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { modelApi } from '@/services/api';
 import { useServerStore } from '@/stores/serverStore';
 import { useToast } from './useToast';
-import type { ModelDownloadRequest } from '@/types';
+import type { ModelDownloadRequest, ModelPreviewResponse } from '@/types';
 
 export function useModels() {
   const queryClient = useQueryClient();
@@ -17,6 +18,12 @@ export function useModels() {
       const loaded = models.find((m) => m.status === 'loaded');
       if (loaded) setLoadedModel(loaded);
       return models;
+    },
+    // Poll every 2 seconds when there's a downloading model to show progress
+    refetchInterval: (query) => {
+      const models = query.state.data;
+      const hasDownloading = models?.some((m) => m.status === 'downloading');
+      return hasDownloading ? 2000 : false;
     },
   });
 
@@ -82,18 +89,40 @@ export function useModels() {
     },
   });
 
+  const [previewData, setPreviewData] = useState<ModelPreviewResponse | null>(null);
+
+  const previewMutation = useMutation({
+    mutationFn: (repoId: string) => modelApi.preview(repoId),
+    onSuccess: (data) => {
+      setPreviewData(data);
+    },
+    onError: (error: Error) => {
+      toast.error(`Preview failed: ${error.message}`);
+      setPreviewData(null);
+    },
+  });
+
   return {
     models: modelsQuery.data ?? [],
     isLoading: modelsQuery.isLoading,
     error: modelsQuery.error?.message,
     refetch: modelsQuery.refetch,
     download: downloadMutation.mutate,
+    downloadModel: downloadMutation.mutateAsync,
     load: loadMutation.mutate,
+    loadModel: loadMutation.mutateAsync,
     unload: unloadMutation.mutate,
+    unloadModel: unloadMutation.mutateAsync,
     delete: deleteMutation.mutate,
     cancel: cancelMutation.mutate,
     isDownloading: downloadMutation.isPending,
     isLoadingModel: loadMutation.isPending,
+    isUnloading: unloadMutation.isPending,
+    isDeleting: deleteMutation.isPending,
+    previewModel: previewMutation.mutateAsync,
+    isPreviewingModel: previewMutation.isPending,
+    previewData,
+    clearPreview: () => setPreviewData(null),
   };
 }
 

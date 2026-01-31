@@ -92,18 +92,18 @@ class ModelPreviewResponse(BaseModel):
     """Response schema for model preview."""
 
     name: str = Field(..., description="Model name")
-    params: str = Field(..., description="Parameter count (e.g., '2.5B')")
-    architecture: str = Field(..., description="Model architecture")
+    params: str | None = Field(default=None, description="Parameter count (e.g., '2.5B')")
+    architecture: str | None = Field(default=None, description="Model architecture")
     requires_trust_remote_code: bool = Field(
-        ...,
+        default=False,
         description="Whether the model requires trust_remote_code",
     )
     is_gated: bool = Field(
-        ...,
+        default=False,
         description="Whether the model is gated and requires authentication",
     )
-    estimated_sizes: dict[str, SizeEstimate] = Field(
-        ...,
+    estimated_sizes: dict[str, SizeEstimate] | None = Field(
+        default=None,
         description="Estimated sizes for each quantization level (Q4, Q8, FP16)",
     )
 
@@ -146,6 +146,10 @@ class ModelResponse(BaseModel):
     error_message: str | None = Field(
         default=None,
         description="Error message if status is ERROR",
+    )
+    download_progress: int | None = Field(
+        default=None,
+        description="Download progress percentage (0-100) when status is DOWNLOADING",
     )
     created_at: datetime = Field(..., description="When the model was added")
     updated_at: datetime = Field(..., description="When the model was last updated")

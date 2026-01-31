@@ -115,11 +115,11 @@
 
 ### Phase 1: Project Setup
 
-- [ ] 1.0 Initialize Vite React project
-  - [ ] 1.1 Create `admin-ui/` directory
-  - [ ] 1.2 Run `npm create vite@latest . -- --template react-ts`
-  - [ ] 1.3 Install core dependencies (react, react-dom, typescript)
-  - [ ] 1.4 Verify dev server starts with `npm run dev`
+- [x] 1.0 Initialize Vite React project
+  - [x] 1.1 Create `admin-ui/` directory
+  - [x] 1.2 Run `npm create vite@latest . -- --template react-ts`
+  - [x] 1.3 Install core dependencies (react, react-dom, typescript)
+  - [x] 1.4 Verify dev server starts with `npm run dev`
 
 - [ ] 2.0 Configure build tools
   - [ ] 2.1 Install Tailwind CSS and PostCSS

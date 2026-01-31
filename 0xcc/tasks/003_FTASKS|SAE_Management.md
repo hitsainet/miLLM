@@ -2,9 +2,9 @@
 
 ## miLLM Feature 3
 
-**Document Version:** 1.1
+**Document Version:** 1.2
 **Created:** January 30, 2026
-**Status:** In Progress - Core Implementation Complete
+**Status:** Complete
 **References:**
 - Feature PRD: `003_FPRD|SAE_Management.md`
 - Feature TDD: `003_FTDD|SAE_Management.md`
@@ -255,66 +255,66 @@
 
 ### Phase 10: Unit Tests
 
-- [~] 18.0 Write ML component unit tests
+- [x] 18.0 Write ML component unit tests
   - [x] 18.1 Create `tests/unit/ml/test_sae_config.py`
-  - [ ] 18.2 Create `tests/unit/ml/test_sae_loader.py`
+  - [x] 18.2 Create `tests/unit/ml/test_sae_loader.py`
   - [x] 18.3 Create `tests/unit/ml/test_sae_wrapper.py`
-  - [ ] 18.4 Create `tests/unit/ml/test_sae_hooker.py`
+  - [x] 18.4 Create `tests/unit/ml/test_sae_hooker.py`
   - [x] 18.5 Test forward pass preserves shape
   - [x] 18.6 Test steering modifies output
   - [x] 18.7 Test monitoring captures activations
   - [x] 18.8 Test feature index validation
 
-- [ ] 19.0 Write service unit tests
-  - [ ] 19.1 Create `tests/unit/services/test_sae_service.py`
-  - [ ] 19.2 Test compatibility checking logic
-  - [ ] 19.3 Test attachment state management
-  - [ ] 19.4 Test concurrent access with lock
+- [x] 19.0 Write service unit tests
+  - [x] 19.1 Create `tests/unit/services/test_sae_service.py`
+  - [x] 19.2 Test compatibility checking logic
+  - [x] 19.3 Test attachment state management
+  - [x] 19.4 Test concurrent access with lock
 
-- [ ] 20.0 Write repository unit tests
-  - [ ] 20.1 Create `tests/unit/db/test_sae_repository.py`
-  - [ ] 20.2 Test CRUD operations
-  - [ ] 20.3 Test attachment tracking
-  - [ ] 20.4 Test single-active constraint
+- [x] 20.0 Write repository unit tests
+  - [x] 20.1 Create `tests/unit/db/test_sae_repository.py`
+  - [x] 20.2 Test CRUD operations
+  - [x] 20.3 Test attachment tracking
+  - [x] 20.4 Test single-active constraint
 
 ### Phase 11: Integration Tests
 
-- [ ] 21.0 Write integration tests
-  - [ ] 21.1 Create `tests/integration/services/test_sae_service_integration.py`
-  - [ ] 21.2 Test full download → attach → detach flow
-  - [ ] 21.3 Test compatibility validation
-  - [ ] 21.4 Test cannot attach second SAE
-  - [ ] 21.5 Test memory tracking accuracy
+- [x] 21.0 Write integration tests
+  - [x] 21.1 Create `tests/integration/services/test_sae_service_integration.py`
+  - [x] 21.2 Test full download → attach → detach flow
+  - [x] 21.3 Test compatibility validation
+  - [x] 21.4 Test cannot attach second SAE
+  - [x] 21.5 Test memory tracking accuracy
 
-- [ ] 22.0 Write API route tests
-  - [ ] 22.1 Create `tests/integration/api/test_sae_routes.py`
-  - [ ] 22.2 Test all endpoints with mocked services
-  - [ ] 22.3 Test error responses match format
-  - [ ] 22.4 Test validation errors
+- [x] 22.0 Write API route tests
+  - [x] 22.1 Create `tests/integration/api/test_sae_routes.py`
+  - [x] 22.2 Test all endpoints with mocked services
+  - [x] 22.3 Test error responses match format
+  - [x] 22.4 Test validation errors
 
 ### Phase 12: Test Fixtures
 
-- [ ] 23.0 Create test fixtures
-  - [ ] 23.1 Create `tests/fixtures/sae/` directory
-  - [ ] 23.2 Create `sample_config.json` with valid SAELens format
-  - [ ] 23.3 Create small `sample_weights.safetensors` (64 x 128 dimensions)
-  - [ ] 23.4 Create pytest fixtures for easy access
-  - [ ] 23.5 Document fixture usage in README
+- [x] 23.0 Create test fixtures
+  - [x] 23.1 Create `tests/fixtures/sae/` directory
+  - [x] 23.2 Create `sample_config.json` with valid SAELens format
+  - [x] 23.3 Create small `sample_weights.safetensors` (64 x 128 dimensions)
+  - [x] 23.4 Create pytest fixtures for easy access
+  - [x] 23.5 Document fixture usage in README
 
 ### Phase 13: Integration and Polish
 
-- [ ] 24.0 Integrate with existing systems
-  - [ ] 24.1 Update app lifespan to initialize SAEService
-  - [ ] 24.2 Add SAE service dependency
-  - [ ] 24.3 Verify WebSocket progress events work
-  - [ ] 24.4 Test with actual model loaded
+- [x] 24.0 Integrate with existing systems
+  - [x] 24.1 Update app lifespan to initialize SAEService
+  - [x] 24.2 Add SAE service dependency
+  - [x] 24.3 Verify WebSocket progress events work
+  - [x] 24.4 Test with actual model loaded
 
-- [ ] 25.0 Documentation and cleanup
-  - [ ] 25.1 Add docstrings to all public methods
-  - [ ] 25.2 Update OpenAPI documentation
-  - [ ] 25.3 Review error messages for clarity
-  - [ ] 25.4 Remove debug code
-  - [ ] 25.5 Run full test suite and fix issues
+- [x] 25.0 Documentation and cleanup
+  - [x] 25.1 Add docstrings to all public methods
+  - [x] 25.2 Update OpenAPI documentation
+  - [x] 25.3 Review error messages for clarity
+  - [x] 25.4 Remove debug code
+  - [x] 25.5 Run full test suite and fix issues
 
 ---
 

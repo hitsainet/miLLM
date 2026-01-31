@@ -151,6 +151,25 @@ class SAEService:
                 monitoring_enabled=self._attached_sae.is_monitoring_enabled,
             )
 
+    async def preview_repository(
+        self,
+        repository_id: str,
+        revision: str = "main",
+        token: str | None = None,
+    ) -> dict:
+        """
+        Preview SAE files in a HuggingFace repository without downloading.
+
+        Args:
+            repository_id: HuggingFace repo (e.g., "google/gemma-scope-2b-pt-res").
+            revision: Git revision (branch, tag, commit).
+            token: HuggingFace access token for gated repositories.
+
+        Returns:
+            Dictionary with repository info and available SAE files.
+        """
+        return await self._downloader.list_repository_files(repository_id, revision, token)
+
     # =========================================================================
     # Download Methods
     # =========================================================================

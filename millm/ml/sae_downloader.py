@@ -289,3 +289,177 @@ class SAEDownloader:
             base_id = f"{base_id}@{revision}"
 
         return base_id
+
+    async def list_repository_files(
+        self,
+        repository_id: str,
+        revision: str = "main",
+        token: str | None = None,
+    ) -> dict[str, Any]:
+        """
+        List SAE files in a HuggingFace repository.
+
+        Args:
+            repository_id: HuggingFace repo ID (e.g., "google/gemma-scope-2b-pt-res").
+            revision: Git revision (branch, tag, commit).
+            token: HuggingFace access token for gated repositories.
+
+        Returns:
+            Dictionary containing repository info and SAE files:
+            {
+                "repository_id": str,
+                "revision": str,
+                "model_id": str | None,  # Extracted from repo if identifiable
+                "files": [
+                    {
+                        "path": str,  # e.g., "layer_0/width_16k/average_l0_13/params.npz"
+                        "size_bytes": int,
+                        "layer": int | None,  # Extracted from path if identifiable
+                        "width": str | None,  # e.g., "16k"
+                    },
+                    ...
+                ],
+                "total_files": int,
+            }
+
+        Raises:
+            ValueError: If repository doesn't exist.
+        """
+        loop = asyncio.get_event_loop()
+        return await loop.run_in_executor(
+            None,
+            self._list_repository_files_sync,
+            repository_id,
+            revision,
+            token,
+        )
+
+    def _list_repository_files_sync(
+        self,
+        repository_id: str,
+        revision: str,
+        token: str | None = None,
+    ) -> dict[str, Any]:
+        """Synchronous implementation of list_repository_files."""
+        import re
+
+        logger.info(f"Listing files in SAE repository {repository_id}@{revision}")
+
+        try:
+            # Validate and get repo info
+            repo_info = self._api.repo_info(repository_id, revision=revision, token=token)
+
+            # Get all files
+            files = self._api.list_repo_files(repository_id, revision=revision, token=token)
+
+            # Filter and parse SAE files
+            sae_files = []
+            for file_path in files:
+                # Skip non-SAE files
+                if not self._is_sae_file(file_path):
+                    continue
+
+                # Get file size if available
+                size_bytes = 0
+                if repo_info.siblings:
+                    for sibling in repo_info.siblings:
+                        if sibling.rfilename == file_path:
+                            size_bytes = sibling.size or 0
+                            break
+
+                # Parse layer and width from path
+                layer, width = self._parse_sae_path(file_path)
+
+                sae_files.append({
+                    "path": file_path,
+                    "size_bytes": size_bytes,
+                    "layer": layer,
+                    "width": width,
+                })
+
+            # Sort by layer, then path
+            sae_files.sort(key=lambda x: (x["layer"] or 999, x["path"]))
+
+            # Try to identify the model from repo name
+            model_id = self._extract_model_id(repository_id)
+
+            return {
+                "repository_id": repository_id,
+                "revision": revision,
+                "model_id": model_id,
+                "files": sae_files,
+                "total_files": len(sae_files),
+            }
+
+        except RepositoryNotFoundError as e:
+            raise ValueError(f"SAE repository not found: {repository_id}") from e
+        except RevisionNotFoundError as e:
+            raise ValueError(
+                f"Revision '{revision}' not found for {repository_id}"
+            ) from e
+
+    def _is_sae_file(self, path: str) -> bool:
+        """Check if file path is an SAE file (params.npz, weights, etc.)."""
+        sae_patterns = [
+            "params.npz",
+            "sae_weights.pt",
+            "sae_weights.safetensors",
+            "cfg.json",
+            "config.json",
+            "sparsity.npz",
+            ".pt",
+            ".safetensors",
+        ]
+        path_lower = path.lower()
+        return any(pattern in path_lower for pattern in sae_patterns)
+
+    def _parse_sae_path(self, path: str) -> tuple[int | None, str | None]:
+        """
+        Extract layer number and width from SAE file path.
+
+        Examples:
+            "layer_0/width_16k/average_l0_13/params.npz" -> (0, "16k")
+            "gemma-scope-2b-pt-res-canonical/layer_12/width_32k/..." -> (12, "32k")
+        """
+        import re
+
+        layer = None
+        width = None
+
+        # Match layer_N or layer_NN
+        layer_match = re.search(r"layer[_-]?(\d+)", path, re.IGNORECASE)
+        if layer_match:
+            layer = int(layer_match.group(1))
+
+        # Match width_NNk or width_NNNk
+        width_match = re.search(r"width[_-]?(\d+k?)", path, re.IGNORECASE)
+        if width_match:
+            width = width_match.group(1)
+
+        return layer, width
+
+    def _extract_model_id(self, repository_id: str) -> str | None:
+        """
+        Try to extract the model ID from repository name.
+
+        Examples:
+            "google/gemma-scope-2b-pt-res" -> "gemma"
+            "jbloom/gemma-2-2b-res-jb" -> "gemma-2-2b"
+        """
+        repo_name = repository_id.split("/")[-1].lower()
+
+        # Common model patterns
+        if "gemma" in repo_name:
+            if "2b" in repo_name:
+                return "gemma-2-2b"
+            if "9b" in repo_name:
+                return "gemma-2-9b"
+            return "gemma"
+        if "gpt2" in repo_name:
+            return "gpt2"
+        if "llama" in repo_name:
+            return "llama"
+        if "tinystories" in repo_name:
+            return "tinystories"
+
+        return None

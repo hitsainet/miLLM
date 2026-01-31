@@ -21,6 +21,8 @@ import type {
   ModelPreviewResponse,
   SAEInfo,
   DownloadSAERequest,
+  PreviewSAERequest,
+  PreviewSAEResponse,
   AttachSAERequest,
   SteeringState,
   SetSteeringRequest,
@@ -259,12 +261,22 @@ export const saeApi = {
 
   /**
    * Initiates download of an SAE from HuggingFace.
-   * SAE must be linked to a compatible downloaded model.
-   * @param req - Download request with repo_id, model_id, and layer
-   * @returns Promise resolving to the created SAE record
+   * @param req - Download request with repository_id and optional revision
+   * @returns Promise resolving to the download response
    */
   download: (req: DownloadSAERequest) =>
-    request<SAEInfo>('/saes', {
+    request<{ sae_id: string; status: string; message: string }>('/saes/download', {
+      method: 'POST',
+      body: JSON.stringify(req),
+    }),
+
+  /**
+   * Previews an SAE repository to list available files without downloading.
+   * @param req - Preview request with repository_id and optional revision
+   * @returns Promise resolving to repository preview with file listing
+   */
+  preview: (req: PreviewSAERequest) =>
+    request<PreviewSAEResponse>('/saes/preview', {
       method: 'POST',
       body: JSON.stringify(req),
     }),

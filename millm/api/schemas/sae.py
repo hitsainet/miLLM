@@ -251,3 +251,50 @@ class DownloadResponse(BaseModel):
         default="Download started",
         description="Status message",
     )
+
+
+class PreviewSAERequest(BaseModel):
+    """Request schema for previewing an SAE repository."""
+
+    repository_id: str = Field(
+        ...,
+        pattern=r"^[\w-]+/[\w.-]+$",
+        max_length=255,
+        description="HuggingFace repository ID (e.g., 'google/gemma-scope-2b-pt-res')",
+        examples=["google/gemma-scope-2b-pt-res", "jbloom/gemma-2-2b-res-jb"],
+    )
+    revision: str = Field(
+        default="main",
+        max_length=100,
+        description="Git revision (branch, tag, or commit hash)",
+    )
+    hf_token: str | None = Field(
+        default=None,
+        max_length=255,
+        description="HuggingFace access token for gated repositories",
+    )
+
+
+class SAEFileInfo(BaseModel):
+    """Information about a single SAE file in a repository."""
+
+    path: str = Field(..., description="File path within the repository")
+    size_bytes: int = Field(default=0, description="File size in bytes")
+    layer: int | None = Field(default=None, description="Layer number extracted from path")
+    width: str | None = Field(default=None, description="SAE width (e.g., '16k')")
+
+
+class PreviewSAEResponse(BaseModel):
+    """Response schema for SAE repository preview."""
+
+    repository_id: str = Field(..., description="HuggingFace repository ID")
+    revision: str = Field(..., description="Git revision")
+    model_id: str | None = Field(
+        default=None,
+        description="Model ID extracted from repository name",
+    )
+    files: list[SAEFileInfo] = Field(
+        default_factory=list,
+        description="List of SAE files in the repository",
+    )
+    total_files: int = Field(..., description="Total number of SAE files found")

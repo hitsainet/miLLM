@@ -90,11 +90,29 @@ export interface SAEInfo {
 }
 
 export interface DownloadSAERequest {
-  repo_id: string;
-  filename?: string;
-  layer?: number;
-  linked_model_id?: number;
+  repository_id: string;
+  revision?: string;
+}
+
+export interface PreviewSAERequest {
+  repository_id: string;
+  revision?: string;
   hf_token?: string;
+}
+
+export interface SAEFileInfo {
+  path: string;
+  size_bytes: number;
+  layer: number | null;
+  width: string | null;
+}
+
+export interface PreviewSAEResponse {
+  repository_id: string;
+  revision: string;
+  model_id: string | null;
+  files: SAEFileInfo[];
+  total_files: number;
 }
 
 export interface AttachSAERequest {

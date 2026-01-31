@@ -19,6 +19,9 @@ from millm.api.schemas.sae import (
     DownloadResponse,
     DownloadSAERequest,
     MonitoringRequest,
+    PreviewSAERequest,
+    PreviewSAEResponse,
+    SAEFileInfo,
     SAEListResponse,
     SAEMetadata,
     SteeringBatchRequest,
@@ -92,6 +95,44 @@ async def download_sae(
         sae_id=sae_id,
         status="downloading",
         message=f"Download started for {request.repository_id}",
+    ))
+
+
+@router.post(
+    "/preview",
+    response_model=ApiResponse[PreviewSAEResponse],
+    summary="Preview SAE repository",
+    description="List SAE files in a HuggingFace repository without downloading.",
+)
+async def preview_sae_repository(
+    request: PreviewSAERequest,
+    service: SAEServiceDep,
+) -> ApiResponse[PreviewSAEResponse]:
+    """
+    Preview SAE repository contents.
+
+    Lists all SAE files available in the repository, including
+    layer information and file sizes.
+    """
+    result = await service.preview_repository(
+        repository_id=request.repository_id,
+        revision=request.revision,
+        token=request.hf_token,
+    )
+    return ApiResponse.ok(PreviewSAEResponse(
+        repository_id=result["repository_id"],
+        revision=result["revision"],
+        model_id=result.get("model_id"),
+        files=[
+            SAEFileInfo(
+                path=f["path"],
+                size_bytes=f["size_bytes"],
+                layer=f.get("layer"),
+                width=f.get("width"),
+            )
+            for f in result["files"]
+        ],
+        total_files=result["total_files"],
     ))
 
 

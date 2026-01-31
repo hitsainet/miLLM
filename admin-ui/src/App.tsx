@@ -1,34 +1,25 @@
-import { useState } from 'react'
-import reactLogo from './assets/react.svg'
-import viteLogo from '/vite.svg'
-import './App.css'
-
 function App() {
-  const [count, setCount] = useState(0)
-
   return (
-    <>
-      <div>
-        <a href="https://vite.dev" target="_blank">
-          <img src={viteLogo} className="logo" alt="Vite logo" />
-        </a>
-        <a href="https://react.dev" target="_blank">
-          <img src={reactLogo} className="logo react" alt="React logo" />
-        </a>
-      </div>
-      <h1>Vite + React</h1>
-      <div className="card">
-        <button onClick={() => setCount((count) => count + 1)}>
-          count is {count}
-        </button>
-        <p>
-          Edit <code>src/App.tsx</code> and save to test HMR
+    <div className="min-h-screen flex items-center justify-center">
+      <div className="card max-w-md">
+        <div className="card-header">
+          <span className="text-primary-400">miLLM</span> Admin UI
+        </div>
+        <p className="text-slate-400 mb-4">
+          Tailwind CSS is working correctly!
         </p>
+        <div className="flex gap-2">
+          <span className="badge-success">Success</span>
+          <span className="badge-warning">Warning</span>
+          <span className="badge-primary">Primary</span>
+          <span className="badge-purple">Attached</span>
+        </div>
+        <div className="mt-4 flex gap-2">
+          <button className="btn-primary">Primary</button>
+          <button className="btn-secondary">Secondary</button>
+        </div>
       </div>
-      <p className="read-the-docs">
-        Click on the Vite and React logos to learn more
-      </p>
-    </>
+    </div>
   )
 }
 

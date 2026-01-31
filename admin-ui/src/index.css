@@ -1,68 +1,140 @@
-:root {
-  font-family: system-ui, Avenir, Helvetica, Arial, sans-serif;
-  line-height: 1.5;
-  font-weight: 400;
+/* Import fonts - must be first */
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600;700&display=swap');
 
-  color-scheme: light dark;
-  color: rgba(255, 255, 255, 0.87);
-  background-color: #242424;
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
 
-  font-synthesis: none;
-  text-rendering: optimizeLegibility;
-  -webkit-font-smoothing: antialiased;
-  -moz-osx-font-smoothing: grayscale;
-}
-
-a {
-  font-weight: 500;
-  color: #646cff;
-  text-decoration: inherit;
-}
-a:hover {
-  color: #535bf2;
-}
-
-body {
-  margin: 0;
-  display: flex;
-  place-items: center;
-  min-width: 320px;
-  min-height: 100vh;
-}
-
-h1 {
-  font-size: 3.2em;
-  line-height: 1.1;
-}
-
-button {
-  border-radius: 8px;
-  border: 1px solid transparent;
-  padding: 0.6em 1.2em;
-  font-size: 1em;
-  font-weight: 500;
-  font-family: inherit;
-  background-color: #1a1a1a;
-  cursor: pointer;
-  transition: border-color 0.25s;
-}
-button:hover {
-  border-color: #646cff;
-}
-button:focus,
-button:focus-visible {
-  outline: 4px auto -webkit-focus-ring-color;
-}
-
-@media (prefers-color-scheme: light) {
-  :root {
-    color: #213547;
-    background-color: #ffffff;
+/* Base styles */
+@layer base {
+  * {
+    box-sizing: border-box;
+    margin: 0;
+    padding: 0;
   }
-  a:hover {
-    color: #747bff;
+
+  html {
+    font-family: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
   }
-  button {
-    background-color: #f9f9f9;
+
+  body {
+    @apply min-h-screen text-slate-200 antialiased;
+    background: linear-gradient(135deg, #0a0f1a 0%, #0f172a 50%, #0a1628 100%);
+  }
+
+  /* Custom scrollbar */
+  ::-webkit-scrollbar {
+    width: 8px;
+    height: 8px;
+  }
+
+  ::-webkit-scrollbar-track {
+    @apply bg-slate-800/30 rounded;
+  }
+
+  ::-webkit-scrollbar-thumb {
+    @apply bg-slate-600/50 rounded;
+  }
+
+  ::-webkit-scrollbar-thumb:hover {
+    @apply bg-slate-600/70;
+  }
+
+  /* Focus styles */
+  input:focus,
+  select:focus,
+  button:focus {
+    @apply outline-none;
+  }
+
+  input:focus,
+  select:focus {
+    @apply border-primary-400/50;
+  }
+
+  /* Range input styling */
+  input[type="range"] {
+    @apply appearance-none bg-slate-700/50 h-1.5 rounded-full cursor-pointer;
+  }
+
+  input[type="range"]::-webkit-slider-thumb {
+    @apply appearance-none w-4 h-4 bg-primary-400 rounded-full cursor-pointer;
+    box-shadow: 0 2px 6px rgba(34, 211, 238, 0.4);
+  }
+
+  input[type="range"]::-moz-range-thumb {
+    @apply w-4 h-4 bg-primary-400 rounded-full cursor-pointer border-0;
+    box-shadow: 0 2px 6px rgba(34, 211, 238, 0.4);
+  }
+}
+
+/* Component styles */
+@layer components {
+  .card {
+    @apply bg-slate-900/60 border border-primary-400/10 rounded-xl p-5;
+  }
+
+  .card-header {
+    @apply text-sm font-semibold text-slate-100 mb-4 flex items-center gap-2;
+  }
+
+  .input-base {
+    @apply w-full px-3.5 py-2.5 bg-slate-800/50 border border-slate-600/50 rounded-lg;
+    @apply text-slate-200 text-sm placeholder-slate-500;
+    @apply transition-colors duration-200;
+    @apply focus:border-primary-400/50;
+  }
+
+  .btn {
+    @apply px-4 py-2.5 rounded-lg font-semibold text-sm;
+    @apply flex items-center justify-center gap-2;
+    @apply transition-all duration-200;
+    @apply disabled:opacity-50 disabled:cursor-not-allowed;
+  }
+
+  .btn-primary {
+    @apply btn bg-gradient-to-r from-primary-600 to-primary-500 text-white;
+    @apply hover:opacity-90;
+  }
+
+  .btn-secondary {
+    @apply btn bg-transparent border border-slate-600/50 text-slate-400;
+    @apply hover:border-slate-500 hover:text-slate-300;
+  }
+
+  .btn-danger {
+    @apply btn bg-danger-light border border-danger-border text-danger;
+    @apply hover:bg-red-500/20;
+  }
+
+  .badge {
+    @apply px-2.5 py-1 rounded-full text-xs font-semibold uppercase tracking-wide;
+  }
+
+  .badge-success {
+    @apply badge bg-success-light text-success;
+  }
+
+  .badge-warning {
+    @apply badge bg-warning-light text-warning;
+  }
+
+  .badge-danger {
+    @apply badge bg-danger-light text-danger;
+  }
+
+  .badge-primary {
+    @apply badge bg-primary-400/15 text-primary-400;
+  }
+
+  .badge-purple {
+    @apply badge bg-purple-light text-purple;
+  }
+}
+
+/* Utility styles */
+@layer utilities {
+  .text-mono {
+    font-family: 'JetBrains Mono', monospace;
   }
 }

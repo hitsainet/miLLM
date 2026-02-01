@@ -89,23 +89,45 @@ export function Header() {
           <div className="hidden md:block h-6 w-px bg-slate-700" />
 
           {/* System Metrics */}
-          <div className="hidden md:flex items-center gap-3 text-xs text-slate-400">
-            <div className="flex items-center gap-1.5" title="GPU Utilization">
+          <div className="hidden md:flex items-center gap-3 text-xs">
+            {/* GPU Utilization - Cyan */}
+            <div
+              className="flex items-center gap-1.5 text-cyan-400"
+              title="GPU Utilization"
+            >
               <Cpu className="w-3.5 h-3.5" />
-              <span className="font-mono">{hasGPU ? `${gpuUtilization}%` : 'N/A'}</span>
+              <span className="font-mono font-medium">
+                {hasGPU ? `${gpuUtilization}%` : 'N/A'}
+              </span>
             </div>
-            <div className="flex items-center gap-1.5" title="GPU Memory">
+            {/* GPU Memory - Purple/Violet */}
+            <div
+              className="flex items-center gap-1.5 text-violet-400"
+              title="GPU Memory"
+            >
               <HardDrive className="w-3.5 h-3.5" />
-              <span className="font-mono">
+              <span className="font-mono font-medium">
                 {hasGPU
                   ? `${(gpuMemoryUsed / 1024).toFixed(1)}/${(gpuMemoryTotal / 1024).toFixed(1)} GB`
                   : 'No GPU'
                 }
               </span>
             </div>
-            <div className="flex items-center gap-1.5" title="GPU Temperature">
+            {/* GPU Temperature - Dynamic color based on temp */}
+            <div
+              className={`flex items-center gap-1.5 ${
+                gpuTemperature >= 80
+                  ? 'text-red-400'
+                  : gpuTemperature >= 65
+                    ? 'text-amber-400'
+                    : 'text-emerald-400'
+              }`}
+              title="GPU Temperature"
+            >
               <Thermometer className="w-3.5 h-3.5" />
-              <span className="font-mono">{hasGPU ? `${gpuTemperature}°C` : 'N/A'}</span>
+              <span className="font-mono font-medium">
+                {hasGPU ? `${gpuTemperature}°C` : 'N/A'}
+              </span>
             </div>
           </div>
 

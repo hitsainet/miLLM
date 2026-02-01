@@ -5,12 +5,84 @@ Handles real-time progress updates for model downloads, loads, and other
 long-running operations via WebSocket connections.
 """
 
+import asyncio
+import subprocess
 from typing import Any, Optional
 
 import socketio
 import structlog
 
 logger = structlog.get_logger()
+
+# Track clients subscribed to system metrics
+_system_metrics_subscribers: set[str] = set()
+_system_metrics_task: Optional[asyncio.Task] = None
+
+
+def get_gpu_metrics() -> dict[str, Any]:
+    """
+    Get GPU metrics using nvidia-smi.
+
+    Returns:
+        Dictionary with GPU utilization, memory, and temperature.
+        Returns zeros if nvidia-smi is not available.
+    """
+    try:
+        result = subprocess.run(
+            [
+                "nvidia-smi",
+                "--query-gpu=utilization.gpu,memory.used,memory.total,temperature.gpu",
+                "--format=csv,noheader,nounits",
+            ],
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+        if result.returncode == 0:
+            parts = result.stdout.strip().split(", ")
+            if len(parts) >= 4:
+                return {
+                    "gpu_utilization": int(parts[0]),
+                    "gpu_memory_used_mb": int(parts[1]),
+                    "gpu_memory_total_mb": int(parts[2]),
+                    "gpu_temperature": int(parts[3]),
+                }
+    except (subprocess.TimeoutExpired, FileNotFoundError, ValueError) as e:
+        logger.debug("nvidia_smi_failed", error=str(e))
+
+    return {
+        "gpu_utilization": 0,
+        "gpu_memory_used_mb": 0,
+        "gpu_memory_total_mb": 0,
+        "gpu_temperature": 0,
+    }
+
+
+async def system_metrics_loop(sio: socketio.AsyncServer) -> None:
+    """
+    Background task that emits system metrics periodically.
+
+    Args:
+        sio: The Socket.IO async server instance
+    """
+    global _system_metrics_subscribers
+    logger.info("system_metrics_loop_started")
+
+    while True:
+        try:
+            await asyncio.sleep(2)  # Emit every 2 seconds
+
+            if not _system_metrics_subscribers:
+                continue
+
+            metrics = get_gpu_metrics()
+            await sio.emit("system:metrics", metrics)
+        except asyncio.CancelledError:
+            logger.info("system_metrics_loop_cancelled")
+            break
+        except Exception as e:
+            logger.warning("system_metrics_loop_error", error=str(e))
+            await asyncio.sleep(5)  # Back off on error
 
 
 def register_handlers(sio: socketio.AsyncServer) -> None:
@@ -20,6 +92,7 @@ def register_handlers(sio: socketio.AsyncServer) -> None:
     Args:
         sio: The Socket.IO async server instance
     """
+    global _system_metrics_task
 
     @sio.event
     async def connect(sid: str, environ: dict) -> None:
@@ -29,7 +102,24 @@ def register_handlers(sio: socketio.AsyncServer) -> None:
     @sio.event
     async def disconnect(sid: str) -> None:
         """Handle client disconnection."""
+        global _system_metrics_subscribers
+        _system_metrics_subscribers.discard(sid)
         logger.info("socket_disconnected", sid=sid)
+
+    @sio.on("system:join")
+    async def on_system_join(sid: str) -> None:
+        """Handle client subscribing to system metrics."""
+        global _system_metrics_task, _system_metrics_subscribers
+        _system_metrics_subscribers.add(sid)
+        logger.info("system_metrics_subscribed", sid=sid)
+
+        # Start the metrics loop if not already running
+        if _system_metrics_task is None or _system_metrics_task.done():
+            _system_metrics_task = asyncio.create_task(system_metrics_loop(sio))
+
+        # Send immediate metrics on join
+        metrics = get_gpu_metrics()
+        await sio.emit("system:metrics", metrics, to=sid)
 
 
 class ProgressEmitter:

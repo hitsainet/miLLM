@@ -1,0 +1,44 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+*.egg-info/
+*.egg
+dist/
+build/
+.eggs/
+
+# Virtual environments
+venv/
+.venv/
+ENV/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Testing
+.pytest_cache/
+.coverage
+htmlcov/
+.tox/
+.nox/
+
+# Environment
+.env
+.env.local
+*.env
+
+# Node (admin-ui)
+node_modules/
+admin-ui/node_modules/
+admin-ui/dist/
+
+# Misc
+*.log
+.DS_Store
+Thumbs.db

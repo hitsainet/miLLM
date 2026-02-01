@@ -1,4 +1,4 @@
-import { Layers, Link, Unlink, Trash2, ExternalLink } from 'lucide-react';
+import { Layers, Link, Unlink, Trash2, ExternalLink, X } from 'lucide-react';
 import { Button, Badge, Spinner } from '@components/common';
 import type { SAEInfo } from '@/types';
 
@@ -8,9 +8,11 @@ interface SAEListItemProps {
   onAttach: () => void;
   onDetach: () => void;
   onDelete: () => void;
+  onCancel?: () => void;
   isAttaching?: boolean;
   isDetaching?: boolean;
   isDeleting?: boolean;
+  isCancelling?: boolean;
   canAttach?: boolean;
 }
 
@@ -20,12 +22,14 @@ export function SAEListItem({
   onAttach,
   onDetach,
   onDelete,
+  onCancel,
   isAttaching,
   isDetaching,
   isDeleting,
+  isCancelling,
   canAttach = true,
 }: SAEListItemProps) {
-  const isLoading = isAttaching || isDetaching || isDeleting;
+  const isLoading = isAttaching || isDetaching || isDeleting || isCancelling;
 
   return (
     <div
@@ -65,6 +69,18 @@ export function SAEListItem({
                 <span>•</span>
               </>
             )}
+            {sae.width && (
+              <>
+                <span>Width {sae.width}</span>
+                <span>•</span>
+              </>
+            )}
+            {sae.average_l0 !== null && sae.average_l0 !== undefined && (
+              <>
+                <span className="text-primary-400/70">L0={sae.average_l0}</span>
+                <span>•</span>
+              </>
+            )}
             <span>{sae.d_sae?.toLocaleString()} features</span>
             {sae.d_in > 0 && (
               <>
@@ -95,7 +111,21 @@ export function SAEListItem({
         {sae.status === 'downloading' ? (
           <div className="flex items-center gap-2">
             <Spinner size="sm" />
-            <span className="text-xs text-slate-400">Downloading...</span>
+            <span className="text-xs text-slate-400">
+              Downloading...
+            </span>
+            {onCancel && (
+              <Button
+                variant="ghost"
+                size="sm"
+                onClick={onCancel}
+                loading={isCancelling}
+                className="text-slate-400 hover:text-red-400 ml-2"
+                title="Cancel download"
+              >
+                <X className="w-4 h-4" />
+              </Button>
+            )}
           </div>
         ) : sae.status === 'error' ? (
           <Badge variant="danger" size="sm">Error</Badge>

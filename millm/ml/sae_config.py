@@ -113,6 +113,96 @@ class SAEConfig:
         )
 
     @classmethod
+    def from_npz(cls, npz_path: str | Path, dir_path: str | Path | None = None) -> "SAEConfig":
+        """
+        Infer SAE configuration from npz file contents and directory path.
+
+        This is used for Gemma-Scope style SAEs that don't have separate cfg.json files.
+        Config is inferred from:
+        - Array shapes in the npz file (for d_in, d_sae)
+        - Directory structure (for layer number)
+
+        Args:
+            npz_path: Path to the params.npz file.
+            dir_path: Directory containing the SAE (for extracting layer info from path).
+
+        Returns:
+            Inferred SAEConfig.
+
+        Raises:
+            FileNotFoundError: If npz file doesn't exist.
+            ValueError: If required arrays are missing from npz file.
+        """
+        import numpy as np
+        import re
+
+        npz_path = Path(npz_path)
+        if not npz_path.exists():
+            raise FileNotFoundError(f"NPZ file not found: {npz_path}")
+
+        logger.debug(f"Inferring SAE config from npz: {npz_path}")
+
+        # Load npz file
+        data = np.load(npz_path)
+
+        # Get dimensions from weight matrices
+        # W_enc shape is typically (d_in, d_sae) or (d_sae, d_in)
+        # W_dec shape is typically (d_sae, d_in) or (d_in, d_sae)
+        if "W_enc" in data:
+            W_enc = data["W_enc"]
+            # Assume W_enc is (d_in, d_sae)
+            d_in, d_sae = W_enc.shape
+            # Verify with b_enc if available
+            if "b_enc" in data:
+                b_enc = data["b_enc"]
+                if b_enc.shape[0] != d_sae:
+                    # W_enc might be transposed, swap dimensions
+                    d_in, d_sae = d_sae, d_in
+        elif "W_dec" in data:
+            W_dec = data["W_dec"]
+            # Assume W_dec is (d_sae, d_in)
+            d_sae, d_in = W_dec.shape
+        else:
+            raise ValueError(
+                f"NPZ file missing weight matrices. Expected W_enc or W_dec. "
+                f"Found keys: {list(data.keys())}"
+            )
+
+        # Extract layer from directory path
+        hook_layer = 0
+        path_str = str(dir_path or npz_path.parent)
+        layer_match = re.search(r"layer[_-]?(\d+)", path_str, re.IGNORECASE)
+        if layer_match:
+            hook_layer = int(layer_match.group(1))
+
+        # Try to extract model name from path
+        model_name = "unknown"
+        if "gemma-scope-2b" in path_str.lower():
+            model_name = "google/gemma-2-2b"
+        elif "gemma-scope-9b" in path_str.lower():
+            model_name = "google/gemma-2-9b"
+        elif "gemma" in path_str.lower():
+            model_name = "gemma"
+
+        # Determine dtype from array
+        dtype_str = "float32"
+        if "W_enc" in data:
+            dtype_str = str(data["W_enc"].dtype)
+
+        config = cls(
+            d_in=int(d_in),
+            d_sae=int(d_sae),
+            model_name=model_name,
+            hook_name=f"blocks.{hook_layer}.hook_resid_post",
+            hook_layer=hook_layer,
+            dtype=dtype_str,
+            normalize_activations="none",
+        )
+
+        logger.info(f"Inferred SAE config from npz: {config}")
+        return config
+
+    @classmethod
     def _parse_config(cls, data: dict[str, Any]) -> "SAEConfig":
         """Parse config dictionary with field name variations."""
         # Handle d_in variations

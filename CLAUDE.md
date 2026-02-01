@@ -1,11 +1,11 @@
 # Project: miLLM - Mechanistic Interpretability LLM Server
 
 ## Current Status
-- **Phase:** Feature Development - Model Management (Ready for Implementation)
-- **Last Session:** January 30, 2026 - Completed full documentation cycle for Feature 1
-- **Next Steps:** Begin implementation using @0xcc/instruct/007_process-task-list.md, start with Task 1.0
-- **Active Document:** 0xcc/tasks/001_FTASKS|Model_Management.md (complete)
-- **Current Feature:** Feature 1: Model Management
+- **Phase:** Implementation & Bug Fixes
+- **Last Session:** February 1, 2026 - Fixed Zustand reactivity bug in steering/monitoring UI
+- **Next Steps:** Test steering enable/disable functionality, continue feature development
+- **Active Document:** N/A (bug fix session)
+- **Current Feature:** All features implemented, fixing UI state management issues
 
 ## Quick Resume Commands
 ```bash
@@ -89,6 +89,7 @@ src/
 - Custom hooks for data fetching (useModels, useSAEs, etc.)
 - Tailwind CSS for styling (no inline styles in production)
 - TypeScript strict mode
+- **IMPORTANT:** Never use computed getters in Zustand stores - they don't trigger re-renders. Always access state properties directly (e.g., use `steering` not `get steeringState()`)
 
 ### API Conventions
 - OpenAI API: `/v1/chat/completions`, `/v1/completions`, `/v1/models`, `/v1/embeddings`
@@ -154,40 +155,40 @@ refactor(services): extract HuggingFace logic
 - ✅ 0xcc/tasks/001_FTASKS|Model_Management.md
 
 **Feature 2: OpenAI API Compatibility**
-- ❌ 0xcc/prds/002_FPRD|OpenAI_API.md
-- ❌ 0xcc/tdds/002_FTDD|OpenAI_API.md
-- ❌ 0xcc/tids/002_FTID|OpenAI_API.md
-- ❌ 0xcc/tasks/002_FTASKS|OpenAI_API.md
+- ✅ 0xcc/prds/002_FPRD|OpenAI_API.md
+- ✅ 0xcc/tdds/002_FTDD|OpenAI_API.md
+- ✅ 0xcc/tids/002_FTID|OpenAI_API.md
+- ✅ 0xcc/tasks/002_FTASKS|OpenAI_API.md
 
 **Feature 3: SAE Management**
-- ❌ 0xcc/prds/003_FPRD|SAE_Management.md
-- ❌ 0xcc/tdds/003_FTDD|SAE_Management.md
-- ❌ 0xcc/tids/003_FTID|SAE_Management.md
-- ❌ 0xcc/tasks/003_FTASKS|SAE_Management.md
+- ✅ 0xcc/prds/003_FPRD|SAE_Management.md
+- ✅ 0xcc/tdds/003_FTDD|SAE_Management.md
+- ✅ 0xcc/tids/003_FTID|SAE_Management.md
+- ✅ 0xcc/tasks/003_FTASKS|SAE_Management.md
 
 **Feature 4: Feature Steering**
-- ❌ 0xcc/prds/004_FPRD|Feature_Steering.md
-- ❌ 0xcc/tdds/004_FTDD|Feature_Steering.md
-- ❌ 0xcc/tids/004_FTID|Feature_Steering.md
-- ❌ 0xcc/tasks/004_FTASKS|Feature_Steering.md
+- ✅ 0xcc/prds/004_FPRD|Feature_Steering.md
+- ✅ 0xcc/tdds/004_FTDD|Feature_Steering.md
+- ✅ 0xcc/tids/004_FTID|Feature_Steering.md
+- ✅ 0xcc/tasks/004_FTASKS|Feature_Steering.md
 
 **Feature 5: Feature Monitoring**
-- ❌ 0xcc/prds/005_FPRD|Feature_Monitoring.md
-- ❌ 0xcc/tdds/005_FTDD|Feature_Monitoring.md
-- ❌ 0xcc/tids/005_FTID|Feature_Monitoring.md
-- ❌ 0xcc/tasks/005_FTASKS|Feature_Monitoring.md
+- ✅ 0xcc/prds/005_FPRD|Feature_Monitoring.md
+- ✅ 0xcc/tdds/005_FTDD|Feature_Monitoring.md
+- ✅ 0xcc/tids/005_FTID|Feature_Monitoring.md
+- ✅ 0xcc/tasks/005_FTASKS|Feature_Monitoring.md
 
 **Feature 6: Profile Management**
-- ❌ 0xcc/prds/006_FPRD|Profile_Management.md
-- ❌ 0xcc/tdds/006_FTDD|Profile_Management.md
-- ❌ 0xcc/tids/006_FTID|Profile_Management.md
-- ❌ 0xcc/tasks/006_FTASKS|Profile_Management.md
+- ✅ 0xcc/prds/006_FPRD|Profile_Management.md
+- ✅ 0xcc/tdds/006_FTDD|Profile_Management.md
+- ✅ 0xcc/tids/006_FTID|Profile_Management.md
+- ✅ 0xcc/tasks/006_FTASKS|Profile_Management.md
 
 **Feature 7: Admin UI**
-- ❌ 0xcc/prds/007_FPRD|Admin_UI.md
-- ❌ 0xcc/tdds/007_FTDD|Admin_UI.md
-- ❌ 0xcc/tids/007_FTID|Admin_UI.md
-- ❌ 0xcc/tasks/007_FTASKS|Admin_UI.md
+- ✅ 0xcc/prds/007_FPRD|Admin_UI.md
+- ✅ 0xcc/tdds/007_FTDD|Admin_UI.md
+- ✅ 0xcc/tids/007_FTID|Admin_UI.md
+- ✅ 0xcc/tasks/007_FTASKS|Admin_UI.md
 
 ### Status Indicators
 - ✅ **Complete:** Document finished and reviewed
@@ -196,11 +197,11 @@ refactor(services): extract HuggingFace logic
 - 🔄 **Needs Update:** Requires revision based on changes
 
 ## Housekeeping Status
-- **Last Checkpoint:** January 30, 2026 - Feature 1 PRD complete
+- **Last Checkpoint:** February 1, 2026 - Zustand reactivity bug fix
 - **Last Transcript Save:** N/A
 - **Context Health:** Good
-- **Session Count:** 1 session since project start
-- **Total Development Time:** ~3 hours (Project PRD + ADR + Feature 1 PRD)
+- **Session Count:** Multiple sessions (documentation + implementation + bug fixes)
+- **Total Development Time:** All features documented and implemented
 
 ## Task Execution Standards
 
@@ -403,6 +404,22 @@ After each development session, update:
 - **Files Modified:** CLAUDE.md
 - **Next:** Create Model Management TDD using @0xcc/instruct/004_create-tdd.md
 
+### Session: February 1, 2026 - Zustand Reactivity Bug Fix
+- **Issue:** Steering page UI not updating when clicking "Enable" despite backend succeeding (toast showed success)
+- **Root Cause:** Zustand computed getters (`get steeringState()`, `get monitoringConfig()`, `get systemMetrics()`) don't trigger React re-renders when underlying data changes
+- **Solution:** Changed all pages to use direct store properties instead of computed getters
+- **Files Modified:**
+  - `admin-ui/src/pages/SteeringPage.tsx` - Changed `steeringState` → `steering`
+  - `admin-ui/src/pages/MonitoringPage.tsx` - Changed `monitoringConfig` → `monitoring`
+  - `admin-ui/src/pages/DashboardPage.tsx` - Changed `systemMetrics` → direct properties
+  - `admin-ui/src/pages/ProfilesPage.tsx` - Changed `steeringState` → `steering`
+  - `admin-ui/src/stores/serverStore.ts` - Removed unused getters and SystemMetrics interface
+  - `admin-ui/src/hooks/useSAE.ts` - Fixed race condition with staleTime, removed improper null-setting
+  - `admin-ui/src/hooks/useModels.ts` - Added staleTime to prevent refetch issues
+  - `admin-ui/src/hooks/useSteering.ts` - Added staleTime for consistency
+- **Key Learning:** Never use computed getters in Zustand stores for values that need to trigger re-renders. Always access state properties directly.
+- **Related Fix:** Also fixed state persistence issue where model/SAE state was being cleared when useSAE query refetched
+
 *[Add new sessions as they occur]*
 
 ## Research Integration
@@ -464,6 +481,6 @@ project-root/
 ---
 
 **Framework Version:** 1.1
-**Last Updated:** January 30, 2026
+**Last Updated:** February 1, 2026
 **Project Started:** January 30, 2026
 **Structure:** 0xcc framework with MCP research integration

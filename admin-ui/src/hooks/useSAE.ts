@@ -15,21 +15,41 @@ export function useSAE() {
       const response = await saeApi.listWithAttachment();
       setSAEs(response.saes);
       // Find attached SAE from the attachment status
+      // Only update attachedSAE when we have valid attachment info
+      // Don't clear it if the API returns is_attached=false to avoid race conditions
       if (response.attachment.is_attached && response.attachment.sae_id) {
         const attached = response.saes.find((s) => s.id === response.attachment.sae_id);
         if (attached) setAttachedSAE(attached);
-      } else {
-        setAttachedSAE(null);
       }
+      // Note: We intentionally don't call setAttachedSAE(null) here
+      // Clearing happens explicitly via detach mutation or WebSocket events
       return response.saes;
     },
+    // Prevent unnecessary refetches that could cause state issues
+    staleTime: 5000,
   });
 
   const downloadMutation = useMutation({
     mutationFn: (req: DownloadSAERequest) => saeApi.download(req),
-    onSuccess: () => {
+    onSuccess: (response) => {
       queryClient.invalidateQueries({ queryKey: ['saes'] });
-      toast.info(`Downloading SAE...`);
+      // Show different toast based on actual status
+      switch (response.status) {
+        case 'downloading':
+          toast.info('Downloading SAE...');
+          break;
+        case 'cached':
+          toast.info('SAE is already downloaded');
+          break;
+        case 'attached':
+          toast.info('SAE is already attached to the model');
+          break;
+        case 'already_downloading':
+          toast.info('SAE download is already in progress');
+          break;
+        default:
+          toast.info(response.message || 'SAE operation completed');
+      }
     },
     onError: (error: Error) => {
       toast.error(`SAE download failed: ${error.message}`);
@@ -100,10 +120,12 @@ export function useSAE() {
     delete: deleteMutation.mutate,
     deleteSAE: deleteMutation.mutateAsync,
     cancel: cancelMutation.mutate,
+    cancelSAE: cancelMutation.mutateAsync,
     isDownloading: downloadMutation.isPending,
     isAttaching: attachMutation.isPending,
     isDetaching: detachMutation.isPending,
     isDeleting: deleteMutation.isPending,
+    isCancelling: cancelMutation.isPending,
   };
 }
 

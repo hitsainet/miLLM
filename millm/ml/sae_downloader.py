@@ -52,14 +52,17 @@ class SAEDownloader:
         self,
         repository_id: str,
         revision: str = "main",
+        file_path: str | None = None,
         progress_callback: Optional[Callable[[dict[str, Any]], None]] = None,
     ) -> str:
         """
-        Download SAE repository.
+        Download SAE from repository.
 
         Args:
             repository_id: HuggingFace repo (e.g., "jbloom/gemma-2-2b-res-jb").
             revision: Git revision (branch, tag, commit).
+            file_path: Specific file to download (e.g., "layer_12/width_16k/average_l0_50/params.npz").
+                       If provided, only downloads files in that directory.
             progress_callback: Called with progress updates:
                 {"status": "downloading", "percent": 50}
                 {"status": "complete", "percent": 100, "path": "/path/to/sae"}
@@ -79,6 +82,7 @@ class SAEDownloader:
             self._download_sync,
             repository_id,
             revision,
+            file_path,
             progress_callback,
         )
 
@@ -88,6 +92,7 @@ class SAEDownloader:
         self,
         repository_id: str,
         revision: str,
+        file_path: str | None,
         progress_callback: Optional[Callable[[dict[str, Any]], None]],
     ) -> str:
         """
@@ -96,12 +101,16 @@ class SAEDownloader:
         Args:
             repository_id: HuggingFace repo ID.
             revision: Git revision.
+            file_path: Specific file/directory to download.
             progress_callback: Optional progress callback.
 
         Returns:
             Local cache path.
         """
-        logger.info(f"Downloading SAE from {repository_id}@{revision}")
+        if file_path:
+            logger.info(f"Downloading SAE file {file_path} from {repository_id}@{revision}")
+        else:
+            logger.info(f"Downloading SAE from {repository_id}@{revision}")
 
         # Emit start
         if progress_callback:
@@ -115,12 +124,23 @@ class SAEDownloader:
             # Validate repository exists
             self._validate_repository(repository_id, revision)
 
+            # Build allow_patterns if specific file requested
+            allow_patterns = None
+            if file_path:
+                # Get the directory containing the SAE file
+                # e.g., "layer_12/width_16k/average_l0_50/params.npz" -> "layer_12/width_16k/average_l0_50/*"
+                from pathlib import PurePosixPath
+                sae_dir = str(PurePosixPath(file_path).parent)
+                allow_patterns = [f"{sae_dir}/*"]
+                logger.info(f"Filtering download to: {allow_patterns}")
+
             # Download with huggingface_hub
             local_path = snapshot_download(
                 repo_id=repository_id,
                 revision=revision,
                 cache_dir=str(self.cache_dir),
                 resume_download=True,
+                allow_patterns=allow_patterns,
                 # Only download essential files
                 ignore_patterns=[
                     "*.md",
@@ -270,16 +290,23 @@ class SAEDownloader:
                     pass
         return total
 
-    def generate_sae_id(self, repository_id: str, revision: str = "main") -> str:
+    def generate_sae_id(
+        self,
+        repository_id: str,
+        revision: str = "main",
+        file_path: str | None = None,
+    ) -> str:
         """
         Generate a unique SAE ID from repository info.
 
         Args:
             repository_id: HuggingFace repo ID (e.g., "jbloom/gemma-2-2b-res-jb").
             revision: Git revision.
+            file_path: Specific file path (e.g., "layer_20/width_16k/average_l0_71/params.npz").
+                       If provided, the directory is included in the ID to make it unique.
 
         Returns:
-            Unique SAE ID (e.g., "jbloom--gemma-2-2b-res-jb").
+            Unique SAE ID (e.g., "jbloom--gemma-2-2b-res-jb--layer_20--width_16k--average_l0_71").
         """
         # Replace / with -- for filesystem-safe ID
         base_id = repository_id.replace("/", "--")
@@ -287,6 +314,15 @@ class SAEDownloader:
         # Add revision if not main
         if revision != "main":
             base_id = f"{base_id}@{revision}"
+
+        # Add file path directory if provided (makes ID unique per SAE in repo)
+        if file_path:
+            from pathlib import PurePosixPath
+            sae_dir = str(PurePosixPath(file_path).parent)
+            if sae_dir and sae_dir != ".":
+                # Replace / with -- for filesystem-safe ID
+                dir_id = sae_dir.replace("/", "--")
+                base_id = f"{base_id}--{dir_id}"
 
         return base_id
 

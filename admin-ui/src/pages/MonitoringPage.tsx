@@ -1,6 +1,8 @@
 import { useNavigate } from 'react-router-dom';
 import { AlertCircle, Info } from 'lucide-react';
 import { useMonitoring } from '@hooks/useMonitoring';
+import { useSAE } from '@hooks/useSAE';
+import { useModels } from '@hooks/useModels';
 import { useServerStore } from '@stores/serverStore';
 import { useUIStore } from '@stores/uiStore';
 import {
@@ -13,7 +15,11 @@ import { Card, Spinner, Button } from '@components/common';
 
 export function MonitoringPage() {
   const navigate = useNavigate();
-  const { loadedModel, attachedSAE, monitoringConfig, latestActivations } = useServerStore();
+  // Use hooks to keep queries active and store populated
+  useModels();
+  useSAE();
+  // Use 'monitoring' directly instead of 'monitoringConfig' getter for proper Zustand reactivity
+  const { loadedModel, attachedSAE, monitoring, latestActivations } = useServerStore();
   const { isMonitoringPaused } = useUIStore();
   const {
     history,
@@ -29,8 +35,8 @@ export function MonitoringPage() {
     isClearing,
   } = useMonitoring();
 
-  const isEnabled = monitoringConfig?.enabled || false;
-  const topK = monitoringConfig?.top_k || 10;
+  const isEnabled = monitoring?.enabled || false;
+  const topK = monitoring?.top_k || 10;
 
   const handleToggle = async () => {
     if (isEnabled) {

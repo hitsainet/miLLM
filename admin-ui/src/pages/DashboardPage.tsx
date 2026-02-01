@@ -9,6 +9,10 @@ import {
   Zap,
 } from 'lucide-react';
 import { useServerStore } from '@stores/serverStore';
+import { useModels } from '@hooks/useModels';
+import { useSAE } from '@hooks/useSAE';
+import { useSteering } from '@hooks/useSteering';
+import { useMonitoring } from '@hooks/useMonitoring';
 import {
   StatusCard,
   SystemMetricCard,
@@ -18,18 +22,28 @@ import {
 import type { StatusType } from '@components/dashboard/StatusCard';
 
 export function DashboardPage() {
+  // Call data fetching hooks to populate the store on mount/refresh
+  useModels();
+  useSAE();
+  useSteering();
+  useMonitoring();
+
+  // Use direct properties instead of computed getters for proper Zustand reactivity
   const {
     loadedModel,
     attachedSAE,
-    steeringState,
-    monitoringConfig,
-    systemMetrics,
+    steering,
+    monitoring,
+    gpuMemoryUsed,
+    gpuMemoryTotal,
+    gpuUtilization,
+    gpuTemperature,
     connectionStatus,
   } = useServerStore();
 
   const hasModel = loadedModel !== null;
   const hasSAE = attachedSAE !== null;
-  const hasSteering = steeringState !== null && steeringState.enabled && (steeringState.features?.length || 0) > 0;
+  const hasSteering = steering !== null && steering.enabled && (steering.features?.length || 0) > 0;
 
   const getModelStatus = (): { status: StatusType; text: string; details?: string } => {
     if (!hasModel) {
@@ -52,7 +66,7 @@ export function DashboardPage() {
     return {
       status: 'success',
       text: 'Attached',
-      details: `Layer ${attachedSAE?.layer}`,
+      details: `Layer ${attachedSAE?.trained_layer ?? 'N/A'}`,
     };
   };
 
@@ -60,10 +74,10 @@ export function DashboardPage() {
     if (!hasSAE) {
       return { status: 'neutral', text: 'Waiting', details: 'Attach SAE first' };
     }
-    if (!steeringState?.enabled) {
+    if (!steering?.enabled) {
       return { status: 'warning', text: 'Disabled' };
     }
-    const featureCount = steeringState?.features?.length || 0;
+    const featureCount = steering?.features?.length || 0;
     if (featureCount === 0) {
       return { status: 'info', text: 'Enabled', details: 'No features configured' };
     }
@@ -78,13 +92,13 @@ export function DashboardPage() {
     if (!hasSAE) {
       return { status: 'neutral', text: 'Waiting', details: 'Attach SAE first' };
     }
-    if (!monitoringConfig?.enabled) {
+    if (!monitoring?.enabled) {
       return { status: 'warning', text: 'Disabled' };
     }
     return {
       status: 'success',
       text: 'Active',
-      details: `Top ${monitoringConfig?.top_k || 10} features`,
+      details: `Top ${monitoring?.top_k || 10} features`,
     };
   };
 
@@ -94,14 +108,14 @@ export function DashboardPage() {
   const monitoringStatus = getMonitoringStatus();
 
   const getGpuTempStatus = (): StatusType => {
-    const temp = systemMetrics?.gpuTemperature || 0;
+    const temp = gpuTemperature || 0;
     if (temp >= 85) return 'error';
     if (temp >= 70) return 'warning';
     return 'success';
   };
 
   const getGpuUsageStatus = (): StatusType => {
-    const usage = systemMetrics?.gpuUtilization || 0;
+    const usage = gpuUtilization || 0;
     if (usage >= 95) return 'warning';
     return 'success';
   };
@@ -149,15 +163,15 @@ export function DashboardPage() {
         <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
           <SystemMetricCard
             label="GPU Utilization"
-            value={systemMetrics?.gpuUtilization ?? '--'}
+            value={gpuUtilization ?? '--'}
             unit="%"
             icon={<Zap className="w-5 h-5" />}
             status={getGpuUsageStatus()}
           />
           <SystemMetricCard
             label="GPU Memory"
-            value={systemMetrics?.gpuMemoryUsed
-              ? `${(systemMetrics.gpuMemoryUsed / 1024).toFixed(1)}/${(systemMetrics.gpuMemoryTotal / 1024).toFixed(1)}`
+            value={gpuMemoryUsed
+              ? `${(gpuMemoryUsed / 1024).toFixed(1)}/${(gpuMemoryTotal / 1024).toFixed(1)}`
               : '--'}
             unit="GB"
             icon={<HardDrive className="w-5 h-5" />}
@@ -165,7 +179,7 @@ export function DashboardPage() {
           />
           <SystemMetricCard
             label="GPU Temp"
-            value={systemMetrics?.gpuTemperature ?? '--'}
+            value={gpuTemperature ?? '--'}
             unit="°C"
             icon={<Thermometer className="w-5 h-5" />}
             status={getGpuTempStatus()}

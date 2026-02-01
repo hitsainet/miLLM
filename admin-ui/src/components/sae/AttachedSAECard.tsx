@@ -47,12 +47,12 @@ export function AttachedSAECard({
             <div>
               <h3 className="text-lg font-semibold text-slate-100">{sae.name}</h3>
               <a
-                href={`https://huggingface.co/${sae.repo_id}`}
+                href={`https://huggingface.co/${sae.repository_id}`}
                 target="_blank"
                 rel="noopener noreferrer"
                 className="text-sm text-primary-400 hover:text-primary-300 flex items-center gap-1"
               >
-                {sae.repo_id}
+                {sae.repository_id}
                 <ExternalLink className="w-3 h-3" />
               </a>
             </div>
@@ -66,7 +66,7 @@ export function AttachedSAECard({
                 <Layers className="w-3 h-3" />
                 Layer
               </div>
-              <p className="text-slate-200 font-semibold">{sae.layer}</p>
+              <p className="text-slate-200 font-semibold">{sae.trained_layer ?? 'Unknown'}</p>
             </div>
 
             <div className="bg-slate-800/50 rounded-lg p-3">
@@ -75,17 +75,17 @@ export function AttachedSAECard({
                 Features
               </div>
               <p className="text-slate-200 font-semibold">
-                {sae.num_features?.toLocaleString() || 'Unknown'}
+                {sae.d_sae ? sae.d_sae.toLocaleString() : 'Unknown'}
               </p>
             </div>
 
             <div className="bg-slate-800/50 rounded-lg p-3">
               <div className="flex items-center gap-2 text-slate-400 text-xs mb-1">
                 <Box className="w-3 h-3" />
-                d_model
+                d_in
               </div>
               <p className="text-slate-200 font-semibold">
-                {sae.d_model?.toLocaleString() || 'Unknown'}
+                {sae.d_in ? sae.d_in.toLocaleString() : 'Unknown'}
               </p>
             </div>
 
@@ -100,10 +100,10 @@ export function AttachedSAECard({
           </div>
 
           {/* Additional Info */}
-          {sae.filename && (
+          {sae.name && (
             <div className="bg-slate-800/30 rounded-lg p-3">
-              <p className="text-xs text-slate-400 mb-1">Filename</p>
-              <p className="text-sm text-slate-300 font-mono truncate">{sae.filename}</p>
+              <p className="text-xs text-slate-400 mb-1">SAE Name</p>
+              <p className="text-sm text-slate-300 font-mono truncate">{sae.name}</p>
             </div>
           )}
         </div>

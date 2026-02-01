@@ -2,9 +2,10 @@
 
 ## miLLM Feature 7
 
-**Document Version:** 1.0
+**Document Version:** 1.1
 **Created:** January 30, 2026
-**Status:** Draft
+**Updated:** February 1, 2026
+**Status:** Complete - Updated with Zustand anti-pattern warning
 **References:**
 - Feature PRD: `007_FPRD|Admin_UI.md`
 - Feature TDD: `007_FTDD|Admin_UI.md`
@@ -267,6 +268,17 @@ export type ConnectionStatus = 'connected' | 'disconnected' | 'connecting';
 ---
 
 ## 4. Zustand Stores
+
+> **⚠️ CRITICAL: Zustand Getter Anti-Pattern**
+> Never use computed getters (`get propertyName()`) in Zustand stores for values that components need to react to. Getters don't trigger React re-renders when their underlying data changes.
+>
+> ```typescript
+> // ❌ BAD - Components won't re-render when 'steering' changes
+> get steeringState() { return this.steering; }
+>
+> // ✅ GOOD - Access state properties directly in components
+> const { steering } = useServerStore();
+> ```
 
 ### 4.1 Server Store
 

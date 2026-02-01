@@ -78,6 +78,8 @@ class SAE(Base):
     # Training metadata
     trained_on: Mapped[str | None] = mapped_column(String(255), nullable=True)
     trained_layer: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    width: Mapped[str | None] = mapped_column(String(50), nullable=True)  # e.g., "16k", "65k"
+    average_l0: Mapped[int | None] = mapped_column(Integer, nullable=True)  # e.g., 38, 71
 
     # Storage
     file_size_bytes: Mapped[int | None] = mapped_column(BigInteger, nullable=True)

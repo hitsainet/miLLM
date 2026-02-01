@@ -25,6 +25,12 @@ class DownloadSAERequest(BaseModel):
         max_length=100,
         description="Git revision (branch, tag, or commit hash)",
     )
+    file_path: str | None = Field(
+        default=None,
+        max_length=500,
+        description="Specific SAE file path to download (e.g., 'layer_12/width_16k/average_l0_50/params.npz'). Downloads only this file and its directory.",
+        examples=["layer_12/width_16k/average_l0_50/params.npz"],
+    )
 
 
 class AttachSAERequest(BaseModel):
@@ -117,6 +123,14 @@ class SAEMetadata(BaseModel):
     trained_layer: int | None = Field(
         default=None,
         description="Layer the SAE was trained for",
+    )
+    width: str | None = Field(
+        default=None,
+        description="SAE width (e.g., '16k', '65k')",
+    )
+    average_l0: int | None = Field(
+        default=None,
+        description="Average L0 sparsity value",
     )
     file_size_bytes: int | None = Field(
         default=None,
@@ -249,6 +263,17 @@ class DownloadResponse(BaseModel):
     )
     message: str = Field(
         default="Download started",
+        description="Status message",
+    )
+
+
+class CancelResponse(BaseModel):
+    """Response schema for SAE download cancellation."""
+
+    sae_id: str = Field(..., description="SAE ID")
+    status: str = Field(..., description="Current SAE status")
+    message: str = Field(
+        default="Download cancelled",
         description="Status message",
     )
 

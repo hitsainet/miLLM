@@ -2,6 +2,8 @@ import { useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { AlertCircle, Sliders, Info } from 'lucide-react';
 import { useSteering } from '@hooks/useSteering';
+import { useSAE } from '@hooks/useSAE';
+import { useModels } from '@hooks/useModels';
 import { useServerStore } from '@stores/serverStore';
 import {
   SteeringControls,
@@ -13,7 +15,12 @@ import { Card, CardHeader, Spinner, EmptyState, Button, Modal } from '@component
 
 export function SteeringPage() {
   const navigate = useNavigate();
-  const { loadedModel, attachedSAE, steeringState } = useServerStore();
+  // Use hooks to keep queries active and store populated
+  // This ensures loadedModel and attachedSAE stay in sync with backend state
+  useModels();
+  useSAE();
+  // Use 'steering' directly instead of 'steeringState' getter for proper Zustand reactivity
+  const { loadedModel, attachedSAE, steering } = useServerStore();
   const {
     isLoading,
     setFeature,
@@ -31,9 +38,9 @@ export function SteeringPage() {
 
   const [saveProfileModal, setSaveProfileModal] = useState(false);
 
-  const features = steeringState?.features || [];
+  const features = steering?.features || [];
   const featureCount = features.length;
-  const isEnabled = steeringState?.enabled || false;
+  const isEnabled = steering?.enabled || false;
 
   const handleAddFeature = async (featureIndex: number, strength: number = 1.0) => {
     await setFeature({ index: featureIndex, strength });
@@ -149,13 +156,13 @@ export function SteeringPage() {
           action={
             <BatchAddForm
               onBatchAdd={handleBatchAdd}
-              maxFeatureIndex={attachedSAE.num_features}
+              maxFeatureIndex={attachedSAE.d_sae}
             />
           }
         />
         <FeatureInput
           onAdd={handleAddFeature}
-          maxFeatureIndex={attachedSAE.num_features}
+          maxFeatureIndex={attachedSAE.d_sae}
         />
       </Card>
 

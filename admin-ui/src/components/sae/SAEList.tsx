@@ -9,9 +9,11 @@ interface SAEListProps {
   onAttach: (sae: SAEInfo) => void;
   onDetach: () => void;
   onDelete: (id: string) => void;
+  onCancel?: (id: string) => void;
   attachingId?: string;
   isDetaching?: boolean;
   deletingId?: string;
+  cancellingId?: string;
   canAttach?: boolean;
 }
 
@@ -21,9 +23,11 @@ export function SAEList({
   onAttach,
   onDetach,
   onDelete,
+  onCancel,
   attachingId,
   isDetaching,
   deletingId,
+  cancellingId,
   canAttach = true,
 }: SAEListProps) {
   if (saes.length === 0) {
@@ -59,9 +63,11 @@ export function SAEList({
             onAttach={() => onAttach(sae)}
             onDetach={onDetach}
             onDelete={() => onDelete(sae.id)}
+            onCancel={onCancel ? () => onCancel(sae.id) : undefined}
             isAttaching={attachingId === sae.id}
             isDetaching={sae.id === attachedSAEId && isDetaching}
             isDeleting={deletingId === sae.id}
+            isCancelling={cancellingId === sae.id}
             canAttach={canAttach && attachedSAEId === undefined}
           />
         ))}

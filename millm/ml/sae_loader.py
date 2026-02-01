@@ -1,13 +1,14 @@
 """
 SAE weight loading.
 
-Loads SAE weights from SafeTensors files.
+Loads SAE weights from SafeTensors or NPZ files.
 """
 
 import logging
 from pathlib import Path
 from typing import Optional
 
+import numpy as np
 import torch
 from safetensors.torch import load_file
 
@@ -21,7 +22,9 @@ class SAELoader:
     """
     Loads SAE weights from disk.
 
-    Supports SAELens SafeTensors format with various weight naming conventions.
+    Supports:
+    - SAELens SafeTensors format with cfg.json config
+    - Gemma-Scope NPZ format (config inferred from array shapes)
 
     Usage:
         loader = SAELoader()
@@ -33,13 +36,53 @@ class SAELoader:
         """
         Load SAE configuration from cache path.
 
+        Tries to load from cfg.json first, then falls back to inferring
+        from NPZ file if no config file is found.
+
         Args:
             cache_path: Path to SAE directory.
 
         Returns:
             Parsed SAEConfig.
         """
-        return SAEConfig.from_json(cache_path)
+        path = Path(cache_path)
+
+        # Try loading from cfg.json first
+        try:
+            return SAEConfig.from_json(cache_path)
+        except FileNotFoundError:
+            pass
+
+        # Fall back to inferring config from npz file
+        npz_path = self._find_npz_file(path)
+        if npz_path:
+            logger.info(f"No cfg.json found, inferring config from {npz_path}")
+            return SAEConfig.from_npz(npz_path, dir_path=path)
+
+        # No config source found
+        raise FileNotFoundError(
+            f"No configuration source found in {path}. "
+            f"Expected cfg.json or params.npz file."
+        )
+
+    def _find_npz_file(self, path: Path) -> Path | None:
+        """Find NPZ weights file in directory."""
+        if not path.is_dir():
+            return None
+
+        # Check common names
+        common_names = ["params.npz", "weights.npz", "sae.npz"]
+        for name in common_names:
+            npz_path = path / name
+            if npz_path.exists():
+                return npz_path
+
+        # Look for any .npz file
+        npz_files = list(path.glob("*.npz"))
+        if npz_files:
+            return npz_files[0]
+
+        return None
 
     def load(
         self,
@@ -49,6 +92,8 @@ class SAELoader:
     ) -> LoadedSAE:
         """
         Load SAE weights and create wrapper.
+
+        Supports both SafeTensors (.safetensors) and NPZ (.npz) formats.
 
         Args:
             cache_path: Path to downloaded SAE directory.
@@ -67,27 +112,16 @@ class SAELoader:
         # Load config
         config = self.load_config(cache_path)
 
-        # Find weights file
+        # Try to find weights file (safetensors or npz)
         weights_path = self._find_weights_file(path)
 
         logger.info(f"Loading SAE from {weights_path}")
 
-        # Load weights
-        state_dict = load_file(weights_path)
-
-        # Extract tensors (handle naming variations)
-        W_enc = self._get_tensor(
-            state_dict, ["W_enc", "encoder.weight", "W_e", "w_enc"]
-        )
-        b_enc = self._get_tensor(
-            state_dict, ["b_enc", "encoder.bias", "b_e", "bias_enc"]
-        )
-        W_dec = self._get_tensor(
-            state_dict, ["W_dec", "decoder.weight", "W_d", "w_dec"]
-        )
-        b_dec = self._get_tensor(
-            state_dict, ["b_dec", "decoder.bias", "b_d", "bias_dec"]
-        )
+        # Load weights based on file type
+        if weights_path.suffix == ".npz":
+            W_enc, b_enc, W_dec, b_dec = self._load_npz_weights(weights_path)
+        else:
+            W_enc, b_enc, W_dec, b_dec = self._load_safetensors_weights(weights_path)
 
         # Convert dtype if specified
         target_dtype = dtype or self._str_to_dtype(config.dtype)
@@ -117,9 +151,46 @@ class SAELoader:
 
         return loaded_sae
 
+    def _load_safetensors_weights(
+        self, weights_path: Path
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+        """Load weights from SafeTensors file."""
+        state_dict = load_file(weights_path)
+
+        W_enc = self._get_tensor(
+            state_dict, ["W_enc", "encoder.weight", "W_e", "w_enc"]
+        )
+        b_enc = self._get_tensor(
+            state_dict, ["b_enc", "encoder.bias", "b_e", "bias_enc"]
+        )
+        W_dec = self._get_tensor(
+            state_dict, ["W_dec", "decoder.weight", "W_d", "w_dec"]
+        )
+        b_dec = self._get_tensor(
+            state_dict, ["b_dec", "decoder.bias", "b_d", "bias_dec"]
+        )
+
+        return W_enc, b_enc, W_dec, b_dec
+
+    def _load_npz_weights(
+        self, weights_path: Path
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+        """Load weights from NPZ file (Gemma-Scope format)."""
+        data = np.load(weights_path)
+
+        # Convert numpy arrays to torch tensors
+        W_enc = torch.from_numpy(data["W_enc"].copy())
+        b_enc = torch.from_numpy(data["b_enc"].copy())
+        W_dec = torch.from_numpy(data["W_dec"].copy())
+        b_dec = torch.from_numpy(data["b_dec"].copy())
+
+        return W_enc, b_enc, W_dec, b_dec
+
     def _find_weights_file(self, path: Path) -> Path:
         """
         Find SAE weights file in directory.
+
+        Supports both SafeTensors (.safetensors) and NPZ (.npz) formats.
 
         Args:
             path: Directory to search.
@@ -130,15 +201,15 @@ class SAELoader:
         Raises:
             FileNotFoundError: If no weights file found.
         """
-        # Check common names
-        common_names = [
+        # Check common safetensors names first
+        safetensors_names = [
             "sae_weights.safetensors",
             "model.safetensors",
             "weights.safetensors",
             "sae.safetensors",
         ]
 
-        for name in common_names:
+        for name in safetensors_names:
             weights_path = path / name
             if weights_path.exists():
                 return weights_path
@@ -152,9 +223,22 @@ class SAELoader:
                     return f
             return safetensors_files[0]
 
+        # Check common npz names (Gemma-Scope format)
+        npz_names = ["params.npz", "weights.npz", "sae.npz"]
+
+        for name in npz_names:
+            weights_path = path / name
+            if weights_path.exists():
+                return weights_path
+
+        # Look for any .npz file
+        npz_files = list(path.glob("*.npz"))
+        if npz_files:
+            return npz_files[0]
+
         raise FileNotFoundError(
             f"No weights file found in {path}. "
-            f"Expected .safetensors file (e.g., sae_weights.safetensors)."
+            f"Expected .safetensors or .npz file (e.g., sae_weights.safetensors, params.npz)."
         )
 
     def _get_tensor(self, state_dict: dict, names: list[str]) -> torch.Tensor:

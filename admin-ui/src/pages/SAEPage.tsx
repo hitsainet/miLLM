@@ -21,10 +21,12 @@ export function SAEPage() {
     detachSAE,
     isDetaching,
     deleteSAE,
+    cancelSAE,
   } = useSAE();
 
   const [attachingId, setAttachingId] = useState<string | undefined>();
   const [deletingId, setDeletingId] = useState<string | undefined>();
+  const [cancellingId, setCancellingId] = useState<string | undefined>();
 
   const handleDownload = async (data: DownloadSAERequest) => {
     await downloadSAE(data);
@@ -53,6 +55,15 @@ export function SAEPage() {
       await deleteSAE(saeId);
     } finally {
       setDeletingId(undefined);
+    }
+  };
+
+  const handleCancel = async (saeId: string) => {
+    setCancellingId(saeId);
+    try {
+      await cancelSAE(saeId);
+    } finally {
+      setCancellingId(undefined);
     }
   };
 
@@ -89,9 +100,11 @@ export function SAEPage() {
             onAttach={handleAttach}
             onDetach={handleDetach}
             onDelete={handleDelete}
+            onCancel={handleCancel}
             attachingId={attachingId}
             isDetaching={isDetaching}
             deletingId={deletingId}
+            cancellingId={cancellingId}
             canAttach={false}
           />
         )}
@@ -131,9 +144,11 @@ export function SAEPage() {
         onAttach={handleAttach}
         onDetach={handleDetach}
         onDelete={handleDelete}
+        onCancel={handleCancel}
         attachingId={attachingId}
         isDetaching={isDetaching}
         deletingId={deletingId}
+        cancellingId={cancellingId}
         canAttach={!attachedSAE}
       />
 

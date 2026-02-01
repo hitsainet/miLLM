@@ -1,6 +1,6 @@
 import { useState } from 'react';
 import { Download, Layers, Search, File, Check } from 'lucide-react';
-import { Card, CardHeader, Button, Input, Spinner } from '@components/common';
+import { Card, CardHeader, Button, Input } from '@components/common';
 import { saeApi } from '@/services/api';
 import type { DownloadSAERequest, PreviewSAEResponse, SAEFileInfo } from '@/types';
 
@@ -55,7 +55,7 @@ export function SAEDownloadForm({
   const [isPreviewing, setIsPreviewing] = useState(false);
   const [previewData, setPreviewData] = useState<PreviewSAEResponse | null>(null);
   const [previewError, setPreviewError] = useState<string | null>(null);
-  const [selectedFile, setSelectedFile] = useState<SAEFileInfo | null>(null);
+  const [selectedFiles, setSelectedFiles] = useState<SAEFileInfo[]>([]);
 
   const validateRepository = (): boolean => {
     const newErrors: Record<string, string> = {};
@@ -76,7 +76,7 @@ export function SAEDownloadForm({
     setIsPreviewing(true);
     setPreviewError(null);
     setPreviewData(null);
-    setSelectedFile(null);
+    setSelectedFiles([]);
 
     try {
       const data = await saeApi.preview({
@@ -92,13 +92,36 @@ export function SAEDownloadForm({
     }
   };
 
+  const toggleFileSelection = (file: SAEFileInfo) => {
+    setSelectedFiles((prev) => {
+      const isSelected = prev.some((f) => f.path === file.path);
+      if (isSelected) {
+        return prev.filter((f) => f.path !== file.path);
+      } else {
+        return [...prev, file];
+      }
+    });
+  };
+
   const handleDownload = () => {
     if (!validateRepository()) return;
 
-    onSubmit({
-      repository_id: repositoryId.trim(),
-      revision: revision.trim() || undefined,
-    });
+    // If files are selected, download each one
+    if (selectedFiles.length > 0) {
+      selectedFiles.forEach((file) => {
+        onSubmit({
+          repository_id: repositoryId.trim(),
+          revision: revision.trim() || undefined,
+          file_path: file.path,
+        });
+      });
+    } else {
+      // Fallback: download entire repository (no file selected)
+      onSubmit({
+        repository_id: repositoryId.trim(),
+        revision: revision.trim() || undefined,
+      });
+    }
   };
 
   // Group files by layer for better organization
@@ -134,7 +157,7 @@ export function SAEDownloadForm({
               onChange={(e) => {
                 setRepositoryId(e.target.value);
                 setPreviewData(null);
-                setSelectedFile(null);
+                setSelectedFiles([]);
               }}
               error={errors.repositoryId}
             />
@@ -147,7 +170,7 @@ export function SAEDownloadForm({
               onChange={(e) => {
                 setRevision(e.target.value);
                 setPreviewData(null);
-                setSelectedFile(null);
+                setSelectedFiles([]);
               }}
               helperText="Branch, tag, or commit"
             />
@@ -204,57 +227,94 @@ export function SAEDownloadForm({
                 <div key={layer}>
                   {/* Layer Header */}
                   {layer >= 0 && (
-                    <div className="sticky top-0 px-3 py-2 bg-slate-800/90 border-b border-slate-700/50 backdrop-blur-sm">
+                    <div className="sticky top-0 px-3 py-2 bg-slate-800/90 border-b border-slate-700/50 backdrop-blur-sm flex items-center justify-between">
                       <span className="text-xs font-medium text-slate-400 uppercase tracking-wider">
                         Layer {layer}
                       </span>
+                      <button
+                        type="button"
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          const layerFiles = groupedFiles[layer];
+                          const allSelected = layerFiles.every((f) =>
+                            selectedFiles.some((sf) => sf.path === f.path)
+                          );
+                          if (allSelected) {
+                            // Deselect all in this layer
+                            setSelectedFiles((prev) =>
+                              prev.filter((f) => !layerFiles.some((lf) => lf.path === f.path))
+                            );
+                          } else {
+                            // Select all in this layer
+                            setSelectedFiles((prev) => {
+                              const newSelection = [...prev];
+                              layerFiles.forEach((lf) => {
+                                if (!newSelection.some((f) => f.path === lf.path)) {
+                                  newSelection.push(lf);
+                                }
+                              });
+                              return newSelection;
+                            });
+                          }
+                        }}
+                        className="text-xs text-primary-400/70 hover:text-primary-400 transition-colors"
+                      >
+                        {groupedFiles[layer].every((f) =>
+                          selectedFiles.some((sf) => sf.path === f.path)
+                        )
+                          ? 'Deselect all'
+                          : 'Select all'}
+                      </button>
                     </div>
                   )}
 
                   {/* Files in Layer - sorted naturally by path */}
-                  {[...groupedFiles[layer]].sort((a, b) => naturalSortCompare(a.path, b.path)).map((file) => (
-                    <div
-                      key={file.path}
-                      onClick={() => setSelectedFile(selectedFile?.path === file.path ? null : file)}
-                      className={`
-                        flex items-center justify-between px-3 py-2 cursor-pointer
-                        transition-colors border-b border-slate-700/30
-                        ${selectedFile?.path === file.path
-                          ? 'bg-primary-500/10 border-primary-500/30'
-                          : 'hover:bg-slate-800/50'
-                        }
-                      `}
-                    >
-                      <div className="flex items-center gap-3 min-w-0">
-                        <div className={`
-                          w-5 h-5 rounded flex items-center justify-center flex-shrink-0
-                          ${selectedFile?.path === file.path
-                            ? 'bg-primary-500 text-white'
-                            : 'bg-slate-700/50 text-slate-500'
+                  {[...groupedFiles[layer]].sort((a, b) => naturalSortCompare(a.path, b.path)).map((file) => {
+                    const isSelected = selectedFiles.some((f) => f.path === file.path);
+                    return (
+                      <div
+                        key={file.path}
+                        onClick={() => toggleFileSelection(file)}
+                        className={`
+                          flex items-center justify-between px-3 py-2 cursor-pointer
+                          transition-colors border-b border-slate-700/30
+                          ${isSelected
+                            ? 'bg-primary-500/10 border-primary-500/30'
+                            : 'hover:bg-slate-800/50'
                           }
-                        `}>
-                          {selectedFile?.path === file.path ? (
-                            <Check className="w-3 h-3" />
-                          ) : (
-                            <File className="w-3 h-3" />
-                          )}
-                        </div>
-                        <span className="text-sm text-slate-300 truncate font-mono">
-                          {file.path}
-                        </span>
-                      </div>
-                      <div className="flex items-center gap-3 flex-shrink-0 ml-4">
-                        {file.width && (
-                          <span className="text-xs text-slate-500 font-mono">
-                            {file.width}
+                        `}
+                      >
+                        <div className="flex items-center gap-3 min-w-0">
+                          <div className={`
+                            w-5 h-5 rounded flex items-center justify-center flex-shrink-0
+                            ${isSelected
+                              ? 'bg-primary-500 text-white'
+                              : 'bg-slate-700/50 text-slate-500'
+                            }
+                          `}>
+                            {isSelected ? (
+                              <Check className="w-3 h-3" />
+                            ) : (
+                              <File className="w-3 h-3" />
+                            )}
+                          </div>
+                          <span className="text-sm text-slate-300 truncate font-mono">
+                            {file.path}
                           </span>
-                        )}
-                        <span className="text-xs text-slate-500 min-w-[60px] text-right">
-                          {formatSize(file.size_bytes)}
-                        </span>
+                        </div>
+                        <div className="flex items-center gap-3 flex-shrink-0 ml-4">
+                          {file.width && (
+                            <span className="text-xs text-slate-500 font-mono">
+                              {file.width}
+                            </span>
+                          )}
+                          <span className="text-xs text-slate-500 min-w-[60px] text-right">
+                            {formatSize(file.size_bytes)}
+                          </span>
+                        </div>
                       </div>
-                    </div>
-                  ))}
+                    );
+                  })}
                 </div>
               ))}
 
@@ -265,19 +325,30 @@ export function SAEDownloadForm({
               )}
             </div>
 
-            {/* Selected File Info */}
-            {selectedFile && (
+            {/* Selected Files Info */}
+            {selectedFiles.length > 0 && (
               <div className="p-3 rounded-lg bg-slate-800/50 border border-slate-700/50">
-                <p className="text-sm text-slate-400">
-                  Selected: <span className="text-slate-200 font-mono">{selectedFile.path}</span>
-                </p>
-                {selectedFile.layer !== null && (
-                  <p className="text-xs text-slate-500 mt-1">
-                    Layer {selectedFile.layer}
-                    {selectedFile.width && ` • Width ${selectedFile.width}`}
-                    {selectedFile.size_bytes > 0 && ` • ${formatSize(selectedFile.size_bytes)}`}
+                <div className="flex items-center justify-between mb-2">
+                  <p className="text-sm text-slate-400">
+                    Selected: <span className="text-slate-200 font-medium">{selectedFiles.length} SAE{selectedFiles.length !== 1 ? 's' : ''}</span>
                   </p>
-                )}
+                  <button
+                    type="button"
+                    onClick={() => setSelectedFiles([])}
+                    className="text-xs text-slate-500 hover:text-slate-300 transition-colors"
+                  >
+                    Clear all
+                  </button>
+                </div>
+                <div className="space-y-1 max-h-24 overflow-y-auto">
+                  {selectedFiles.map((file) => (
+                    <div key={file.path} className="text-xs text-slate-500 font-mono truncate">
+                      {file.path}
+                      {file.layer !== null && ` (L${file.layer})`}
+                      {file.width && ` • ${file.width}`}
+                    </div>
+                  ))}
+                </div>
               </div>
             )}
           </div>
@@ -289,17 +360,22 @@ export function SAEDownloadForm({
           variant="primary"
           onClick={handleDownload}
           loading={isLoading}
-          disabled={!repositoryId.trim()}
+          disabled={!repositoryId.trim() || (previewData !== null && selectedFiles.length === 0)}
           leftIcon={<Layers className="w-4 h-4" />}
           className="w-full"
         >
-          {previewData ? 'Download SAE Repository' : 'Download SAE'}
+          {selectedFiles.length > 0
+            ? `Download ${selectedFiles.length} Selected SAE${selectedFiles.length !== 1 ? 's' : ''}`
+            : (previewData ? 'Select SAEs to Download' : 'Download SAE Repository')}
         </Button>
 
         {/* Help Text */}
         <div className="text-xs text-slate-500 bg-slate-800/30 rounded-lg p-3">
           <p className="font-medium text-slate-400 mb-1">Note:</p>
-          <p>Downloads the entire SAE repository. Layer selection is done when attaching the SAE to a model.</p>
+          <p>{previewData
+            ? 'Click to select multiple SAE files. Selected files will be downloaded individually.'
+            : 'Downloads the entire SAE repository. Layer selection is done when attaching the SAE to a model.'
+          }</p>
         </div>
       </div>
     </Card>

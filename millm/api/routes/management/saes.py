@@ -13,6 +13,7 @@ from millm.api.schemas.common import ApiResponse
 from millm.api.schemas.sae import (
     AttachResponse,
     AttachSAERequest,
+    CancelResponse,
     CompatibilityResult,
     DeleteResponse,
     DetachResponse,
@@ -85,16 +86,48 @@ async def download_sae(
     Start downloading an SAE.
 
     Downloads the SAE from HuggingFace in the background.
+    If file_path is provided, only that specific SAE is downloaded.
     Progress updates are sent via WebSocket.
+
+    Returns status indicating actual state:
+    - "downloading": New download started
+    - "cached": SAE already downloaded
+    - "attached": SAE already attached to model
+    - "already_downloading": Download already in progress
     """
-    sae_id = await service.start_download(
+    result = await service.start_download(
         repository_id=request.repository_id,
         revision=request.revision,
+        file_path=request.file_path,
     )
     return ApiResponse.ok(DownloadResponse(
-        sae_id=sae_id,
-        status="downloading",
-        message=f"Download started for {request.repository_id}",
+        sae_id=result.sae_id,
+        status=result.status,
+        message=result.message,
+    ))
+
+
+@router.post(
+    "/{sae_id}/cancel",
+    response_model=ApiResponse[CancelResponse],
+    summary="Cancel SAE download",
+    description="Cancel an in-progress SAE download.",
+)
+async def cancel_download(
+    sae_id: SAEId,
+    service: SAEServiceDep,
+) -> ApiResponse[CancelResponse]:
+    """
+    Cancel an in-progress SAE download.
+
+    Only works for SAEs with status: downloading.
+    The SAE's status will be changed to error.
+    """
+    sae = await service.cancel_download(sae_id)
+    return ApiResponse.ok(CancelResponse(
+        sae_id=sae.id,
+        status=sae.status.value,
+        message="Download cancelled" if sae.status.value == "error" else "Download not in progress",
     ))
 
 
@@ -359,25 +392,50 @@ async def set_steering_batch(
 @router.post(
     "/steering/enable",
     response_model=ApiResponse[SteeringStatus],
-    summary="Enable/disable steering",
-    description="Enable or disable steering without clearing values.",
+    summary="Enable steering",
+    description="Enable steering to apply configured feature strengths.",
 )
-async def toggle_steering(
-    enabled: bool,
+async def enable_steering(
     service: SAEServiceDep,
 ) -> ApiResponse[SteeringStatus]:
     """
-    Enable or disable steering.
+    Enable steering.
 
-    When disabled, steering values are preserved but not applied.
+    Activates the steering configuration so feature strengths are applied
+    during inference.
     """
-    service.enable_steering(enabled)
+    service.enable_steering(True)
 
     attachment = service.get_attachment_status()
     values = service.get_steering_values() if attachment.is_attached else {}
 
     return ApiResponse.ok(SteeringStatus(
-        enabled=enabled,
+        enabled=True,
+        values=values,
+    ))
+
+
+@router.post(
+    "/steering/disable",
+    response_model=ApiResponse[SteeringStatus],
+    summary="Disable steering",
+    description="Disable steering without clearing values.",
+)
+async def disable_steering(
+    service: SAEServiceDep,
+) -> ApiResponse[SteeringStatus]:
+    """
+    Disable steering.
+
+    Steering values are preserved but not applied during inference.
+    """
+    service.enable_steering(False)
+
+    attachment = service.get_attachment_status()
+    values = service.get_steering_values() if attachment.is_attached else {}
+
+    return ApiResponse.ok(SteeringStatus(
+        enabled=False,
         values=values,
     ))
 

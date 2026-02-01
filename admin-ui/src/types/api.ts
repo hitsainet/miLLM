@@ -80,6 +80,8 @@ export interface SAEInfo {
   d_sae: number;
   trained_on: string | null;
   trained_layer: number | null;
+  width: string | null;
+  average_l0: number | null;
   file_size_bytes: number | null;
   status: SAEStatus;
   error_message: string | null;
@@ -105,6 +107,7 @@ export interface SAEListResponse {
 export interface DownloadSAERequest {
   repository_id: string;
   revision?: string;
+  file_path?: string;
 }
 
 export interface PreviewSAERequest {
@@ -256,7 +259,7 @@ export interface ServerStatus {
 // WebSocket event types
 export interface DownloadProgressEvent {
   model_id?: number;
-  sae_id?: number;
+  sae_id?: string;
   progress: number;
   downloaded_mb: number;
   total_mb: number;

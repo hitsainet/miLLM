@@ -36,6 +36,47 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         debug=settings.DEBUG,
     )
 
+    # Reset any models/SAEs marked as "loaded" since in-memory state is lost on restart
+    try:
+        from millm.db.base import async_session_factory
+        from sqlalchemy import text
+
+        async with async_session_factory() as session:
+            # Reset models that were marked as loaded
+            result = await session.execute(
+                text("UPDATE models SET status = 'ready', loaded_at = NULL WHERE status = 'loaded'")
+            )
+            if result.rowcount > 0:
+                logger.info("reset_stale_model_status", count=result.rowcount)
+
+            # Reset SAEs that were marked as attached (back to cached)
+            result = await session.execute(
+                text("UPDATE saes SET status = 'cached' WHERE status = 'attached'")
+            )
+            if result.rowcount > 0:
+                logger.info("reset_stale_sae_status", count=result.rowcount)
+
+            # Deactivate any active attachment records
+            result = await session.execute(
+                text("UPDATE sae_attachments SET is_active = false, detached_at = NOW() WHERE is_active = true")
+            )
+            if result.rowcount > 0:
+                logger.info("deactivated_stale_attachments", count=result.rowcount)
+
+            await session.commit()
+    except Exception as e:
+        logger.warning("failed_to_reset_stale_status", error=str(e))
+
+    # Clear any stale in-memory SAE attachment state
+    try:
+        from millm.services.sae_service import AttachedSAEState
+        sae_state = AttachedSAEState()
+        if sae_state.is_attached:
+            logger.info("clearing_stale_sae_attachment")
+            sae_state.clear()
+    except Exception as e:
+        logger.warning("failed_to_clear_sae_state", error=str(e))
+
     yield
 
     # Shutdown

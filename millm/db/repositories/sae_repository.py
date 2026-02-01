@@ -178,6 +178,8 @@ class SAERepository:
         trained_layer: int | None = None,
         file_size_bytes: int | None = None,
         name: str | None = None,
+        width: str | None = None,
+        average_l0: int | None = None,
     ) -> SAE | None:
         """
         Update SAE after successful download.
@@ -191,6 +193,8 @@ class SAERepository:
             trained_layer: Layer the SAE was trained for.
             file_size_bytes: Size on disk.
             name: Display name (optional).
+            width: SAE width (e.g., "16k", "65k").
+            average_l0: Average L0 sparsity value.
 
         Returns:
             The updated SAE instance or None if not found.
@@ -206,6 +210,8 @@ class SAERepository:
         sae.trained_on = trained_on
         sae.trained_layer = trained_layer
         sae.file_size_bytes = file_size_bytes
+        sae.width = width
+        sae.average_l0 = average_l0
         sae.updated_at = datetime.utcnow()
 
         if name:

@@ -12,14 +12,6 @@ import type {
 } from '@/types';
 import type { ConnectionStatus } from '@/types/ui';
 
-// System metrics interface for computed property
-export interface SystemMetrics {
-  gpuMemoryUsed: number;
-  gpuMemoryTotal: number;
-  gpuUtilization: number;
-  gpuTemperature: number;
-}
-
 interface ServerState {
   // Connection
   connectionStatus: ConnectionStatus;
@@ -102,11 +94,6 @@ interface ServerActions {
   setFeatureStatistics: (stats: FeatureStatistics[]) => void;
   setMonitoringLoading: (loading: boolean) => void;
   setLatestActivations: (activations: FeatureActivation[]) => void;
-
-  // Computed property getters (aliases for backward compatibility)
-  readonly steeringState: SteeringState;
-  readonly monitoringConfig: MonitoringConfig;
-  readonly systemMetrics: SystemMetrics;
 
   // Profile actions
   setProfiles: (profiles: Profile[]) => void;
@@ -275,22 +262,6 @@ export const useServerStore = create<ServerState & ServerActions>((set) => ({
   setFeatureStatistics: (stats) => set({ featureStatistics: stats }),
   setMonitoringLoading: (loading) => set({ monitoringLoading: loading }),
   setLatestActivations: (activations) => set({ latestActivations: activations }),
-
-  // Computed properties (getters)
-  get steeringState() {
-    return this.steering;
-  },
-  get monitoringConfig() {
-    return this.monitoring;
-  },
-  get systemMetrics(): SystemMetrics {
-    return {
-      gpuMemoryUsed: this.gpuMemoryUsed,
-      gpuMemoryTotal: this.gpuMemoryTotal,
-      gpuUtilization: this.gpuUtilization,
-      gpuTemperature: this.gpuTemperature,
-    };
-  },
 
   // Profile actions
   setProfiles: (profiles) => set({ profiles }),

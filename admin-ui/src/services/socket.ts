@@ -198,7 +198,7 @@ class SocketClient {
 
     this.socket.on(
       'sae:download:error',
-      (data: { sae_id: number; error: string }) => {
+      (data: { sae_id: string; error: string }) => {
         serverStore.clearSAEDownloadProgress(data.sae_id);
         serverStore.updateSAE(data.sae_id, { status: 'error' });
         uiStore.addToast({
@@ -220,7 +220,7 @@ class SocketClient {
     this.socket.on('sae:detach:complete', () => {
       const attachedSAE = serverStore.attachedSAE;
       if (attachedSAE) {
-        serverStore.updateSAE(attachedSAE.id, { status: 'ready' });
+        serverStore.updateSAE(attachedSAE.id, { status: 'cached' });
       }
       serverStore.setAttachedSAE(null);
       uiStore.addToast({

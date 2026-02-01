@@ -19,6 +19,8 @@ export function useModels() {
       if (loaded) setLoadedModel(loaded);
       return models;
     },
+    // Prevent unnecessary refetches that could cause state issues
+    staleTime: 5000,
     // Poll every 2 seconds when there's a downloading or loading model to show progress
     refetchInterval: (query) => {
       const models = query.state.data;

@@ -13,7 +13,8 @@ import type { Profile, CreateProfileRequest, UpdateProfileRequest, ProfileExport
 
 export function ProfilesPage() {
   const location = useLocation();
-  const { steeringState, activeProfile } = useServerStore();
+  // Use 'steering' directly instead of 'steeringState' getter for proper Zustand reactivity
+  const { steering, activeProfile } = useServerStore();
   const {
     profiles,
     isLoading,
@@ -44,7 +45,7 @@ export function ProfilesPage() {
     }
   });
 
-  const currentFeatures = steeringState?.features || [];
+  const currentFeatures = steering?.features || [];
 
   const handleCreate = async (data: CreateProfileRequest) => {
     await createProfile(data);

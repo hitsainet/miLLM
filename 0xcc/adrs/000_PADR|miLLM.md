@@ -471,6 +471,19 @@ export const useModelStore = create<ModelState>((set, get) => ({
 }));
 ```
 
+**⚠️ IMPORTANT: Zustand Getter Anti-Pattern**
+Never use computed getters (`get propertyName()`) in Zustand stores for values that components need to react to. Getters don't trigger React re-renders when their underlying data changes.
+
+```typescript
+// ❌ BAD - Components won't re-render when 'steering' changes
+get steeringState() {
+  return this.steering;
+}
+
+// ✅ GOOD - Access state properties directly in components
+const { steering } = useServerStore();
+```
+
 **Custom Hook Pattern:**
 ```typescript
 // hooks/useModels.ts
@@ -1185,6 +1198,7 @@ src/
 - Custom hooks for data fetching (useModels, useSAEs, etc.)
 - Tailwind CSS for styling (no inline styles in production)
 - TypeScript strict mode
+- **IMPORTANT:** Never use computed getters in Zustand stores - they don't trigger re-renders. Always access state properties directly (e.g., use `steering` not `get steeringState()`)
 
 ### API Conventions
 - OpenAI API: `/v1/chat/completions`, `/v1/completions`, `/v1/models`, `/v1/embeddings`

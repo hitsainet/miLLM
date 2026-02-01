@@ -16,6 +16,8 @@ export function useSteering() {
       setSteering(state);
       return state;
     },
+    // Prevent rapid refetches that could overwrite mutation results
+    staleTime: 5000,
   });
 
   const setFeatureMutation = useMutation({

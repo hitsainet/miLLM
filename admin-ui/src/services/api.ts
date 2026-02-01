@@ -366,12 +366,37 @@ export const saeApi = {
  * await steeringApi.enable();
  * ```
  */
+/**
+ * Transforms backend steering response to frontend SteeringState format.
+ * Backend returns: { enabled: bool, values: { feature_idx: strength } }
+ * Frontend expects: { enabled: bool, sae_id: number|null, features: FeatureSteering[] }
+ */
+interface BackendSteeringResponse {
+  enabled: boolean;
+  values: Record<string, number>;
+}
+
+function transformSteeringResponse(response: BackendSteeringResponse): SteeringState {
+  const features = Object.entries(response.values).map(([index, strength]) => ({
+    index: parseInt(index, 10),
+    strength,
+  }));
+  return {
+    enabled: response.enabled,
+    sae_id: null, // Backend doesn't return sae_id in steering response
+    features,
+  };
+}
+
 export const steeringApi = {
   /**
    * Gets the current steering state including all active features.
    * @returns Promise resolving to current steering configuration
    */
-  getState: () => request<SteeringState>('/steering'),
+  getState: async (): Promise<SteeringState> => {
+    const response = await request<BackendSteeringResponse>('/saes/steering');
+    return transformSteeringResponse(response);
+  },
 
   /**
    * Sets the strength for a single feature.
@@ -379,11 +404,18 @@ export const steeringApi = {
    * @param req - Request with feature index and strength value
    * @returns Promise resolving to updated steering state
    */
-  set: (req: SetSteeringRequest) =>
-    request<SteeringState>('/steering', {
+  set: async (req: SetSteeringRequest): Promise<SteeringState> => {
+    // Transform frontend format { feature_index, strength }
+    // to backend format { feature_idx, value }
+    const response = await request<BackendSteeringResponse>('/saes/steering', {
       method: 'POST',
-      body: JSON.stringify(req),
-    }),
+      body: JSON.stringify({
+        feature_idx: req.feature_index,
+        value: req.strength,
+      }),
+    });
+    return transformSteeringResponse(response);
+  },
 
   /**
    * Sets strengths for multiple features in a single request.
@@ -391,50 +423,66 @@ export const steeringApi = {
    * @param req - Request with array of feature/strength pairs
    * @returns Promise resolving to updated steering state
    */
-  batch: (req: BatchSteeringRequest) =>
-    request<SteeringState>('/steering/batch', {
+  batch: async (req: BatchSteeringRequest): Promise<SteeringState> => {
+    // Transform frontend format { features: [{ index, strength }] }
+    // to backend format { steering: { index: strength } }
+    const steering: Record<number, number> = {};
+    for (const feature of req.features) {
+      steering[feature.index] = feature.strength;
+    }
+    const response = await request<BackendSteeringResponse>('/saes/steering/batch', {
       method: 'POST',
-      body: JSON.stringify(req),
-    }),
+      body: JSON.stringify({ steering }),
+    });
+    return transformSteeringResponse(response);
+  },
 
   /**
    * Removes a feature from steering (resets to neutral).
    * @param featureIndex - Index of the feature to remove
    * @returns Promise resolving to updated steering state
    */
-  remove: (featureIndex: number) =>
-    request<SteeringState>(`/steering/${featureIndex}`, {
+  remove: async (featureIndex: number): Promise<SteeringState> => {
+    const response = await request<BackendSteeringResponse>(`/saes/steering/${featureIndex}`, {
       method: 'DELETE',
-    }),
+    });
+    return transformSteeringResponse(response);
+  },
 
   /**
    * Clears all steering values (resets all features to neutral).
    * @returns Promise resolving to updated steering state
    */
-  clear: () =>
-    request<SteeringState>('/steering/clear', {
-      method: 'POST',
-    }),
+  clear: async (): Promise<SteeringState> => {
+    const response = await request<BackendSteeringResponse>('/saes/steering', {
+      method: 'DELETE',
+    });
+    return transformSteeringResponse(response);
+  },
 
   /**
    * Enables steering to apply configured feature strengths.
    * Steering is applied to all subsequent inference requests.
    * @returns Promise resolving to updated steering state
    */
-  enable: () =>
-    request<SteeringState>('/steering/enable', {
+  enable: async (): Promise<SteeringState> => {
+    const response = await request<BackendSteeringResponse>('/saes/steering/enable', {
       method: 'POST',
-    }),
+    });
+    return transformSteeringResponse(response);
+  },
 
   /**
    * Disables steering without clearing configuration.
    * Feature strengths are preserved but not applied.
    * @returns Promise resolving to updated steering state
    */
-  disable: () =>
-    request<SteeringState>('/steering/disable', {
+  disable: async (): Promise<SteeringState> => {
+    const response = await request<BackendSteeringResponse>('/saes/steering/disable', {
       method: 'POST',
-    }),
+    });
+    return transformSteeringResponse(response);
+  },
 };
 
 /**
@@ -472,7 +520,7 @@ export const monitoringApi = {
    * @returns Promise resolving to updated monitoring configuration
    */
   configure: (req: ConfigureMonitoringRequest) =>
-    request<MonitoringConfig>('/monitoring', {
+    request<MonitoringConfig>('/monitoring/configure', {
       method: 'POST',
       body: JSON.stringify(req),
     }),
@@ -485,6 +533,7 @@ export const monitoringApi = {
   enable: () =>
     request<MonitoringConfig>('/monitoring/enable', {
       method: 'POST',
+      body: JSON.stringify({ enabled: true }),
     }),
 
   /**
@@ -492,8 +541,9 @@ export const monitoringApi = {
    * @returns Promise resolving to updated monitoring configuration
    */
   disable: () =>
-    request<MonitoringConfig>('/monitoring/disable', {
+    request<MonitoringConfig>('/monitoring/enable', {
       method: 'POST',
+      body: JSON.stringify({ enabled: false }),
     }),
 
   /**

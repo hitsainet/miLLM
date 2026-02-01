@@ -1,0 +1,52 @@
+name: Sync to Clean Repository
+
+on:
+  push:
+    branches:
+      - main
+
+jobs:
+  sync:
+    # HARD STOP: only run in Onegaishimas/miStudio
+    if: github.repository == 'Onegaishimas/miStudio'
+
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout source repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Remove excluded files and folders
+        run: |
+          rm -rf 0xcc/
+          rm -rf .claude/
+          rm -f CLAUDE.md
+          rm -rf backups/
+          rm -rf docs/
+          rm -rf scripts/
+          echo "Removed excluded files"
+
+      - name: Commit filtered changes (including workflow updates)
+        run: |
+          git config user.name "GitHub Action"
+          git config user.email "action@github.com"
+
+          git add -A
+
+          if git diff --staged --quiet; then
+            echo "No changes to sync"
+            exit 0
+          fi
+
+          git commit -m "Sync from source repository (filtered)"
+
+      - name: Push to clean repository
+        env:
+          SYNC_TOKEN: ${{ secrets.HITSAINET_SYNC }}
+        run: |
+          git config --unset-all http.https://github.com/.extraheader || true
+          git config --global --unset-all http.https://github.com/.extraheader || true
+
+          git push --force "https://x-access-token:${SYNC_TOKEN}@github.com/hitsainet/miStudio.git" main

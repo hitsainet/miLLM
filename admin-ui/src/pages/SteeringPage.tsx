@@ -1,9 +1,10 @@
-import { useState } from 'react';
+import { useState, useMemo } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { AlertCircle, Sliders, Info } from 'lucide-react';
+import { AlertCircle, Sliders, Info, Save } from 'lucide-react';
 import { useSteering } from '@hooks/useSteering';
 import { useSAE } from '@hooks/useSAE';
 import { useModels } from '@hooks/useModels';
+import { useProfiles } from '@hooks/useProfiles';
 import { useServerStore } from '@stores/serverStore';
 import {
   SteeringControls,
@@ -11,7 +12,7 @@ import {
   BatchAddForm,
   SteeringSlider,
 } from '@components/steering';
-import { Card, CardHeader, Spinner, EmptyState, Button, Modal } from '@components/common';
+import { Card, CardHeader, Spinner, EmptyState, Button, Modal, Input } from '@components/common';
 
 export function SteeringPage() {
   const navigate = useNavigate();
@@ -35,11 +36,31 @@ export function SteeringPage() {
     isEnabling,
     isDisabling,
   } = useSteering();
+  const { createProfile, isCreating } = useProfiles();
 
   const [saveProfileModal, setSaveProfileModal] = useState(false);
+  const [profileName, setProfileName] = useState('');
+  const [profileDescription, setProfileDescription] = useState('');
 
   const features = steering?.features || [];
   const featureCount = features.length;
+
+  // Generate suggested profile name and description
+  const suggestedName = useMemo(() => {
+    const modelName = loadedModel?.name?.split('/').pop() || 'model';
+    const date = new Date().toISOString().slice(0, 10);
+    return `${modelName}-steering-${date}`;
+  }, [loadedModel]);
+
+  const suggestedDescription = useMemo(() => {
+    if (featureCount === 0) return 'Empty steering configuration';
+    const featureList = features
+      .slice(0, 5)
+      .map((f) => `#${f.index} (${f.strength > 0 ? '+' : ''}${f.strength})`)
+      .join(', ');
+    const suffix = featureCount > 5 ? `, and ${featureCount - 5} more` : '';
+    return `Steering configuration with ${featureCount} feature${featureCount !== 1 ? 's' : ''}: ${featureList}${suffix}`;
+  }, [features, featureCount]);
   const isEnabled = steering?.enabled || false;
 
   const handleAddFeature = async (featureIndex: number, strength: number = 1.0) => {
@@ -70,10 +91,26 @@ export function SteeringPage() {
     await clearFeatures();
   };
 
-  const handleSaveProfile = () => {
-    // Navigate to profiles page with state to create new profile
-    navigate('/profiles', { state: { createFromCurrent: true } });
+  const openSaveModal = () => {
+    // Pre-fill with suggested values when opening modal
+    setProfileName(suggestedName);
+    setProfileDescription(suggestedDescription);
+    setSaveProfileModal(true);
+  };
+
+  const handleSaveProfile = async () => {
+    const name = profileName.trim() || suggestedName;
+    const description = profileDescription.trim() || suggestedDescription;
+
+    await createProfile({
+      name,
+      description,
+      save_current: true,
+    });
+
     setSaveProfileModal(false);
+    setProfileName('');
+    setProfileDescription('');
   };
 
   // No model loaded
@@ -142,7 +179,7 @@ export function SteeringPage() {
         featureCount={featureCount}
         onToggle={handleToggle}
         onClear={handleClear}
-        onSaveProfile={() => setSaveProfileModal(true)}
+        onSaveProfile={openSaveModal}
         isToggling={isEnabling || isDisabling}
         isClearing={isClearing}
       />
@@ -226,18 +263,41 @@ export function SteeringPage() {
             <Button variant="secondary" onClick={() => setSaveProfileModal(false)}>
               Cancel
             </Button>
-            <Button variant="primary" onClick={handleSaveProfile}>
-              Go to Profiles
+            <Button
+              variant="primary"
+              onClick={handleSaveProfile}
+              disabled={isCreating || featureCount === 0}
+              leftIcon={<Save className="w-4 h-4" />}
+            >
+              {isCreating ? 'Saving...' : 'Save Profile'}
             </Button>
           </>
         }
       >
-        <p className="text-slate-300">
-          You can save your current steering configuration as a profile from the Profiles page.
-        </p>
-        <p className="text-slate-400 text-sm mt-2">
-          This will allow you to quickly restore these settings later.
-        </p>
+        <div className="space-y-4">
+          <Input
+            label="Profile Name"
+            value={profileName}
+            onChange={(e) => setProfileName(e.target.value)}
+            placeholder={suggestedName}
+          />
+          <div>
+            <label className="block text-xs font-medium text-slate-400 mb-1.5">
+              Description
+            </label>
+            <textarea
+              className="w-full px-3.5 py-2.5 text-sm bg-slate-800/50 border border-slate-600/50 rounded-lg text-slate-200 placeholder-slate-500 focus:outline-none focus:border-primary-400/50 transition-colors duration-200 resize-none"
+              rows={3}
+              value={profileDescription}
+              onChange={(e) => setProfileDescription(e.target.value)}
+              placeholder={suggestedDescription}
+            />
+          </div>
+          <p className="text-xs text-slate-500">
+            This will save your current {featureCount} feature{featureCount !== 1 ? 's' : ''} as a
+            reusable profile.
+          </p>
+        </div>
       </Modal>
     </div>
   );

@@ -18,11 +18,11 @@ jobs:
           - name: backend
             context: .
             dockerfile: ./Dockerfile
-            repo: hitsainet/millm-backend
+            repo: hitsai/millm-backend
           - name: admin-ui
             context: ./admin-ui
             dockerfile: ./admin-ui/Dockerfile
-            repo: hitsainet/millm-admin-ui
+            repo: hitsai/millm-admin-ui
 
     steps:
       - name: Checkout source

@@ -53,4 +53,4 @@ jobs:
           git config --unset-all http.https://github.com/.extraheader || true
           git config --global --unset-all http.https://github.com/.extraheader || true
 
-          git push --force "https://x-access-token:${SYNC_TOKEN}@github.com/hitsai/miLLM.git" main
+          git push --force "https://x-access-token:${SYNC_TOKEN}@github.com/hitsainet/millm.git" main

@@ -44,10 +44,12 @@ RUN pip install --no-cache-dir . || pip install --no-cache-dir -e .
 # Copy application code
 COPY millm/ /app/millm/
 COPY alembic.ini /app/
+COPY docker-entrypoint.sh /app/
 
 # Create non-root user for security
 RUN useradd --create-home --shell /bin/bash millm \
-    && chown -R millm:millm /app
+    && chown -R millm:millm /app \
+    && chmod +x /app/docker-entrypoint.sh
 
 # Create model and SAE cache directories
 RUN mkdir -p /app/model_cache /app/sae_cache && chown -R millm:millm /app/model_cache /app/sae_cache
@@ -61,6 +63,9 @@ EXPOSE 8000
 # Health check
 HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
     CMD python -c "import urllib.request; urllib.request.urlopen('http://localhost:8000/api/health')" || exit 1
+
+# Entrypoint runs migrations before starting the app
+ENTRYPOINT ["/app/docker-entrypoint.sh"]
 
 # Default command
 CMD ["python", "-m", "uvicorn", "millm.main:app", "--host", "0.0.0.0", "--port", "8000"]

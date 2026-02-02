@@ -8,28 +8,22 @@ echo "Waiting for database..."
 max_retries=30
 retry_count=0
 
+# Extract host and port from DATABASE_URL
+# Format: postgresql+asyncpg://user:pass@host:port/dbname
+DB_HOST=$(echo $DATABASE_URL | sed -n 's/.*@\([^:]*\):.*/\1/p')
+DB_PORT=$(echo $DATABASE_URL | sed -n 's/.*:\([0-9]*\)\/.*/\1/p')
+
+if [ -z "$DB_HOST" ]; then
+    DB_HOST="db"
+fi
+if [ -z "$DB_PORT" ]; then
+    DB_PORT="5432"
+fi
+
+echo "Checking database at $DB_HOST:$DB_PORT..."
+
 while [ $retry_count -lt $max_retries ]; do
-    if python -c "
-import asyncio
-from sqlalchemy.ext.asyncio import create_async_engine
-import os
-
-async def check_db():
-    url = os.environ.get('DATABASE_URL', '')
-    if not url:
-        return False
-    engine = create_async_engine(url)
-    try:
-        async with engine.connect() as conn:
-            await conn.execute(type('obj', (object,), {'text': lambda x: None})())
-            return True
-    except:
-        return False
-    finally:
-        await engine.dispose()
-
-exit(0 if asyncio.run(check_db()) else 1)
-" 2>/dev/null; then
+    if python3 -c "import socket; s=socket.socket(); s.settimeout(2); s.connect(('${DB_HOST}', ${DB_PORT})); s.close(); exit(0)" 2>/dev/null; then
         echo "Database is ready!"
         break
     fi

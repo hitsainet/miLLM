@@ -195,126 +195,8 @@ async def get_attachment_status(
     ))
 
 
-@router.get(
-    "/{sae_id}",
-    response_model=ApiResponse[SAEMetadata],
-    summary="Get SAE details",
-    description="Returns details for a single SAE.",
-)
-async def get_sae(
-    sae_id: SAEId,
-    service: SAEServiceDep,
-) -> ApiResponse[SAEMetadata]:
-    """
-    Get details for a single SAE.
-
-    Args:
-        sae_id: The SAE's unique identifier.
-    """
-    sae = await service.get_sae(sae_id)
-    return ApiResponse.ok(SAEMetadata.from_sae(sae))
-
-
-@router.delete(
-    "/{sae_id}",
-    response_model=ApiResponse[DeleteResponse],
-    summary="Delete an SAE",
-    description="Delete an SAE from disk and database.",
-)
-async def delete_sae(
-    sae_id: SAEId,
-    service: SAEServiceDep,
-) -> ApiResponse[DeleteResponse]:
-    """
-    Delete an SAE.
-
-    Removes the SAE from the database and deletes cached files.
-    Cannot delete an SAE that is currently attached.
-    """
-    result = await service.delete_sae(sae_id)
-    return ApiResponse.ok(DeleteResponse(
-        status=result["status"],
-        sae_id=result["sae_id"],
-        freed_disk_mb=result["freed_disk_mb"],
-    ))
-
-
-@router.get(
-    "/{sae_id}/compatibility",
-    response_model=ApiResponse[CompatibilityResult],
-    summary="Check SAE compatibility",
-    description="Check if an SAE is compatible with the currently loaded model.",
-)
-async def check_compatibility(
-    sae_id: SAEId,
-    layer: int,
-    service: SAEServiceDep,
-) -> ApiResponse[CompatibilityResult]:
-    """
-    Check SAE compatibility with loaded model.
-
-    Validates dimensions, layer range, and trained model match.
-    """
-    result = await service.check_compatibility(sae_id, layer)
-    return ApiResponse.ok(CompatibilityResult(
-        compatible=result.compatible,
-        errors=result.errors,
-        warnings=result.warnings,
-    ))
-
-
-@router.post(
-    "/{sae_id}/attach",
-    response_model=ApiResponse[AttachResponse],
-    summary="Attach an SAE",
-    description="Attach an SAE to the currently loaded model.",
-)
-async def attach_sae(
-    sae_id: SAEId,
-    request: AttachSAERequest,
-    service: SAEServiceDep,
-) -> ApiResponse[AttachResponse]:
-    """
-    Attach an SAE to the model.
-
-    Loads the SAE into GPU memory and installs a forward hook
-    at the specified layer.
-    """
-    result = await service.attach_sae(sae_id, request.layer)
-    return ApiResponse.ok(AttachResponse(
-        status=result["status"],
-        sae_id=result["sae_id"],
-        layer=result["layer"],
-        memory_usage_mb=result["memory_usage_mb"],
-        warnings=result.get("warnings", []),
-    ))
-
-
-@router.post(
-    "/{sae_id}/detach",
-    response_model=ApiResponse[DetachResponse],
-    summary="Detach an SAE",
-    description="Detach an SAE from the model.",
-)
-async def detach_sae(
-    sae_id: SAEId,
-    service: SAEServiceDep,
-) -> ApiResponse[DetachResponse]:
-    """
-    Detach an SAE from the model.
-
-    Removes the forward hook and frees GPU memory.
-    """
-    result = await service.detach_sae(sae_id)
-    return ApiResponse.ok(DetachResponse(
-        status=result["status"],
-        sae_id=result["sae_id"],
-        memory_freed_mb=result["memory_freed_mb"],
-    ))
-
-
 # =============================================================================
-# Steering endpoints
+# Steering endpoints (MUST be before /{sae_id} routes to avoid path conflicts)
 # =============================================================================
 
 
@@ -489,7 +371,7 @@ async def clear_steering(
 
 
 # =============================================================================
-# Monitoring endpoints
+# Monitoring endpoints (MUST be before /{sae_id} routes)
 # =============================================================================
 
 
@@ -511,3 +393,126 @@ async def configure_monitoring(
     """
     service.enable_monitoring(request.enabled, request.features)
     return ApiResponse.ok(None)
+
+
+# =============================================================================
+# SAE-specific endpoints (with {sae_id} path parameter)
+# =============================================================================
+
+
+@router.get(
+    "/{sae_id}",
+    response_model=ApiResponse[SAEMetadata],
+    summary="Get SAE details",
+    description="Returns details for a single SAE.",
+)
+async def get_sae(
+    sae_id: SAEId,
+    service: SAEServiceDep,
+) -> ApiResponse[SAEMetadata]:
+    """
+    Get details for a single SAE.
+
+    Args:
+        sae_id: The SAE's unique identifier.
+    """
+    sae = await service.get_sae(sae_id)
+    return ApiResponse.ok(SAEMetadata.from_sae(sae))
+
+
+@router.delete(
+    "/{sae_id}",
+    response_model=ApiResponse[DeleteResponse],
+    summary="Delete an SAE",
+    description="Delete an SAE from disk and database.",
+)
+async def delete_sae(
+    sae_id: SAEId,
+    service: SAEServiceDep,
+) -> ApiResponse[DeleteResponse]:
+    """
+    Delete an SAE.
+
+    Removes the SAE from the database and deletes cached files.
+    Cannot delete an SAE that is currently attached.
+    """
+    result = await service.delete_sae(sae_id)
+    return ApiResponse.ok(DeleteResponse(
+        status=result["status"],
+        sae_id=result["sae_id"],
+        freed_disk_mb=result["freed_disk_mb"],
+    ))
+
+
+@router.get(
+    "/{sae_id}/compatibility",
+    response_model=ApiResponse[CompatibilityResult],
+    summary="Check SAE compatibility",
+    description="Check if an SAE is compatible with the currently loaded model.",
+)
+async def check_compatibility(
+    sae_id: SAEId,
+    layer: int,
+    service: SAEServiceDep,
+) -> ApiResponse[CompatibilityResult]:
+    """
+    Check SAE compatibility with loaded model.
+
+    Validates dimensions, layer range, and trained model match.
+    """
+    result = await service.check_compatibility(sae_id, layer)
+    return ApiResponse.ok(CompatibilityResult(
+        compatible=result.compatible,
+        errors=result.errors,
+        warnings=result.warnings,
+    ))
+
+
+@router.post(
+    "/{sae_id}/attach",
+    response_model=ApiResponse[AttachResponse],
+    summary="Attach an SAE",
+    description="Attach an SAE to the currently loaded model.",
+)
+async def attach_sae(
+    sae_id: SAEId,
+    request: AttachSAERequest,
+    service: SAEServiceDep,
+) -> ApiResponse[AttachResponse]:
+    """
+    Attach an SAE to the model.
+
+    Loads the SAE into GPU memory and installs a forward hook
+    at the specified layer.
+    """
+    result = await service.attach_sae(sae_id, request.layer)
+    return ApiResponse.ok(AttachResponse(
+        status=result["status"],
+        sae_id=result["sae_id"],
+        layer=result["layer"],
+        memory_usage_mb=result["memory_usage_mb"],
+        warnings=result.get("warnings", []),
+    ))
+
+
+@router.post(
+    "/{sae_id}/detach",
+    response_model=ApiResponse[DetachResponse],
+    summary="Detach an SAE",
+    description="Detach an SAE from the model.",
+)
+async def detach_sae(
+    sae_id: SAEId,
+    service: SAEServiceDep,
+) -> ApiResponse[DetachResponse]:
+    """
+    Detach an SAE from the model.
+
+    Removes the forward hook and frees GPU memory.
+    """
+    result = await service.detach_sae(sae_id)
+    return ApiResponse.ok(DetachResponse(
+        status=result["status"],
+        sae_id=result["sae_id"],
+        memory_freed_mb=result["memory_freed_mb"],
+    ))

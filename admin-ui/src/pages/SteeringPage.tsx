@@ -240,13 +240,13 @@ export function SteeringPage() {
           <Info className="w-5 h-5 text-primary-400 flex-shrink-0 mt-0.5" />
           <div className="text-sm text-slate-400">
             <p className="mb-2">
-              <strong className="text-slate-300">Positive values:</strong> Amplify the feature (e.g., +5 for more of that behavior)
+              <strong className="text-slate-300">Positive values:</strong> Amplify the feature (e.g., +50 to +100 for strong effect)
             </p>
             <p className="mb-2">
-              <strong className="text-slate-300">Negative values:</strong> Suppress the feature (e.g., -5 for less of that behavior)
+              <strong className="text-slate-300">Negative values:</strong> Suppress the feature (e.g., -50 to -100 to reduce behavior)
             </p>
             <p>
-              <strong className="text-slate-300">Tip:</strong> Use Neuronpedia to find feature indices and their meanings.
+              <strong className="text-slate-300">Tip:</strong> Use Neuronpedia to find feature indices and their meanings. Values around ±50-100 typically produce noticeable effects.
             </p>
           </div>
         </div>

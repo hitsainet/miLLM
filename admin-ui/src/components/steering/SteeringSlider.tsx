@@ -21,25 +21,29 @@ export function SteeringSlider({
   onRemove,
   disabled,
   label,
-  min = -10,
-  max = 10,
-  step = 0.1,
+  min = -200,
+  max = 200,
+  step = 1,
 }: SteeringSliderProps) {
   const [localStrength, setLocalStrength] = useState(strength);
-  const [inputValue, setInputValue] = useState(strength.toString());
+  const [inputValue, setInputValue] = useState(String(Math.round(strength)));
 
   useEffect(() => {
     setLocalStrength(strength);
-    setInputValue(strength.toString());
+    setInputValue(String(Math.round(strength)));
   }, [strength]);
 
   const handleSliderChange = (value: number) => {
-    setLocalStrength(value);
-    setInputValue(value.toFixed(1));
+    // Only update local state during drag - no API call
+    const rounded = Math.round(value);
+    setLocalStrength(rounded);
+    setInputValue(String(rounded));
   };
 
   const handleSliderCommit = (value: number) => {
-    onStrengthChange(value);
+    // Call API only when drag ends
+    const rounded = Math.round(value);
+    onStrengthChange(rounded);
   };
 
   const handleInputChange = (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -49,12 +53,12 @@ export function SteeringSlider({
   const handleInputBlur = () => {
     const value = parseFloat(inputValue);
     if (!isNaN(value)) {
-      const clamped = Math.max(min, Math.min(max, value));
+      const clamped = Math.round(Math.max(min, Math.min(max, value)));
       setLocalStrength(clamped);
-      setInputValue(clamped.toString());
+      setInputValue(String(clamped));
       onStrengthChange(clamped);
     } else {
-      setInputValue(localStrength.toString());
+      setInputValue(String(Math.round(localStrength)));
     }
   };
 

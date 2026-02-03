@@ -1,4 +1,4 @@
-import { useState, useCallback } from 'react';
+import { useState, useCallback, useEffect, useRef } from 'react';
 import type { ChangeEvent } from 'react';
 
 interface SliderProps {
@@ -30,13 +30,26 @@ export function Slider({
 }: SliderProps) {
   const [localValue, setLocalValue] = useState(value);
   const [isDragging, setIsDragging] = useState(false);
+  // Use ref to track latest value for onChangeEnd callback
+  const latestValueRef = useRef(value);
+
+  // Sync local value with prop when value changes externally
+  useEffect(() => {
+    if (!isDragging) {
+      setLocalValue(value);
+      latestValueRef.current = value;
+    }
+  }, [value, isDragging]);
 
   const handleChange = useCallback(
     (e: ChangeEvent<HTMLInputElement>) => {
       const newValue = parseFloat(e.target.value);
       setLocalValue(newValue);
+      latestValueRef.current = newValue;
+      // Real-time update during drag
+      onChange(newValue);
     },
-    []
+    [onChange]
   );
 
   const handleMouseDown = useCallback(() => {
@@ -45,15 +58,12 @@ export function Slider({
 
   const handleMouseUp = useCallback(() => {
     setIsDragging(false);
-    onChange(localValue);
-    onChangeEnd?.(localValue);
-  }, [localValue, onChange, onChangeEnd]);
-
-  // Sync local value with prop when not dragging
-  const displayValue = isDragging ? localValue : value;
+    // Use ref to get the latest value
+    onChangeEnd?.(latestValueRef.current);
+  }, [onChangeEnd]);
 
   // Calculate fill percentage
-  const percentage = ((displayValue - min) / (max - min)) * 100;
+  const percentage = ((localValue - min) / (max - min)) * 100;
 
   return (
     <div className={`w-full ${className}`}>
@@ -64,8 +74,8 @@ export function Slider({
           )}
           {showValue && (
             <span className="text-sm font-semibold text-slate-100 font-mono min-w-[50px] text-right">
-              {displayValue > 0 ? '+' : ''}
-              {formatValue(displayValue)}
+              {localValue > 0 ? '+' : ''}
+              {formatValue(localValue)}
             </span>
           )}
         </div>
@@ -76,21 +86,18 @@ export function Slider({
           min={min}
           max={max}
           step={step}
-          value={displayValue}
+          value={localValue}
           onChange={handleChange}
           onMouseDown={handleMouseDown}
           onMouseUp={handleMouseUp}
           onTouchStart={handleMouseDown}
           onTouchEnd={handleMouseUp}
           disabled={disabled}
-          className={`
-            w-full h-1.5 bg-slate-700/50 rounded-full appearance-none cursor-pointer
-            disabled:opacity-50 disabled:cursor-not-allowed
-          `}
+          className="slider-thumb w-full h-2 bg-slate-700/50 rounded-full appearance-none cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed"
           style={{
             background: `linear-gradient(to right,
-              ${displayValue >= 0 ? '#06b6d4' : '#f87171'} ${Math.min(percentage, 50)}%,
-              ${displayValue >= 0 ? '#06b6d4' : '#f87171'} ${Math.max(percentage, 50)}%,
+              ${localValue >= 0 ? '#06b6d4' : '#f87171'} ${Math.min(percentage, 50)}%,
+              ${localValue >= 0 ? '#06b6d4' : '#f87171'} ${Math.max(percentage, 50)}%,
               rgba(71, 85, 105, 0.5) ${Math.max(percentage, 50)}%,
               rgba(71, 85, 105, 0.5) 100%)`,
           }}

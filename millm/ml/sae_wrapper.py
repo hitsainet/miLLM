@@ -112,6 +112,13 @@ class LoadedSAE:
         Returns:
             Reconstructed activations (batch, seq_len, d_in).
         """
+        # Store original dtype for output conversion
+        original_dtype = x.dtype
+
+        # Cast input to SAE weight dtype if different
+        if x.dtype != self.W_enc.dtype:
+            x = x.to(self.W_enc.dtype)
+
         # Encode: x @ W_enc + b_enc with ReLU
         feature_acts = torch.relu(x @ self.W_enc + self.b_enc)
 
@@ -125,6 +132,10 @@ class LoadedSAE:
 
         # Decode: feature_acts @ W_dec + b_dec
         reconstructed = feature_acts @ self.W_dec + self.b_dec
+
+        # Cast back to original dtype
+        if reconstructed.dtype != original_dtype:
+            reconstructed = reconstructed.to(original_dtype)
 
         return reconstructed
 

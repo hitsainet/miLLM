@@ -1,7 +1,12 @@
 """
 Model hook management for SAE attachment.
 
-Installs PyTorch forward hooks to intercept and modify activations.
+Implements direct residual stream steering (miStudio/Neuronpedia compatible).
+
+Steering Formula:
+    modified_activations = original_activations + Σ(strength_i × decoder_direction_i)
+
+The hook applies steering uniformly to all token positions without full SAE reconstruction.
 """
 
 import logging
@@ -20,15 +25,18 @@ class SAEHooker:
     """
     Manages PyTorch forward hooks for SAE attachment.
 
-    Installs hooks that intercept layer outputs, apply SAE transformation,
-    and return modified activations.
+    Implements direct residual stream steering (miStudio/Neuronpedia compatible):
+    - Steering is applied by adding decoder directions to hidden states
+    - Applied uniformly to ALL token positions
+    - No full SAE encode/decode for steering (lightweight)
+    - Optional monitoring via SAE encoding
 
     Hook function signature:
         hook(module, input, output) -> modified_output
 
     Thread safety:
         Hook functions are called during forward pass.
-        Ensure SAE forward is thread-safe.
+        SAE steering/monitoring is thread-safe.
 
     Usage:
         hooker = SAEHooker()
@@ -66,7 +74,7 @@ class SAEHooker:
         # Register hook
         handle = target_layer.register_forward_hook(hook_fn)
 
-        logger.info(f"Installed SAE hook at layer {layer}")
+        logger.info(f"Installed SAE hook at layer {layer} (direct steering mode)")
         return handle
 
     def remove(self, handle: RemovableHandle) -> None:
@@ -81,9 +89,10 @@ class SAEHooker:
 
     def _create_hook_fn(self, sae: LoadedSAE) -> Callable:
         """
-        Create the hook function for SAE.
+        Create the hook function for direct steering.
 
-        The hook intercepts layer output, applies SAE, returns modified output.
+        The hook applies steering by adding decoder directions to hidden states,
+        matching miStudio/Neuronpedia behavior.
         """
 
         def hook_fn(
@@ -92,22 +101,37 @@ class SAEHooker:
             output: Union[Tensor, Tuple[Tensor, ...]],
         ) -> Union[Tensor, Tuple[Tensor, ...]]:
             """
-            Forward hook that applies SAE.
+            Forward hook that applies direct residual stream steering.
 
             Handles different output formats:
             - Tuple (hidden_states, ...) - common in transformers
             - Single tensor
             """
-            # Handle tuple output (common for transformer layers)
+            # Extract hidden states based on output format
             if isinstance(output, tuple):
                 hidden_states = output[0]
-                # Apply SAE
-                modified = sae.forward(hidden_states)
-                # Return with same structure
+            else:
+                hidden_states = output
+
+            # Capture activations for monitoring (if enabled)
+            # This uses SAE encoding to get feature activations
+            if sae.is_monitoring_enabled:
+                with torch.no_grad():
+                    # Cast to SAE dtype for encoding
+                    x = hidden_states
+                    if x.dtype != sae.W_enc.dtype:
+                        x = x.to(sae.W_enc.dtype)
+                    sae._capture_activations(sae.encode(x))
+
+            # Apply direct steering (miStudio/Neuronpedia compatible)
+            # This adds the pre-computed steering delta to hidden states
+            modified = sae.apply_steering(hidden_states)
+
+            # Return with same structure as input
+            if isinstance(output, tuple):
                 return (modified,) + output[1:]
             else:
-                # Single tensor output
-                return sae.forward(output)
+                return modified
 
         return hook_fn
 

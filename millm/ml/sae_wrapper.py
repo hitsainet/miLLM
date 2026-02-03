@@ -2,6 +2,12 @@
 LoadedSAE wrapper for inference.
 
 Handles encoding, decoding, steering, and monitoring for attached SAEs.
+
+Steering Formula (miStudio/Neuronpedia compatible):
+    modified_activations = original_activations + Σ(strength_i × decoder_direction_i)
+
+Where decoder_direction_i = W_dec[feature_idx_i, :] is the decoder column for feature i.
+This applies steering directly to the residual stream, uniformly to all token positions.
 """
 
 import logging
@@ -19,7 +25,14 @@ class LoadedSAE:
     """
     Loaded SAE with encoder and decoder weights.
 
-    Implements the SAE forward pass with optional steering and monitoring.
+    Implements direct residual stream steering (miStudio/Neuronpedia compatible)
+    and optional SAE encode/decode for monitoring.
+
+    Steering approach:
+    - Direct steering: Add steering delta directly to hidden states
+    - Delta = Σ (strength × decoder_column) for all configured features
+    - Applied uniformly to ALL token positions
+    - Neuronpedia-compatible strength semantics (0=none, 1=1x, 80=strong)
 
     Thread-safety notes:
     - Forward pass is thread-safe (no mutation)
@@ -39,7 +52,7 @@ class LoadedSAE:
         b_dec: Decoder bias vector.
         config: SAE configuration.
         device: Current device (cpu/cuda).
-        d_in: Input dimension.
+        d_in: Input dimension (hidden_size).
         d_sae: SAE feature dimension.
     """
 
@@ -85,10 +98,11 @@ class LoadedSAE:
             f"d_sae mismatch: weights have {self.d_sae}, config has {config.d_sae}"
         )
 
-        # Steering state
+        # Steering state (direct residual stream steering)
         self._steering_values: dict[int, float] = {}
         self._steering_enabled: bool = False
-        self._steering_vector: Optional[Tensor] = None
+        # Pre-computed steering delta in residual stream space (d_in,)
+        self._steering_delta: Optional[Tensor] = None
 
         # Monitoring state
         self._monitoring_enabled: bool = False
@@ -102,9 +116,10 @@ class LoadedSAE:
 
     def forward(self, x: Tensor) -> Tensor:
         """
-        Forward pass through SAE.
+        Forward pass through SAE (encode -> decode).
 
-        Performs: encode -> (optional steering) -> decode
+        Note: This performs SAE reconstruction but NOT steering.
+        Steering is applied directly via apply_steering() for miStudio compatibility.
 
         Args:
             x: Input activations (batch, seq_len, d_in).
@@ -126,10 +141,6 @@ class LoadedSAE:
         if self._monitoring_enabled:
             self._capture_activations(feature_acts)
 
-        # Apply steering
-        if self._steering_enabled and self._steering_vector is not None:
-            feature_acts = feature_acts + self._steering_vector
-
         # Decode: feature_acts @ W_dec + b_dec
         reconstructed = feature_acts @ self.W_dec + self.b_dec
 
@@ -138,6 +149,61 @@ class LoadedSAE:
             reconstructed = reconstructed.to(original_dtype)
 
         return reconstructed
+
+    def apply_steering(self, hidden_states: Tensor) -> Tensor:
+        """
+        Apply direct residual stream steering (miStudio/Neuronpedia compatible).
+
+        Formula: modified = original + Σ(strength_i × decoder_direction_i)
+
+        This adds the steering delta uniformly to ALL token positions.
+        The steering delta is pre-computed from decoder columns.
+
+        Args:
+            hidden_states: Model activations (batch, seq_len, d_in).
+
+        Returns:
+            Modified activations with steering applied.
+        """
+        if not self._steering_enabled or self._steering_delta is None:
+            return hidden_states
+
+        # Ensure steering delta matches hidden states dtype/device
+        delta = self._steering_delta
+        if delta.device != hidden_states.device or delta.dtype != hidden_states.dtype:
+            delta = delta.to(device=hidden_states.device, dtype=hidden_states.dtype)
+
+        # Broadcast delta to all tokens: [d_in] -> [1, 1, d_in] -> [batch, seq_len, d_in]
+        # Use in-place add for Gemma-2 compatibility (some architectures require this)
+        batch_size, seq_len, _ = hidden_states.shape
+        delta_expanded = delta.unsqueeze(0).unsqueeze(0).expand(batch_size, seq_len, -1)
+
+        # Apply steering in-place
+        hidden_states = hidden_states + delta_expanded
+
+        return hidden_states
+
+    def get_decoder_direction(self, feature_idx: int) -> Tensor:
+        """
+        Get the decoder direction (column) for a feature.
+
+        This is the direction in residual stream space that the feature represents.
+
+        Args:
+            feature_idx: Feature index (0 to d_sae-1).
+
+        Returns:
+            Decoder direction vector (d_in,).
+
+        Raises:
+            ValueError: If feature_idx is out of range.
+        """
+        if not 0 <= feature_idx < self.d_sae:
+            raise ValueError(
+                f"Feature index {feature_idx} out of range [0, {self.d_sae})"
+            )
+        # W_dec shape is (d_sae, d_in), so W_dec[feature_idx, :] gives (d_in,)
+        return self.W_dec[feature_idx, :]
 
     def encode(self, x: Tensor) -> Tensor:
         """
@@ -232,18 +298,45 @@ class LoadedSAE:
         """Check if steering is enabled."""
         return self._steering_enabled
 
-    def _rebuild_steering_vector(self) -> None:
-        """Rebuild pre-computed steering vector from values."""
+    @property
+    def steering_delta(self) -> Optional[Tensor]:
+        """Get the pre-computed steering delta (for hook access)."""
+        return self._steering_delta
+
+    def _rebuild_steering_delta(self) -> None:
+        """
+        Rebuild pre-computed steering delta from values.
+
+        Computes: delta = Σ (strength_i × decoder_direction_i)
+        where decoder_direction_i = W_dec[feature_idx_i, :]
+
+        The result is in residual stream space (d_in dimensions).
+        """
         if not self._steering_values:
-            self._steering_vector = None
+            self._steering_delta = None
             return
 
-        # Create sparse steering vector
-        vector = torch.zeros(self.d_sae, device=self.device, dtype=self.W_enc.dtype)
-        for idx, value in self._steering_values.items():
-            vector[idx] = value
+        # Accumulate steering vectors from all features
+        # Result shape: (d_in,) - in residual stream space
+        delta = torch.zeros(self.d_in, device=self.device, dtype=self.W_dec.dtype)
 
-        self._steering_vector = vector
+        for feature_idx, strength in self._steering_values.items():
+            if strength == 0:
+                continue
+            # Get decoder direction for this feature: W_dec[feature_idx, :] -> (d_in,)
+            decoder_direction = self.W_dec[feature_idx, :]
+            # Accumulate: strength × decoder_direction
+            delta = delta + (strength * decoder_direction)
+
+        self._steering_delta = delta
+
+        logger.debug(
+            f"Rebuilt steering delta: {len(self._steering_values)} features, "
+            f"delta norm={delta.norm().item():.4f}"
+        )
+
+    # Alias for backward compatibility
+    _rebuild_steering_vector = _rebuild_steering_delta
 
     # ==========================================================================
     # Monitoring Methods
@@ -318,8 +411,8 @@ class LoadedSAE:
         self.W_dec = self.W_dec.to(device)
         self.b_dec = self.b_dec.to(device)
 
-        if self._steering_vector is not None:
-            self._steering_vector = self._steering_vector.to(device)
+        if self._steering_delta is not None:
+            self._steering_delta = self._steering_delta.to(device)
 
         self.device = device
         logger.debug(f"LoadedSAE moved to {device}")

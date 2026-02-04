@@ -179,7 +179,8 @@ class InferenceService:
                     temperature=gen_config.temperature if gen_config.do_sample else 1.0,
                     top_p=gen_config.top_p,
                     do_sample=gen_config.do_sample,
-                    pad_token_id=self._tokenizer.eos_token_id,
+                    pad_token_id=self._tokenizer.pad_token_id or self._tokenizer.eos_token_id,
+                    eos_token_id=self._tokenizer.eos_token_id,
                 )
 
             # Decode output
@@ -255,7 +256,8 @@ class InferenceService:
                 "temperature": gen_config.temperature if gen_config.do_sample else 1.0,
                 "top_p": gen_config.top_p,
                 "do_sample": gen_config.do_sample,
-                "pad_token_id": self._tokenizer.eos_token_id,
+                "pad_token_id": self._tokenizer.pad_token_id or self._tokenizer.eos_token_id,
+                "eos_token_id": self._tokenizer.eos_token_id,
             }
 
             # Apply steering if active
@@ -369,7 +371,8 @@ class InferenceService:
                     temperature=gen_config.temperature if gen_config.do_sample else 1.0,
                     top_p=gen_config.top_p,
                     do_sample=gen_config.do_sample,
-                    pad_token_id=self._tokenizer.eos_token_id,
+                    pad_token_id=self._tokenizer.pad_token_id or self._tokenizer.eos_token_id,
+                    eos_token_id=self._tokenizer.eos_token_id,
                 )
 
             # Decode output
@@ -482,7 +485,7 @@ class InferenceService:
         Format chat messages into prompt string.
 
         Uses model's chat template if available, otherwise falls back
-        to simple concatenation format.
+        to Gemma-style format with turn markers.
 
         Args:
             messages: List of chat messages
@@ -493,24 +496,29 @@ class InferenceService:
         # Prefer model's built-in chat template
         if hasattr(self._tokenizer, "apply_chat_template"):
             try:
-                return self._tokenizer.apply_chat_template(
-                    [{"role": m.role, "content": m.content} for m in messages],
-                    tokenize=False,
-                    add_generation_prompt=True,
-                )
+                # Check if chat_template is actually set
+                if self._tokenizer.chat_template:
+                    return self._tokenizer.apply_chat_template(
+                        [{"role": m.role, "content": m.content} for m in messages],
+                        tokenize=False,
+                        add_generation_prompt=True,
+                    )
             except Exception as e:
                 logger.warning(
                     "chat_template_failed_using_fallback", error=str(e)
                 )
 
-        # Fallback: simple concatenation
+        # Fallback: Gemma-style format with turn markers
+        # This format works well with Gemma 2 and similar models
         parts = []
         for msg in messages:
             if msg.role == "system":
-                parts.append(f"System: {msg.content}")
+                # Prepend system message to first user turn
+                parts.append(f"<start_of_turn>user\n{msg.content}")
             elif msg.role == "user":
-                parts.append(f"User: {msg.content}")
+                parts.append(f"<start_of_turn>user\n{msg.content}<end_of_turn>")
             elif msg.role == "assistant":
-                parts.append(f"Assistant: {msg.content}")
-        parts.append("Assistant:")
+                parts.append(f"<start_of_turn>model\n{msg.content}<end_of_turn>")
+        # Add generation prompt
+        parts.append("<start_of_turn>model")
         return "\n".join(parts)

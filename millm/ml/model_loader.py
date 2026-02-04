@@ -23,6 +23,7 @@ class LoadedModel:
     """Represents a model loaded in GPU memory."""
 
     model_id: int
+    model_name: str  # Human-readable model name (e.g., "gemma-2-2b")
     model: Any  # AutoModelForCausalLM
     tokenizer: Any  # AutoTokenizer
     loaded_at: datetime
@@ -106,8 +107,9 @@ class ModelLoadContext:
     Ensures cleanup on any failure during the loading process.
     """
 
-    def __init__(self, model_id: int) -> None:
+    def __init__(self, model_id: int, model_name: str) -> None:
         self.model_id = model_id
+        self.model_name = model_name
         self.model: Any = None
         self.tokenizer: Any = None
 
@@ -253,6 +255,7 @@ class ModelLoadContext:
 
         return LoadedModel(
             model_id=self.model_id,
+            model_name=self.model_name,
             model=self.model,
             tokenizer=self.tokenizer,
             loaded_at=datetime.utcnow(),
@@ -292,6 +295,7 @@ class ModelLoader:
     def load(
         self,
         model_id: int,
+        model_name: str,
         cache_path: str,
         quantization: str,
         estimated_memory_mb: int,
@@ -305,6 +309,7 @@ class ModelLoader:
 
         Args:
             model_id: Database ID of the model
+            model_name: Human-readable model name (e.g., "gemma-2-2b")
             cache_path: Path to the cached model files
             quantization: Quantization type ("FP16", "Q8", "Q4")
             estimated_memory_mb: Estimated memory requirement in MB
@@ -342,7 +347,7 @@ class ModelLoader:
             )
 
         # Load with context manager for cleanup on failure
-        with ModelLoadContext(model_id) as ctx:
+        with ModelLoadContext(model_id, model_name) as ctx:
             loaded = ctx.load(
                 cache_path=cache_path,
                 quantization=quantization,

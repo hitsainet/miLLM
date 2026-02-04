@@ -803,6 +803,7 @@ class ModelService:
             self._executor,
             self._load_worker,
             model_id,
+            model.name,
             model.cache_path,
             model.quantization.value,
             model.estimated_memory_mb or 0,
@@ -814,6 +815,7 @@ class ModelService:
     def _load_worker(
         self,
         model_id: int,
+        model_name: str,
         cache_path: str,
         quantization: str,
         estimated_memory_mb: int,
@@ -837,6 +839,7 @@ class ModelService:
 
             loaded = self.loader.load(
                 model_id=model_id,
+                model_name=model_name,
                 cache_path=full_cache_path,
                 quantization=quantization,
                 estimated_memory_mb=estimated_memory_mb,

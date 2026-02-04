@@ -112,18 +112,8 @@ class InferenceService:
         if loaded is None:
             return None
 
-        # Get model name from model_service if available, otherwise use model_id
-        name = str(loaded.model_id)
-        if self._model_service:
-            # Try to get model info from service
-            try:
-                # This would need to be async, so we use a simple approach
-                name = getattr(loaded.tokenizer, "name_or_path", str(loaded.model_id))
-            except Exception:
-                pass
-
         return LoadedModelInfo(
-            name=name,
+            name=loaded.model_name,
             model_id=loaded.model_id,
             loaded_at=loaded.loaded_at,
         )

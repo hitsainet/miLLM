@@ -9,8 +9,7 @@ Supports both streaming and non-streaming responses.
 from typing import Union
 
 from fastapi import APIRouter, Depends
-from fastapi.responses import JSONResponse
-from sse_starlette.sse import EventSourceResponse
+from fastapi.responses import JSONResponse, StreamingResponse
 
 from millm.api.dependencies import get_inference_service
 from millm.api.routes.openai.errors import model_not_loaded_error
@@ -36,7 +35,7 @@ logger = get_logger(__name__)
 async def create_chat_completion(
     request: ChatCompletionRequest,
     inference: InferenceService = Depends(get_inference_service),
-) -> Union[ChatCompletionResponse, EventSourceResponse, JSONResponse]:
+) -> Union[ChatCompletionResponse, StreamingResponse, JSONResponse]:
     """
     Create a chat completion.
 
@@ -56,7 +55,7 @@ async def create_chat_completion(
 
     # Handle streaming vs non-streaming
     if request.stream:
-        return EventSourceResponse(
+        return StreamingResponse(
             inference.stream_chat_completion(request),
             media_type="text/event-stream",
         )

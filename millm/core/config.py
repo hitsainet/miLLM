@@ -54,6 +54,9 @@ class Settings(BaseSettings):
     # Redis (optional, for distributed state)
     REDIS_URL: Optional[str] = None
 
+    # Auto-load model on startup (model ID or name, empty to disable)
+    AUTO_LOAD_MODEL: Optional[str] = None
+
     @property
     def cors_origins_list(self) -> list[str]:
         """Parse CORS origins from comma-separated string."""

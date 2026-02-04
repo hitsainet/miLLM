@@ -21,6 +21,84 @@ from millm.core.logging import get_logger, setup_logging
 logger = get_logger(__name__)
 
 
+async def _auto_load_model(model_identifier: str) -> None:
+    """
+    Auto-load a model on startup.
+
+    Args:
+        model_identifier: Model ID (numeric) or model name
+    """
+    from millm.db.base import async_session_factory
+    from millm.db.repositories.model_repository import ModelRepository
+    from millm.ml.model_downloader import ModelDownloader
+    from millm.ml.model_loader import ModelLoader
+    from millm.services.model_service import ModelService
+
+    logger.info("auto_load_model_starting", model=model_identifier)
+
+    async with async_session_factory() as session:
+        repository = ModelRepository(session)
+        downloader = ModelDownloader()
+        loader = ModelLoader()
+        service = ModelService(
+            repository=repository,
+            downloader=downloader,
+            loader=loader,
+            emitter=None,  # No progress emitter needed for auto-load
+        )
+
+        # Find model by ID or name
+        model = None
+        if model_identifier.isdigit():
+            model = await service.get_model(int(model_identifier))
+        else:
+            # Search by name
+            models = await service.list_models()
+            for m in models:
+                if m.name == model_identifier:
+                    model = m
+                    break
+
+        if not model:
+            logger.warning("auto_load_model_not_found", model=model_identifier)
+            return
+
+        if model.status.value == "loaded":
+            logger.info("auto_load_model_already_loaded", model_id=model.id, name=model.name)
+            return
+
+        if model.status.value != "ready":
+            logger.warning(
+                "auto_load_model_not_ready",
+                model_id=model.id,
+                name=model.name,
+                status=model.status.value,
+            )
+            return
+
+        # Load the model
+        logger.info("auto_load_model_loading", model_id=model.id, name=model.name)
+        await service.load_model(model.id)
+
+        # Wait for model to finish loading (poll status)
+        import asyncio
+        for _ in range(120):  # Max 2 minutes
+            await asyncio.sleep(1)
+            updated_model = await service.get_model(model.id)
+            if updated_model.status.value == "loaded":
+                logger.info("auto_load_model_complete", model_id=model.id, name=model.name)
+                return
+            elif updated_model.status.value == "error":
+                logger.error(
+                    "auto_load_model_error",
+                    model_id=model.id,
+                    error=updated_model.error_message,
+                )
+                return
+
+        logger.warning("auto_load_model_timeout", model_id=model.id, name=model.name)
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     """
@@ -76,6 +154,13 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
             sae_state.clear()
     except Exception as e:
         logger.warning("failed_to_clear_sae_state", error=str(e))
+
+    # Auto-load model if configured
+    if settings.AUTO_LOAD_MODEL:
+        try:
+            await _auto_load_model(settings.AUTO_LOAD_MODEL)
+        except Exception as e:
+            logger.error("auto_load_model_failed", error=str(e), model=settings.AUTO_LOAD_MODEL)
 
     yield
 

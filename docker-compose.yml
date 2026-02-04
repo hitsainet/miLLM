@@ -73,6 +73,7 @@ services:
       - DEBUG=${DEBUG:-false}
       - LOG_LEVEL=${LOG_LEVEL:-INFO}
       - CORS_ORIGINS=${CORS_ORIGINS:-http://localhost,http://localhost:3000,http://millm.mcslab.io}
+      - AUTO_LOAD_MODEL=${AUTO_LOAD_MODEL:-}
     ports:
       - "${API_PORT:-8000}:8000"
     volumes:

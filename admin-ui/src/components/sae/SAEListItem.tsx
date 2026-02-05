@@ -128,7 +128,20 @@ export function SAEListItem({
             )}
           </div>
         ) : sae.status === 'error' ? (
-          <Badge variant="danger" size="sm">Error</Badge>
+          <div className="flex items-center gap-2">
+            <Badge variant="danger" size="sm">Error</Badge>
+            <Button
+              variant="ghost"
+              size="sm"
+              onClick={onDelete}
+              loading={isDeleting}
+              disabled={isLoading}
+              className="text-slate-400 hover:text-red-400"
+              title="Delete failed SAE"
+            >
+              <Trash2 className="w-4 h-4" />
+            </Button>
+          </div>
         ) : (
           <>
             {isAttached ? (

@@ -1,44 +1,30 @@
 # miLLM Backend Dockerfile
-# Supports NVIDIA GPU for model inference
+# Two targets: 'runtime' (slim, for k8s) and 'cuda' (full CUDA, for local dev)
 
 # =============================================================================
-# Runtime Stage (Single stage for simplicity with CUDA support)
+# Runtime Stage — slim Python, GPU via nvidia-container-toolkit on host
 # =============================================================================
-FROM nvidia/cuda:12.4.1-devel-ubuntu22.04 as runtime
+FROM python:3.11-slim as runtime
 
-# Set environment variables
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
     PYTHONPATH=/app \
     PIP_NO_CACHE_DIR=1 \
-    PIP_DISABLE_PIP_VERSION_CHECK=1 \
-    DEBIAN_FRONTEND=noninteractive
+    PIP_DISABLE_PIP_VERSION_CHECK=1
 
 WORKDIR /app
 
-# Install Python 3.11 from deadsnakes PPA and dependencies
+# Install minimal system deps
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    software-properties-common \
-    && add-apt-repository -y ppa:deadsnakes/ppa \
-    && apt-get update && apt-get install -y --no-install-recommends \
-    python3.11 \
-    python3.11-venv \
-    python3.11-dev \
-    python3-pip \
     libpq5 \
     curl \
-    && rm -rf /var/lib/apt/lists/* \
-    && ln -sf /usr/bin/python3.11 /usr/bin/python \
-    && ln -sf /usr/bin/python3.11 /usr/bin/python3
-
-# Upgrade pip
-RUN python -m pip install --upgrade pip setuptools wheel
+    && rm -rf /var/lib/apt/lists/*
 
 # Copy only requirements first for better caching
 COPY pyproject.toml ./
 COPY millm/__init__.py millm/__init__.py
 
-# Install dependencies
+# Install dependencies (torch bundles its own CUDA runtime)
 RUN pip install --no-cache-dir . || pip install --no-cache-dir -e .
 
 # Copy application code

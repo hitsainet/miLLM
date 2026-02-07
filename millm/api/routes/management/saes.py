@@ -9,6 +9,7 @@ from typing import Annotated
 from fastapi import APIRouter, Path
 
 from millm.api.dependencies import SAEServiceDep
+from millm.sockets.progress import progress_emitter
 from millm.api.schemas.common import ApiResponse
 from millm.api.schemas.sae import (
     AttachResponse,
@@ -99,6 +100,7 @@ async def download_sae(
         repository_id=request.repository_id,
         revision=request.revision,
         file_path=request.file_path,
+        token=request.hf_token,
     )
     return ApiResponse.ok(DownloadResponse(
         sae_id=result.sae_id,
@@ -200,6 +202,17 @@ async def get_attachment_status(
 # =============================================================================
 
 
+async def _emit_steering_update(service: "SAEServiceDep", enabled: bool) -> None:
+    """Emit steering:update WebSocket event after steering changes."""
+    values = service.get_steering_values() if service.get_attachment_status().is_attached else {}
+    str_values = {str(k): v for k, v in values.items()}
+    await progress_emitter.emit_steering_changed(
+        enabled=enabled,
+        values=str_values,
+        active_count=len(values),
+    )
+
+
 @router.get(
     "/steering",
     response_model=ApiResponse[SteeringStatus],
@@ -241,6 +254,7 @@ async def set_steering(
     service.set_steering(request.feature_idx, request.value)
     service.enable_steering(True)
 
+    await _emit_steering_update(service, True)
     return ApiResponse.ok(SteeringStatus(
         enabled=True,
         values=service.get_steering_values(),
@@ -265,6 +279,7 @@ async def set_steering_batch(
     service.set_steering_batch(request.steering)
     service.enable_steering(True)
 
+    await _emit_steering_update(service, True)
     return ApiResponse.ok(SteeringStatus(
         enabled=True,
         values=service.get_steering_values(),
@@ -291,6 +306,7 @@ async def enable_steering(
     attachment = service.get_attachment_status()
     values = service.get_steering_values() if attachment.is_attached else {}
 
+    await _emit_steering_update(service, True)
     return ApiResponse.ok(SteeringStatus(
         enabled=True,
         values=values,
@@ -316,6 +332,7 @@ async def disable_steering(
     attachment = service.get_attachment_status()
     values = service.get_steering_values() if attachment.is_attached else {}
 
+    await _emit_steering_update(service, False)
     return ApiResponse.ok(SteeringStatus(
         enabled=False,
         values=values,
@@ -342,6 +359,7 @@ async def clear_feature_steering(
     attachment = service.get_attachment_status()
     values = service.get_steering_values() if attachment.is_attached else {}
 
+    await _emit_steering_update(service, attachment.steering_enabled)
     return ApiResponse.ok(SteeringStatus(
         enabled=attachment.steering_enabled,
         values=values,
@@ -364,6 +382,7 @@ async def clear_steering(
     """
     service.clear_steering()
 
+    await _emit_steering_update(service, False)
     return ApiResponse.ok(SteeringStatus(
         enabled=False,
         values={},

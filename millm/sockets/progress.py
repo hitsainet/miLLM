@@ -451,6 +451,36 @@ class ProgressEmitter:
         logger.info("emitted_sae_detached", sae_id=sae_id)
 
     # =========================================================================
+    # Steering Events
+    # =========================================================================
+
+    async def emit_steering_changed(
+        self,
+        enabled: bool,
+        values: dict[str, float],
+        active_count: int = 0,
+    ) -> None:
+        """
+        Emit steering state changed event.
+
+        Args:
+            enabled: Whether steering is enabled
+            values: Current steering values {feature_idx: strength}
+            active_count: Number of active features
+        """
+        if self._sio is None:
+            return
+
+        await self._sio.emit(
+            "steering:update",
+            {
+                "enabled": enabled,
+                "values": values,
+                "activeCount": active_count,
+            },
+        )
+
+    # =========================================================================
     # Monitoring Events
     # =========================================================================
 

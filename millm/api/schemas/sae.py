@@ -31,6 +31,10 @@ class DownloadSAERequest(BaseModel):
         description="Specific SAE file path to download (e.g., 'layer_12/width_16k/average_l0_50/params.npz'). Downloads only this file and its directory.",
         examples=["layer_12/width_16k/average_l0_50/params.npz"],
     )
+    hf_token: str | None = Field(
+        default=None,
+        description="HuggingFace access token for gated repositories (never logged)",
+    )
 
 
 class AttachSAERequest(BaseModel):

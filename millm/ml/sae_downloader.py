@@ -54,6 +54,7 @@ class SAEDownloader:
         revision: str = "main",
         file_path: str | None = None,
         progress_callback: Optional[Callable[[dict[str, Any]], None]] = None,
+        token: Optional[str] = None,
     ) -> str:
         """
         Download SAE from repository.
@@ -84,6 +85,7 @@ class SAEDownloader:
             revision,
             file_path,
             progress_callback,
+            token,
         )
 
         return cache_path
@@ -94,6 +96,7 @@ class SAEDownloader:
         revision: str,
         file_path: str | None,
         progress_callback: Optional[Callable[[dict[str, Any]], None]],
+        token: Optional[str] = None,
     ) -> str:
         """
         Synchronous download implementation.
@@ -134,6 +137,12 @@ class SAEDownloader:
                 allow_patterns = [f"{sae_dir}/*"]
                 logger.info(f"Filtering download to: {allow_patterns}")
 
+            # Resolve token: parameter > environment > None
+            effective_token = token
+            if not effective_token:
+                import os
+                effective_token = os.environ.get("HF_TOKEN")
+
             # Download with huggingface_hub
             local_path = snapshot_download(
                 repo_id=repository_id,
@@ -141,6 +150,7 @@ class SAEDownloader:
                 cache_dir=str(self.cache_dir),
                 resume_download=True,
                 allow_patterns=allow_patterns,
+                token=effective_token,
                 # Only download essential files
                 ignore_patterns=[
                     "*.md",

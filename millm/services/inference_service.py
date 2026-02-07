@@ -41,6 +41,7 @@ from millm.services.request_queue import RequestQueue
 
 if TYPE_CHECKING:
     from millm.services.model_service import ModelService
+    from millm.services.monitoring_service import MonitoringService
 
 logger = get_logger(__name__)
 
@@ -153,6 +154,33 @@ class InferenceService:
         kwargs["eos_token_id"] = self._tokenizer.eos_token_id
         return kwargs
 
+    def _notify_monitoring(self, request_id: Optional[str] = None) -> None:
+        """
+        Forward captured activations to the monitoring service.
+
+        Reads last feature activations from the attached SAE (captured
+        during the forward hook) and sends them to MonitoringService.
+        """
+        try:
+            from millm.services.sae_service import AttachedSAEState
+            from millm.api.dependencies import _monitoring_service
+
+            sae_state = AttachedSAEState()
+            sae = sae_state.attached_sae
+            if sae is None or not sae.is_monitoring_enabled:
+                return
+
+            activations = sae.get_last_feature_activations()
+            if activations is None or _monitoring_service is None:
+                return
+
+            _monitoring_service.on_activation(
+                activations, request_id=request_id
+            )
+        except Exception as e:
+            # Never let monitoring errors affect inference
+            logger.debug("monitoring_notification_failed", error=str(e))
+
     def _determine_finish_reason(
         self, generated_token_count: int, max_new_tokens: int
     ) -> str:
@@ -232,14 +260,11 @@ class InferenceService:
             for i in range(n):
                 # Generate
                 with torch.no_grad():
-                    # Apply steering if active
-                    if self._steering_service and getattr(
-                        self._steering_service, "is_active", False
-                    ):
-                        self._steering_service.prepare_generation()
-
                     generate_kwargs = self._build_generate_kwargs(gen_config, inputs)
                     outputs = self._model.generate(**generate_kwargs)
+
+                # Notify monitoring after generation
+                self._notify_monitoring(request_id=completion_id)
 
                 # Decode output
                 generated_ids = outputs[0][prompt_tokens:]
@@ -328,12 +353,6 @@ class InferenceService:
             generation_kwargs = self._build_generate_kwargs(gen_config, inputs)
             generation_kwargs["streamer"] = streamer
 
-            # Apply steering if active
-            if self._steering_service and getattr(
-                self._steering_service, "is_active", False
-            ):
-                self._steering_service.prepare_generation()
-
             # Start generation thread with error capture
             thread_error: list[Exception] = []
             thread = Thread(
@@ -358,10 +377,44 @@ class InferenceService:
                 )
                 yield f"data: {first_chunk.model_dump_json(exclude_none=True)}\n\n"
 
-                # Stream tokens, counting for finish_reason
+                # Stream tokens with stop sequence checking
                 token_count = 0
+                accumulated_text = ""
+                stop_sequences = gen_config.stop_sequences
+                stopped_by_sequence = False
+
                 for token in streamer:
                     if token:
+                        # Check if accumulated text contains a stop sequence
+                        if stop_sequences:
+                            accumulated_text += token
+                            truncated, found = self._apply_stop_sequences(
+                                accumulated_text, stop_sequences
+                            )
+                            if found:
+                                # Yield only the portion before stop sequence
+                                remaining = truncated[
+                                    len(accumulated_text) - len(token) :
+                                ]
+                                if remaining:
+                                    chunk = ChatCompletionChunk(
+                                        id=completion_id,
+                                        created=created,
+                                        model=model_name,
+                                        choices=[
+                                            ChatCompletionChunkChoice(
+                                                index=0,
+                                                delta=ChatCompletionChunkDelta(
+                                                    content=remaining
+                                                ),
+                                                finish_reason=None,
+                                            )
+                                        ],
+                                    )
+                                    yield f"data: {chunk.model_dump_json(exclude_none=True)}\n\n"
+                                stopped_by_sequence = True
+                                break
+
                         token_count += 1
                         chunk = ChatCompletionChunk(
                             id=completion_id,
@@ -376,6 +429,9 @@ class InferenceService:
                             ],
                         )
                         yield f"data: {chunk.model_dump_json(exclude_none=True)}\n\n"
+
+                # Notify monitoring after generation completes
+                self._notify_monitoring(request_id=completion_id)
 
                 # Check for thread errors
                 if thread_error:
@@ -398,9 +454,12 @@ class InferenceService:
                     return
 
                 # Determine finish reason
-                finish_reason = self._determine_finish_reason(
-                    token_count, gen_config.max_new_tokens
-                )
+                if stopped_by_sequence:
+                    finish_reason = "stop"
+                else:
+                    finish_reason = self._determine_finish_reason(
+                        token_count, gen_config.max_new_tokens
+                    )
 
                 # Send final chunk with finish_reason
                 final_chunk = ChatCompletionChunk(
@@ -488,6 +547,9 @@ class InferenceService:
                         gen_config, inputs
                     )
                     outputs = self._model.generate(**generate_kwargs)
+
+                # Notify monitoring after generation
+                self._notify_monitoring(request_id=completion_id)
 
                 # Decode output
                 generated_ids = outputs[0][prompt_tokens:]

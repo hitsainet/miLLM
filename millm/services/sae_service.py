@@ -268,6 +268,7 @@ class SAEService:
         repository_id: str,
         revision: str = "main",
         file_path: str | None = None,
+        token: str | None = None,
     ) -> DownloadResult:
         """
         Start downloading an SAE from HuggingFace.
@@ -350,7 +351,7 @@ class SAEService:
         )
 
         # Start background download and track it
-        task = asyncio.create_task(self._download_task(sae_id, repository_id, revision, file_path))
+        task = asyncio.create_task(self._download_task(sae_id, repository_id, revision, file_path, token))
         self._active_downloads[sae_id] = task
 
         return DownloadResult(
@@ -365,6 +366,7 @@ class SAEService:
         repository_id: str,
         revision: str,
         file_path: str | None = None,
+        token: str | None = None,
     ) -> None:
         """
         Background task for downloading SAE.
@@ -383,6 +385,7 @@ class SAEService:
                 revision=revision,
                 file_path=file_path,
                 progress_callback=self._make_progress_callback(sae_id),
+                token=token,
             )
 
             # Check if cancelled after download

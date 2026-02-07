@@ -2,12 +2,13 @@
 Profile management API endpoints.
 
 Provides endpoints for creating, updating, activating, and deleting
-steering configuration profiles.
+steering configuration profiles. Includes import/export for miStudio compatibility.
 """
 
-from typing import Annotated
+from typing import Annotated, Any
 
 from fastapi import APIRouter, Path
+from pydantic import BaseModel, Field
 
 from millm.api.dependencies import ProfileServiceDep
 from millm.api.schemas.common import ApiResponse
@@ -255,3 +256,99 @@ async def delete_profile(
         profile_id=result["profile_id"],
         was_active=result["was_active"],
     ))
+
+
+# =============================================================================
+# Export/Import endpoints (miStudio compatible)
+# =============================================================================
+
+
+class ProfileExportData(BaseModel):
+    """miStudio-compatible profile export format."""
+
+    version: str = "1.0"
+    name: str
+    description: str | None = None
+    model_id: str | None = None
+    sae_id: str | None = None
+    layer: int | None = None
+    steering: dict[str, Any] = Field(default_factory=dict)
+    created_at: str | None = None
+    updated_at: str | None = None
+
+
+class ProfileImportRequest(BaseModel):
+    """Request schema for importing a profile."""
+
+    version: str = Field(default="1.0", description="Export format version")
+    name: str = Field(..., min_length=1, max_length=100)
+    description: str | None = None
+    model_id: str | None = None
+    sae_id: str | None = None
+    layer: int | None = Field(default=None, ge=0)
+    steering: dict[str, Any] = Field(default_factory=dict)
+
+
+@router.get(
+    "/{profile_id}/export",
+    response_model=ApiResponse[ProfileExportData],
+    summary="Export a profile",
+    description="Export a profile in miStudio-compatible JSON format.",
+)
+async def export_profile(
+    profile_id: ProfileId,
+    service: ProfileServiceDep,
+) -> ApiResponse[ProfileExportData]:
+    """
+    Export a profile as miStudio-compatible JSON.
+
+    Returns the profile data in a portable format for sharing or miStudio import.
+    """
+    profile = await service.get_profile(profile_id)
+
+    return ApiResponse.ok(ProfileExportData(
+        name=profile.name,
+        description=profile.description,
+        model_id=profile.model_id,
+        sae_id=profile.sae_id,
+        layer=profile.layer,
+        steering=profile.steering or {},
+        created_at=profile.created_at.isoformat() if profile.created_at else None,
+        updated_at=profile.updated_at.isoformat() if profile.updated_at else None,
+    ))
+
+
+@router.post(
+    "/import",
+    response_model=ApiResponse[ProfileResponse],
+    summary="Import a profile",
+    description="Import a profile from miStudio-compatible JSON format.",
+)
+async def import_profile(
+    request: ProfileImportRequest,
+    service: ProfileServiceDep,
+) -> ApiResponse[ProfileResponse]:
+    """
+    Import a profile from miStudio-compatible JSON.
+
+    Creates a new profile from the imported data. Validates the format
+    and steering values before creating.
+    """
+    # Convert string keys to int keys for steering
+    steering = {}
+    for k, v in request.steering.items():
+        try:
+            steering[int(k)] = float(v)
+        except (ValueError, TypeError):
+            pass
+
+    profile = await service.create_profile(
+        name=request.name,
+        description=request.description,
+        steering=steering,
+        model_id=request.model_id,
+        sae_id=request.sae_id,
+        layer=request.layer,
+    )
+
+    return ApiResponse.ok(ProfileResponse.from_profile(profile))

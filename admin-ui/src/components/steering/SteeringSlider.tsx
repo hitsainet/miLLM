@@ -23,26 +23,28 @@ export function SteeringSlider({
   label,
   min = -200,
   max = 200,
-  step = 1,
+  step = 0.1,
 }: SteeringSliderProps) {
   const [localStrength, setLocalStrength] = useState(strength);
-  const [inputValue, setInputValue] = useState(String(Math.round(strength)));
+  const [inputValue, setInputValue] = useState(String(strength));
 
   useEffect(() => {
     setLocalStrength(strength);
-    setInputValue(String(Math.round(strength)));
+    setInputValue(String(strength));
   }, [strength]);
+
+  const roundToStep = (value: number) => Math.round(value * 10) / 10;
 
   const handleSliderChange = (value: number) => {
     // Only update local state during drag - no API call
-    const rounded = Math.round(value);
+    const rounded = roundToStep(value);
     setLocalStrength(rounded);
     setInputValue(String(rounded));
   };
 
   const handleSliderCommit = (value: number) => {
     // Call API only when drag ends
-    const rounded = Math.round(value);
+    const rounded = roundToStep(value);
     onStrengthChange(rounded);
   };
 

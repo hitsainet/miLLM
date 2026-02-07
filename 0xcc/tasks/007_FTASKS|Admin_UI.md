@@ -355,207 +355,207 @@
 
 ### Phase 8: Dashboard Page
 
-- [ ] 28.0 Create Dashboard components
-  - [ ] 28.1 Create `src/components/dashboard/StatusCard.tsx`
-  - [ ] 28.2 Implement status badge colors
-  - [ ] 28.3 Create `src/components/dashboard/QuickActions.tsx`
-  - [ ] 28.4 Implement action buttons
+- [x] 28.0 Create Dashboard components
+  - [x] 28.1 Create `src/components/dashboard/StatusCard.tsx`
+  - [x] 28.2 Implement status badge colors
+  - [x] 28.3 Create `src/components/dashboard/QuickActions.tsx`
+  - [x] 28.4 Implement action buttons
 
-- [ ] 29.0 Create Dashboard page
-  - [ ] 29.1 Create `src/pages/DashboardPage.tsx`
-  - [ ] 29.2 Add status cards grid (model, SAE, steering, monitoring)
-  - [ ] 29.3 Add quick start guide based on state
-  - [ ] 29.4 Connect to serverStore
-  - [ ] 29.5 Write DashboardPage tests
+- [x] 29.0 Create Dashboard page
+  - [x] 29.1 Create `src/pages/DashboardPage.tsx`
+  - [x] 29.2 Add status cards grid (model, SAE, steering, monitoring)
+  - [x] 29.3 Add quick start guide based on state
+  - [x] 29.4 Connect to serverStore
+  - [x] 29.5 Write DashboardPage tests
 
 ### Phase 9: Models Page
 
-- [ ] 30.0 Create Models components
-  - [ ] 30.1 Create `src/components/models/ModelLoadForm.tsx`
-  - [ ] 30.2 Implement model_id input
-  - [ ] 30.3 Implement device select (auto/cuda/cpu)
-  - [ ] 30.4 Implement dtype select
-  - [ ] 30.5 Implement submit with validation
-  - [ ] 30.6 Create `src/components/models/LoadedModelCard.tsx`
-  - [ ] 30.7 Display model info
-  - [ ] 30.8 Add unload button with confirmation
+- [x] 30.0 Create Models components
+  - [x] 30.1 Create `src/components/models/ModelLoadForm.tsx`
+  - [x] 30.2 Implement model_id input
+  - [x] 30.3 Implement device select (auto/cuda/cpu)
+  - [x] 30.4 Implement dtype select
+  - [x] 30.5 Implement submit with validation
+  - [x] 30.6 Create `src/components/models/LoadedModelCard.tsx`
+  - [x] 30.7 Display model info
+  - [x] 30.8 Add unload button with confirmation
 
-- [ ] 31.0 Create Models page
-  - [ ] 31.1 Create `src/pages/ModelsPage.tsx`
-  - [ ] 31.2 Show LoadedModelCard when model loaded
-  - [ ] 31.3 Show ModelLoadForm when no model
-  - [ ] 31.4 Handle loading states
-  - [ ] 31.5 Write ModelsPage tests
+- [x] 31.0 Create Models page
+  - [x] 31.1 Create `src/pages/ModelsPage.tsx`
+  - [x] 31.2 Show LoadedModelCard when model loaded
+  - [x] 31.3 Show ModelLoadForm when no model
+  - [x] 31.4 Handle loading states
+  - [x] 31.5 Write ModelsPage tests
 
 ### Phase 10: SAE Page
 
-- [ ] 32.0 Create SAE components
-  - [ ] 32.1 Create `src/components/sae/SAEDownloadForm.tsx`
-  - [ ] 32.2 Implement repo_id and filename inputs
-  - [ ] 32.3 Implement download button with progress
-  - [ ] 32.4 Create `src/components/sae/SAEList.tsx`
-  - [ ] 32.5 Create `src/components/sae/SAEListItem.tsx`
-  - [ ] 32.6 Display SAE metadata (layer, features)
-  - [ ] 32.7 Add attach/delete buttons
-  - [ ] 32.8 Create `src/components/sae/AttachedSAECard.tsx`
-  - [ ] 32.9 Display attached SAE info
-  - [ ] 32.10 Add detach button
+- [x] 32.0 Create SAE components
+  - [x] 32.1 Create `src/components/sae/SAEDownloadForm.tsx`
+  - [x] 32.2 Implement repo_id and filename inputs
+  - [x] 32.3 Implement download button with progress
+  - [x] 32.4 Create `src/components/sae/SAEList.tsx`
+  - [x] 32.5 Create `src/components/sae/SAEListItem.tsx`
+  - [x] 32.6 Display SAE metadata (layer, features)
+  - [x] 32.7 Add attach/delete buttons
+  - [x] 32.8 Create `src/components/sae/AttachedSAECard.tsx`
+  - [x] 32.9 Display attached SAE info
+  - [x] 32.10 Add detach button
 
-- [ ] 33.0 Create SAE page
-  - [ ] 33.1 Create `src/pages/SAEPage.tsx`
-  - [ ] 33.2 Show AttachedSAECard at top
-  - [ ] 33.3 Show SAEDownloadForm
-  - [ ] 33.4 Show SAEList with downloaded SAEs
-  - [ ] 33.5 Handle empty state
-  - [ ] 33.6 Write SAEPage tests
+- [x] 33.0 Create SAE page
+  - [x] 33.1 Create `src/pages/SAEPage.tsx`
+  - [x] 33.2 Show AttachedSAECard at top
+  - [x] 33.3 Show SAEDownloadForm
+  - [x] 33.4 Show SAEList with downloaded SAEs
+  - [x] 33.5 Handle empty state
+  - [x] 33.6 Write SAEPage tests
 
 ### Phase 11: Steering Page
 
-- [ ] 34.0 Create Steering components
-  - [ ] 34.1 Create `src/components/steering/FeatureInput.tsx`
-  - [ ] 34.2 Implement feature index input with add button
-  - [ ] 34.3 Create `src/components/steering/BatchAddForm.tsx`
-  - [ ] 34.4 Implement comma-separated feature input
-  - [ ] 34.5 Create `src/components/steering/SteeringSlider.tsx`
-  - [ ] 34.6 Combine Slider with numeric input
-  - [ ] 34.7 Add remove button
-  - [ ] 34.8 Create `src/components/steering/SteeringControls.tsx`
-  - [ ] 34.9 Implement enable/disable toggle
-  - [ ] 34.10 Implement clear all button
+- [x] 34.0 Create Steering components
+  - [x] 34.1 Create `src/components/steering/FeatureInput.tsx`
+  - [x] 34.2 Implement feature index input with add button
+  - [x] 34.3 Create `src/components/steering/BatchAddForm.tsx`
+  - [x] 34.4 Implement comma-separated feature input
+  - [x] 34.5 Create `src/components/steering/SteeringSlider.tsx`
+  - [x] 34.6 Combine Slider with numeric input
+  - [x] 34.7 Add remove button
+  - [x] 34.8 Create `src/components/steering/SteeringControls.tsx`
+  - [x] 34.9 Implement enable/disable toggle
+  - [x] 34.10 Implement clear all button
 
-- [ ] 35.0 Create Steering page
-  - [ ] 35.1 Create `src/pages/SteeringPage.tsx`
-  - [ ] 35.2 Show SteeringControls at top
-  - [ ] 35.3 Show FeatureInput and BatchAddForm
-  - [ ] 35.4 Show list of SteeringSliders
-  - [ ] 35.5 Handle empty state
-  - [ ] 35.6 Handle no SAE attached state
-  - [ ] 35.7 Write SteeringPage tests
+- [x] 35.0 Create Steering page
+  - [x] 35.1 Create `src/pages/SteeringPage.tsx`
+  - [x] 35.2 Show SteeringControls at top
+  - [x] 35.3 Show FeatureInput and BatchAddForm
+  - [x] 35.4 Show list of SteeringSliders
+  - [x] 35.5 Handle empty state
+  - [x] 35.6 Handle no SAE attached state
+  - [x] 35.7 Write SteeringPage tests
 
 ### Phase 12: Monitoring Page
 
-- [ ] 36.0 Create Monitoring components
-  - [ ] 36.1 Create `src/components/monitoring/MonitoringControls.tsx`
-  - [ ] 36.2 Implement enable/disable toggle
-  - [ ] 36.3 Implement top_k configuration select
-  - [ ] 36.4 Implement pause/resume button
-  - [ ] 36.5 Create `src/components/monitoring/ActivationChart.tsx`
-  - [ ] 36.6 Implement horizontal bar chart for activations
-  - [ ] 36.7 Create `src/components/monitoring/ActivationHistory.tsx`
-  - [ ] 36.8 Implement scrollable history list
-  - [ ] 36.9 Add clear history button
-  - [ ] 36.10 Create `src/components/monitoring/StatisticsPanel.tsx`
-  - [ ] 36.11 Display feature statistics
+- [x] 36.0 Create Monitoring components
+  - [x] 36.1 Create `src/components/monitoring/MonitoringControls.tsx`
+  - [x] 36.2 Implement enable/disable toggle
+  - [x] 36.3 Implement top_k configuration select
+  - [x] 36.4 Implement pause/resume button
+  - [x] 36.5 Create `src/components/monitoring/ActivationChart.tsx`
+  - [x] 36.6 Implement horizontal bar chart for activations
+  - [x] 36.7 Create `src/components/monitoring/ActivationHistory.tsx`
+  - [x] 36.8 Implement scrollable history list
+  - [x] 36.9 Add clear history button
+  - [x] 36.10 Create `src/components/monitoring/StatisticsPanel.tsx`
+  - [x] 36.11 Display feature statistics
 
-- [ ] 37.0 Create Monitoring page
-  - [ ] 37.1 Create `src/pages/MonitoringPage.tsx`
-  - [ ] 37.2 Show MonitoringControls at top
-  - [ ] 37.3 Show ActivationChart
-  - [ ] 37.4 Show ActivationHistory and StatisticsPanel
-  - [ ] 37.5 Handle empty/no SAE state
-  - [ ] 37.6 Write MonitoringPage tests
+- [x] 37.0 Create Monitoring page
+  - [x] 37.1 Create `src/pages/MonitoringPage.tsx`
+  - [x] 37.2 Show MonitoringControls at top
+  - [x] 37.3 Show ActivationChart
+  - [x] 37.4 Show ActivationHistory and StatisticsPanel
+  - [x] 37.5 Handle empty/no SAE state
+  - [x] 37.6 Write MonitoringPage tests
 
 ### Phase 13: Profiles Page
 
-- [ ] 38.0 Create Profile components
-  - [ ] 38.1 Create `src/components/profiles/ProfileListItem.tsx`
-  - [ ] 38.2 Display profile name, description, feature count
-  - [ ] 38.3 Add activate/deactivate toggle
-  - [ ] 38.4 Add edit/delete buttons
-  - [ ] 38.5 Create `src/components/profiles/ProfileList.tsx`
-  - [ ] 38.6 List ProfileListItems
-  - [ ] 38.7 Create `src/components/profiles/ProfileForm.tsx`
-  - [ ] 38.8 Implement create/edit form with name, description
-  - [ ] 38.9 Option to save current steering
-  - [ ] 38.10 Create `src/components/profiles/ImportExportButtons.tsx`
-  - [ ] 38.11 Implement export to file download
-  - [ ] 38.12 Implement import from file upload
+- [x] 38.0 Create Profile components
+  - [x] 38.1 Create `src/components/profiles/ProfileListItem.tsx`
+  - [x] 38.2 Display profile name, description, feature count
+  - [x] 38.3 Add activate/deactivate toggle
+  - [x] 38.4 Add edit/delete buttons
+  - [x] 38.5 Create `src/components/profiles/ProfileList.tsx`
+  - [x] 38.6 List ProfileListItems
+  - [x] 38.7 Create `src/components/profiles/ProfileForm.tsx`
+  - [x] 38.8 Implement create/edit form with name, description
+  - [x] 38.9 Option to save current steering
+  - [x] 38.10 Create `src/components/profiles/ImportExportButtons.tsx`
+  - [x] 38.11 Implement export to file download
+  - [x] 38.12 Implement import from file upload
 
-- [ ] 39.0 Create Profiles page
-  - [ ] 39.1 Create `src/pages/ProfilesPage.tsx`
-  - [ ] 39.2 Show create profile button
-  - [ ] 39.3 Show ProfileList
-  - [ ] 39.4 Show ImportExportButtons
-  - [ ] 39.5 Implement profile form modal
-  - [ ] 39.6 Handle empty state
-  - [ ] 39.7 Write ProfilesPage tests
+- [x] 39.0 Create Profiles page
+  - [x] 39.1 Create `src/pages/ProfilesPage.tsx`
+  - [x] 39.2 Show create profile button
+  - [x] 39.3 Show ProfileList
+  - [x] 39.4 Show ImportExportButtons
+  - [x] 39.5 Implement profile form modal
+  - [x] 39.6 Handle empty state
+  - [x] 39.7 Write ProfilesPage tests
 
 ### Phase 14: Settings Page
 
-- [ ] 40.0 Create Settings page
-  - [ ] 40.1 Create `src/pages/SettingsPage.tsx`
-  - [ ] 40.2 Implement theme toggle section
-  - [ ] 40.3 Implement connection status section
-  - [ ] 40.4 Add manual reconnect button
-  - [ ] 40.5 Display server URL
-  - [ ] 40.6 Write SettingsPage tests
+- [x] 40.0 Create Settings page
+  - [x] 40.1 Create `src/pages/SettingsPage.tsx`
+  - [x] 40.2 Implement theme toggle section
+  - [x] 40.3 Implement connection status section
+  - [x] 40.4 Add manual reconnect button
+  - [x] 40.5 Display server URL
+  - [x] 40.6 Write SettingsPage tests
 
 ### Phase 15: App Integration
 
-- [ ] 41.0 Create App entry point
-  - [ ] 41.1 Create `src/App.tsx` with router
-  - [ ] 41.2 Define all routes with Layout wrapper
-  - [ ] 41.3 Create `src/main.tsx`
-  - [ ] 41.4 Initialize theme from store
-  - [ ] 41.5 Connect WebSocket on startup
-  - [ ] 41.6 Set up QueryClient with defaults
-  - [ ] 41.7 Create `src/index.css` with animations
+- [x] 41.0 Create App entry point
+  - [x] 41.1 Create `src/App.tsx` with router
+  - [x] 41.2 Define all routes with Layout wrapper
+  - [x] 41.3 Create `src/main.tsx`
+  - [x] 41.4 Initialize theme from store
+  - [x] 41.5 Connect WebSocket on startup
+  - [x] 41.6 Set up QueryClient with defaults
+  - [x] 41.7 Create `src/index.css` with animations
 
-- [ ] 42.0 Configure proxy for development
-  - [ ] 42.1 Update `vite.config.ts` with API proxy
-  - [ ] 42.2 Update `vite.config.ts` with WebSocket proxy
-  - [ ] 42.3 Add environment variable support
-  - [ ] 42.4 Test dev server with backend
+- [x] 42.0 Configure proxy for development
+  - [x] 42.1 Update `vite.config.ts` with API proxy
+  - [x] 42.2 Update `vite.config.ts` with WebSocket proxy
+  - [x] 42.3 Add environment variable support
+  - [x] 42.4 Test dev server with backend
 
 ### Phase 16: Testing
 
-- [ ] 43.0 Set up testing infrastructure
-  - [ ] 43.1 Create `vitest.config.ts`
-  - [ ] 43.2 Create `tests/setup.ts` with mocks
-  - [ ] 43.3 Add test scripts to package.json
-  - [ ] 43.4 Verify test runner works
+- [x] 43.0 Set up testing infrastructure
+  - [x] 43.1 Create `vitest.config.ts`
+  - [x] 43.2 Create `tests/setup.ts` with mocks
+  - [x] 43.3 Add test scripts to package.json
+  - [x] 43.4 Verify test runner works
 
-- [ ] 44.0 Write component tests
-  - [ ] 44.1 Test all common components
-  - [ ] 44.2 Test layout components
-  - [ ] 44.3 Test feature components
-  - [ ] 44.4 Aim for 80% component coverage
+- [x] 44.0 Write component tests
+  - [x] 44.1 Test all common components
+  - [x] 44.2 Test layout components
+  - [x] 44.3 Test feature components
+  - [x] 44.4 Aim for 80% component coverage
 
-- [ ] 45.0 Write integration tests
-  - [ ] 45.1 Create `tests/integration/pages/DashboardPage.test.tsx`
-  - [ ] 45.2 Create tests for each page
-  - [ ] 45.3 Mock API and WebSocket
-  - [ ] 45.4 Test user flows
+- [x] 45.0 Write integration tests
+  - [x] 45.1 Create `tests/integration/pages/DashboardPage.test.tsx`
+  - [x] 45.2 Create tests for each page
+  - [x] 45.3 Mock API and WebSocket
+  - [x] 45.4 Test user flows
 
 ### Phase 17: Backend Integration
 
-- [ ] 46.0 Configure static file serving
-  - [ ] 46.1 Update `millm/main.py` to serve admin-ui/dist
-  - [ ] 46.2 Mount static files at root
-  - [ ] 46.3 Configure SPA fallback for client-side routing
-  - [ ] 46.4 Test build and serve
+- [x] 46.0 Configure static file serving
+  - [x] 46.1 Update `millm/main.py` to serve admin-ui/dist
+  - [x] 46.2 Mount static files at root
+  - [x] 46.3 Configure SPA fallback for client-side routing
+  - [x] 46.4 Test build and serve
 
-- [ ] 47.0 Build and deploy
-  - [ ] 47.1 Add build script to package.json
-  - [ ] 47.2 Test production build
-  - [ ] 47.3 Verify all routes work
-  - [ ] 47.4 Verify WebSocket connects
-  - [ ] 47.5 Verify API calls work
+- [x] 47.0 Build and deploy
+  - [x] 47.1 Add build script to package.json
+  - [x] 47.2 Test production build
+  - [x] 47.3 Verify all routes work
+  - [x] 47.4 Verify WebSocket connects
+  - [x] 47.5 Verify API calls work
 
 ### Phase 18: Polish & Documentation
 
-- [ ] 48.0 Final polish
-  - [ ] 48.1 Review all error handling
-  - [ ] 48.2 Review all loading states
-  - [ ] 48.3 Review responsive behavior
-  - [ ] 48.4 Test in Chrome, Firefox, Safari
-  - [ ] 48.5 Fix any visual inconsistencies
+- [x] 48.0 Final polish
+  - [x] 48.1 Review all error handling
+  - [x] 48.2 Review all loading states
+  - [x] 48.3 Review responsive behavior
+  - [x] 48.4 Test in Chrome, Firefox, Safari
+  - [x] 48.5 Fix any visual inconsistencies
 
-- [ ] 49.0 Documentation
-  - [ ] 49.1 Add README.md to admin-ui
-  - [ ] 49.2 Document environment variables
-  - [ ] 49.3 Document build process
-  - [ ] 49.4 Document component library
+- [x] 49.0 Documentation
+  - [x] 49.1 Add README.md to admin-ui
+  - [x] 49.2 Document environment variables
+  - [x] 49.3 Document build process
+  - [x] 49.4 Document component library
 
 ---
 

@@ -181,6 +181,27 @@ class InferenceService:
             # Never let monitoring errors affect inference
             logger.debug("monitoring_notification_failed", error=str(e))
 
+    def _check_context_length(self, prompt_tokens: int, max_new_tokens: int) -> None:
+        """
+        Validate that prompt + generation fits within model context.
+
+        Raises:
+            ValueError: If context length would be exceeded.
+        """
+        max_length = getattr(
+            getattr(self._model, "config", None), "max_position_embeddings", None
+        )
+        if max_length is None:
+            return  # Can't validate without config
+
+        total = prompt_tokens + max_new_tokens
+        if total > max_length:
+            from millm.api.routes.openai.errors import context_length_exceeded_error
+            raise ValueError(
+                f"Context length exceeded: {prompt_tokens} prompt + "
+                f"{max_new_tokens} max_tokens = {total} > {max_length}"
+            )
+
     def _determine_finish_reason(
         self, generated_token_count: int, max_new_tokens: int
     ) -> str:
@@ -256,6 +277,7 @@ class InferenceService:
 
             # Build generation config
             gen_config = GenerationConfig.from_request(request)
+            self._check_context_length(prompt_tokens, gen_config.max_new_tokens)
 
             for i in range(n):
                 # Generate
@@ -350,6 +372,8 @@ class InferenceService:
 
             # Build generation kwargs
             gen_config = GenerationConfig.from_request(request)
+            prompt_tokens = inputs["input_ids"].shape[1]
+            self._check_context_length(prompt_tokens, gen_config.max_new_tokens)
             generation_kwargs = self._build_generate_kwargs(gen_config, inputs)
             generation_kwargs["streamer"] = streamer
 
@@ -534,12 +558,13 @@ class InferenceService:
         async with self._request_queue.acquire():
             gen_config = GenerationConfig.from_request(request)
 
-            for i, prompt in enumerate(prompts):
+            for i, prompt_text in enumerate(prompts):
                 # Tokenize input
-                inputs = self._tokenizer(prompt, return_tensors="pt").to(
+                inputs = self._tokenizer(prompt_text, return_tensors="pt").to(
                     self._device
                 )
                 prompt_tokens = inputs.input_ids.shape[1]
+                self._check_context_length(prompt_tokens, gen_config.max_new_tokens)
 
                 # Generate
                 with torch.no_grad():

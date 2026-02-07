@@ -733,6 +733,17 @@ class SAEService:
         for warning in compat.warnings:
             logger.warning("sae_compatibility_warning", warning=warning)
 
+        # Check available GPU memory before loading
+        if torch.cuda.is_available():
+            free_mb = torch.cuda.mem_get_info()[0] / (1024 * 1024)
+            estimated_mb = (sae.file_size_bytes or 0) / (1024 * 1024) * 1.2  # 20% overhead
+            if estimated_mb > 0 and estimated_mb > free_mb:
+                logger.warning(
+                    "sae_memory_warning",
+                    estimated_mb=int(estimated_mb),
+                    available_mb=int(free_mb),
+                )
+
         # Load SAE weights
         logger.info("loading_sae", sae_id=sae_id, cache_path=sae.cache_path)
         loaded_sae = self._loader.load(
@@ -794,6 +805,21 @@ class SAEService:
                 f"SAE '{sae_id}' is not attached",
                 details={"attached_sae_id": self._sae_state.attached_sae_id},
             )
+
+        # Wait for any in-flight inference requests to complete
+        from millm.api.dependencies import get_inference_service
+        try:
+            inference_svc = get_inference_service()
+            queue = inference_svc.request_queue
+            if queue.pending_count > 0:
+                logger.info("waiting_for_pending_requests", pending=queue.pending_count)
+                import asyncio
+                for _ in range(30):  # Wait up to 3 seconds
+                    if queue.pending_count == 0:
+                        break
+                    await asyncio.sleep(0.1)
+        except Exception:
+            pass  # Don't block detach if queue check fails
 
         # Get memory before cleanup
         attached_sae = self._sae_state.attached_sae

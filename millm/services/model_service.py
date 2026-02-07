@@ -10,6 +10,7 @@ import os
 import time
 from concurrent.futures import Future, ThreadPoolExecutor
 from datetime import datetime
+from pathlib import Path
 from typing import Any, Optional
 
 import structlog
@@ -213,18 +214,23 @@ class ModelService:
                     error=str(e),
                 )
 
-        # Generate cache path
+        # Generate cache path or use local path
         cache_path = ""
         if request.source == ModelSource.HUGGINGFACE and request.repo_id:
             safe_name = request.repo_id.replace("/", "--") + f"--{request.quantization.value}"
             cache_path = f"huggingface/{safe_name}"
+        elif request.source == ModelSource.LOCAL and request.local_path:
+            # For local models, use the local path directly as cache_path
+            cache_path = request.local_path
 
         # Extract name from repo_id or local_path
         name = ""
-        if request.repo_id:
+        if request.custom_name:
+            name = request.custom_name
+        elif request.repo_id:
             name = request.repo_id.split("/")[-1]
         elif request.local_path:
-            name = request.local_path.split("/")[-1]
+            name = request.local_path.rstrip("/").split("/")[-1]
 
         # Estimate memory requirement
         estimated_memory = 0
@@ -248,6 +254,36 @@ class ModelService:
             architecture=model_info.get("architecture") if model_info else None,
             estimated_memory_mb=estimated_memory if estimated_memory > 0 else None,
         )
+
+        # For local models, mark as ready immediately (no download needed)
+        if request.source == ModelSource.LOCAL and request.local_path:
+            import os
+            if not os.path.isdir(request.local_path):
+                from millm.core.errors import InvalidLocalPathError
+                raise InvalidLocalPathError(
+                    f"Local path does not exist or is not a directory: {request.local_path}",
+                    details={"path": request.local_path},
+                )
+
+            # Calculate disk size
+            total_size = sum(
+                f.stat().st_size
+                for f in Path(request.local_path).rglob("*")
+                if f.is_file()
+            ) if Path(request.local_path).exists() else 0
+
+            model = await self.repository.update(
+                model.id,
+                status=ModelStatus.READY,
+                cache_path=request.local_path,
+                disk_size_mb=int(total_size / (1024 * 1024)),
+            )
+            logger.info(
+                "local_model_registered",
+                model_id=model.id,
+                local_path=request.local_path,
+            )
+            return model
 
         logger.info(
             "download_started",
@@ -936,6 +972,20 @@ class ModelService:
             )
 
         logger.info("unload_started", model_id=model_id, timeout=timeout)
+
+        # Wait for pending inference requests to drain
+        try:
+            from millm.api.dependencies import get_inference_service
+            inference_svc = get_inference_service()
+            queue = inference_svc.request_queue
+            if queue.pending_count > 0:
+                logger.info("waiting_for_pending_inference", pending=queue.pending_count)
+                for _ in range(50):  # Wait up to 5 seconds
+                    if queue.pending_count == 0:
+                        break
+                    await asyncio.sleep(0.1)
+        except Exception:
+            pass  # Don't block unload if queue check fails
 
         # Unload from GPU with timeout
         try:

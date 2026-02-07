@@ -65,7 +65,9 @@ class SteeringRequest(BaseModel):
     )
     value: float = Field(
         ...,
-        description="Steering strength (positive=amplify, negative=suppress)",
+        ge=-200.0,
+        le=200.0,
+        description="Steering strength (-200 to +200, positive=amplify, negative=suppress)",
     )
 
 

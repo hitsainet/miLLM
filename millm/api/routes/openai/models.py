@@ -37,7 +37,7 @@ async def list_models(
                 ModelObject(
                     id=model_info.name,
                     created=int(model_info.loaded_at.timestamp()),
-                    owned_by="local",
+                    owned_by="miLLM",
                 )
             )
             logger.debug("models_list_request", model_count=1)
@@ -75,5 +75,5 @@ async def get_model(
     return ModelObject(
         id=model_info.name,
         created=int(model_info.loaded_at.timestamp()),
-        owned_by="local",
+        owned_by="miLLM",
     )

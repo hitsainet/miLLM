@@ -71,7 +71,7 @@ Users can point any existing OpenAI-compatible tool at miLLM and immediately ben
 - [ ] Receive generated text with steering applied
 - [ ] Support for max_tokens, temperature, top_p parameters
 - [ ] Support for stop sequences
-- [ ] Both streaming and non-streaming modes work
+- [ ] Non-streaming mode works (streaming deferred in v1.0; returns 400 with message)
 
 #### US-2.3: List Available Models
 **As a** user setting up a client
@@ -120,7 +120,7 @@ Users can point any existing OpenAI-compatible tool at miLLM and immediately ben
 - temperature, top_p, max_tokens respected
 - stop sequences halt generation correctly
 - frequency_penalty, presence_penalty applied
-- n parameter for multiple completions (n=1 only in v1.0)
+- n parameter for multiple completions
 
 ### Edge Cases and Error Scenarios
 
@@ -168,6 +168,7 @@ Users can point any existing OpenAI-compatible tool at miLLM and immediately ben
 | OA-C9 | System shall support top_p parameter (0.0-1.0) | Should |
 | OA-C10 | System shall support max_tokens parameter | Must |
 | OA-C11 | System shall support stop sequences | Should |
+| OA-C12 | System shall support `n` parameter for multiple completions | Should |
 
 ### Text Completions (FR-5.2)
 
@@ -175,9 +176,10 @@ Users can point any existing OpenAI-compatible tool at miLLM and immediately ben
 |----|-------------|----------|
 | OA-T1 | System shall implement POST /v1/completions | Must |
 | OA-T2 | System shall support prompt string input | Must |
-| OA-T3 | System shall support streaming responses | Must |
+| OA-T3 | System shall support streaming responses (deferred in v1.0; returns 400) | Should |
 | OA-T4 | System shall apply active steering to generation | Must |
 | OA-T5 | System shall support same parameters as chat completions | Should |
+| OA-T6 | System shall support `n` parameter for multiple completions | Should |
 
 ### Models Endpoint (FR-5.3)
 
@@ -197,6 +199,9 @@ Users can point any existing OpenAI-compatible tool at miLLM and immediately ben
 | OA-E3 | System shall support array of strings input | Must |
 | OA-E4 | System shall return embedding vectors | Must |
 | OA-E5 | System shall trigger feature monitoring if enabled | Must |
+| OA-E6 | System shall support `encoding_format` parameter ("float" or "base64") | Should |
+| OA-E7 | System shall support `dimensions` parameter for truncating embeddings | Should |
+| OA-E8 | System shall accept `user` parameter (logged, not used for auth) | Should |
 
 ### Streaming (FR-5.5)
 
@@ -222,6 +227,7 @@ interface ChatCompletionRequest {
   top_p?: number;                   // 0.0-1.0, default: 1.0
   max_tokens?: number;              // Max generation length
   stop?: string | string[];         // Stop sequences
+  n?: number;                        // Number of completions to generate (default: 1)
   frequency_penalty?: number;       // -2.0 to 2.0
   presence_penalty?: number;        // -2.0 to 2.0
   user?: string;                    // User identifier (logged, not used)
@@ -428,7 +434,10 @@ Response:
 Request:
   {
     "model": "gemma-2-2b",
-    "input": "Text to embed" | ["Text 1", "Text 2"]
+    "input": "Text to embed" | ["Text 1", "Text 2"],
+    "encoding_format": "float" | "base64",  // Default: "float"
+    "dimensions": 512,                       // Optional: truncate embedding dimensions
+    "user": "user-123"                       // Optional: user identifier (logged, not used)
   }
 
 Response:
@@ -447,16 +456,33 @@ Response:
 ```
 
 ### Error Response Format
+
+All error responses use the OpenAI-standard format with the `error` top-level key (not miLLM's `{success, data, error}` format used by the Management API):
 ```json
 {
   "error": {
     "message": "Human-readable error message",
     "type": "invalid_request_error" | "authentication_error" | "rate_limit_error" | "server_error",
-    "param": "field_name",  // Optional
-    "code": "error_code"    // Optional
+    "param": "field_name",  // Optional: the parameter that caused the error
+    "code": "error_code"    // Optional: machine-readable error code
   }
 }
 ```
+
+### Implementation Notes
+
+#### Model Name Validation
+The `model` field in requests is validated against the currently loaded model. If the requested model name does not match the loaded model, the endpoint returns HTTP 404 with an error indicating which models are available.
+
+#### Completions Streaming Deferral
+Streaming for `/v1/completions` is deferred in v1.0. If a client sends `stream: true` to the completions endpoint, the server returns HTTP 400 with a message indicating that streaming is not yet supported for text completions. Chat completions streaming (`/v1/chat/completions`) is fully supported.
+
+#### finish_reason Semantics
+- `"stop"` is returned when generation ends naturally (EOS token) or when a stop sequence is matched.
+- `"length"` is returned when generation stops because `max_tokens` has been reached.
+
+#### Stop Sequence Enforcement
+Stop sequences specified via the `stop` parameter are enforced in both streaming and non-streaming modes. In streaming mode, generation halts as soon as a stop sequence is detected and the stop sequence text is excluded from the output.
 
 ---
 
@@ -494,7 +520,7 @@ Response:
 |----------|-----------|
 | Multi-turn function calling | Complexity, limited steering benefit |
 | Vision/multimodal inputs | Model-dependent, future feature |
-| Multiple completions (n>1) | Limited use case, resource intensive |
+| ~~Multiple completions (n>1)~~ | Implemented: `n` parameter supported on chat and text completions |
 | Log probabilities (logprobs) | Implementation complexity |
 | Fine-tuning endpoints | Out of scope for inference server |
 | Files/Assistants API | OpenAI-specific features |

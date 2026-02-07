@@ -56,7 +56,7 @@ Users can directly influence model behavior by adjusting specific interpretable 
 
 **Acceptance Criteria:**
 - [ ] Enter feature index (e.g., 1234)
-- [ ] Adjust strength slider (-10.0 to +10.0)
+- [ ] Adjust strength slider (-200.0 to +200.0)
 - [ ] Changes apply to next generation
 - [ ] UI shows current strength value
 - [ ] Can reset to default (0.0)
@@ -113,7 +113,7 @@ Users can directly influence model behavior by adjusting specific interpretable 
 
 #### US-4.6: Feature Strength Presets
 **Scenario:** User wants quick strength options
-- Preset buttons: Off (0), Low (±2), Medium (±5), High (±10)
+- Preset buttons: Off (0), Low (±10), Medium (±50), High (±100)
 - Click to set strength
 - Custom value still available via slider
 
@@ -136,9 +136,10 @@ Users can directly influence model behavior by adjusting specific interpretable 
 - **Message:** "Feature index must be 0-{max_index}"
 
 #### EC-4.3: Extreme Steering Values
-- **Trigger:** Set very high steering (>10 or <-10)
+- **Trigger:** Set very high steering (>100 or <-100)
 - **Behavior:** Show warning, allow with confirmation
 - **Message:** "Extreme values may cause unpredictable outputs"
+- **Note:** Values outside -200 to +200 are rejected by backend Pydantic validation
 
 #### EC-4.4: Steering During Generation
 - **Trigger:** Change steering while generating
@@ -159,7 +160,7 @@ Users can directly influence model behavior by adjusting specific interpretable 
 | ID | Requirement | Priority |
 |----|-------------|----------|
 | ST-A1 | System shall allow adjustment of individual feature strengths by index | Must |
-| ST-A2 | System shall support strength values from -10.0 to +10.0 | Must |
+| ST-A2 | System shall support strength values from -200.0 to +200.0 | Must |
 | ST-A3 | System shall support 0.1 precision for strength values | Should |
 | ST-A4 | System shall display current strength for each adjusted feature | Must |
 | ST-A5 | System shall allow resetting feature to default (0.0) | Must |
@@ -206,7 +207,7 @@ Users can directly influence model behavior by adjusting specific interpretable 
 ```typescript
 interface SetSteeringRequest {
   feature_index: number;      // 0 to d_sae-1
-  value: number;              // -10.0 to +10.0
+  value: number;              // -200.0 to +200.0
 }
 ```
 
@@ -215,7 +216,7 @@ interface SetSteeringRequest {
 interface BatchSteeringRequest {
   steering: Array<{
     feature_index: number;
-    value: number;
+    value: number;              // -200.0 to +200.0
   }>;
 }
 ```
@@ -251,10 +252,11 @@ interface ToggleSteeringRequest {
 - Quick-add button
 
 #### Strength Adjustment
-- Horizontal slider from -10 to +10
+- Horizontal slider from -200 to +200 with 0.1 precision
 - Numeric input for precise values
 - Color coding: red (negative), green (positive), gray (zero)
 - Preset buttons for common values
+- Follows Neuronpedia-compatible strength semantics (typical values: +/-50-100 for strong observable effects)
 
 #### Feature List
 - List of currently adjusted features
@@ -318,7 +320,7 @@ CREATE TABLE steering_logs (
 | Field | Validation |
 |-------|------------|
 | feature_index | Integer, 0 to sae.d_sae - 1 |
-| value | Float, -10.0 to +10.0 |
+| value | Float, -200.0 to +200.0 (validated by Pydantic) |
 | precision | 0.1 minimum step |
 
 ---
@@ -622,7 +624,7 @@ Scenario: Yelling Demo
 ### Resolved
 | Question | Resolution |
 |----------|------------|
-| Value range? | -10.0 to +10.0, based on research defaults |
+| Value range? | -200.0 to +200.0, aligned with Neuronpedia-compatible semantics (typical strong effects at +/-50-100) |
 | Persistence? | In-memory only; profiles handle persistence |
 
 ### Questions for TDD

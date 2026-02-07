@@ -140,10 +140,11 @@ Users can easily acquire and manage models without leaving the miLLM interface, 
 
 #### US-1.8: Resume After Server Restart
 **Scenario:** Server restarts while model was loaded
-- Previously loaded model is not auto-loaded (intentional)
+- By default, previously loaded model is not auto-loaded
 - Model remains in "Ready" state
 - User must manually load model again
 - All downloaded models preserved in cache
+- **AUTO_LOAD_MODEL:** If the `AUTO_LOAD_MODEL` environment variable is set to a model name, miLLM automatically loads that model on server startup. This is useful for headless/Docker deployments where the admin UI is not immediately available.
 
 ### Edge Cases and Error Scenarios
 
@@ -256,13 +257,18 @@ Users can easily acquire and manage models without leaving the miLLM interface, 
 interface ModelDownloadRequest {
   source: 'huggingface' | 'local';
   repo_id?: string;           // For HuggingFace: "google/gemma-2-2b"
-  local_path?: string;        // For local: "/path/to/model"
+  local_path?: string;        // For local: "/path/to/model" (absolute path)
   quantization: 'Q4' | 'Q8' | 'FP16';
   trust_remote_code: boolean; // Default: false
   hf_token?: string;          // Optional, for gated models
   custom_name?: string;       // Optional display name
 }
 ```
+
+**Local model path notes:**
+- When `source` is `"local"`, the `local_path` parameter must be provided as an absolute filesystem path.
+- The system validates the path exists and contains valid model files (e.g., `config.json`).
+- Local models are registered in the database but files remain at the original path (no copying).
 
 #### Model Response
 ```typescript
@@ -444,6 +450,14 @@ $MODEL_CACHE_DIR/
 - **Database:** PostgreSQL 14+ for metadata, Redis for real-time state
 - **Async:** All I/O operations must be async
 - **Error Handling:** Use MiLLMError hierarchy, structured logging
+
+### Environment Variables
+
+| Variable | Required | Description |
+|----------|----------|-------------|
+| MODEL_CACHE_DIR | No | Directory for cached model files (default: `./data/models`) |
+| HF_TOKEN | No | HuggingFace access token for gated models |
+| AUTO_LOAD_MODEL | No | Model name to automatically load on server startup (e.g., `gemma-2-2b`) |
 
 ### Technology Stack Constraints
 
@@ -659,7 +673,7 @@ Only the currently loaded model appears in this list.
 
 | Requirement | Target |
 |-------------|--------|
-| Download retry | 3 attempts with exponential backoff |
+| Download retry | 3 attempts with exponential backoff (circuit breaker pattern) |
 | Partial download cleanup | 100% cleanup on failure/cancel |
 | Load failure recovery | Clean state, no GPU memory leak |
 | Graceful unload timeout | 30 seconds max |
@@ -891,6 +905,7 @@ test('complete model workflow', async ({ page }) => {
 | Download corrupts | Checksum verification |
 | OOM on load | Pre-check memory, clear caches |
 | WebSocket disconnect | Polling fallback, reconnection |
+| HuggingFace API instability | Circuit breaker pattern on HF API calls: tracks failures and opens circuit after repeated failures to prevent cascading errors. Automatically recovers after cooldown period. |
 
 ---
 

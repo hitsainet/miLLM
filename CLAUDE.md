@@ -1,11 +1,11 @@
 # Project: miLLM - Mechanistic Interpretability LLM Server
 
 ## Current Status
-- **Phase:** Implementation & Bug Fixes
-- **Last Session:** February 1, 2026 - Fixed Zustand reactivity bug in steering/monitoring UI
-- **Next Steps:** Test steering enable/disable functionality, continue feature development
-- **Active Document:** N/A (bug fix session)
-- **Current Feature:** All features implemented, fixing UI state management issues
+- **Phase:** Hardening & Documentation
+- **Last Session:** February 7, 2026 - Comprehensive audit + fix all 23 findings
+- **Next Steps:** Testing, deployment verification, v1.0 release prep
+- **Active Document:** Audit report findings (all resolved)
+- **Current Feature:** All features implemented, audited, and hardened
 
 ## Quick Resume Commands
 ```bash
@@ -197,11 +197,11 @@ refactor(services): extract HuggingFace logic
 - 🔄 **Needs Update:** Requires revision based on changes
 
 ## Housekeeping Status
-- **Last Checkpoint:** February 1, 2026 - Zustand reactivity bug fix
+- **Last Checkpoint:** February 7, 2026 - Comprehensive audit + all fixes applied
 - **Last Transcript Save:** N/A
 - **Context Health:** Good
-- **Session Count:** Multiple sessions (documentation + implementation + bug fixes)
-- **Total Development Time:** All features documented and implemented
+- **Session Count:** Multiple sessions (documentation + implementation + bug fixes + audit)
+- **Total Development Time:** All features documented, implemented, audited, and hardened
 
 ## Task Execution Standards
 
@@ -419,6 +419,36 @@ After each development session, update:
   - `admin-ui/src/hooks/useSteering.ts` - Added staleTime for consistency
 - **Key Learning:** Never use computed getters in Zustand stores for values that need to trigger re-renders. Always access state properties directly.
 - **Related Fix:** Also fixed state persistence issue where model/SAE state was being cleared when useSAE query refetched
+
+### Session: February 4-7, 2026 - Open WebUI Integration & Comprehensive Audit
+- **Accomplished:**
+  - Connected Open WebUI (K8s on 192.168.244.61) to miLLM (192.168.224.222)
+  - Fixed model name returning "1" instead of "gemma-2-2b" in /v1/models
+  - Implemented AUTO_LOAD_MODEL for automatic model loading on startup
+  - Fixed SSE streaming double data: prefix issue (EventSourceResponse → StreamingResponse)
+  - Fixed Gemma chat template fallback (system message turn markers)
+  - Added proper eos_token_id to generate() calls
+  - Downloaded gemma-2-2b-it (instruction-tuned) model
+  - Added delete button for failed SAE downloads in UI
+  - **Comprehensive OpenAI API spec audit (15 issues found, all fixed)**:
+    - Error format routing (OpenAI format for /v1/*, management format for /api/*)
+    - finish_reason "length" detection, stop sequence enforcement in streaming
+    - frequency_penalty/presence_penalty mapped to repetition_penalty
+    - Model name validation, n parameter, encoding_format for embeddings
+    - Thread error propagation in streaming, SSE error events
+    - Tool/function role support in ChatMessage
+  - **Full 7-feature audit against PRDs (23 issues found, all fixed)**:
+    - HIGH: Monitoring wired to inference, streaming stop sequences, steering WS events, HF_TOKEN for SAE downloads
+    - MEDIUM: owned_by fix, context length validation, profile parameter, steering range validation, slider precision, GPU memory check, graceful detach/unload, profile export/import endpoints, local model paths
+    - LOW: asyncio deprecation fix, console.error removal
+  - Updated task list 007 (Admin UI) - marked all implemented tasks complete
+  - Updated PRDs with undocumented features
+- **Key Decisions:**
+  - SAEs trained on base model (gemma-2-2b) don't work with instruction-tuned (gemma-2-2b-it)
+  - Steering strength range: -200 to +200 (Neuronpedia compatible, typical: +/-50-100)
+  - Direct residual stream steering (miStudio/Neuronpedia compatible)
+- **Files Modified:** 20+ files across backend, frontend, and documentation
+- **Commits:** 8 commits covering SSE fix, chat template, OpenAI spec compliance, audit fixes
 
 *[Add new sessions as they occur]*
 

@@ -77,14 +77,7 @@ function AppContent() {
  */
 function App() {
   return (
-    <ErrorBoundary
-      onError={(error, errorInfo) => {
-        // Log errors to console in production
-        // In a real app, you might send this to an error tracking service
-        console.error('Application error:', error);
-        console.error('Error info:', errorInfo);
-      }}
-    >
+    <ErrorBoundary>
       <QueryClientProvider client={queryClient}>
         <AppContent />
       </QueryClientProvider>

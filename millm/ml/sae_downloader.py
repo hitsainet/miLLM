@@ -75,7 +75,7 @@ class SAEDownloader:
             ValueError: If repository doesn't exist.
             HfHubHTTPError: If download fails.
         """
-        loop = asyncio.get_event_loop()
+        loop = asyncio.get_running_loop()
 
         # Run in executor (HF download is blocking)
         cache_path = await loop.run_in_executor(
@@ -371,7 +371,7 @@ class SAEDownloader:
         Raises:
             ValueError: If repository doesn't exist.
         """
-        loop = asyncio.get_event_loop()
+        loop = asyncio.get_running_loop()
         return await loop.run_in_executor(
             None,
             self._list_repository_files_sync,

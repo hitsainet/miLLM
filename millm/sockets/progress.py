@@ -515,17 +515,24 @@ class ProgressEmitter:
             "position": position,
         }
 
-        # Schedule async emit (don't block forward pass)
+        # Schedule async emit from thread (don't block forward pass)
         try:
-            loop = asyncio.get_event_loop()
-            if loop.is_running():
+            # Called from a background thread, so use run_coroutine_threadsafe
+            try:
+                loop = asyncio.get_running_loop()
+                # We're in an async context - create task directly
                 asyncio.create_task(
                     self._sio.emit("monitoring:activation", data)
                 )
-            else:
-                loop.run_until_complete(
-                    self._sio.emit("monitoring:activation", data)
-                )
+            except RuntimeError:
+                # No running loop in this thread - find the main loop
+                # and schedule the coroutine there
+                import threading
+                if hasattr(self, "_main_loop") and self._main_loop:
+                    asyncio.run_coroutine_threadsafe(
+                        self._sio.emit("monitoring:activation", data),
+                        self._main_loop,
+                    )
         except Exception:
             # Don't let emission errors affect inference
             pass

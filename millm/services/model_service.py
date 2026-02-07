@@ -294,7 +294,7 @@ class ModelService:
 
         # Start background download
         # Store the main loop for thread-safe async operations
-        loop = asyncio.get_event_loop()
+        loop = asyncio.get_running_loop()
         self._main_loop = loop
         future = loop.run_in_executor(
             self._executor,
@@ -833,7 +833,7 @@ class ModelService:
 
         # Start background load
         # Store the main loop for thread-safe async operations
-        loop = asyncio.get_event_loop()
+        loop = asyncio.get_running_loop()
         self._main_loop = loop
         loop.run_in_executor(
             self._executor,
@@ -989,7 +989,7 @@ class ModelService:
 
         # Unload from GPU with timeout
         try:
-            loop = asyncio.get_event_loop()
+            loop = asyncio.get_running_loop()
             await asyncio.wait_for(
                 loop.run_in_executor(self._executor, self._unload_worker, model_id),
                 timeout=timeout,

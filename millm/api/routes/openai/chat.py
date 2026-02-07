@@ -12,7 +12,7 @@ from fastapi import APIRouter, Depends
 from fastapi.responses import JSONResponse, StreamingResponse
 
 from millm.api.dependencies import get_inference_service
-from millm.api.routes.openai.errors import model_not_loaded_error
+from millm.api.routes.openai.errors import model_not_found_error, model_not_loaded_error
 from millm.api.schemas.openai import (
     ChatCompletionRequest,
     ChatCompletionResponse,
@@ -45,6 +45,11 @@ async def create_chat_completion(
     # Check if model is loaded
     if not inference.is_model_loaded():
         return model_not_loaded_error()
+
+    # Validate model name matches loaded model
+    model_info = inference.get_loaded_model_info()
+    if model_info and request.model != model_info.name:
+        return model_not_found_error(request.model, model_info.name)
 
     logger.info(
         "chat_completion_request",

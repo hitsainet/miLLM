@@ -1,13 +1,16 @@
 """
 Exception handlers for FastAPI.
 
-Converts MiLLMError exceptions to standard API responses with user-friendly messages.
+Routes errors to the correct format based on the request path:
+- /v1/* endpoints -> OpenAI error format
+- All other endpoints -> Management API format (ApiResponse)
 """
 
 from fastapi import Request
 from fastapi.responses import JSONResponse
 
 from millm.api.schemas.common import ApiResponse
+from millm.api.routes.openai.errors import ERROR_STATUS_MAP, create_openai_error
 from millm.core.errors import MiLLMError
 from millm.core.error_messages import get_user_friendly_message
 from millm.core.logging import get_logger
@@ -15,34 +18,50 @@ from millm.core.logging import get_logger
 logger = get_logger(__name__)
 
 
+def _is_openai_route(request: Request) -> bool:
+    """Check if the request is for an OpenAI-compatible endpoint."""
+    return request.url.path.startswith("/v1/")
+
+
 async def millm_error_handler(request: Request, exc: MiLLMError) -> JSONResponse:
     """
-    Convert MiLLMError to a standard API error response.
+    Convert MiLLMError to the appropriate error response format.
 
-    Includes both technical error message and user-friendly message.
+    Routes to OpenAI error format for /v1/* endpoints,
+    management API format for all others.
 
     Args:
         request: The FastAPI request object.
         exc: The MiLLMError exception.
 
     Returns:
-        JSONResponse with the error in ApiResponse format.
+        JSONResponse with the appropriate error format.
     """
-    # Get user-friendly message for this error code
-    user_message = get_user_friendly_message(exc.code, exc.message)
-
     logger.warning(
         "api_error",
         error_code=exc.code,
         error_message=exc.message,
-        user_message=user_message,
         status_code=exc.status_code,
         path=request.url.path,
         method=request.method,
         details=exc.details,
     )
 
-    # Include both technical and user-friendly messages in details
+    # Use OpenAI format for /v1/* endpoints
+    if _is_openai_route(request):
+        status_code, error_type = ERROR_STATUS_MAP.get(
+            exc.code, (exc.status_code, "server_error")
+        )
+        return create_openai_error(
+            message=exc.message,
+            error_type=error_type,
+            code=exc.code.lower() if exc.code else None,
+            status_code=status_code,
+        )
+
+    # Management API format for everything else
+    user_message = get_user_friendly_message(exc.code, exc.message)
+
     enhanced_details = {
         **exc.details,
         "user_message": user_message,
@@ -51,7 +70,7 @@ async def millm_error_handler(request: Request, exc: MiLLMError) -> JSONResponse
 
     response = ApiResponse.fail(
         code=exc.code,
-        message=user_message,  # Use user-friendly message as primary
+        message=user_message,
         details=enhanced_details,
     )
 
@@ -63,14 +82,14 @@ async def millm_error_handler(request: Request, exc: MiLLMError) -> JSONResponse
 
 async def generic_exception_handler(request: Request, exc: Exception) -> JSONResponse:
     """
-    Handle unexpected exceptions with a generic error response.
+    Handle unexpected exceptions with the appropriate error format.
 
     Args:
         request: The FastAPI request object.
         exc: The exception.
 
     Returns:
-        JSONResponse with a generic error message.
+        JSONResponse with the appropriate error format.
     """
     logger.error(
         "unhandled_exception",
@@ -81,6 +100,16 @@ async def generic_exception_handler(request: Request, exc: Exception) -> JSONRes
         exc_info=True,
     )
 
+    # Use OpenAI format for /v1/* endpoints
+    if _is_openai_route(request):
+        return create_openai_error(
+            message="An internal server error occurred.",
+            error_type="server_error",
+            code="server_error",
+            status_code=500,
+        )
+
+    # Management API format for everything else
     user_message = get_user_friendly_message("INTERNAL_ERROR")
 
     response = ApiResponse.fail(

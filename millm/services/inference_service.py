@@ -133,6 +133,63 @@ class InferenceService:
         return self._model_state.current.tokenizer
 
     # =========================================================================
+    # Generation Helpers
+    # =========================================================================
+
+    def _build_generate_kwargs(
+        self, gen_config: GenerationConfig, inputs: dict
+    ) -> dict:
+        """
+        Build kwargs for model.generate() from GenerationConfig.
+
+        Uses to_generate_kwargs() for proper penalty mapping, then adds
+        tokenizer-specific pad/eos tokens.
+        """
+        kwargs = gen_config.to_generate_kwargs()
+        kwargs.update({k: v.to(self._device) for k, v in inputs.items()})
+        kwargs["pad_token_id"] = (
+            self._tokenizer.pad_token_id or self._tokenizer.eos_token_id
+        )
+        kwargs["eos_token_id"] = self._tokenizer.eos_token_id
+        return kwargs
+
+    def _determine_finish_reason(
+        self, generated_token_count: int, max_new_tokens: int
+    ) -> str:
+        """
+        Determine finish_reason per OpenAI spec.
+
+        Returns "length" if generation hit max_tokens, "stop" otherwise.
+        """
+        if generated_token_count >= max_new_tokens:
+            return "length"
+        return "stop"
+
+    def _apply_stop_sequences(
+        self, text: str, stop_sequences: Optional[list[str]]
+    ) -> tuple[str, bool]:
+        """
+        Truncate text at the first occurrence of any stop sequence.
+
+        Returns:
+            Tuple of (truncated_text, was_stopped).
+        """
+        if not stop_sequences:
+            return text, False
+
+        earliest_pos = len(text)
+        found = False
+        for seq in stop_sequences:
+            pos = text.find(seq)
+            if pos != -1 and pos < earliest_pos:
+                earliest_pos = pos
+                found = True
+
+        if found:
+            return text[:earliest_pos], True
+        return text, False
+
+    # =========================================================================
     # Chat Completions
     # =========================================================================
 
@@ -173,15 +230,8 @@ class InferenceService:
                 ):
                     self._steering_service.prepare_generation()
 
-                outputs = self._model.generate(
-                    **inputs,
-                    max_new_tokens=gen_config.max_new_tokens,
-                    temperature=gen_config.temperature if gen_config.do_sample else 1.0,
-                    top_p=gen_config.top_p,
-                    do_sample=gen_config.do_sample,
-                    pad_token_id=self._tokenizer.pad_token_id or self._tokenizer.eos_token_id,
-                    eos_token_id=self._tokenizer.eos_token_id,
-                )
+                generate_kwargs = self._build_generate_kwargs(gen_config, inputs)
+                outputs = self._model.generate(**generate_kwargs)
 
             # Decode output
             generated_ids = outputs[0][prompt_tokens:]
@@ -189,6 +239,19 @@ class InferenceService:
                 generated_ids, skip_special_tokens=True
             )
             completion_tokens = len(generated_ids)
+
+        # Apply stop sequences
+        completion_text, stopped_by_sequence = self._apply_stop_sequences(
+            completion_text, gen_config.stop_sequences
+        )
+
+        # Determine finish reason
+        if stopped_by_sequence:
+            finish_reason = "stop"
+        else:
+            finish_reason = self._determine_finish_reason(
+                completion_tokens, gen_config.max_new_tokens
+            )
 
         model_info = self.get_loaded_model_info()
         model_name = model_info.name if model_info else "unknown"
@@ -201,7 +264,7 @@ class InferenceService:
                 ChatCompletionChoice(
                     index=0,
                     message=ChatMessage(role="assistant", content=completion_text),
-                    finish_reason="stop",
+                    finish_reason=finish_reason,
                 )
             ],
             usage=Usage(
@@ -249,16 +312,8 @@ class InferenceService:
 
             # Build generation kwargs
             gen_config = GenerationConfig.from_request(request)
-            generation_kwargs = {
-                **{k: v.to(self._device) for k, v in inputs.items()},
-                "streamer": streamer,
-                "max_new_tokens": gen_config.max_new_tokens,
-                "temperature": gen_config.temperature if gen_config.do_sample else 1.0,
-                "top_p": gen_config.top_p,
-                "do_sample": gen_config.do_sample,
-                "pad_token_id": self._tokenizer.pad_token_id or self._tokenizer.eos_token_id,
-                "eos_token_id": self._tokenizer.eos_token_id,
-            }
+            generation_kwargs = self._build_generate_kwargs(gen_config, inputs)
+            generation_kwargs["streamer"] = streamer
 
             # Apply steering if active
             if self._steering_service and getattr(
@@ -266,9 +321,11 @@ class InferenceService:
             ):
                 self._steering_service.prepare_generation()
 
-            # Start generation thread
+            # Start generation thread with error capture
+            thread_error: list[Exception] = []
             thread = Thread(
-                target=self._generate_in_thread, args=(generation_kwargs,)
+                target=self._generate_in_thread,
+                args=(generation_kwargs, thread_error),
             )
             thread.start()
 
@@ -286,11 +343,13 @@ class InferenceService:
                         )
                     ],
                 )
-                yield f"data: {first_chunk.model_dump_json()}\n\n"
+                yield f"data: {first_chunk.model_dump_json(exclude_none=True)}\n\n"
 
-                # Stream tokens
+                # Stream tokens, counting for finish_reason
+                token_count = 0
                 for token in streamer:
                     if token:
+                        token_count += 1
                         chunk = ChatCompletionChunk(
                             id=completion_id,
                             created=created,
@@ -303,7 +362,32 @@ class InferenceService:
                                 )
                             ],
                         )
-                        yield f"data: {chunk.model_dump_json()}\n\n"
+                        yield f"data: {chunk.model_dump_json(exclude_none=True)}\n\n"
+
+                # Check for thread errors
+                if thread_error:
+                    error_msg = str(thread_error[0])
+                    logger.error("generation_failed_during_stream", error=error_msg)
+                    # Send error as final SSE event before closing
+                    import json
+
+                    error_event = json.dumps(
+                        {
+                            "error": {
+                                "message": f"Generation error: {error_msg}",
+                                "type": "server_error",
+                                "code": "generation_error",
+                            }
+                        }
+                    )
+                    yield f"data: {error_event}\n\n"
+                    yield "data: [DONE]\n\n"
+                    return
+
+                # Determine finish reason
+                finish_reason = self._determine_finish_reason(
+                    token_count, gen_config.max_new_tokens
+                )
 
                 # Send final chunk with finish_reason
                 final_chunk = ChatCompletionChunk(
@@ -314,16 +398,32 @@ class InferenceService:
                         ChatCompletionChunkChoice(
                             index=0,
                             delta=ChatCompletionChunkDelta(),
-                            finish_reason="stop",
+                            finish_reason=finish_reason,
                         )
                     ],
                 )
-                yield f"data: {final_chunk.model_dump_json()}\n\n"
+                yield f"data: {final_chunk.model_dump_json(exclude_none=True)}\n\n"
                 yield "data: [DONE]\n\n"
 
             except Exception as e:
                 logger.error("streaming_error", error=str(e))
-                raise
+                # Try to send error in SSE format
+                import json
+
+                try:
+                    error_event = json.dumps(
+                        {
+                            "error": {
+                                "message": f"Streaming error: {str(e)}",
+                                "type": "server_error",
+                                "code": "streaming_error",
+                            }
+                        }
+                    )
+                    yield f"data: {error_event}\n\n"
+                    yield "data: [DONE]\n\n"
+                except Exception:
+                    pass
             finally:
                 thread.join(timeout=5.0)
                 if thread.is_alive():
@@ -349,38 +449,65 @@ class InferenceService:
         created = int(datetime.now().timestamp())
 
         # Handle prompt as string or list
-        prompt = (
-            request.prompt[0]
+        prompts = (
+            request.prompt
             if isinstance(request.prompt, list)
-            else request.prompt
+            else [request.prompt]
         )
 
-        async with self._request_queue.acquire():
-            # Tokenize input
-            inputs = self._tokenizer(prompt, return_tensors="pt").to(self._device)
-            prompt_tokens = inputs.input_ids.shape[1]
+        choices: list[TextCompletionChoice] = []
+        total_prompt_tokens = 0
+        total_completion_tokens = 0
 
-            # Build generation config
+        async with self._request_queue.acquire():
             gen_config = GenerationConfig.from_request(request)
 
-            # Generate
-            with torch.no_grad():
-                outputs = self._model.generate(
-                    **inputs,
-                    max_new_tokens=gen_config.max_new_tokens,
-                    temperature=gen_config.temperature if gen_config.do_sample else 1.0,
-                    top_p=gen_config.top_p,
-                    do_sample=gen_config.do_sample,
-                    pad_token_id=self._tokenizer.pad_token_id or self._tokenizer.eos_token_id,
-                    eos_token_id=self._tokenizer.eos_token_id,
+            for i, prompt in enumerate(prompts):
+                # Tokenize input
+                inputs = self._tokenizer(prompt, return_tensors="pt").to(
+                    self._device
+                )
+                prompt_tokens = inputs.input_ids.shape[1]
+
+                # Generate
+                with torch.no_grad():
+                    generate_kwargs = self._build_generate_kwargs(
+                        gen_config, inputs
+                    )
+                    outputs = self._model.generate(**generate_kwargs)
+
+                # Decode output
+                generated_ids = outputs[0][prompt_tokens:]
+                completion_text = self._tokenizer.decode(
+                    generated_ids, skip_special_tokens=True
+                )
+                completion_tokens = len(generated_ids)
+
+                # Apply stop sequences
+                completion_text, stopped_by_sequence = (
+                    self._apply_stop_sequences(
+                        completion_text, gen_config.stop_sequences
+                    )
                 )
 
-            # Decode output
-            generated_ids = outputs[0][prompt_tokens:]
-            completion_text = self._tokenizer.decode(
-                generated_ids, skip_special_tokens=True
-            )
-            completion_tokens = len(generated_ids)
+                # Determine finish reason
+                if stopped_by_sequence:
+                    finish_reason = "stop"
+                else:
+                    finish_reason = self._determine_finish_reason(
+                        completion_tokens, gen_config.max_new_tokens
+                    )
+
+                choices.append(
+                    TextCompletionChoice(
+                        index=i,
+                        text=completion_text,
+                        finish_reason=finish_reason,
+                    )
+                )
+
+                total_prompt_tokens += prompt_tokens
+                total_completion_tokens += completion_tokens
 
         model_info = self.get_loaded_model_info()
         model_name = model_info.name if model_info else "unknown"
@@ -389,17 +516,11 @@ class InferenceService:
             id=completion_id,
             created=created,
             model=model_name,
-            choices=[
-                TextCompletionChoice(
-                    index=0,
-                    text=completion_text,
-                    finish_reason="stop",
-                )
-            ],
+            choices=choices,
             usage=Usage(
-                prompt_tokens=prompt_tokens,
-                completion_tokens=completion_tokens,
-                total_tokens=prompt_tokens + completion_tokens,
+                prompt_tokens=total_prompt_tokens,
+                completion_tokens=total_completion_tokens,
+                total_tokens=total_prompt_tokens + total_completion_tokens,
             ),
         )
 
@@ -468,17 +589,22 @@ class InferenceService:
     # Private Methods
     # =========================================================================
 
-    def _generate_in_thread(self, generation_kwargs: dict) -> None:
+    def _generate_in_thread(
+        self, generation_kwargs: dict, errors: Optional[list] = None
+    ) -> None:
         """
         Run generation in thread for streaming.
 
         Must be called in separate thread because generate() is blocking.
+        Errors are captured in the errors list so the caller can check them.
         """
         try:
             with torch.no_grad():
                 self._model.generate(**generation_kwargs)
         except Exception as e:
             logger.error("generation_thread_error", error=str(e))
+            if errors is not None:
+                errors.append(e)
 
     def _format_chat_messages(self, messages: list[ChatMessage]) -> str:
         """
@@ -511,14 +637,26 @@ class InferenceService:
         # Fallback: Gemma-style format with turn markers
         # This format works well with Gemma 2 and similar models
         parts = []
+        pending_system = None
         for msg in messages:
             if msg.role == "system":
-                # Prepend system message to first user turn
-                parts.append(f"<start_of_turn>user\n{msg.content}")
+                # Buffer system message to prepend to next user turn
+                pending_system = msg.content
             elif msg.role == "user":
-                parts.append(f"<start_of_turn>user\n{msg.content}<end_of_turn>")
+                if pending_system:
+                    parts.append(
+                        f"<start_of_turn>user\n{pending_system}\n\n{msg.content}<end_of_turn>"
+                    )
+                    pending_system = None
+                else:
+                    parts.append(f"<start_of_turn>user\n{msg.content}<end_of_turn>")
             elif msg.role == "assistant":
                 parts.append(f"<start_of_turn>model\n{msg.content}<end_of_turn>")
+
+        # If there's a dangling system message with no user turn after it
+        if pending_system:
+            parts.append(f"<start_of_turn>user\n{pending_system}<end_of_turn>")
+
         # Add generation prompt
         parts.append("<start_of_turn>model")
         return "\n".join(parts)

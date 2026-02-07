@@ -25,8 +25,8 @@ from pydantic import BaseModel, Field, model_validator
 class ChatMessage(BaseModel):
     """Chat message with role and content."""
 
-    role: Literal["system", "user", "assistant"]
-    content: str
+    role: Literal["system", "user", "assistant", "tool", "function"]
+    content: Optional[str] = None
 
     # Allow extra fields (OpenAI clients may send name, function_call, etc.)
     model_config = {"extra": "ignore"}

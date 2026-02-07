@@ -15,6 +15,21 @@
 
 Feature Monitoring provides real-time visibility into SAE feature activations. This document provides implementation guidance building on LoadedSAE monitoring capabilities from Feature 3.
 
+### Implementation Notes (Post-Implementation)
+
+**`_notify_monitoring()` Wiring Path:** The monitoring data flows as follows:
+1. During inference, `InferenceService._notify_monitoring(request_id)` is called after generation
+2. It reads the last captured activations from the attached SAE via `sae.get_last_feature_activations()`
+3. It converts the tensor to a dict and calls `MonitoringService.on_activation(activations, request_id, ...)`
+4. MonitoringService records to history, updates statistics, and emits throttled WebSocket events
+
+**`on_activation()` Signature:** The actual `MonitoringService.on_activation()` takes a `Tensor` (not a `Dict`) as its first argument. The method signature is:
+```python
+def on_activation(self, activations: Tensor, request_id: Optional[str] = None, token_position: int = 0, top_k: int = 10)
+```
+
+**ProgressEmitter Pattern:** WebSocket emission uses the `ProgressEmitter` class in `sockets/progress.py`, which wraps Socket.IO emit calls. It provides methods like `emit_activation_update()` and `emit_monitoring_state_changed()`. The emitter is initialized with the Socket.IO server instance and provides a consistent interface for all event types.
+
 ---
 
 ## 2. File Structure
@@ -236,15 +251,16 @@ class MonitoringService:
 
     def on_activation(
         self,
-        activations: Dict[int, float],
-        request_id: str,
-        position: Optional[int] = None,
-        activation_type: str = "token",
+        activations: Tensor,  # NOTE: Takes Tensor, not Dict
+        request_id: Optional[str] = None,
+        token_position: int = 0,
+        top_k: int = 10,
     ):
         """
         Called when new activations captured.
 
         This is called from inference path - keep it fast!
+        The activations parameter is a Tensor from the SAE forward pass.
         """
         if not self._enabled:
             return
@@ -445,24 +461,32 @@ def emit_activation_update(
 
 ## 7. Integration with InferenceService
 
+The actual integration uses `_notify_monitoring()` called after generation completes:
+
 ```python
-# millm/services/inference_service.py (modification)
+# millm/services/inference_service.py (actual implementation)
 
 class InferenceService:
-    def __init__(self, ..., monitoring_service: MonitoringService = None):
-        self._monitoring_service = monitoring_service
+    def __init__(self, ...):
+        # MonitoringService accessed via app state, not constructor injection
+        ...
 
-    async def _after_generation(self, request_id: str):
-        """Called after generation to capture monitoring data."""
-        if self._monitoring_service and self._sae:
-            activations = self._sae.get_last_feature_activations()
-            if activations is not None:
-                # Convert tensor to dict
-                act_dict = self._tensor_to_dict(activations)
-                self._monitoring_service.on_activation(
-                    activations=act_dict,
+    def _notify_monitoring(self, request_id: Optional[str] = None) -> None:
+        """
+        Forward captured activations to the monitoring service.
+        Called after both streaming and non-streaming generation.
+        Wrapped in try/except to never let monitoring errors affect inference.
+        """
+        sae = self._get_attached_sae()
+        if sae is None:
+            return
+        activations = sae.get_last_feature_activations()
+        if activations is not None:
+            monitoring_service = self._get_monitoring_service()
+            if monitoring_service:
+                monitoring_service.on_activation(
+                    activations=activations,  # Tensor, not dict
                     request_id=request_id,
-                    activation_type="mean",
                 )
 ```
 

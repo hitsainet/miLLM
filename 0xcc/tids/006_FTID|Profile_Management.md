@@ -2,9 +2,30 @@
 
 ## miLLM Feature 6
 
-**Document Version:** 1.0
+**Document Version:** 1.1
 **Created:** January 30, 2026
-**Status:** Draft
+**Status:** Complete
+
+---
+
+### Implementation Notes (Post-Implementation)
+
+**Export/Import Endpoints:** The actual implementation uses:
+- `GET /api/profiles/{id}/export` - Returns JSON with `Content-Disposition` header for download
+- `POST /api/profiles/import` - Accepts a `ProfileImportRequest` Pydantic model (not a file upload)
+
+**ProfileImportRequest Pattern:** Unlike the TID design which used `UploadFile`, the actual implementation uses a Pydantic `BaseModel`:
+```python
+class ProfileImportRequest(BaseModel):
+    version: str = Field(default="1.0")
+    name: str = Field(..., min_length=1, max_length=100)
+    description: str | None = None
+    steering: dict[str, Any] = Field(default_factory=dict)
+    # ... other fields
+```
+This is simpler than file upload and works well for JSON payloads from miStudio.
+
+**Profile Parameter in Inference:** The `chat.py` route handler supports a `profile` parameter in `ChatCompletionRequest`. When set, it loads the profile by name from the database via `ProfileRepository.get_by_name()` and applies steering via `sae.set_steering_batch()` + `sae.enable_steering(True)` before generation begins.
 
 ---
 
@@ -334,6 +355,7 @@ class ProfileService:
         await self._repository.deactivate_all()
 
     async def export_profile(self, profile_id: str) -> dict:
+        """Export profile as miStudio-compatible JSON."""
         profile = await self.get_profile(profile_id)
         return {
             "version": "1.0",
@@ -350,16 +372,18 @@ class ProfileService:
             "exported_from": "miLLM v1.0",
         }
 
-    async def import_profile(self, data: dict) -> Profile:
-        if data.get("type") != "millm_profile":
-            raise ValueError("Invalid profile format")
+    async def import_profile(self, request: "ProfileImportRequest") -> Profile:
+        """
+        Import profile from ProfileImportRequest (Pydantic BaseModel).
 
-        profile_data = data["profile"]
-        steering = {int(k): v for k, v in profile_data["steering"].items()}
+        Note: Uses Pydantic BaseModel instead of file upload for simplicity.
+        The request contains name, description, steering dict, etc. directly.
+        """
+        steering = {int(k): v for k, v in request.steering.items()}
 
         return await self.create_profile(
-            name=profile_data["name"],
-            description=profile_data.get("description"),
+            name=request.name,
+            description=request.description,
             steering=steering,
         )
 
@@ -476,15 +500,14 @@ async def export_profile(
     )
 
 
-@router.post("/import", response_model=ProfileResponse)
+@router.post("/import", response_model=ApiResponse[ProfileResponse])
 async def import_profile(
-    file: UploadFile = File(...),
-    profile_service: ProfileService = Depends(get_profile_service),
-):
-    content = await file.read()
-    data = json.loads(content)
-    profile = await profile_service.import_profile(data)
-    return ProfileResponse.from_model(profile)
+    request: ProfileImportRequest,  # Pydantic BaseModel, not file upload
+    service: ProfileServiceDep,
+) -> ApiResponse[ProfileResponse]:
+    """Import a profile from miStudio-compatible JSON."""
+    profile = await service.import_profile(request)
+    return ApiResponse.ok(ProfileResponse.from_profile(profile))
 ```
 
 ---

@@ -18,9 +18,23 @@ This Technical Implementation Document provides specific implementation guidance
 
 ### Implementation Philosophy
 - **Leverage Existing:** LoadedSAE already has steering methods from Feature 3
-- **Thin Service Layer:** SteeringService wraps SAE methods with validation
-- **Real-Time Events:** WebSocket notifications for UI updates
+- **Direct on LoadedSAE:** No separate SteeringService -- steering lives on LoadedSAE and SAEService
+- **Real-Time Events:** WebSocket `steering:update` emission after each change
 - **Zero Overhead When Off:** No performance impact when steering disabled
+
+### Implementation Notes (Post-Implementation)
+
+**Steering Range:** The actual steering range is **-200 to +200** (not -10/+10 as originally planned). This is validated in the Pydantic schema `SteeringRequest` in `api/schemas/sae.py` with `ge=-200.0, le=200.0`.
+
+**Direct Residual Stream Steering Formula:** Steering is applied directly to the residual stream, not through encode/decode:
+```
+modified_activations = original_activations + sum(strength_i * W_dec[feature_idx_i, :])
+```
+Where `W_dec[feature_idx_i, :]` is the decoder column for feature i. This applies uniformly to all token positions.
+
+**No Separate SteeringService:** Unlike the TDD design, there is no standalone `SteeringService` class. All steering operations are methods on `LoadedSAE` (in `ml/sae_wrapper.py`) and are delegated through `SAEService`. The API routes in `api/routes/management/saes.py` call SAEService directly.
+
+**WebSocket `steering:update` Emission:** After each steering change (set, batch, clear, enable/disable), the route handler calls `_emit_steering_update()` which emits a `steering:update` event via `ProgressEmitter` in `sockets/progress.py`. This notifies the admin UI to refresh its steering state.
 
 ---
 
@@ -93,9 +107,9 @@ class SetFeatureRequest(BaseModel):
     )
     value: float = Field(
         ...,
-        ge=-10.0,
-        le=10.0,
-        description="Steering strength (-10 to +10)"
+        ge=-200.0,
+        le=200.0,
+        description="Steering strength (-200 to +200)"
     )
 
     @field_validator("value", mode="after")
@@ -508,7 +522,7 @@ async def set_feature(
     """
     Set steering value for a single feature.
 
-    Value range: -10.0 to +10.0
+    Value range: -200.0 to +200.0
     Setting value to 0 clears the feature.
     """
     try:
@@ -615,7 +629,7 @@ class InvalidFeatureIndexError(SteeringError):
 class InvalidSteeringValueError(SteeringError):
     """Raised when steering value is out of allowed range."""
 
-    def __init__(self, value: float, min_val: float = -10.0, max_val: float = 10.0):
+    def __init__(self, value: float, min_val: float = -200.0, max_val: float = 200.0):
         super().__init__(
             code="INVALID_STEERING_VALUE",
             message=f"Steering value {value} out of range ({min_val} to {max_val})"

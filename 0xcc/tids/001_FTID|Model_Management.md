@@ -30,6 +30,14 @@ Model Management is implemented as a greenfield feature following the "Ollama-si
 - **Real-time:** Socket.IO for progress events
 - **ML Libraries:** Transformers, huggingface_hub, bitsandbytes
 
+### Implementation Notes (Post-Implementation)
+
+**AUTO_LOAD_MODEL:** The `main.py` lifespan handler supports an `AUTO_LOAD_MODEL` setting (in `core/config.py`). When set, the `_auto_load_model()` function runs during startup, looking up a model by numeric ID or name, then calling `service.load_model()` with a polling loop (up to 120s) to wait for the load to complete.
+
+**Local Model Path Support:** When `source == ModelSource.LOCAL`, the `download_model()` method in `ModelService` validates the directory exists, calculates disk size from the local path, and marks the model as `ready` immediately (no download needed). The `local_path` is used directly as `cache_path`.
+
+**Circuit Breaker Pattern:** HuggingFace API calls are protected by a circuit breaker implemented in `core/resilience.py`. The `CircuitBreaker` class has `CLOSED`, `OPEN`, and `HALF_OPEN` states with configurable failure threshold and recovery timeout. The health endpoint at `/api/health` exposes circuit breaker status.
+
 ---
 
 ## 2. File Structure and Organization

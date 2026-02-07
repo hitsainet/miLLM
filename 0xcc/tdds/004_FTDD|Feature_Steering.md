@@ -29,7 +29,7 @@ Feature Steering provides the mechanism for users to modify model behavior by ad
 | Vector | Pre-computed sparse tensor | O(1) application during inference |
 | Updates | Rebuild on change | Simple, fast for typical counts |
 | Thread Safety | Copy-on-read for vector | No locks during inference |
-| Range | -10.0 to +10.0 | Research-based reasonable range |
+| Range | -200.0 to +200.0 | Neuronpedia-compatible strength semantics: 0=none, 1=1x multiplier, typical strong effects at +/-50-100. Backend validates range -200 to +200 via Pydantic. |
 
 ---
 
@@ -50,15 +50,17 @@ Feature Steering provides the mechanism for users to modify model behavior by ad
 │                      FastAPI Application                         │
 │                                                                  │
 │  ┌─────────────────────────────────────────────────────────┐   │
-│  │                  Steering Routes                          │   │
-│  │  /api/steering   /api/steering/features   /api/steering/* │   │
+│  │          Steering Routes (in saes.py router)              │   │
+│  │  /api/saes/steering/*  (embedded in SAE management routes)│   │
 │  └────────────────────────────┬────────────────────────────┘   │
 │                               │                                  │
 │                               ▼                                  │
 │  ┌─────────────────────────────────────────────────────────┐   │
-│  │                  SteeringService                          │   │
-│  │  - get_state()   - set_feature()   - toggle()            │   │
-│  │  - clear_all()   - batch_set()     - validate()          │   │
+│  │                  SAEService (steering methods)             │   │
+│  │  - set_steering()  - enable_steering()  - get_steering()  │   │
+│  │  - clear_steering() - set_steering_batch()                │   │
+│  │  NOTE: No separate SteeringService. Steering is managed   │   │
+│  │  through SAEService and LoadedSAE methods directly.       │   │
 │  └────────────────────────────┬────────────────────────────┘   │
 │                               │                                  │
 │                               ▼                                  │
@@ -76,7 +78,8 @@ Feature Steering provides the mechanism for users to modify model behavior by ad
 ┌─────────────────────────────────────────────────────────────────┐
 │                    Model Forward Pass                            │
 │                                                                  │
-│    Layer Output ──► SAE Encode ──► [+Steering] ──► SAE Decode   │
+│    **Direct Residual Stream Steering** (no SAE reconstruction)   │
+│    Layer Output ──► modified = original + Σ(strength_i × W_dec[i,:]) │
 └─────────────────────────────────────────────────────────────────┘
 ```
 
@@ -86,15 +89,15 @@ Feature Steering provides the mechanism for users to modify model behavior by ad
 User adjusts slider for feature 1234 to +5.0
         │
         ▼
-Steering Route ────────► Validate request
+Steering Route (saes.py) ► Validate request
         │                 - Check SAE attached
         │                 - Validate feature index
-        │                 - Validate value range
+        │                 - Validate value range (-200 to +200)
         │
         ▼
-Steering Service ──────► Update state
+SAEService methods ────► Update state
         │                 - Call LoadedSAE.set_steering(1234, 5.0)
-        │                 - Emit WebSocket event
+        │                 - Emit via ProgressEmitter.emit_steering_changed()
         │
         ▼
 LoadedSAE ─────────────► Rebuild steering vector
@@ -108,6 +111,15 @@ Return success with new state
 
 ### Data Flow: Steering Applied During Inference
 
+> **Implementation Note:** Steering uses **direct residual stream modification**, not
+> SAE encode-steer-decode. The formula is:
+>
+> `modified_activations = original_activations + Σ(strength_i × decoder_direction_i)`
+>
+> where `decoder_direction_i = W_dec[feature_idx, :]` (the SAE decoder row for that feature).
+> This is applied uniformly to ALL token positions without SAE reconstruction, making it
+> compatible with miStudio/Neuronpedia conventions.
+
 ```
 Token generation request
         │
@@ -115,20 +127,15 @@ Token generation request
 Model forward pass reaches hooked layer
         │
         ▼
-SAE Hook intercepts output
+SAE Hook intercepts activations (sae_hooker.py)
         │
         ▼
-LoadedSAE.forward() called ──────────────────────────────────┐
-        │                                                     │
-        ▼                                                     │
-    Encode: x @ W_enc + b_enc → feature_acts                 │
-        │                                                     │
-        ▼                                                     │
-    if steering_enabled and steering_vector:                  │
-        feature_acts = feature_acts + steering_vector   ◄────┘
-        │                                                 Pre-computed!
+    if steering_enabled and steering_vector is not None:
+        activations = activations + steering_vector   ◄── Pre-computed!
+        │                                                 steering_vector = Σ(strength_i × W_dec[i,:])
+        │                                                 Shape: (d_model,), added to residual stream
         ▼
-    Decode: feature_acts @ W_dec + b_dec → output
+    (Optional: monitoring capture of feature_acts)
         │
         ▼
 Return modified activations to model
@@ -173,6 +180,9 @@ class LoadedSAE:
 
 ### Pydantic Schemas
 
+> **Frontend Note:** The admin UI slider uses `step=0.1` (not integer steps),
+> allowing fine-grained control within the -200.0 to +200.0 range.
+
 ```python
 # millm/api/schemas/steering.py
 
@@ -183,7 +193,7 @@ from typing import Dict, List, Optional
 class SetFeatureRequest(BaseModel):
     """Request to set a single feature's steering value."""
     feature_index: int = Field(..., ge=0, description="Feature index")
-    value: float = Field(..., ge=-10.0, le=10.0, description="Steering strength")
+    value: float = Field(..., ge=-200.0, le=200.0, description="Steering strength")
 
     @field_validator("value")
     def round_value(cls, v):
@@ -239,8 +249,14 @@ class ClearResponse(BaseModel):
 
 ### Route Structure
 
+> **Implementation Note:** Steering routes are embedded in the SAE management router
+> (`millm/api/routes/management/saes.py`) under the `/api/saes/steering/*` prefix.
+> There is no separate `steering.py` route file or `SteeringService` class. Steering
+> is managed through `SAEService` methods (`set_steering()`, `enable_steering()`,
+> `get_steering_values()`) and `LoadedSAE` methods directly.
+
 ```python
-# millm/api/routes/management/steering.py
+# millm/api/routes/management/saes.py (steering routes section)
 
 from fastapi import APIRouter, Depends, HTTPException
 
@@ -252,231 +268,116 @@ from millm.api.schemas.steering import (
     SetFeatureResponse,
     ClearResponse,
 )
-from millm.services.steering_service import SteeringService
-from millm.api.dependencies import get_steering_service
+from millm.services.sae_service import SAEService
+from millm.api.dependencies import get_sae_service
 
-router = APIRouter(prefix="/api/steering", tags=["Feature Steering"])
+router = APIRouter(prefix="/api/saes", tags=["SAE Management & Steering"])
 
 
-@router.get("", response_model=SteeringState)
+@router.get("/steering", response_model=SteeringState)
 async def get_steering_state(
-    steering: SteeringService = Depends(get_steering_service),
+    sae_service: SAEService = Depends(get_sae_service),
 ):
     """Get current steering state including all active features."""
-    return await steering.get_state()
+    return sae_service.get_steering_state()
 
 
-@router.post("/enable", response_model=SteeringState)
+@router.post("/steering/enable", response_model=SteeringState)
 async def toggle_steering(
     request: ToggleRequest,
-    steering: SteeringService = Depends(get_steering_service),
+    sae_service: SAEService = Depends(get_sae_service),
 ):
     """Enable or disable steering. Values are preserved when disabled."""
-    return await steering.set_enabled(request.enabled)
+    return sae_service.enable_steering(request.enabled)
 
 
-@router.post("/features", response_model=SetFeatureResponse)
+@router.post("/steering/features", response_model=SetFeatureResponse)
 async def set_feature(
     request: SetFeatureRequest,
-    steering: SteeringService = Depends(get_steering_service),
+    sae_service: SAEService = Depends(get_sae_service),
 ):
     """Set steering value for a single feature."""
-    return await steering.set_feature(
+    return sae_service.set_steering(
         request.feature_index,
         request.value,
     )
 
 
-@router.post("/features/batch", response_model=SteeringState)
+@router.post("/steering/features/batch", response_model=SteeringState)
 async def batch_set_features(
     request: BatchSetRequest,
-    steering: SteeringService = Depends(get_steering_service),
+    sae_service: SAEService = Depends(get_sae_service),
 ):
     """Set multiple feature values at once."""
-    return await steering.batch_set(
+    return sae_service.set_steering_batch(
         {r.feature_index: r.value for r in request.steering}
     )
 
 
-@router.delete("/features/{feature_index}", response_model=SetFeatureResponse)
+@router.delete("/steering/features/{feature_index}", response_model=SetFeatureResponse)
 async def remove_feature(
     feature_index: int,
-    steering: SteeringService = Depends(get_steering_service),
+    sae_service: SAEService = Depends(get_sae_service),
 ):
     """Remove steering for a specific feature (set to 0)."""
-    return await steering.clear_feature(feature_index)
+    return sae_service.clear_steering_feature(feature_index)
 
 
-@router.delete("/features", response_model=ClearResponse)
+@router.delete("/steering/features", response_model=ClearResponse)
 async def clear_all_features(
-    steering: SteeringService = Depends(get_steering_service),
+    sae_service: SAEService = Depends(get_sae_service),
 ):
     """Clear all steering values."""
-    return await steering.clear_all()
+    return sae_service.clear_all_steering()
 ```
 
 ---
 
 ## 6. Component Architecture
 
-### SteeringService Design
+### Steering Logic (in SAEService)
+
+> **Implementation Note:** There is no separate `SteeringService` class. Steering is
+> managed through `SAEService` methods (`set_steering()`, `enable_steering()`,
+> `get_steering_values()`) and `LoadedSAE` methods. Steering API routes are embedded
+> in `/api/saes/steering/*` within the SAE management router (`saes.py`).
+
+The SAEService exposes steering methods that delegate to the `LoadedSAE` instance:
 
 ```python
-# millm/services/steering_service.py
+# millm/services/sae_service.py (steering-related methods)
 
-from typing import Dict, Optional
-import logging
+class SAEService:
+    """SAE management including steering operations."""
 
-from millm.services.sae_service import SAEService
-from millm.api.schemas.steering import (
-    SteeringState,
-    SetFeatureResponse,
-    ClearResponse,
-)
-from millm.sockets.events import emit_steering_changed
+    def set_steering(self, feature_index: int, value: float):
+        """Set steering value for a feature. Delegates to LoadedSAE."""
+        sae = self._require_attached_sae()
+        sae.set_steering(feature_index, value)
+        self._emitter.emit_steering_changed(...)
 
-logger = logging.getLogger(__name__)
+    def enable_steering(self, enabled: bool):
+        """Enable or disable steering. Delegates to LoadedSAE."""
+        sae = self._require_attached_sae()
+        sae.enable_steering(enabled)
+        self._emitter.emit_steering_changed(...)
 
+    def get_steering_values(self) -> Dict[int, float]:
+        """Get current steering values. Delegates to LoadedSAE."""
+        sae = self._require_attached_sae()
+        return sae.get_steering_values()
 
-class SteeringService:
-    """
-    Service for managing feature steering.
+    def set_steering_batch(self, steering: Dict[int, float]):
+        """Set multiple features at once. Delegates to LoadedSAE."""
+        sae = self._require_attached_sae()
+        sae.set_steering_batch(steering)
+        self._emitter.emit_steering_changed(...)
 
-    Wraps LoadedSAE steering methods with validation
-    and state tracking.
-    """
-
-    def __init__(self, sae_service: SAEService):
-        self._sae_service = sae_service
-
-    @property
-    def _sae(self):
-        """Get currently attached SAE."""
-        return self._sae_service._loaded_sae
-
-    def _require_sae(self):
-        """Raise if no SAE attached."""
-        if not self._sae_service._attached_sae_id:
-            raise ValueError("No SAE attached. Attach an SAE to use steering.")
-
-    def _validate_feature_index(self, index: int):
-        """Validate feature index is in range."""
-        self._require_sae()
-        if not 0 <= index < self._sae.d_sae:
-            raise ValueError(
-                f"Feature index {index} out of range. "
-                f"SAE has {self._sae.d_sae} features (0-{self._sae.d_sae - 1})"
-            )
-
-    async def get_state(self) -> SteeringState:
-        """Get current steering state."""
-        if not self._sae_service._attached_sae_id:
-            return SteeringState(
-                enabled=False,
-                active_count=0,
-                values={},
-                sae_id=None,
-                sae_feature_count=None,
-            )
-
-        return SteeringState.from_service(
-            enabled=self._sae._steering_enabled,
-            values=self._sae.get_steering_values(),
-            sae_id=self._sae_service._attached_sae_id,
-            feature_count=self._sae.d_sae,
-        )
-
-    async def set_enabled(self, enabled: bool) -> SteeringState:
-        """Enable or disable steering."""
-        self._require_sae()
-
-        self._sae.enable_steering(enabled)
-
-        logger.info(f"Steering {'enabled' if enabled else 'disabled'}")
-        emit_steering_changed(enabled=enabled)
-
-        return await self.get_state()
-
-    async def set_feature(
-        self,
-        feature_index: int,
-        value: float,
-    ) -> SetFeatureResponse:
-        """Set steering value for a feature."""
-        self._validate_feature_index(feature_index)
-
-        # Round to 1 decimal
-        value = round(value, 1)
-
-        # Set on SAE
-        if value == 0:
-            self._sae.clear_steering(feature_index)
-        else:
-            self._sae.set_steering(feature_index, value)
-
-        logger.info(f"Set feature {feature_index} to {value}")
-        emit_steering_changed(
-            feature_index=feature_index,
-            value=value,
-        )
-
-        return SetFeatureResponse(
-            feature_index=feature_index,
-            value=value,
-            active_count=len(self._sae.get_steering_values()),
-        )
-
-    async def batch_set(
-        self,
-        steering: Dict[int, float],
-    ) -> SteeringState:
-        """Set multiple features at once."""
-        self._require_sae()
-
-        # Validate all indices first
-        for index in steering:
-            self._validate_feature_index(index)
-
-        # Apply all
-        rounded = {k: round(v, 1) for k, v in steering.items()}
-        self._sae.set_steering_batch(rounded)
-
-        logger.info(f"Batch set {len(steering)} features")
-        emit_steering_changed(batch=True, count=len(steering))
-
-        return await self.get_state()
-
-    async def clear_feature(self, feature_index: int) -> SetFeatureResponse:
-        """Clear steering for a specific feature."""
-        self._require_sae()
-
-        self._sae.clear_steering(feature_index)
-
-        logger.info(f"Cleared feature {feature_index}")
-        emit_steering_changed(feature_index=feature_index, removed=True)
-
-        return SetFeatureResponse(
-            feature_index=feature_index,
-            value=0.0,
-            active_count=len(self._sae.get_steering_values()),
-        )
-
-    async def clear_all(self) -> ClearResponse:
-        """Clear all steering values."""
-        self._require_sae()
-
-        values = self._sae.get_steering_values()
-        cleared_count = len(values)
-
-        self._sae.clear_steering()
-
-        logger.info(f"Cleared all {cleared_count} steering values")
-        emit_steering_changed(cleared=True, count=cleared_count)
-
-        return ClearResponse(
-            cleared_count=cleared_count,
-            active_count=0,
-        )
+    def clear_all_steering(self):
+        """Clear all steering values. Delegates to LoadedSAE."""
+        sae = self._require_attached_sae()
+        sae.clear_steering()
+        self._emitter.emit_steering_changed(...)
 ```
 
 ---
@@ -497,18 +398,20 @@ class LoadedSAE:
         self._steering_enabled: bool = False
         self._steering_vector: Optional[Tensor] = None
 
-    def forward(self, x: Tensor) -> Tensor:
-        """Forward pass with optional steering."""
-        # Encode
-        feature_acts = torch.relu(x @ self.W_enc + self.b_enc)
+    def apply_steering(self, activations: Tensor) -> Tensor:
+        """Apply steering directly to residual stream activations.
 
-        # Apply steering if enabled
+        Uses direct residual stream steering (not SAE encode-steer-decode):
+        modified = original + Σ(strength_i × W_dec[feature_idx, :])
+
+        The steering_vector is pre-computed as Σ(strength_i × W_dec[i,:])
+        with shape (d_model,), applied uniformly to all token positions.
+        """
         if self._steering_enabled and self._steering_vector is not None:
-            # Broadcasting: (batch, seq, d_sae) + (d_sae,)
-            feature_acts = feature_acts + self._steering_vector
+            # Broadcasting: (batch, seq, d_model) + (d_model,)
+            activations = activations + self._steering_vector
 
-        # Decode
-        return feature_acts @ self.W_dec + self.b_dec
+        return activations
 
     def set_steering(self, feature_idx: int, value: float):
         """Set steering value for a feature."""
@@ -543,19 +446,23 @@ class LoadedSAE:
         self._steering_enabled = enabled
 
     def _rebuild_steering_vector(self):
-        """Rebuild pre-computed steering vector."""
+        """Rebuild pre-computed steering vector in residual stream space.
+
+        Computes: steering_vector = Σ(strength_i × W_dec[feature_idx, :])
+        Result shape: (d_model,) — added directly to residual stream.
+        """
         if not self._steering_values:
             self._steering_vector = None
             return
 
-        # Create sparse vector on same device as weights
+        # Compute weighted sum of decoder directions
         vector = torch.zeros(
-            self.d_sae,
+            self.d_model,
             device=self.device,
-            dtype=self.W_enc.dtype,
+            dtype=self.W_dec.dtype,
         )
-        for idx, value in self._steering_values.items():
-            vector[idx] = value
+        for idx, strength in self._steering_values.items():
+            vector += strength * self.W_dec[idx, :]
 
         self._steering_vector = vector
 ```
@@ -564,19 +471,23 @@ class LoadedSAE:
 
 ## 8. WebSocket Events
 
+> **Implementation Note:** `steering:update` events are emitted via
+> `ProgressEmitter.emit_steering_changed()` (from `millm/sockets/progress.py`),
+> not via standalone functions. This is called from all steering mutation endpoints
+> in `saes.py` (set_feature, batch_set, enable, clear, etc.).
+
 ```python
-# millm/sockets/events.py (add steering events)
+# millm/sockets/progress.py (ProgressEmitter class)
 
-from millm.sockets.manager import socket_manager
+class ProgressEmitter:
+    """Centralized WebSocket event emitter."""
 
-
-def emit_steering_changed(**kwargs):
-    """Emit steering state change event."""
-    socket_manager.emit(
-        "steering_changed",
-        kwargs,
-        room="admin",  # Only admin clients
-    )
+    def emit_steering_changed(self, **kwargs):
+        """Emit steering state change event."""
+        self._emit(
+            "steering_changed",
+            kwargs,
+        )
 
 
 # Event data examples:
@@ -622,7 +533,7 @@ class InvalidSteeringValueError(SteeringError):
     def __init__(self, value: float):
         super().__init__(
             code="INVALID_STEERING_VALUE",
-            message=f"Steering value {value} out of range (-10.0 to +10.0)"
+            message=f"Steering value {value} out of range (-200.0 to +200.0)"
         )
 ```
 
@@ -632,72 +543,60 @@ class InvalidSteeringValueError(SteeringError):
 
 ### Unit Tests
 
+> **Note:** Tests target SAEService steering methods (no separate SteeringService).
+
 ```python
-# tests/unit/services/test_steering_service.py
+# tests/unit/services/test_sae_service_steering.py
 
 import pytest
 from unittest.mock import Mock, MagicMock
 
-from millm.services.steering_service import SteeringService
+from millm.services.sae_service import SAEService
 
 
 @pytest.fixture
-def mock_sae_service():
-    """Create mock SAE service with attached SAE."""
-    service = Mock()
-    service._attached_sae_id = "test-sae"
-    service._loaded_sae = MagicMock()
-    service._loaded_sae.d_sae = 1000
-    service._loaded_sae._steering_enabled = False
-    service._loaded_sae._steering_values = {}
-    service._loaded_sae.get_steering_values.return_value = {}
+def mock_sae():
+    """Create mock LoadedSAE with steering support."""
+    sae = MagicMock()
+    sae.d_sae = 1000
+    sae._steering_enabled = False
+    sae._steering_values = {}
+    sae.get_steering_values.return_value = {}
+    return sae
+
+
+@pytest.fixture
+def sae_service(mock_sae):
+    service = SAEService(...)
+    service._loaded_sae = mock_sae
     return service
 
 
-@pytest.fixture
-def steering_service(mock_sae_service):
-    return SteeringService(mock_sae_service)
-
-
-class TestSteeringService:
-    async def test_get_state_no_sae(self, mock_sae_service):
+class TestSAEServiceSteering:
+    async def test_get_state_no_sae(self, sae_service):
         """Should return empty state when no SAE attached."""
-        mock_sae_service._attached_sae_id = None
-        service = SteeringService(mock_sae_service)
+        sae_service._loaded_sae = None
 
-        state = await service.get_state()
+        state = sae_service.get_steering_state()
 
         assert not state.enabled
         assert state.active_count == 0
-        assert state.sae_id is None
 
-    async def test_set_feature_validates_index(self, steering_service):
+    async def test_set_feature_validates_index(self, sae_service):
         """Should reject out-of-range feature index."""
         with pytest.raises(ValueError, match="out of range"):
-            await steering_service.set_feature(9999, 5.0)
+            sae_service.set_steering(9999, 5.0)
 
-    async def test_set_feature_rounds_value(self, steering_service):
-        """Should round value to 1 decimal place."""
-        result = await steering_service.set_feature(100, 5.55)
-
-        steering_service._sae.set_steering.assert_called_with(100, 5.6)
-
-    async def test_clear_on_zero_value(self, steering_service):
-        """Setting value to 0 should clear the feature."""
-        await steering_service.set_feature(100, 0.0)
-
-        steering_service._sae.clear_steering.assert_called_with(100)
-
-    async def test_batch_validates_all_first(self, steering_service):
+    async def test_batch_validates_all_first(self, sae_service):
         """Should validate all indices before applying any."""
         with pytest.raises(ValueError):
-            await steering_service.batch_set({
+            sae_service.set_steering_batch({
                 100: 5.0,
                 9999: 3.0,  # Invalid
             })
 
         # Verify nothing was set
-        steering_service._sae.set_steering_batch.assert_not_called()
+        sae_service._loaded_sae.set_steering_batch.assert_not_called()
 ```
 
 ### Integration Tests
@@ -707,8 +606,8 @@ class TestSteeringService:
 
 class TestSteeringRoutes:
     async def test_get_state_endpoint(self, client, attached_sae):
-        """GET /api/steering returns current state."""
-        response = await client.get("/api/steering")
+        """GET /api/saes/steering returns current state."""
+        response = await client.get("/api/saes/steering")
 
         assert response.status_code == 200
         data = response.json()
@@ -717,9 +616,9 @@ class TestSteeringRoutes:
         assert data["sae_id"] is not None
 
     async def test_set_feature_endpoint(self, client, attached_sae):
-        """POST /api/steering/features sets a feature."""
+        """POST /api/saes/steering/features sets a feature."""
         response = await client.post(
-            "/api/steering/features",
+            "/api/saes/steering/features",
             json={"feature_index": 100, "value": 5.0}
         )
 
@@ -732,7 +631,7 @@ class TestSteeringRoutes:
     async def test_no_sae_returns_error(self, client):
         """Should return error when no SAE attached."""
         response = await client.post(
-            "/api/steering/features",
+            "/api/saes/steering/features",
             json={"feature_index": 100, "value": 5.0}
         )
 
@@ -747,34 +646,39 @@ class TestSteeringRoutes:
 ### Vector Computation Efficiency
 
 ```python
-# Optimized steering vector rebuild
+# Optimized steering vector rebuild (residual stream space)
 
 def _rebuild_steering_vector(self):
-    """Rebuild with minimal allocations."""
+    """Rebuild with minimal allocations.
+
+    Computes Σ(strength_i × W_dec[i,:]) in d_model space.
+    """
     if not self._steering_values:
         self._steering_vector = None
         return
 
-    # Pre-allocate on correct device
+    # Pre-allocate on correct device (d_model, not d_sae)
     if self._steering_vector is None or \
        self._steering_vector.device != self.device:
         self._steering_vector = torch.zeros(
-            self.d_sae,
+            self.d_model,
             device=self.device,
-            dtype=self.W_enc.dtype,
+            dtype=self.W_dec.dtype,
         )
     else:
         # Reuse existing tensor
         self._steering_vector.zero_()
 
-    # Set values (fast indexed assignment)
+    # Batch compute: gather decoder rows and weight them
     indices = list(self._steering_values.keys())
-    values = list(self._steering_values.values())
-    self._steering_vector[indices] = torch.tensor(
-        values,
+    strengths = torch.tensor(
+        list(self._steering_values.values()),
         device=self.device,
-        dtype=self.W_enc.dtype,
+        dtype=self.W_dec.dtype,
     )
+    # W_dec[indices] shape: (n_features, d_model)
+    # strengths shape: (n_features,)
+    self._steering_vector = (strengths.unsqueeze(1) * self.W_dec[indices]).sum(dim=0)
 ```
 
 ### Thread Safety During Inference
@@ -782,29 +686,27 @@ def _rebuild_steering_vector(self):
 ```python
 # Copy-on-read for thread safety during inference
 
-def forward(self, x: Tensor) -> Tensor:
-    """Thread-safe forward with steering."""
-    # Encode
-    feature_acts = torch.relu(x @ self.W_enc + self.b_enc)
-
+def apply_steering(self, activations: Tensor) -> Tensor:
+    """Thread-safe direct residual stream steering."""
     # Capture local reference (atomic read)
     steering_enabled = self._steering_enabled
     steering_vector = self._steering_vector
 
     # Apply steering if enabled
     if steering_enabled and steering_vector is not None:
-        feature_acts = feature_acts + steering_vector
+        # steering_vector shape: (d_model,)
+        # activations shape: (batch, seq, d_model)
+        activations = activations + steering_vector
 
-    # Decode
-    return feature_acts @ self.W_dec + self.b_dec
+    return activations
 ```
 
 ---
 
 ## 12. Development Phases
 
-### Phase 1: Service Layer (1 day)
-- [ ] SteeringService implementation
+### Phase 1: SAEService Steering Methods (1 day)
+- [ ] Add steering methods to SAEService
 - [ ] Validation methods
 - [ ] State management
 

@@ -22,6 +22,25 @@ This Technical Implementation Document provides specific implementation guidance
 - **Transparent Integration:** Steering hooks apply without changing API contract
 - **Graceful Degradation:** Unsupported parameters ignored, errors formatted correctly
 
+### Implementation Notes (Post-Implementation)
+
+**Dual Error Format Routing:** The `exception_handlers.py` file contains a `_is_openai_route(request)` helper that checks if `request.url.path.startswith("/v1/")`. Both `millm_error_handler` and the generic exception handler use this to route errors to either OpenAI format (`{"error": {...}}`) for `/v1/*` routes or the standard `ApiResponse` format for `/api/*` management routes.
+
+**InferenceService Helper Methods:** The actual `InferenceService` implementation includes several important private helpers:
+- `_build_generate_kwargs(gen_config, inputs)` - Builds the dict passed to `model.generate()`, including `eos_token_id`
+- `_notify_monitoring(request_id)` - Forwards captured activations from the attached SAE to `MonitoringService.on_activation()`. Wrapped in try/except to never let monitoring errors affect inference.
+- `_check_context_length(prompt_tokens, max_new_tokens)` - Validates prompt + generation fits within model context window
+- `_apply_stop_sequences(text, stop_sequences)` - Returns `(truncated_text, found_stop)` tuple
+- `_determine_finish_reason(generated_token_count, max_new_tokens)` - Returns `"length"` if tokens hit max, otherwise `"stop"`
+
+**Profile Parameter in chat.py:** The `chat.py` route handler checks `request.profile` and, if set, loads the profile by name from the database using `ProfileRepository.get_by_name()`, then applies its steering dict via `sae.set_steering_batch()` and `sae.enable_steering(True)` before generation.
+
+**Penalty Mapping in `to_generate_kwargs()`:** The `GenerationConfig.to_generate_kwargs()` method maps both `frequency_penalty` and `presence_penalty` to Transformers' `repetition_penalty`. Positive frequency penalty maps as `1.0 + (penalty * 0.25)`. Negative frequency penalty maps as `max(0.8, 1.0 + (penalty * 0.1))`. Presence penalty falls back to `1.0 + (penalty * 0.25)` only if frequency penalty didn't already set repetition_penalty.
+
+**Streaming Stop Sequence Implementation:** During streaming, the service accumulates text in `accumulated_text` and calls `_apply_stop_sequences()` on each token. If a stop sequence is found, it yields only the portion before the stop and sets `stopped_by_sequence = True` to break the loop.
+
+**Thread Error Capture Pattern:** A mutable list `thread_error: list[Exception] = []` is passed to `_generate_in_thread()`. If the thread catches an exception, it appends to this list. After the streamer completes, the main async code checks `if thread_error:` and sends an error SSE event if a generation error occurred.
+
 ---
 
 ## 2. File Structure

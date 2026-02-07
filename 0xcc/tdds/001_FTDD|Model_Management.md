@@ -516,16 +516,14 @@ class ModelService:
     def __init__(
         self,
         repository: ModelRepository,
-        loader: ModelLoader,
         downloader: ModelDownloader,
-        sio: AsyncServer,
-        executor: ThreadPoolExecutor
+        loader: ModelLoader,
+        emitter: EventEmitter
     ):
         self.repository = repository
-        self.loader = loader
         self.downloader = downloader
-        self.sio = sio
-        self.executor = executor
+        self.loader = loader
+        self.emitter = emitter
         self._loaded_model: Optional[LoadedModel] = None
         self._pending_downloads: Dict[int, asyncio.Future] = {}
 
@@ -952,19 +950,22 @@ def verify_memory_available(required_mb: int) -> Tuple[bool, int]:
 ```python
 # millm/services/model_service.py
 
-async def graceful_unload(self, timeout: float = 30.0) -> bool:
+async def graceful_unload(self, timeout: float = 5.0) -> bool:
     """
-    Wait for pending requests, then unload.
+    Wait for the inference request queue to drain (up to 5s), then unload.
     Returns True if unloaded, False if timed out.
+
+    The implementation waits for the inference request queue to drain
+    before unloading, with a default timeout of 5 seconds.
     """
     if not self._loaded_model:
         return True
 
-    # Wait for pending inference requests
+    # Wait for pending inference requests to drain (up to 5s)
     start = time.time()
     while self._pending_requests > 0:
         if time.time() - start > timeout:
-            logger.warning("Graceful unload timed out, forcing unload")
+            logger.warning("Graceful unload timed out after %.1fs, forcing unload", timeout)
             break
         await asyncio.sleep(0.1)
 
@@ -992,13 +993,12 @@ async def graceful_unload(self, timeout: float = 30.0) -> bool:
 
 class TestModelService:
     @pytest.fixture
-    def service(self, mock_repository, mock_loader, mock_sio):
+    def service(self, mock_repository, mock_loader, mock_emitter):
         return ModelService(
             repository=mock_repository,
-            loader=mock_loader,
             downloader=MockDownloader(),
-            sio=mock_sio,
-            executor=ThreadPoolExecutor(max_workers=1)
+            loader=mock_loader,
+            emitter=mock_emitter,
         )
 
     async def test_download_model_creates_record(self, service, mock_repository):
@@ -1117,6 +1117,17 @@ LOG_FORMAT=json  # or "console" for development
 # Server
 HOST=0.0.0.0
 PORT=8000
+```
+
+### Automatic Model Loading
+
+The server supports automatic model loading via the `AUTO_LOAD_MODEL` environment variable. Set to a model ID or name to auto-load on startup. Implemented in `millm/main.py`.
+
+```bash
+# .env
+AUTO_LOAD_MODEL=1         # Load model with ID 1 on startup
+# or
+AUTO_LOAD_MODEL=gemma-2-2b  # Load model by name on startup
 ```
 
 ### Docker Compose

@@ -85,12 +85,8 @@
 **Store Organization:**
 ```
 src/stores/
-├── modelStore.ts      # Model loading, status, memory
-├── saeStore.ts        # SAE management, attachment status
-├── steeringStore.ts   # Feature adjustments, active steering
-├── profileStore.ts    # Saved profiles, active profile
-├── monitorStore.ts    # Real-time activations, monitoring config
-└── serverStore.ts     # Server status, system metrics
+├── serverStore.ts    # Server state (model, SAE, steering, monitoring, connection)
+└── uiStore.ts        # UI state (sidebar, theme, toasts, modals)
 ```
 
 #### Build Tools
@@ -236,8 +232,11 @@ REDIS_URL=redis://localhost:6379
 # Optional
 HF_TOKEN=hf_xxxx           # For gated models
 MODEL_CACHE_DIR=/path/to/cache
+SAE_CACHE_DIR=/app/sae_cache  # SAE cache directory
 LOG_LEVEL=INFO
 LOG_FORMAT=json            # or "console" for development
+AUTO_LOAD_MODEL=            # Model ID or name to auto-load on startup
+CORS_ORIGINS=*              # Allowed CORS origins
 ```
 
 #### Monitoring & Logging
@@ -260,41 +259,47 @@ millm/
 │   │   │   ├── chat.py
 │   │   │   ├── completions.py
 │   │   │   ├── models.py
-│   │   │   └── embeddings.py
+│   │   │   ├── embeddings.py
+│   │   │   └── errors.py       # OpenAI error format helpers
 │   │   ├── management/     # miLLM Management API
 │   │   │   ├── models.py
-│   │   │   ├── saes.py
-│   │   │   ├── steering.py
+│   │   │   ├── saes.py         # Includes steering + monitoring endpoints
 │   │   │   ├── profiles.py
-│   │   │   └── monitor.py
+│   │   │   └── monitoring.py
 │   │   └── system/         # Health, metrics
-│   ├── middleware/
-│   ├── dependencies.py
-│   └── exceptions.py
+│   ├── schemas/            # Pydantic schemas
+│   ├── dependencies.py     # FastAPI dependency injection
+│   └── exception_handlers.py  # Dual-format error routing
 ├── services/               # Business logic
 │   ├── model_service.py
-│   ├── sae_service.py
-│   ├── steering_service.py
+│   ├── sae_service.py      # SAE + steering orchestration
 │   ├── profile_service.py
-│   ├── monitor_service.py
-│   └── inference_service.py
+│   ├── monitoring_service.py
+│   ├── inference_service.py
+│   └── request_queue.py
 ├── ml/                     # ML-specific code
 │   ├── model_loader.py
+│   ├── model_downloader.py
 │   ├── sae_loader.py
-│   ├── hooks.py            # SAE hooking mechanism
-│   ├── steering.py         # Feature steering logic
-│   └── quantization.py
+│   ├── sae_downloader.py
+│   ├── sae_hooker.py       # PyTorch forward hooks for SAE
+│   ├── sae_wrapper.py      # LoadedSAE with steering/monitoring
+│   ├── sae_config.py
+│   ├── generation_config.py
+│   └── memory_utils.py
 ├── db/                     # Database layer
 │   ├── models/             # SQLAlchemy models
 │   ├── repositories/       # Data access patterns
-│   └── migrations/         # Alembic migrations
+│   ├── migrations/         # Alembic migrations
+│   └── base.py
 ├── sockets/                # WebSocket handlers
-│   ├── monitor.py
-│   └── events.py
+│   └── progress.py         # ProgressEmitter + system metrics
 ├── core/                   # Core utilities
 │   ├── config.py
 │   ├── logging.py
-│   └── errors.py
+│   ├── errors.py
+│   ├── error_messages.py
+│   └── resilience.py       # Circuit breaker pattern
 └── main.py                 # Application entry point
 ```
 
@@ -365,10 +370,17 @@ src/
 ```python
 # services/model_service.py
 class ModelService:
-    def __init__(self, db: AsyncSession, cache: Redis):
-        self.db = db
-        self.cache = cache
-        self._loaded_model: Optional[LoadedModel] = None
+    def __init__(
+        self,
+        repository: ModelRepository,
+        downloader: ModelDownloader,
+        loader: Optional[ModelLoader] = None,
+        emitter: Optional[ProgressEmitter] = None,
+    ) -> None:
+        self.repository = repository
+        self.downloader = downloader
+        self.loader = loader
+        self.emitter = emitter
 
     async def download_model(self, repo_id: str, quantization: str) -> Model:
         """Download model from HuggingFace."""
@@ -383,14 +395,20 @@ class ModelService:
         # Implementation
 ```
 
-**Dependency Injection:**
+**Dependency Injection (Annotated type aliases):**
 ```python
 # api/dependencies.py
-async def get_model_service(
-    db: AsyncSession = Depends(get_db),
-    cache: Redis = Depends(get_redis)
-) -> ModelService:
-    return ModelService(db, cache)
+# Type alias pattern
+ModelServiceDep = Annotated["ModelService", Depends(get_model_service)]
+SAEServiceDep = Annotated["SAEService", Depends(get_sae_service)]
+
+async def get_model_service(repository: ModelRepo, request: Request) -> ModelService:
+    return ModelService(
+        repository=repository,
+        downloader=get_model_downloader(),
+        loader=get_model_loader(),
+        emitter=progress_emitter,
+    )
 ```
 
 **Error Handling:**
@@ -398,19 +416,22 @@ async def get_model_service(
 # core/errors.py
 class MiLLMError(Exception):
     """Base error for miLLM."""
-    def __init__(self, message: str, code: str, details: dict = None):
+    code: str = "INTERNAL_ERROR"   # Class attribute, not constructor param
+    status_code: int = 500
+
+    def __init__(self, message: str, details: Optional[dict] = None) -> None:
         self.message = message
-        self.code = code
         self.details = details or {}
 
 class ModelNotLoadedError(MiLLMError):
     """Raised when operation requires loaded model."""
-    def __init__(self, message: str = "No model currently loaded"):
-        super().__init__(message, "MODEL_NOT_LOADED")
+    code = "MODEL_NOT_LOADED"
+    status_code = 400
 
 class SAENotAttachedError(MiLLMError):
     """Raised when operation requires attached SAE."""
-    pass
+    code = "SAE_NOT_ATTACHED"
+    status_code = 400
 ```
 
 **Pydantic Schemas:**
@@ -880,7 +901,7 @@ POST   /api/models/{id}/unload  # Unload model from memory
   "error": null
 }
 
-// Error response
+// Error response (Management API)
 {
   "success": false,
   "data": null,
@@ -892,18 +913,38 @@ POST   /api/models/{id}/unload  # Unload model from memory
 }
 ```
 
+#### Dual Error Format Routing
+- `/v1/*` endpoints use OpenAI error format: `{"error": {"message": "...", "type": "...", "param": null, "code": "..."}}`
+- `/api/*` endpoints use Management API format: `{"success": false, "data": null, "error": {"code": "...", "message": "...", "details": {}}}`
+- Routing is handled by `_is_openai_route()` in `exception_handlers.py`
+
 #### WebSocket Events (Socket.IO)
 ```typescript
-// Namespaces
-/monitor     # Feature activation monitoring
-/system      # System metrics (GPU, memory)
-/progress    # Download/load progress
+// Model events
+model:download:progress    // Download progress updates
+model:download:complete    // Download finished
+model:download:error       // Download failed
+model:load:progress        // Model loading progress
+model:load:complete        // Model loaded into GPU
+model:load:error           // Model load failed
+model:unload:complete      // Model unloaded
 
-// Events
-monitor:subscribe    # Subscribe to feature activations
-monitor:activations  # Activation data stream
-system:metrics       # GPU/memory metrics
-progress:update      # Download/load progress
+// SAE events
+sae:download:progress      // SAE download progress
+sae:download:complete      // SAE downloaded
+sae:download:error         // SAE download failed
+sae:attached               // SAE attached to model
+sae:detached               // SAE detached
+
+// Steering events
+steering:update            // Steering state changed (enable/disable/values)
+
+// Monitoring events
+monitoring:activation      // Feature activation data
+monitoring:state           // Monitoring config changed
+
+// System events
+system:metrics             // GPU/memory metrics (periodic)
 ```
 
 ### Data Exchange Formats

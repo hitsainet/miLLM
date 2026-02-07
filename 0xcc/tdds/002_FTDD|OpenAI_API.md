@@ -172,8 +172,8 @@ from datetime import datetime
 
 
 class ChatMessage(BaseModel):
-    role: Literal["system", "user", "assistant"]
-    content: str
+    role: Literal["system", "user", "assistant", "tool", "function"]
+    content: Optional[str] = None
 
 
 class ChatCompletionRequest(BaseModel):
@@ -186,6 +186,7 @@ class ChatCompletionRequest(BaseModel):
     stop: Optional[Union[str, List[str]]] = None
     frequency_penalty: float = Field(default=0.0, ge=-2.0, le=2.0)
     presence_penalty: float = Field(default=0.0, ge=-2.0, le=2.0)
+    n: int = Field(default=1, ge=1)
     user: Optional[str] = None
     # miLLM extension
     profile: Optional[str] = None  # Override active steering profile
@@ -234,6 +235,9 @@ class ChatCompletionChunk(BaseModel):
 class EmbeddingRequest(BaseModel):
     model: str
     input: Union[str, List[str]]
+    encoding_format: Literal["float", "base64"] = "float"
+    dimensions: Optional[int] = None
+    user: Optional[str] = None
 
 
 class EmbeddingData(BaseModel):
@@ -270,6 +274,36 @@ class OpenAIError(BaseModel):
 
 class OpenAIErrorResponse(BaseModel):
     error: OpenAIError
+
+
+class TextCompletionRequest(BaseModel):
+    model: str
+    prompt: Union[str, List[str]]
+    stream: bool = False
+    temperature: float = Field(default=1.0, ge=0.0, le=2.0)
+    top_p: float = Field(default=1.0, ge=0.0, le=1.0)
+    max_tokens: Optional[int] = Field(default=None, gt=0)
+    stop: Optional[Union[str, List[str]]] = None
+    frequency_penalty: float = Field(default=0.0, ge=-2.0, le=2.0)
+    presence_penalty: float = Field(default=0.0, ge=-2.0, le=2.0)
+    n: int = Field(default=1, ge=1)
+    user: Optional[str] = None
+    profile: Optional[str] = None
+
+
+class TextCompletionChoice(BaseModel):
+    index: int
+    text: str
+    finish_reason: Literal["stop", "length", "timeout"]
+
+
+class TextCompletionResponse(BaseModel):
+    id: str
+    object: Literal["text_completion"] = "text_completion"
+    created: int
+    model: str
+    choices: List[TextCompletionChoice]
+    usage: Usage
 ```
 
 ### Generation Configuration
@@ -304,6 +338,22 @@ class GenerationConfig:
             frequency_penalty=request.frequency_penalty,
             presence_penalty=request.presence_penalty,
         )
+
+    def to_generate_kwargs(self) -> dict:
+        """
+        Convert to kwargs for model.generate().
+        Maps OpenAI parameters to Transformers equivalents:
+        - frequency_penalty → repetition_penalty (1.0 + frequency_penalty)
+        """
+        kwargs = {
+            "max_new_tokens": self.max_new_tokens,
+            "temperature": self.temperature if self.do_sample else 1.0,
+            "top_p": self.top_p,
+            "do_sample": self.do_sample,
+        }
+        if self.frequency_penalty != 0.0:
+            kwargs["repetition_penalty"] = 1.0 + self.frequency_penalty
+        return kwargs
 ```
 
 ---
@@ -485,6 +535,13 @@ class InferenceService:
             self._model.generate(**generation_kwargs)
 ```
 
+### Streaming Implementation Notes
+
+- **finish_reason:** Returns `"length"` when `generated_token_count >= max_new_tokens`, otherwise `"stop"`.
+- **Stop sequences:** Checked per-token during streaming via text accumulation against the stop list.
+- **Thread error handling:** Errors from the generation thread are captured and sent as SSE error events to the client.
+- **Serialization:** Chunks use `exclude_none=True` for JSON serialization to omit null fields from the SSE output.
+
 ### Error Handling
 
 ```python
@@ -537,6 +594,29 @@ async def openai_exception_handler(request: Request, exc: MiLLMError):
         status_code=status_code
     )
 ```
+
+### Dual-Format Error Routing
+
+The exception handler uses a dual-format routing pattern that returns the appropriate error format based on the request path:
+
+```python
+def _is_openai_route(request: Request) -> bool:
+    """Check if the request targets an OpenAI-compatible endpoint."""
+    return request.url.path.startswith("/v1/")
+
+# ERROR_STATUS_MAP maps error codes to HTTP status + error type
+ERROR_STATUS_MAP = {
+    "MODEL_NOT_LOADED": (503, "server_error"),
+    "MODEL_NOT_FOUND": (404, "invalid_request_error"),
+    "VALIDATION_ERROR": (400, "invalid_request_error"),
+    "INSUFFICIENT_MEMORY": (507, "server_error"),
+    "SAE_NOT_ATTACHED": (400, "invalid_request_error"),
+    "CONTEXT_LENGTH_EXCEEDED": (400, "invalid_request_error"),
+}
+```
+
+- `/v1/*` routes return OpenAI format: `{"error": {"message": ..., "type": ..., "param": ..., "code": ...}}`
+- `/api/*` routes return management format: `{"success": false, "data": null, "error": {"code": ..., "message": ..., "details": ...}}`
 
 ---
 
@@ -808,6 +888,12 @@ class QueueFullError(Exception):
 - Message content sanitized (no code execution)
 - Token limits enforced to prevent resource exhaustion
 - Stop sequences limited to prevent abuse
+- **Model name validation:** All `/v1` endpoints validate that `request.model` matches the loaded model name, returning 404 on mismatch
+- **Context length validation:** `_check_context_length()` compares `prompt_tokens + max_new_tokens` vs `model.config.max_position_embeddings`, returning an error if exceeded
+
+### Profile-Based Steering via API
+
+When `request.profile` is set on a chat or completion request, the endpoint loads the named profile from the database and applies its steering values before generation. This allows OpenAI API clients to select steering profiles per-request without using the admin UI.
 
 ### No Authentication (v1.0)
 - Assumes trusted local network

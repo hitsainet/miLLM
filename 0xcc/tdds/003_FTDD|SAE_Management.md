@@ -27,9 +27,10 @@ SAE Management provides the infrastructure for downloading, caching, and attachi
 |------|----------|-----------|
 | Hooking | PyTorch forward hooks | Native, well-supported, removable |
 | Format | SAELens via sae-lens library | Standard format, active maintenance |
-| Storage | SafeTensors | Fast loading, safe format |
+| Storage | SafeTensors + NPZ | SafeTensors for SAELens, NPZ for Gemma-Scope |
 | Caching | HuggingFace-style hub | Familiar pattern, proven reliability |
 | Locking | Per-attachment lock | Thread-safe operations |
+| Steering | Via `SAEService` + `LoadedSAE` | No separate SteeringService class; steering is managed through `SAEService` methods and the `LoadedSAE` wrapper |
 
 ---
 
@@ -121,7 +122,8 @@ SAE Service ───────────► Compatibility check
 Memory Check ──────────► Verify VRAM available
         │                 - Get current GPU usage
         │                 - Add SAE memory estimate
-        │                 - Warn if >90% utilization
+        │                 - Log warning if estimated SAE size > available VRAM
+        │                 - Proceeds with attachment (soft check, not blocking)
         │
         ▼
 SAE Loader ────────────► Load SAE weights
@@ -281,6 +283,7 @@ class DownloadSAERequest(BaseModel):
     repository_id: str = Field(..., description="HuggingFace repo (e.g., jbloom/gemma-2-2b-res-jb)")
     revision: str = Field(default="main", description="Git revision")
     force_redownload: bool = Field(default=False, description="Re-download even if cached")
+    hf_token: Optional[str] = Field(default=None, exclude=True, description="HuggingFace access token for gated repos")
 
 
 class AttachSAERequest(BaseModel):
@@ -314,6 +317,15 @@ class CompatibilityResult(BaseModel):
     warnings: list[str]
     errors: list[str]
 ```
+
+### Supported SAE Formats
+
+The system supports two SAE file formats:
+
+1. **SAELens SafeTensors format:** Standard format from the sae-lens library. Weights stored in `.safetensors` files with a `cfg.json` configuration file.
+2. **NPZ format (Gemma-Scope):** NumPy compressed archive format used by Google's Gemma-Scope SAEs. Weights stored in `.npz` files with parameters encoded in the array keys.
+
+The `SAELoader` detects the format automatically based on the files present in the cache directory.
 
 ### SAE Configuration Schema (SAELens)
 
@@ -767,10 +779,20 @@ class SAEService:
             }
 
     async def detach_sae(self, sae_id: str) -> dict:
-        """Detach SAE from model, freeing memory."""
+        """
+        Detach SAE from model, freeing memory.
+
+        Graceful detach: waits up to 3 seconds for pending inference
+        requests to complete before removing the hook.
+        """
         async with self._attachment_lock:
             if self._attached_sae_id != sae_id:
                 raise ValueError(f"SAE {sae_id} is not attached")
+
+            # Wait for pending inference requests (up to 3s)
+            start = time.time()
+            while self._has_pending_requests() and (time.time() - start) < 3.0:
+                await asyncio.sleep(0.1)
 
             # Remove hook
             if self._hook_handle:
@@ -1187,6 +1209,7 @@ class SAEDownloader:
         repository_id: str,
         revision: str = "main",
         progress_callback: Optional[Callable] = None,
+        token: Optional[str] = None,
     ) -> str:
         """
         Download SAE repository.
@@ -1215,11 +1238,13 @@ class SAEDownloader:
         """Synchronous download implementation."""
         try:
             # Download entire repository
+            # hf_token is threaded through service → downloader → snapshot_download()
             local_path = snapshot_download(
                 repo_id=repository_id,
                 revision=revision,
                 cache_dir=str(self.cache_dir),
                 resume_download=True,
+                token=token,
             )
 
             logger.info(f"Downloaded SAE to {local_path}")

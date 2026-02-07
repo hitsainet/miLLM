@@ -78,7 +78,7 @@
 - [x] 5.0 Integration setup
   - [x] 5.1 Add MonitoringServiceDep to dependencies.py
   - [x] 5.2 Export MonitoringService in services/__init__.py
-  - [ ] 5.3 Full inference pipeline integration (future enhancement)
+  - [x] 5.3 Full inference pipeline integration (implemented via InferenceService._notify_monitoring())
 
 ### Phase 5: Testing
 
@@ -90,10 +90,10 @@
   - [x] 6.5 Test configuration
   - [x] 6.6 Test get_top_features
 
-- [ ] 7.0 Integration tests (deferred)
-  - [ ] 7.1 Test API endpoints with TestClient
-  - [ ] 7.2 Test with mock SAE
-  - [ ] 7.3 Test history accumulation
+- [x] 7.0 Integration tests (implemented in tests/integration/test_monitoring_flow.py)
+  - [x] 7.1 Test API endpoints with TestClient
+  - [x] 7.2 Test with mock SAE (via mocked monitoring service)
+  - [x] 7.3 Test history accumulation
 
 ---
 

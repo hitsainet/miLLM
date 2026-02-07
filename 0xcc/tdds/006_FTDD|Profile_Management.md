@@ -82,12 +82,12 @@ class ProfileService:
     def __init__(
         self,
         repository: ProfileRepository,
-        steering_service: SteeringService,
         sae_service: SAEService,
     ):
         self._repository = repository
-        self._steering = steering_service
         self._sae = sae_service
+        # Note: No separate SteeringService. Steering is managed
+        # through SAEService and LoadedSAE methods directly.
 
     async def create(
         self,
@@ -98,7 +98,7 @@ class ProfileService:
         """Create profile from current or provided steering."""
         # Use current steering if not provided
         if steering is None:
-            steering = self._steering._sae.get_steering_values()
+            steering = self._sae.get_steering_values()
 
         profile = Profile(
             id=self._generate_id(),
@@ -123,9 +123,9 @@ class ProfileService:
         # Deactivate current
         await self._repository.deactivate_all()
 
-        # Apply steering
-        await self._steering.batch_set(profile.steering)
-        await self._steering.set_enabled(True)
+        # Apply steering via SAEService
+        self._sae.set_steering_batch(profile.steering)
+        self._sae.enable_steering(True)
 
         # Mark active
         await self._repository.set_active(profile_id)
@@ -150,17 +150,24 @@ class ProfileService:
             "exported_from": "miLLM v1.0",
         }
 
-    async def import_profile(self, data: dict) -> Profile:
-        """Import profile from JSON."""
+    async def import_profile(self, data: ProfileImportRequest) -> Profile:
+        """Import profile from JSON.
+
+        Uses ProfileImportRequest BaseModel (not file upload).
+        Keys in the steering dict arrive as strings from JSON serialization
+        and are converted to int on import.
+        """
         # Validate format
-        if data.get("type") != "millm_profile":
+        if data.type != "millm_profile":
             raise InvalidProfileFormat()
 
-        profile_data = data["profile"]
+        profile_data = data.profile
+        # Convert string keys to int (JSON only supports string keys)
+        steering = {int(k): v for k, v in profile_data.steering.items()}
         return await self.create(
-            name=profile_data["name"],
-            description=profile_data.get("description"),
-            steering={int(k): v for k, v in profile_data["steering"].items()},
+            name=profile_data.name,
+            description=profile_data.description,
+            steering=steering,
         )
 ```
 
@@ -179,6 +186,19 @@ async def list_profiles(...)
 @router.post("", response_model=ProfileResponse)
 async def create_profile(request: CreateProfileRequest, ...)
 
+@router.get("/active", response_model=ProfileResponse)
+async def get_active_profile(...)
+    """Get currently active profile."""
+
+@router.post("/save-current", response_model=ProfileResponse)
+async def save_current_steering(request: SaveCurrentRequest, ...)
+    """Save current SAE steering configuration as a new profile."""
+
+@router.post("/import", response_model=ProfileResponse)
+async def import_profile(request: ProfileImportRequest, ...)
+    """Import profile from JSON. Uses ProfileImportRequest BaseModel (not file upload).
+    Keys in steering dict are strings (from JSON), converted to int on import."""
+
 @router.get("/{profile_id}", response_model=ProfileResponse)
 async def get_profile(profile_id: str, ...)
 
@@ -191,11 +211,13 @@ async def delete_profile(profile_id: str, ...)
 @router.post("/{profile_id}/activate", response_model=ProfileResponse)
 async def activate_profile(profile_id: str, ...)
 
+@router.post("/{profile_id}/deactivate", response_model=ProfileResponse)
+async def deactivate_profile(profile_id: str, clear_steering: bool = True, ...)
+    """Deactivate profile. Query param clear_steering=true clears steering values."""
+
 @router.get("/{profile_id}/export")
 async def export_profile(profile_id: str, ...)
-
-@router.post("/import", response_model=ProfileResponse)
-async def import_profile(file: UploadFile, ...)
+    """Export profile as miStudio-compatible JSON."""
 ```
 
 ---
@@ -203,6 +225,13 @@ async def import_profile(file: UploadFile, ...)
 ## 6. API Integration
 
 The profile parameter in OpenAI API requests:
+
+> **Implementation Note:** When `request.profile` is set in `/v1/chat/completions`,
+> the chat route loads the profile by name from the database, applies its steering
+> values via `sae.set_steering_batch()`, and enables steering. This **permanently**
+> sets the steering configuration -- it does NOT restore the previous steering after
+> the request completes. The rationale is that selecting a profile is an intentional
+> state change, not a per-request override.
 
 ```python
 # millm/api/routes/openai/chat.py
@@ -212,21 +241,18 @@ async def create_chat_completion(
     request: ChatCompletionRequest,  # Has profile: Optional[str]
     ...
 ):
-    # Apply profile steering for this request if specified
+    # Apply profile steering if specified (permanent, not per-request)
     if request.profile:
         profile = await profile_service.get_by_name(request.profile)
         if profile:
-            # Temporarily apply profile steering
-            original = steering_service._sae.get_steering_values()
-            await steering_service.batch_set(profile.steering)
-            try:
-                result = await inference_service.generate(...)
-            finally:
-                # Restore original steering
-                await steering_service.batch_set(original)
-            return result
+            sae = get_attached_sae()  # from AttachedSAEState singleton
+            sae.set_steering_batch(
+                {int(k): v for k, v in profile.steering.items()}
+            )
+            sae.enable_steering(True)
+            # Note: steering remains active after this request
 
-    # Normal generation with current steering
+    # Normal generation with current steering (possibly just set by profile)
     return await inference_service.generate(...)
 ```
 

@@ -153,21 +153,19 @@ Feature 6 (Profile Management) implements the core profile CRUD operations, acti
 
 ---
 
-## Deferred Tasks
+## Previously Deferred Tasks (Now Complete)
 
-The following tasks are deferred to a future enhancement:
+### Export/Import
+- [x] Implement export_profile (JSON response with profile data)
+- [x] Implement import_profile with validation (uses ProfileImportRequest BaseModel)
+- [x] GET /api/profiles/{id}/export endpoint
+- [x] POST /api/profiles/import endpoint
+- [x] ProfileExportData schema (in routes/management/profiles.py)
 
-### Export/Import (Future)
-- [ ] Implement export_profile (JSON file download)
-- [ ] Implement import_profile with validation
-- [ ] GET /api/profiles/{id}/export endpoint
-- [ ] POST /api/profiles/import endpoint
-- [ ] ProfileExport schema
-
-### Inference Integration (Future)
-- [ ] Support profile parameter in ChatCompletionRequest
-- [ ] Apply profile steering temporarily for request
-- [ ] Restore original steering after request
+### Inference Integration
+- [x] Support profile parameter in ChatCompletionRequest
+- [x] Apply profile steering for request (in chat.py route handler)
+- [x] Steering applied via sae.set_steering_batch() + sae.enable_steering(True)
 
 ---
 

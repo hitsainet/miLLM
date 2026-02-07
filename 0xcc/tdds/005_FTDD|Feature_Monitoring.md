@@ -52,20 +52,33 @@ Feature Monitoring provides real-time visibility into SAE feature activations du
 
 ### Data Flow: Activation Capture
 
+> **Actual Inference Wiring:**
+> 1. Forward hook in `sae_hooker.py` captures activations to `LoadedSAE._last_feature_acts`
+> 2. After generation completes, `InferenceService._notify_monitoring()` reads from the `AttachedSAEState` singleton
+> 3. It calls `sae.get_last_feature_activations()` and passes the tensor to `MonitoringService.on_activation()`
+> 4. This path is called after both streaming and non-streaming generation
+
 ```
-Model forward pass triggers SAE hook
+Model forward pass triggers SAE hook (sae_hooker.py)
         │
         ▼
-LoadedSAE.forward() captures activations
-        │ (only if monitoring enabled)
+LoadedSAE._last_feature_acts = captured activations
+        │ (stored on LoadedSAE instance)
         ▼
-MonitoringService.on_activation() called
+Generation completes (streaming or non-streaming)
+        │
+        ▼
+InferenceService._notify_monitoring()
+        │  reads AttachedSAEState singleton
+        │  calls sae.get_last_feature_activations()
+        ▼
+MonitoringService.on_activation(activations: Tensor, ...)
         │
         ├──► Add to HistoryBuffer
         │
         ├──► Update StatisticsTracker
         │
-        └──► Emit via WebSocket (throttled)
+        └──► Emit via ProgressEmitter.emit_activation_update() (throttled)
 ```
 
 ---
@@ -80,12 +93,19 @@ MonitoringService.on_activation() called
 class MonitoringService:
     """Service for feature activation monitoring."""
 
-    def __init__(self, sae_service: SAEService):
+    def __init__(
+        self,
+        sae_service: SAEService,
+        emitter: ProgressEmitter,
+        history_size: int = 100,
+        throttle_ms: int = 100,
+    ):
         self._sae_service = sae_service
-        self._history = ActivationHistory(max_size=100)
+        self._emitter = emitter
+        self._history = ActivationHistory(max_size=history_size)
         self._statistics = StatisticsTracker()
         self._last_emit_time = 0
-        self._emit_interval = 0.1  # 100ms = 10/sec max
+        self._emit_interval = throttle_ms / 1000.0  # Convert ms to seconds
 
     async def configure(
         self,
@@ -100,30 +120,40 @@ class MonitoringService:
 
     def on_activation(
         self,
-        activations: Dict[int, float],
-        request_id: str,
-        position: Optional[int] = None,
-        activation_type: str = "token",
+        activations: Tensor,
+        request_id: Optional[str] = None,
+        token_position: int = 0,
+        top_k: int = 50,
     ):
-        """Called when new activations captured."""
+        """Called when new activations captured.
+
+        Takes a raw Tensor (not a Dict). Internally extracts top-k
+        features and converts to dict for history/stats/emission.
+        """
+        # Extract top-k from tensor
+        top_values, top_indices = activations.topk(min(top_k, activations.shape[-1]))
+        activation_dict = {
+            int(idx): float(val)
+            for idx, val in zip(top_indices.tolist(), top_values.tolist())
+        }
+
         # Add to history
-        self._history.add(activations, request_id, position, activation_type)
+        self._history.add(activation_dict, request_id, token_position, "token")
 
         # Update statistics
-        self._statistics.update(activations)
+        self._statistics.update(activation_dict)
 
         # Emit via WebSocket (throttled)
-        self._maybe_emit(activations, request_id, position, activation_type)
+        self._maybe_emit(activation_dict, request_id, token_position)
 
-    def _maybe_emit(self, activations, request_id, position, activation_type):
+    def _maybe_emit(self, activations, request_id, position):
         """Emit update if not throttled."""
         now = time.time()
         if now - self._last_emit_time >= self._emit_interval:
-            emit_activation_update(
+            self._emitter.emit_activation_update(
                 features=activations,
                 request_id=request_id,
                 position=position,
-                activation_type=activation_type,
             )
             self._last_emit_time = now
 ```
@@ -200,20 +230,47 @@ class FeatureStats:
     min_val: float = float('inf')
     max_val: float = float('-inf')
     sum_val: float = 0.0
+    sum_sq_val: float = 0.0
     count: int = 0
+    active_count: int = 0  # Number of times activation > 0
 
     def update(self, value: float):
         self.min_val = min(self.min_val, value)
         self.max_val = max(self.max_val, value)
         self.sum_val += value
+        self.sum_sq_val += value * value
         self.count += 1
+        if value > 0:
+            self.active_count += 1
+
+    @property
+    def mean(self) -> float:
+        return self.sum_val / self.count if self.count > 0 else 0.0
+
+    @property
+    def variance(self) -> float:
+        if self.count < 2:
+            return 0.0
+        return (self.sum_sq_val / self.count) - (self.mean ** 2)
+
+    @property
+    def std(self) -> float:
+        return self.variance ** 0.5
+
+    @property
+    def active_ratio(self) -> float:
+        return self.active_count / self.count if self.count > 0 else 0.0
 
     def to_dict(self) -> Dict[str, float]:
         return {
             "min": self.min_val if self.count > 0 else 0,
             "max": self.max_val if self.count > 0 else 0,
-            "mean": self.sum_val / self.count if self.count > 0 else 0,
+            "mean": self.mean,
+            "variance": self.variance,
+            "std": self.std,
             "count": self.count,
+            "active_count": self.active_count,
+            "active_ratio": self.active_ratio,
         }
 ```
 
@@ -274,27 +331,32 @@ async def reset_statistics(...)
 
 ### WebSocket Events
 
-```python
-# millm/sockets/events.py
+> **Implementation Note:** WebSocket emission uses `ProgressEmitter.emit_activation_update()`
+> from `millm/sockets/progress.py`, not standalone functions in `events.py`. The
+> `ProgressEmitter` is the centralized emitter for all WebSocket events.
 
-def emit_activation_update(
-    features: Dict[int, float],
-    request_id: str,
-    position: Optional[int],
-    activation_type: str,
-):
-    """Emit activation update to monitoring clients."""
-    socket_manager.emit(
-        "activation_update",
-        {
-            "timestamp": datetime.utcnow().isoformat(),
-            "features": features,
-            "request_id": request_id,
-            "position": position,
-            "type": activation_type,
-        },
-        room="monitoring",
-    )
+```python
+# millm/sockets/progress.py (ProgressEmitter class)
+
+class ProgressEmitter:
+    """Centralized WebSocket event emitter."""
+
+    def emit_activation_update(
+        self,
+        features: Dict[int, float],
+        request_id: Optional[str] = None,
+        position: Optional[int] = None,
+    ):
+        """Emit activation update to monitoring clients."""
+        self._emit(
+            "activation_update",
+            {
+                "timestamp": datetime.utcnow().isoformat(),
+                "features": features,
+                "request_id": request_id,
+                "position": position,
+            },
+        )
 ```
 
 ---

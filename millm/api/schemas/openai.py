@@ -50,6 +50,7 @@ class ChatCompletionRequest(BaseModel):
     stream: bool = False
     temperature: float = Field(default=1.0, ge=0.0, le=2.0)
     top_p: float = Field(default=1.0, ge=0.0, le=1.0)
+    n: int = Field(default=1, ge=1)
     max_tokens: Optional[int] = Field(default=None, gt=0)
     stop: Optional[Union[str, list[str]]] = None
     frequency_penalty: float = Field(default=0.0, ge=-2.0, le=2.0)
@@ -75,6 +76,7 @@ class TextCompletionRequest(BaseModel):
     model: str
     prompt: Union[str, list[str]]
     stream: bool = False
+    n: int = Field(default=1, ge=1)
     max_tokens: Optional[int] = Field(default=16, gt=0)
     temperature: float = Field(default=1.0, ge=0.0, le=2.0)
     top_p: float = Field(default=1.0, ge=0.0, le=1.0)
@@ -98,6 +100,9 @@ class EmbeddingRequest(BaseModel):
 
     model: str
     input: Union[str, list[str]]
+    encoding_format: Literal["float", "base64"] = "float"
+    dimensions: Optional[int] = Field(default=None, gt=0)
+    user: Optional[str] = None
 
     model_config = {"extra": "ignore"}
 
@@ -227,11 +232,11 @@ class TextCompletionResponse(BaseModel):
 
 
 class EmbeddingData(BaseModel):
-    """Single embedding result."""
+    """Single embedding result. Embedding is float list or base64 string."""
 
     object: Literal["embedding"] = "embedding"
     index: int
-    embedding: list[float]
+    embedding: Union[list[float], str]
 
 
 class EmbeddingResponse(BaseModel):

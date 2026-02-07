@@ -199,6 +199,8 @@ class InferenceService:
         """
         Create non-streaming chat completion.
 
+        Supports n > 1 for multiple completions per request.
+
         Args:
             request: The chat completion request
 
@@ -213,6 +215,11 @@ class InferenceService:
 
         # Format messages to prompt
         prompt = self._format_chat_messages(request.messages)
+        n = getattr(request, "n", 1) or 1
+
+        choices: list[ChatCompletionChoice] = []
+        total_prompt_tokens = 0
+        total_completion_tokens = 0
 
         async with self._request_queue.acquire():
             # Tokenize input
@@ -222,36 +229,48 @@ class InferenceService:
             # Build generation config
             gen_config = GenerationConfig.from_request(request)
 
-            # Generate
-            with torch.no_grad():
-                # Apply steering if active
-                if self._steering_service and getattr(
-                    self._steering_service, "is_active", False
-                ):
-                    self._steering_service.prepare_generation()
+            for i in range(n):
+                # Generate
+                with torch.no_grad():
+                    # Apply steering if active
+                    if self._steering_service and getattr(
+                        self._steering_service, "is_active", False
+                    ):
+                        self._steering_service.prepare_generation()
 
-                generate_kwargs = self._build_generate_kwargs(gen_config, inputs)
-                outputs = self._model.generate(**generate_kwargs)
+                    generate_kwargs = self._build_generate_kwargs(gen_config, inputs)
+                    outputs = self._model.generate(**generate_kwargs)
 
-            # Decode output
-            generated_ids = outputs[0][prompt_tokens:]
-            completion_text = self._tokenizer.decode(
-                generated_ids, skip_special_tokens=True
-            )
-            completion_tokens = len(generated_ids)
+                # Decode output
+                generated_ids = outputs[0][prompt_tokens:]
+                completion_text = self._tokenizer.decode(
+                    generated_ids, skip_special_tokens=True
+                )
+                completion_tokens = len(generated_ids)
 
-        # Apply stop sequences
-        completion_text, stopped_by_sequence = self._apply_stop_sequences(
-            completion_text, gen_config.stop_sequences
-        )
+                # Apply stop sequences
+                completion_text, stopped_by_sequence = self._apply_stop_sequences(
+                    completion_text, gen_config.stop_sequences
+                )
 
-        # Determine finish reason
-        if stopped_by_sequence:
-            finish_reason = "stop"
-        else:
-            finish_reason = self._determine_finish_reason(
-                completion_tokens, gen_config.max_new_tokens
-            )
+                # Determine finish reason
+                if stopped_by_sequence:
+                    finish_reason = "stop"
+                else:
+                    finish_reason = self._determine_finish_reason(
+                        completion_tokens, gen_config.max_new_tokens
+                    )
+
+                choices.append(
+                    ChatCompletionChoice(
+                        index=i,
+                        message=ChatMessage(role="assistant", content=completion_text),
+                        finish_reason=finish_reason,
+                    )
+                )
+
+                total_prompt_tokens += prompt_tokens
+                total_completion_tokens += completion_tokens
 
         model_info = self.get_loaded_model_info()
         model_name = model_info.name if model_info else "unknown"
@@ -260,17 +279,11 @@ class InferenceService:
             id=completion_id,
             created=created,
             model=model_name,
-            choices=[
-                ChatCompletionChoice(
-                    index=0,
-                    message=ChatMessage(role="assistant", content=completion_text),
-                    finish_reason=finish_reason,
-                )
-            ],
+            choices=choices,
             usage=Usage(
-                prompt_tokens=prompt_tokens,
-                completion_tokens=completion_tokens,
-                total_tokens=prompt_tokens + completion_tokens,
+                prompt_tokens=total_prompt_tokens,
+                completion_tokens=total_completion_tokens,
+                total_tokens=total_prompt_tokens + total_completion_tokens,
             ),
         )
 
@@ -533,6 +546,7 @@ class InferenceService:
         Create embeddings for input text.
 
         Uses the model's last hidden layer with mean pooling.
+        Supports float and base64 encoding formats.
 
         Args:
             request: The embedding request
@@ -540,10 +554,15 @@ class InferenceService:
         Returns:
             EmbeddingResponse with embeddings
         """
+        import base64
+        import struct
+
         # Normalize input to list
         inputs = (
             request.input if isinstance(request.input, list) else [request.input]
         )
+
+        encoding_format = getattr(request, "encoding_format", "float") or "float"
 
         embeddings_data: list[EmbeddingData] = []
         total_tokens = 0
@@ -569,6 +588,11 @@ class InferenceService:
                 # Ensure embedding is a list
                 if isinstance(embedding, float):
                     embedding = [embedding]
+
+                # Encode as base64 if requested
+                if encoding_format == "base64":
+                    packed = struct.pack(f"<{len(embedding)}f", *embedding)
+                    embedding = base64.b64encode(packed).decode("ascii")
 
                 embeddings_data.append(EmbeddingData(index=i, embedding=embedding))
 

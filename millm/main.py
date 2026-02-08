@@ -120,9 +120,10 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         from sqlalchemy import text
 
         async with async_session_factory() as session:
-            # Reset models that were marked as loaded
+            # Reset models that were marked as loaded or loading
+            # (in-memory state is lost on restart, so these are stale)
             result = await session.execute(
-                text("UPDATE models SET status = 'ready', loaded_at = NULL WHERE status = 'loaded'")
+                text("UPDATE models SET status = 'ready', loaded_at = NULL WHERE status IN ('loaded', 'loading')")
             )
             if result.rowcount > 0:
                 logger.info("reset_stale_model_status", count=result.rowcount)

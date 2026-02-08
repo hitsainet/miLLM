@@ -790,9 +790,14 @@ class ModelService:
             )
 
         if model.status == ModelStatus.ERROR:
-            raise ModelBusyError(
-                f"Model {model_id} is in error state",
-                details={"model_id": model_id, "error": model.error_message},
+            # Allow retry from error state - reset to ready first
+            logger.info(
+                "retrying_errored_model",
+                model_id=model_id,
+                previous_error=model.error_message,
+            )
+            model = await self.repository.update_status(
+                model_id, status=ModelStatus.READY, error_message=None
             )
 
         # Check if another load is in progress

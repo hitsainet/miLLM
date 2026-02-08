@@ -132,6 +132,13 @@ spec:
         - ip: "192.168.244.61"
           hostnames:
             - "k8s-millm.mcslab.io"
+      initContainers:
+        - name: fix-permissions
+          image: busybox:latest
+          command: ["sh", "-c", "mkdir -p /data/model_cache /data/sae_cache /data/hf_cache && chown -R 1000:1000 /data"]
+          volumeMounts:
+            - name: millm-data
+              mountPath: /data
       containers:
         - name: backend
           image: hitsai/millm-backend:latest

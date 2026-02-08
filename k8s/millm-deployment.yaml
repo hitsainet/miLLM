@@ -1,0 +1,349 @@
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: millm
+
+# -------------------------
+# POSTGRES (with persistent storage via hostPath)
+# -------------------------
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: postgres
+  namespace: millm
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: postgres
+  template:
+    metadata:
+      labels:
+        app: postgres
+    spec:
+      containers:
+        - name: postgres
+          image: postgres:16
+          env:
+            - name: POSTGRES_DB
+              value: millm
+            - name: POSTGRES_USER
+              value: millm
+            - name: POSTGRES_PASSWORD
+              value: millm
+            - name: PGDATA
+              value: /var/lib/postgresql/data/pgdata
+          ports:
+            - containerPort: 5432
+          volumeMounts:
+            - name: postgres-data
+              mountPath: /var/lib/postgresql/data
+      volumes:
+        - name: postgres-data
+          hostPath:
+            path: /data/millm/postgres
+            type: DirectoryOrCreate
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: postgres
+  namespace: millm
+spec:
+  selector:
+    app: postgres
+  ports:
+    - port: 5432
+      targetPort: 5432
+
+# -------------------------
+# REDIS
+# -------------------------
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: redis
+  namespace: millm
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: redis
+  template:
+    metadata:
+      labels:
+        app: redis
+    spec:
+      containers:
+        - name: redis
+          image: redis:7
+          ports:
+            - containerPort: 6379
+          volumeMounts:
+            - name: redis-data
+              mountPath: /data
+      volumes:
+        - name: redis-data
+          hostPath:
+            path: /data/millm/redis
+            type: DirectoryOrCreate
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: redis
+  namespace: millm
+spec:
+  selector:
+    app: redis
+  ports:
+    - port: 6379
+      targetPort: 6379
+
+# -------------------------
+# BACKEND (GPU-enabled)
+# -------------------------
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: millm-backend
+  namespace: millm
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: millm-backend
+  template:
+    metadata:
+      labels:
+        app: millm-backend
+    spec:
+      nodeSelector:
+        kubernetes.io/hostname: mcs-lnxgpu01
+      hostAliases:
+        - ip: "192.168.244.61"
+          hostnames:
+            - "k8s-millm.mcslab.io"
+      containers:
+        - name: backend
+          image: hitsai/millm-backend:latest
+          imagePullPolicy: Always
+          ports:
+            - containerPort: 8000
+          env:
+            - name: DATABASE_URL
+              value: "postgresql+asyncpg://millm:millm@postgres:5432/millm"
+            - name: REDIS_URL
+              value: "redis://redis:6379/0"
+            - name: MODEL_CACHE_DIR
+              value: "/data/model_cache"
+            - name: SAE_CACHE_DIR
+              value: "/data/sae_cache"
+            - name: HF_HOME
+              value: "/data/hf_cache"
+            - name: CORS_ORIGINS
+              value: "http://k8s-millm.mcslab.io,http://k8s-millm.hitsai.net,http://localhost:3000"
+            - name: LOG_LEVEL
+              value: "INFO"
+            - name: LOG_FORMAT
+              value: "json"
+            - name: DEBUG
+              value: "false"
+          volumeMounts:
+            - name: millm-data
+              mountPath: /data
+          resources:
+            limits:
+              nvidia.com/gpu: 1
+      volumes:
+        - name: millm-data
+          hostPath:
+            path: /data/millm/data
+            type: DirectoryOrCreate
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: millm-backend
+  namespace: millm
+spec:
+  selector:
+    app: millm-backend
+  ports:
+    - port: 8000
+      targetPort: 8000
+
+# -------------------------
+# FRONTEND (Admin UI)
+# -------------------------
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: millm-frontend
+  namespace: millm
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: millm-frontend
+  template:
+    metadata:
+      labels:
+        app: millm-frontend
+    spec:
+      containers:
+        - name: frontend
+          image: hitsai/millm-admin-ui:latest
+          imagePullPolicy: Always
+          ports:
+            - containerPort: 80
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: millm-frontend
+  namespace: millm
+spec:
+  selector:
+    app: millm-frontend
+  ports:
+    - port: 80
+      targetPort: 80
+
+# -------------------------
+# INGRESS - Main (API + Frontend)
+# -------------------------
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: millm-ingress
+  namespace: millm
+  annotations:
+    nginx.ingress.kubernetes.io/proxy-body-size: "0"
+    nginx.ingress.kubernetes.io/proxy-read-timeout: "3600"
+    nginx.ingress.kubernetes.io/proxy-send-timeout: "3600"
+    nginx.ingress.kubernetes.io/proxy-connect-timeout: "3600"
+spec:
+  ingressClassName: public
+  rules:
+    - host: k8s-millm.mcslab.io
+      http:
+        paths:
+          - path: /api
+            pathType: Prefix
+            backend:
+              service:
+                name: millm-backend
+                port:
+                  number: 8000
+          - path: /v1
+            pathType: Prefix
+            backend:
+              service:
+                name: millm-backend
+                port:
+                  number: 8000
+          - path: /docs
+            pathType: Prefix
+            backend:
+              service:
+                name: millm-backend
+                port:
+                  number: 8000
+          - path: /redoc
+            pathType: Prefix
+            backend:
+              service:
+                name: millm-backend
+                port:
+                  number: 8000
+          - path: /openapi.json
+            pathType: Prefix
+            backend:
+              service:
+                name: millm-backend
+                port:
+                  number: 8000
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: millm-frontend
+                port:
+                  number: 80
+    - host: k8s-millm.hitsai.net
+      http:
+        paths:
+          - path: /api
+            pathType: Prefix
+            backend:
+              service:
+                name: millm-backend
+                port:
+                  number: 8000
+          - path: /v1
+            pathType: Prefix
+            backend:
+              service:
+                name: millm-backend
+                port:
+                  number: 8000
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: millm-frontend
+                port:
+                  number: 80
+
+# -------------------------
+# INGRESS - WebSocket (separate for proper upgrade handling)
+# Do NOT add configuration-snippet with Upgrade headers - it causes header duplication
+# -------------------------
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: millm-websocket-ingress
+  namespace: millm
+  annotations:
+    nginx.ingress.kubernetes.io/websocket-services: "millm-backend"
+    nginx.ingress.kubernetes.io/proxy-http-version: "1.1"
+    nginx.ingress.kubernetes.io/proxy-read-timeout: "86400"
+    nginx.ingress.kubernetes.io/proxy-send-timeout: "86400"
+    nginx.ingress.kubernetes.io/proxy-connect-timeout: "3600"
+spec:
+  ingressClassName: public
+  rules:
+    - host: k8s-millm.mcslab.io
+      http:
+        paths:
+          - path: /socket.io
+            pathType: Prefix
+            backend:
+              service:
+                name: millm-backend
+                port:
+                  number: 8000
+    - host: k8s-millm.hitsai.net
+      http:
+        paths:
+          - path: /socket.io
+            pathType: Prefix
+            backend:
+              service:
+                name: millm-backend
+                port:
+                  number: 8000

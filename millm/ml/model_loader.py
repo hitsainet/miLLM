@@ -177,13 +177,16 @@ class ModelLoadContext:
         )
 
         # Configure quantization
+        # Use bfloat16 instead of float16: same memory (2 bytes/param) but much larger
+        # numeric range (max ~3.4e38 vs ~65504). Many modern models (Gemma 3, Llama 3, etc.)
+        # are trained in bfloat16 and produce NaN/Inf logits when loaded in float16.
         quantization_config = None
-        torch_dtype = torch.float16
+        torch_dtype = torch.bfloat16
 
         if quantization == "Q4":
             quantization_config = BitsAndBytesConfig(
                 load_in_4bit=True,
-                bnb_4bit_compute_dtype=torch.float16,
+                bnb_4bit_compute_dtype=torch.bfloat16,
                 bnb_4bit_use_double_quant=True,
                 bnb_4bit_quant_type="nf4",
             )

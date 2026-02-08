@@ -124,6 +124,11 @@ class GenerationConfig:
         if self.presence_penalty > 0 and "repetition_penalty" not in kwargs:
             kwargs["repetition_penalty"] = 1.0 + (self.presence_penalty * 0.25)
 
+        # Default repetition penalty to prevent degenerate loops,
+        # especially important for smaller models (2B-7B)
+        if "repetition_penalty" not in kwargs:
+            kwargs["repetition_penalty"] = 1.1
+
         return kwargs
 
     def with_max_tokens(self, max_tokens: int) -> "GenerationConfig":

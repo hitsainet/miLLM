@@ -730,16 +730,31 @@ class InferenceService:
         Returns:
             Formatted prompt string
         """
+        # Log incoming messages for debugging template issues
+        for i, m in enumerate(messages):
+            logger.debug(
+                "chat_message",
+                index=i,
+                role=m.role,
+                content_preview=m.content[:200] if m.content else "",
+            )
+
         # Prefer model's built-in chat template
         if hasattr(self._tokenizer, "apply_chat_template"):
             try:
                 # Check if chat_template is actually set
                 if self._tokenizer.chat_template:
-                    return self._tokenizer.apply_chat_template(
+                    formatted = self._tokenizer.apply_chat_template(
                         [{"role": m.role, "content": m.content} for m in messages],
                         tokenize=False,
                         add_generation_prompt=True,
                     )
+                    logger.debug(
+                        "formatted_prompt",
+                        length=len(formatted),
+                        preview=formatted[:500],
+                    )
+                    return formatted
             except Exception as e:
                 logger.warning(
                     "chat_template_failed_using_fallback", error=str(e)

@@ -6,45 +6,49 @@
 
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 
-// Mock socket.io-client
-const mockSocket = {
-  connected: false,
-  on: vi.fn(),
-  off: vi.fn(),
-  emit: vi.fn(),
-  connect: vi.fn(),
-  disconnect: vi.fn(),
-};
+// Use vi.hoisted so mock variables are available in vi.mock factories
+const { mockSocket, mockIo, mockServerStore, mockUIStore } = vi.hoisted(() => {
+  const mockSocket = {
+    connected: false,
+    active: false,
+    on: vi.fn(),
+    off: vi.fn(),
+    emit: vi.fn(),
+    connect: vi.fn(),
+    disconnect: vi.fn(),
+  };
 
-const mockIo = vi.fn(() => mockSocket);
+  const mockIo = vi.fn(() => mockSocket);
+
+  const mockServerStore = {
+    setConnectionStatus: vi.fn(),
+    setDownloadProgress: vi.fn(),
+    clearDownloadProgress: vi.fn(),
+    updateModel: vi.fn(),
+    setModelLoading: vi.fn(),
+    setLoadedModel: vi.fn(),
+    setSAEDownloadProgress: vi.fn(),
+    clearSAEDownloadProgress: vi.fn(),
+    updateSAE: vi.fn(),
+    setAttachedSAE: vi.fn(),
+    setSteering: vi.fn(),
+    addActivationRecord: vi.fn(),
+    setSystemMetrics: vi.fn(),
+    attachedSAE: null as { id: string; name: string } | null,
+    monitoring: { enabled: false },
+  };
+
+  const mockUIStore = {
+    addToast: vi.fn(),
+    monitoringPaused: false,
+  };
+
+  return { mockSocket, mockIo, mockServerStore, mockUIStore };
+});
 
 vi.mock('socket.io-client', () => ({
   io: mockIo,
 }));
-
-// Mock stores
-const mockServerStore = {
-  setConnectionStatus: vi.fn(),
-  setDownloadProgress: vi.fn(),
-  clearDownloadProgress: vi.fn(),
-  updateModel: vi.fn(),
-  setModelLoading: vi.fn(),
-  setLoadedModel: vi.fn(),
-  setSAEDownloadProgress: vi.fn(),
-  clearSAEDownloadProgress: vi.fn(),
-  updateSAE: vi.fn(),
-  setAttachedSAE: vi.fn(),
-  setSteering: vi.fn(),
-  addActivationRecord: vi.fn(),
-  setSystemMetrics: vi.fn(),
-  attachedSAE: null,
-  monitoring: { enabled: false },
-};
-
-const mockUIStore = {
-  addToast: vi.fn(),
-  monitoringPaused: false,
-};
 
 vi.mock('@/stores/serverStore', () => ({
   useServerStore: {
@@ -73,7 +77,7 @@ describe('SocketClient', () => {
   });
 
   afterEach(() => {
-    socketClient.disconnect();
+    socketClient.disconnectImmediate();
   });
 
   describe('connect', () => {
@@ -97,14 +101,16 @@ describe('SocketClient', () => {
     });
 
     it('does not create new socket if already connected', () => {
+      // First connect creates the socket
+      socketClient.connect();
+      const callCountAfterFirst = mockIo.mock.calls.length;
+
+      // Mark as connected
       mockSocket.connected = true;
-      const initialCallCount = mockIo.mock.calls.length;
 
+      // Second connect should be a no-op
       socketClient.connect();
-      socketClient.connect();
-
-      // Should only be called once
-      expect(mockIo.mock.calls.length).toBe(initialCallCount);
+      expect(mockIo.mock.calls.length).toBe(callCountAfterFirst);
     });
   });
 
@@ -175,7 +181,7 @@ describe('SocketClient', () => {
         (call) => call[0] === 'model:download:progress'
       )?.[1];
 
-      progressHandler?.({ model_id: 1, progress: 50 });
+      progressHandler?.({ modelId: 1, progress: 50 });
 
       expect(mockServerStore.setDownloadProgress).toHaveBeenCalledWith(1, 50);
     });
@@ -185,25 +191,24 @@ describe('SocketClient', () => {
         (call) => call[0] === 'model:download:complete'
       )?.[1];
 
-      completeHandler?.({ id: 1, name: 'test-model' });
+      completeHandler?.({ modelId: 1 });
 
       expect(mockServerStore.updateModel).toHaveBeenCalledWith(1, {
-        id: 1,
-        name: 'test-model',
+        status: 'ready',
       });
       expect(mockServerStore.clearDownloadProgress).toHaveBeenCalledWith(1);
       expect(mockUIStore.addToast).toHaveBeenCalledWith({
         type: 'success',
-        message: 'Model "test-model" downloaded successfully',
+        message: 'Model downloaded successfully',
       });
     });
 
-    it('handles model download error', () => {
+    it('handles model download error with object error', () => {
       const errorHandler = mockSocket.on.mock.calls.find(
         (call) => call[0] === 'model:download:error'
       )?.[1];
 
-      errorHandler?.({ model_id: 1, error: 'Network error' });
+      errorHandler?.({ modelId: 1, error: { code: 'GATED_MODEL_NO_TOKEN', message: 'Model is gated' } });
 
       expect(mockServerStore.clearDownloadProgress).toHaveBeenCalledWith(1);
       expect(mockServerStore.updateModel).toHaveBeenCalledWith(1, {
@@ -211,7 +216,7 @@ describe('SocketClient', () => {
       });
       expect(mockUIStore.addToast).toHaveBeenCalledWith({
         type: 'error',
-        message: 'Download failed: Network error',
+        message: 'Download failed: Model is gated',
       });
     });
 
@@ -220,21 +225,20 @@ describe('SocketClient', () => {
         (call) => call[0] === 'model:load:complete'
       )?.[1];
 
-      loadHandler?.({ id: 1, name: 'test-model' });
+      loadHandler?.({ modelId: 1, memoryUsedMb: 4096 });
 
-      expect(mockServerStore.setLoadedModel).toHaveBeenCalledWith({
-        id: 1,
-        name: 'test-model',
+      expect(mockServerStore.updateModel).toHaveBeenCalledWith(1, {
+        status: 'loaded',
       });
       expect(mockServerStore.setModelLoading).toHaveBeenCalledWith(false);
     });
 
-    it('handles model load error', () => {
+    it('handles model load error with object error', () => {
       const errorHandler = mockSocket.on.mock.calls.find(
         (call) => call[0] === 'model:load:error'
       )?.[1];
 
-      errorHandler?.({ model_id: 1, error: 'Out of memory' });
+      errorHandler?.({ modelId: 1, error: { code: 'MODEL_LOAD_FAILED', message: 'Out of memory' } });
 
       expect(mockServerStore.setModelLoading).toHaveBeenCalledWith(false);
       expect(mockServerStore.updateModel).toHaveBeenCalledWith(1, {
@@ -251,7 +255,7 @@ describe('SocketClient', () => {
         (call) => call[0] === 'model:unload:complete'
       )?.[1];
 
-      unloadHandler?.({ model_id: 1 });
+      unloadHandler?.({ modelId: 1 });
 
       expect(mockServerStore.setLoadedModel).toHaveBeenCalledWith(null);
       expect(mockServerStore.updateModel).toHaveBeenCalledWith(1, {
@@ -270,10 +274,10 @@ describe('SocketClient', () => {
         (call) => call[0] === 'sae:download:progress'
       )?.[1];
 
-      progressHandler?.({ sae_id: 1, progress: 75 });
+      progressHandler?.({ saeId: 'sae-1', percent: 75 });
 
       expect(mockServerStore.setSAEDownloadProgress).toHaveBeenCalledWith(
-        1,
+        'sae-1',
         75
       );
     });
@@ -283,43 +287,38 @@ describe('SocketClient', () => {
         (call) => call[0] === 'sae:download:complete'
       )?.[1];
 
-      completeHandler?.({ id: 1, name: 'test-sae' });
+      completeHandler?.({ saeId: 'sae-1' });
 
-      expect(mockServerStore.updateSAE).toHaveBeenCalledWith(1, {
-        id: 1,
-        name: 'test-sae',
+      expect(mockServerStore.updateSAE).toHaveBeenCalledWith('sae-1', {
+        status: 'cached',
       });
-      expect(mockServerStore.clearSAEDownloadProgress).toHaveBeenCalledWith(1);
+      expect(mockServerStore.clearSAEDownloadProgress).toHaveBeenCalledWith('sae-1');
     });
 
-    it('handles SAE attach complete', () => {
+    it('handles SAE attached', () => {
       const attachHandler = mockSocket.on.mock.calls.find(
-        (call) => call[0] === 'sae:attach:complete'
+        (call) => call[0] === 'sae:attached'
       )?.[1];
 
-      attachHandler?.({ id: 1, name: 'test-sae' });
+      attachHandler?.({ saeId: 'sae-1', layer: 12, memoryMb: 256 });
 
-      expect(mockServerStore.setAttachedSAE).toHaveBeenCalledWith({
-        id: 1,
-        name: 'test-sae',
-      });
-      expect(mockServerStore.updateSAE).toHaveBeenCalledWith(1, {
+      expect(mockServerStore.updateSAE).toHaveBeenCalledWith('sae-1', {
         status: 'attached',
       });
     });
 
-    it('handles SAE detach complete', () => {
-      mockServerStore.attachedSAE = { id: 1, name: 'test-sae' };
+    it('handles SAE detached', () => {
+      mockServerStore.attachedSAE = { id: 'sae-1', name: 'test-sae' };
 
       const detachHandler = mockSocket.on.mock.calls.find(
-        (call) => call[0] === 'sae:detach:complete'
+        (call) => call[0] === 'sae:detached'
       )?.[1];
 
       detachHandler?.();
 
       expect(mockServerStore.setAttachedSAE).toHaveBeenCalledWith(null);
-      expect(mockServerStore.updateSAE).toHaveBeenCalledWith(1, {
-        status: 'ready',
+      expect(mockServerStore.updateSAE).toHaveBeenCalledWith('sae-1', {
+        status: 'cached',
       });
     });
   });
@@ -393,7 +392,7 @@ describe('SocketClient', () => {
   describe('disconnect', () => {
     it('disconnects socket and sets status', () => {
       socketClient.connect();
-      socketClient.disconnect();
+      socketClient.disconnectImmediate();
 
       expect(mockSocket.disconnect).toHaveBeenCalled();
       expect(mockServerStore.setConnectionStatus).toHaveBeenCalledWith(
@@ -447,7 +446,7 @@ describe('SocketClient resilience', () => {
   });
 
   afterEach(() => {
-    socketClient.disconnect();
+    socketClient.disconnectImmediate();
   });
 
   it('recovers from temporary disconnection', () => {
@@ -516,19 +515,23 @@ describe('SocketClient resilience', () => {
       (call) => call[0] === 'connect_error'
     )?.[1];
 
-    // Simulate some errors
-    connectErrorHandler?.();
-    connectErrorHandler?.();
-    connectErrorHandler?.();
-
-    // Successful connection should reset
+    // First, reset counter by simulating a successful connection
     connectHandler?.();
+    vi.clearAllMocks();
 
-    // More errors shouldn't immediately trigger max attempts
+    // Now simulate some errors (should start from 0)
+    connectErrorHandler?.();
+    connectErrorHandler?.();
+    connectErrorHandler?.();
+
+    // Successful connection should reset counter
+    connectHandler?.();
+    vi.clearAllMocks();
+
+    // Two more errors after reset shouldn't trigger max attempts (2 < 5)
     connectErrorHandler?.();
     connectErrorHandler?.();
 
-    // Should not show error (reset happened)
     const errorCalls = mockServerStore.setConnectionStatus.mock.calls.filter(
       (call) => call[0] === 'error'
     );

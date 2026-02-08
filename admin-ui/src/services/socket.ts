@@ -2,36 +2,31 @@ import { io, Socket } from 'socket.io-client';
 import { useServerStore } from '@/stores/serverStore';
 import { useUIStore } from '@/stores/uiStore';
 import type {
-  DownloadProgressEvent,
-  LoadProgressEvent,
   ActivationEvent,
   SystemMetricsEvent,
-  ModelInfo,
-  SAEInfo,
-  SteeringState,
 } from '@/types';
 
 type EventCallback<T> = (data: T) => void;
 
 interface SocketEventHandlers {
-  // Model events
-  'model:download:progress': EventCallback<DownloadProgressEvent>;
-  'model:download:complete': EventCallback<ModelInfo>;
-  'model:download:error': EventCallback<{ model_id: number; error: string }>;
-  'model:load:progress': EventCallback<LoadProgressEvent>;
-  'model:load:complete': EventCallback<ModelInfo>;
-  'model:load:error': EventCallback<{ model_id: number; error: string }>;
-  'model:unload:complete': EventCallback<{ model_id: number }>;
+  // Model events (backend uses camelCase keys)
+  'model:download:progress': EventCallback<{ modelId: number; progress: number }>;
+  'model:download:complete': EventCallback<{ modelId: number }>;
+  'model:download:error': EventCallback<{ modelId: number; error: unknown }>;
+  'model:load:progress': EventCallback<{ modelId: number; stage: string; progress: number }>;
+  'model:load:complete': EventCallback<{ modelId: number; memoryUsedMb: number }>;
+  'model:load:error': EventCallback<{ modelId: number; error: unknown }>;
+  'model:unload:complete': EventCallback<{ modelId: number }>;
 
-  // SAE events
-  'sae:download:progress': EventCallback<DownloadProgressEvent>;
-  'sae:download:complete': EventCallback<SAEInfo>;
-  'sae:download:error': EventCallback<{ sae_id: number; error: string }>;
-  'sae:attach:complete': EventCallback<SAEInfo>;
-  'sae:detach:complete': EventCallback<void>;
+  // SAE events (backend uses camelCase keys)
+  'sae:download:progress': EventCallback<{ saeId: string; percent: number }>;
+  'sae:download:complete': EventCallback<{ saeId: string }>;
+  'sae:download:error': EventCallback<{ saeId: string; error: string }>;
+  'sae:attached': EventCallback<{ saeId: string; layer: number; memoryMb: number }>;
+  'sae:detached': EventCallback<{ saeId: string }>;
 
   // Steering events
-  'steering:update': EventCallback<SteeringState>;
+  'steering:update': EventCallback<{ enabled: boolean; values: Record<string, number>; activeCount?: number }>;
 
   // Monitoring events
   'monitoring:activation': EventCallback<ActivationEvent>;
@@ -111,69 +106,84 @@ class SocketClient {
     const serverStore = useServerStore.getState();
     const uiStore = useUIStore.getState();
 
+    // Helper to extract error message from backend error payloads
+    // Backend sends error as { code, message, details } object or plain string
+    const getErrorMessage = (error: unknown): string => {
+      if (typeof error === 'string') return error;
+      if (error && typeof error === 'object' && 'message' in error) {
+        return (error as { message: string }).message;
+      }
+      return 'Unknown error';
+    };
+
     // Model download events
-    this.socket.on('model:download:progress', (data: DownloadProgressEvent) => {
-      if (data.model_id) {
-        serverStore.setDownloadProgress(data.model_id, data.progress);
+    // Backend sends: { modelId, progress, downloadedBytes, totalBytes, speedBps? }
+    this.socket.on('model:download:progress', (data: { modelId: number; progress: number }) => {
+      if (data.modelId) {
+        serverStore.setDownloadProgress(data.modelId, data.progress);
       }
     });
 
-    this.socket.on('model:download:complete', (data: ModelInfo) => {
-      serverStore.updateModel(data.id, data);
-      serverStore.clearDownloadProgress(data.id);
+    // Backend sends: { modelId, localPath }
+    this.socket.on('model:download:complete', (data: { modelId: number }) => {
+      serverStore.updateModel(data.modelId, { status: 'ready' });
+      serverStore.clearDownloadProgress(data.modelId);
       uiStore.addToast({
         type: 'success',
-        message: `Model "${data.name}" downloaded successfully`,
+        message: 'Model downloaded successfully',
       });
     });
 
+    // Backend sends: { modelId, error: { code, message, details } }
     this.socket.on(
       'model:download:error',
-      (data: { model_id: number; error: string }) => {
-        serverStore.clearDownloadProgress(data.model_id);
-        serverStore.updateModel(data.model_id, { status: 'error' });
+      (data: { modelId: number; error: unknown }) => {
+        serverStore.clearDownloadProgress(data.modelId);
+        serverStore.updateModel(data.modelId, { status: 'error' });
         uiStore.addToast({
           type: 'error',
-          message: `Download failed: ${data.error}`,
+          message: `Download failed: ${getErrorMessage(data.error)}`,
         });
       }
     );
 
     // Model load events
+    // Backend sends: { modelId, stage, progress }
     this.socket.on(
       'model:load:progress',
       // eslint-disable-next-line @typescript-eslint/no-unused-vars
-      (_data: LoadProgressEvent) => {
-        // Could update a loading progress indicator
+      (_data: { modelId: number; stage: string; progress: number }) => {
         serverStore.setModelLoading(true);
       }
     );
 
-    this.socket.on('model:load:complete', (data: ModelInfo) => {
-      serverStore.setLoadedModel(data);
-      serverStore.updateModel(data.id, { status: 'loaded' });
+    // Backend sends: { modelId, memoryUsedMb }
+    this.socket.on('model:load:complete', (data: { modelId: number; memoryUsedMb: number }) => {
+      serverStore.updateModel(data.modelId, { status: 'loaded' });
       serverStore.setModelLoading(false);
       uiStore.addToast({
         type: 'success',
-        message: `Model "${data.name}" loaded successfully`,
+        message: 'Model loaded successfully',
       });
     });
 
+    // Backend sends: { modelId, error: { code, message } }
     this.socket.on(
       'model:load:error',
-      (data: { model_id: number; error: string }) => {
+      (data: { modelId: number; error: unknown }) => {
         serverStore.setModelLoading(false);
-        serverStore.updateModel(data.model_id, { status: 'error' });
+        serverStore.updateModel(data.modelId, { status: 'error' });
         uiStore.addToast({
           type: 'error',
-          message: `Failed to load model: ${data.error}`,
+          message: `Failed to load model: ${getErrorMessage(data.error)}`,
         });
       }
     );
 
-    this.socket.on('model:unload:complete', (data: { model_id: number }) => {
+    // Backend sends: { modelId }
+    this.socket.on('model:unload:complete', (data: { modelId: number }) => {
       serverStore.setLoadedModel(null);
-      serverStore.updateModel(data.model_id, { status: 'ready' });
+      serverStore.updateModel(data.modelId, { status: 'ready' });
       uiStore.addToast({
         type: 'info',
         message: 'Model unloaded',
@@ -181,26 +191,29 @@ class SocketClient {
     });
 
     // SAE events
-    this.socket.on('sae:download:progress', (data: DownloadProgressEvent) => {
-      if (data.sae_id) {
-        serverStore.setSAEDownloadProgress(data.sae_id, data.progress);
+    // Backend sends: { saeId, percent }
+    this.socket.on('sae:download:progress', (data: { saeId: string; percent: number }) => {
+      if (data.saeId) {
+        serverStore.setSAEDownloadProgress(data.saeId, data.percent);
       }
     });
 
-    this.socket.on('sae:download:complete', (data: SAEInfo) => {
-      serverStore.updateSAE(data.id, data);
-      serverStore.clearSAEDownloadProgress(data.id);
+    // Backend sends: { saeId }
+    this.socket.on('sae:download:complete', (data: { saeId: string }) => {
+      serverStore.updateSAE(data.saeId, { status: 'cached' });
+      serverStore.clearSAEDownloadProgress(data.saeId);
       uiStore.addToast({
         type: 'success',
-        message: `SAE "${data.name}" downloaded successfully`,
+        message: 'SAE downloaded successfully',
       });
     });
 
+    // Backend sends: { saeId, error } (error is a plain string)
     this.socket.on(
       'sae:download:error',
-      (data: { sae_id: string; error: string }) => {
-        serverStore.clearSAEDownloadProgress(data.sae_id);
-        serverStore.updateSAE(data.sae_id, { status: 'error' });
+      (data: { saeId: string; error: string }) => {
+        serverStore.clearSAEDownloadProgress(data.saeId);
+        serverStore.updateSAE(data.saeId, { status: 'error' });
         uiStore.addToast({
           type: 'error',
           message: `SAE download failed: ${data.error}`,
@@ -208,17 +221,18 @@ class SocketClient {
       }
     );
 
-    this.socket.on('sae:attach:complete', (data: SAEInfo) => {
-      serverStore.setAttachedSAE(data);
-      serverStore.updateSAE(data.id, { status: 'attached' });
+    // Backend emits 'sae:attached' with { saeId, layer, memoryMb }
+    this.socket.on('sae:attached', (data: { saeId: string; layer: number; memoryMb: number }) => {
+      serverStore.updateSAE(data.saeId, { status: 'attached' });
       uiStore.addToast({
         type: 'success',
-        message: `SAE "${data.name}" attached`,
+        message: 'SAE attached',
       });
     });
 
-    this.socket.on('sae:detach:complete', () => {
-      const attachedSAE = serverStore.attachedSAE;
+    // Backend emits 'sae:detached' with { saeId }
+    this.socket.on('sae:detached', () => {
+      const attachedSAE = useServerStore.getState().attachedSAE;
       if (attachedSAE) {
         serverStore.updateSAE(attachedSAE.id, { status: 'cached' });
       }

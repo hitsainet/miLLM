@@ -166,18 +166,19 @@ class ModelDownloader:
                 details={"repo_id": repo_id, "circuit_error": str(e)},
             )
 
-        except RepositoryNotFoundError as e:
-            logger.warning("repo_not_found", repo_id=repo_id, error=str(e))
-            raise RepoNotFoundError(
-                f"Repository '{repo_id}' not found on HuggingFace",
-                details={"repo_id": repo_id},
-            )
-
         except GatedRepoError as e:
+            # Must be before RepositoryNotFoundError (GatedRepoError is a subclass)
             logger.warning("gated_repo", repo_id=repo_id, error=str(e))
             raise GatedModelError(
                 f"Model '{repo_id}' is gated. Please provide a valid access token "
                 "and ensure you have accepted the model's terms of use.",
+                details={"repo_id": repo_id},
+            )
+
+        except RepositoryNotFoundError as e:
+            logger.warning("repo_not_found", repo_id=repo_id, error=str(e))
+            raise RepoNotFoundError(
+                f"Repository '{repo_id}' not found on HuggingFace",
                 details={"repo_id": repo_id},
             )
 

@@ -29,6 +29,7 @@ export function ModelsPage() {
   // State for selected model in modal
   const [selectedModel, setSelectedModel] = useState<ModelInfo | null>(null);
   const [isModalOpen, setIsModalOpen] = useState(false);
+  const [previewRepoId, setPreviewRepoId] = useState<string | null>(null);
 
   const handleLoadModel = async (data: ModelLoadFormData) => {
     await downloadModel({
@@ -42,6 +43,7 @@ export function ModelsPage() {
   };
 
   const handlePreview = async (repo_id: string) => {
+    setPreviewRepoId(repo_id); // Track the repo_id for download-from-preview
     await previewModel(repo_id);
     setSelectedModel(null); // Clear any selected model
     setIsModalOpen(true);
@@ -62,7 +64,19 @@ export function ModelsPage() {
   const handleCloseModal = () => {
     setIsModalOpen(false);
     setSelectedModel(null);
+    setPreviewRepoId(null);
     clearPreview();
+  };
+
+  const handleDownloadFromPreview = async (quantization: string, trustRemoteCode: boolean) => {
+    if (!previewRepoId) return;
+    await downloadModel({
+      source: 'huggingface',
+      repo_id: previewRepoId,
+      quantization: quantization as 'FP32' | 'FP16' | 'Q8' | 'Q4' | 'Q2',
+      trust_remote_code: trustRemoteCode,
+    });
+    handleCloseModal();
   };
 
   const handleLoadFromModal = (id: number) => {
@@ -261,6 +275,7 @@ export function ModelsPage() {
         onLoad={handleLoadFromModal}
         onUnload={handleUnloadFromModal}
         onDelete={handleDeleteFromModal}
+        onDownloadFromPreview={handleDownloadFromPreview}
         isLoadingModel={isLoadingModel}
         isUnloading={isUnloading}
         isDeleting={isDeleting}

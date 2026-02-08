@@ -93,7 +93,7 @@ class ModelPreviewResponse(BaseModel):
 
     name: str = Field(..., description="Model name")
     params: str | None = Field(default=None, description="Parameter count (e.g., '2.5B')")
-    architecture: str | None = Field(default=None, description="Model architecture")
+    architecture: str | None = Field(default=None, description="Model architecture / pipeline tag")
     requires_trust_remote_code: bool = Field(
         default=False,
         description="Whether the model requires trust_remote_code",
@@ -104,8 +104,18 @@ class ModelPreviewResponse(BaseModel):
     )
     estimated_sizes: dict[str, SizeEstimate] | None = Field(
         default=None,
-        description="Estimated sizes for each quantization level (Q4, Q8, FP16)",
+        description="Estimated sizes for each quantization level",
     )
+    downloads: int = Field(default=0, description="Total downloads from HuggingFace")
+    likes: int = Field(default=0, description="Total likes on HuggingFace")
+    tags: list[str] | None = Field(default=None, description="Model tags from HuggingFace")
+    pipeline_tag: str | None = Field(default=None, description="Pipeline tag (e.g., text-generation)")
+    model_type: str | None = Field(default=None, description="Model type from config (e.g., llama)")
+    architectures: list[str] | None = Field(
+        default=None, description="Model architectures from config (e.g., ['LlamaForCausalLM'])"
+    )
+    license: str | None = Field(default=None, description="Model license")
+    language: str | list[str] | None = Field(default=None, description="Model language(s)")
 
 
 class ModelResponse(BaseModel):

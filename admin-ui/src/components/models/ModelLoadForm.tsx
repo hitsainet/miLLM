@@ -4,7 +4,7 @@ import { Card, CardHeader, Button, Input, Select } from '@components/common';
 
 export interface ModelLoadFormData {
   repo_id: string;
-  quantization: 'Q4' | 'Q8' | 'FP16';
+  quantization: 'FP32' | 'FP16' | 'Q8' | 'Q4' | 'Q2';
   device: 'auto' | 'cuda' | 'cpu';
   trust_remote_code: boolean;
   hf_token?: string;
@@ -18,9 +18,11 @@ interface ModelLoadFormProps {
 }
 
 const quantizationOptions = [
-  { value: 'Q4', label: '4-bit (Recommended)' },
-  { value: 'Q8', label: '8-bit' },
-  { value: 'FP16', label: 'FP16 (Full Precision)' },
+  { value: 'Q4', label: 'Q4 - 4-bit (Recommended)' },
+  { value: 'Q8', label: 'Q8 - 8-bit' },
+  { value: 'FP16', label: 'FP16 - Half Precision' },
+  { value: 'FP32', label: 'FP32 - Full Precision' },
+  { value: 'Q2', label: 'Q2 - 2-bit' },
 ];
 
 const deviceOptions = [

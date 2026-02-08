@@ -241,6 +241,16 @@ class ModelDownloader:
         try:
             info = self._get_model_info_with_circuit(repo_id, token=token or settings.HF_TOKEN)
 
+            # Extract config fields (model_type, architectures)
+            config = getattr(info, "config", None) or {}
+            if hasattr(config, "__dict__"):
+                config = config.__dict__ if not isinstance(config, dict) else config
+
+            # Extract card_data fields (license, language)
+            card_data = getattr(info, "card_data", None) or {}
+            if hasattr(card_data, "__dict__") and not isinstance(card_data, dict):
+                card_data = card_data.__dict__
+
             return {
                 "name": info.modelId.split("/")[-1] if info.modelId else repo_id.split("/")[-1],
                 "repo_id": info.modelId,
@@ -251,6 +261,12 @@ class ModelDownloader:
                 "library_name": getattr(info, "library_name", None),
                 "downloads": getattr(info, "downloads", 0),
                 "likes": getattr(info, "likes", 0),
+                "tags": list(getattr(info, "tags", None) or []),
+                "pipeline_tag": getattr(info, "pipeline_tag", None),
+                "model_type": config.get("model_type") if isinstance(config, dict) else None,
+                "architectures": config.get("architectures") if isinstance(config, dict) else None,
+                "license": card_data.get("license") if isinstance(card_data, dict) else None,
+                "language": card_data.get("language") if isinstance(card_data, dict) else None,
             }
 
         except CircuitOpenError as e:

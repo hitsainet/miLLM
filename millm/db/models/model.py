@@ -40,9 +40,11 @@ class ModelSource(str, enum.Enum):
 class QuantizationType(str, enum.Enum):
     """Quantization level for the model."""
 
-    Q4 = "Q4"
-    Q8 = "Q8"
+    FP32 = "FP32"
     FP16 = "FP16"
+    Q8 = "Q8"
+    Q4 = "Q4"
+    Q2 = "Q2"
 
 
 class Model(Base):

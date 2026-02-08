@@ -13,7 +13,7 @@ export interface ErrorDetails {
 
 // Model types
 export type ModelStatus = 'ready' | 'loaded' | 'downloading' | 'loading' | 'error';
-export type QuantizationType = 'Q4' | 'Q8' | 'FP16';
+export type QuantizationType = 'FP32' | 'FP16' | 'Q8' | 'Q4' | 'Q2';
 export type ModelSource = 'huggingface' | 'local';
 
 export interface ModelInfo {
@@ -64,7 +64,15 @@ export interface ModelPreviewResponse {
   architecture: string | null;
   requires_trust_remote_code: boolean;
   is_gated: boolean;
-  estimated_sizes: Record<QuantizationType, SizeEstimate> | null;
+  estimated_sizes: Record<string, SizeEstimate> | null;
+  downloads: number;
+  likes: number;
+  tags: string[] | null;
+  pipeline_tag: string | null;
+  model_type: string | null;
+  architectures: string[] | null;
+  license: string | null;
+  language: string | string[] | null;
 }
 
 // SAE types

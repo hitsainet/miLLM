@@ -212,34 +212,43 @@ async def preview_model(
     if params_str:
         # Parse params like "2.5B", "9B", "3B" to estimate memory
         try:
-            multiplier = 1.0
             if params_str.endswith("B"):
                 params_num = float(params_str[:-1])
             elif params_str.endswith("M"):
                 params_num = float(params_str[:-1]) / 1000
+            elif params_str.endswith("T"):
+                params_num = float(params_str[:-1]) * 1000
             else:
                 params_num = float(params_str)
 
-            # Estimate: ~0.5 bytes/param for Q4, ~1 byte for Q8, ~2 bytes for FP16
+            # Estimates include ~20% overhead for inference runtime
             base_gb = params_num  # params in billions
             estimated_sizes = {
-                "Q4": SizeEstimate(
-                    disk_mb=int(base_gb * 500),  # ~0.5 GB per billion params
-                    memory_mb=int(base_gb * 600),  # slightly more for runtime
-                ),
-                "Q8": SizeEstimate(
-                    disk_mb=int(base_gb * 1000),  # ~1 GB per billion params
-                    memory_mb=int(base_gb * 1200),
+                "FP32": SizeEstimate(
+                    disk_mb=int(base_gb * 4000),  # ~4 bytes/param
+                    memory_mb=int(base_gb * 4800),
                 ),
                 "FP16": SizeEstimate(
-                    disk_mb=int(base_gb * 2000),  # ~2 GB per billion params
+                    disk_mb=int(base_gb * 2000),  # ~2 bytes/param
                     memory_mb=int(base_gb * 2400),
+                ),
+                "Q8": SizeEstimate(
+                    disk_mb=int(base_gb * 1000),  # ~1 byte/param
+                    memory_mb=int(base_gb * 1200),
+                ),
+                "Q4": SizeEstimate(
+                    disk_mb=int(base_gb * 500),  # ~0.5 bytes/param
+                    memory_mb=int(base_gb * 600),
+                ),
+                "Q2": SizeEstimate(
+                    disk_mb=int(base_gb * 250),  # ~0.25 bytes/param
+                    memory_mb=int(base_gb * 300),
                 ),
             }
         except (ValueError, TypeError):
             pass
 
-    # Build preview response
+    # Build preview response with all available metadata
     preview = ModelPreviewResponse(
         name=info.get("name", ""),
         params=info.get("params"),
@@ -247,6 +256,14 @@ async def preview_model(
         is_gated=info.get("is_gated", False),
         requires_trust_remote_code=info.get("requires_trust_remote_code", False),
         estimated_sizes=estimated_sizes,
+        downloads=info.get("downloads", 0),
+        likes=info.get("likes", 0),
+        tags=info.get("tags"),
+        pipeline_tag=info.get("pipeline_tag"),
+        model_type=info.get("model_type"),
+        architectures=info.get("architectures"),
+        license=info.get("license"),
+        language=info.get("language"),
     )
 
     return ApiResponse.ok(preview)

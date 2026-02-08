@@ -75,7 +75,7 @@ export function Header() {
           </div>
 
           {/* Steering Status */}
-          {steering.enabled && steering.features.length > 0 && (
+          {steering.enabled && (steering.features?.length ?? 0) > 0 && (
             <div
               className="hidden lg:flex items-center gap-2 px-2.5 py-1.5 rounded-lg text-xs font-medium bg-amber-500/10 text-amber-400 border border-amber-500/30"
               title={`${steering.features.length} features being steered`}

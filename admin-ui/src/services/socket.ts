@@ -230,8 +230,18 @@ class SocketClient {
     });
 
     // Steering events
-    this.socket.on('steering:update', (data: SteeringState) => {
-      serverStore.setSteering(data);
+    // Backend sends { enabled, values: {idx: strength}, activeCount }
+    // Frontend expects { enabled, sae_id, features: [{index, strength}] }
+    this.socket.on('steering:update', (data: { enabled: boolean; values: Record<string, number>; activeCount?: number }) => {
+      const features = Object.entries(data.values || {}).map(([index, strength]) => ({
+        index: parseInt(index, 10),
+        strength,
+      }));
+      serverStore.setSteering({
+        enabled: data.enabled,
+        sae_id: null,
+        features,
+      });
     });
 
     // Monitoring events

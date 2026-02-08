@@ -96,7 +96,8 @@ export function useModels() {
   const [previewData, setPreviewData] = useState<ModelPreviewResponse | null>(null);
 
   const previewMutation = useMutation({
-    mutationFn: (repoId: string) => modelApi.preview(repoId),
+    mutationFn: ({ repoId, hfToken }: { repoId: string; hfToken?: string }) =>
+      modelApi.preview(repoId, hfToken),
     onSuccess: (data) => {
       setPreviewData(data);
     },
@@ -123,7 +124,8 @@ export function useModels() {
     isLoadingModel: loadMutation.isPending,
     isUnloading: unloadMutation.isPending,
     isDeleting: deleteMutation.isPending,
-    previewModel: previewMutation.mutateAsync,
+    previewModel: (repoId: string, hfToken?: string) =>
+      previewMutation.mutateAsync({ repoId, hfToken }),
     isPreviewingModel: previewMutation.isPending,
     previewData,
     clearPreview: () => setPreviewData(null),

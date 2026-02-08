@@ -12,7 +12,7 @@ export interface ModelLoadFormData {
 
 interface ModelLoadFormProps {
   onSubmit: (data: ModelLoadFormData) => void;
-  onPreview?: (repo_id: string) => void;
+  onPreview?: (repo_id: string, hf_token?: string) => void;
   isLoading?: boolean;
   isPreviewLoading?: boolean;
 }
@@ -71,7 +71,7 @@ export function ModelLoadForm({
 
   const handlePreview = () => {
     if (formData.repo_id.trim() && formData.repo_id.includes('/')) {
-      onPreview?.(formData.repo_id);
+      onPreview?.(formData.repo_id, formData.hf_token || undefined);
     }
   };
 

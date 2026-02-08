@@ -30,6 +30,7 @@ export function ModelsPage() {
   const [selectedModel, setSelectedModel] = useState<ModelInfo | null>(null);
   const [isModalOpen, setIsModalOpen] = useState(false);
   const [previewRepoId, setPreviewRepoId] = useState<string | null>(null);
+  const [previewHfToken, setPreviewHfToken] = useState<string | undefined>(undefined);
 
   const handleLoadModel = async (data: ModelLoadFormData) => {
     await downloadModel({
@@ -42,9 +43,10 @@ export function ModelsPage() {
     });
   };
 
-  const handlePreview = async (repo_id: string) => {
+  const handlePreview = async (repo_id: string, hf_token?: string) => {
     setPreviewRepoId(repo_id); // Track the repo_id for download-from-preview
-    await previewModel(repo_id);
+    setPreviewHfToken(hf_token); // Preserve token for download-from-preview
+    await previewModel(repo_id, hf_token);
     setSelectedModel(null); // Clear any selected model
     setIsModalOpen(true);
   };
@@ -65,6 +67,7 @@ export function ModelsPage() {
     setIsModalOpen(false);
     setSelectedModel(null);
     setPreviewRepoId(null);
+    setPreviewHfToken(undefined);
     clearPreview();
   };
 
@@ -75,6 +78,7 @@ export function ModelsPage() {
       repo_id: previewRepoId,
       quantization: quantization as 'FP32' | 'FP16' | 'Q8' | 'Q4' | 'Q2',
       trust_remote_code: trustRemoteCode,
+      hf_token: previewHfToken,
     });
     handleCloseModal();
   };

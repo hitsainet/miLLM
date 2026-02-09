@@ -769,6 +769,18 @@ class SAEService:
 
         memory_mb = int(loaded_sae.estimate_memory_mb())
 
+        # Auto-lock the model for steering
+        try:
+            from millm.db.base import async_session_factory
+            from millm.db.repositories.model_repository import ModelRepository
+
+            async with async_session_factory() as session:
+                model_repo = ModelRepository(session)
+                await model_repo.update(model_state.loaded_model_id, locked=True)
+                logger.info("model_auto_locked", model_id=model_state.loaded_model_id, sae_id=sae_id)
+        except Exception as e:
+            logger.warning("model_auto_lock_failed", error=str(e))
+
         logger.info(
             "sae_attached",
             sae_id=sae_id,
@@ -841,9 +853,26 @@ class SAEService:
         # Clear state in singleton (this also removes hook if not already done)
         self._sae_state.clear()
 
+        # Capture model_id before clearing state
+        model_state = LoadedModelState()
+        locked_model_id = model_state.loaded_model_id if model_state.is_loaded else None
+
         # Update database
         await self.repository.update_status(sae_id, SAEStatus.CACHED)
         await self.repository.deactivate_attachment(sae_id)
+
+        # Auto-unlock the model
+        if locked_model_id:
+            try:
+                from millm.db.base import async_session_factory
+                from millm.db.repositories.model_repository import ModelRepository
+
+                async with async_session_factory() as session:
+                    model_repo = ModelRepository(session)
+                    await model_repo.update(locked_model_id, locked=False)
+                    logger.info("model_auto_unlocked", model_id=locked_model_id, sae_id=sae_id)
+            except Exception as e:
+                logger.warning("model_auto_unlock_failed", error=str(e))
 
         logger.info(
             "sae_detached",

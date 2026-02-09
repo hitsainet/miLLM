@@ -125,7 +125,10 @@ def model_not_found_error(model_id: str, available_model: Optional[str] = None) 
     if available_model:
         message = f"The model '{model_id}' does not exist. Available: {available_model}"
     else:
-        message = f"The model '{model_id}' does not exist"
+        message = (
+            f"The model '{model_id}' does not exist or has not been downloaded. "
+            "Download it first using the Management API."
+        )
 
     return create_openai_error(
         message=message,
@@ -133,6 +136,18 @@ def model_not_found_error(model_id: str, available_model: Optional[str] = None) 
         code="model_not_found",
         param="model",
         status_code=404,
+    )
+
+
+def model_locked_error(model_id: str, locked_model: str) -> JSONResponse:
+    """Create error response when model is locked for steering."""
+    return create_openai_error(
+        message=f"The model '{model_id}' is not available. "
+        f"Model '{locked_model}' is currently locked for steering.",
+        error_type="invalid_request_error",
+        code="model_locked",
+        param="model",
+        status_code=409,
     )
 
 

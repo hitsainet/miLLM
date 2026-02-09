@@ -225,6 +225,26 @@ export const modelApi = {
     request<void>(`/models/${id}/cancel`, {
       method: 'POST',
     }),
+
+  /**
+   * Locks a loaded model for steering (prevents auto-unload).
+   * @param id - Model ID to lock
+   * @returns Promise resolving to updated model information
+   */
+  lock: (id: number) =>
+    request<ModelInfo>(`/models/${id}/lock`, {
+      method: 'POST',
+    }),
+
+  /**
+   * Unlocks a model to allow auto-unload by inference requests.
+   * @param id - Model ID to unlock
+   * @returns Promise resolving to updated model information
+   */
+  unlock: (id: number) =>
+    request<ModelInfo>(`/models/${id}/unlock`, {
+      method: 'POST',
+    }),
 };
 
 /**

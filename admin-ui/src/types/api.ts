@@ -28,6 +28,7 @@ export interface ModelInfo {
   status: ModelStatus;
   created_at: string;
   updated_at: string;
+  locked?: boolean;
   // Extended properties
   num_parameters?: number;
   memory_footprint?: number;

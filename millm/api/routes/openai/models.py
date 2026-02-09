@@ -3,12 +3,16 @@ OpenAI-compatible models endpoint.
 
 GET /v1/models - List available models
 GET /v1/models/{model_id} - Get model details
+
+Behavior:
+- When no model is locked: returns ALL available models (READY, LOADED, LOADING)
+- When a model is locked for steering: returns only the locked model
 """
 
 from fastapi import APIRouter, Depends
 from fastapi.responses import JSONResponse
 
-from millm.api.dependencies import get_inference_service
+from millm.api.dependencies import ModelServiceDep, get_inference_service
 from millm.api.routes.openai.errors import model_not_found_error
 from millm.api.schemas.openai import ModelListResponse, ModelObject, OpenAIErrorResponse
 from millm.core.logging import get_logger
@@ -20,30 +24,43 @@ logger = get_logger(__name__)
 
 @router.get("/models", response_model=ModelListResponse)
 async def list_models(
+    service: ModelServiceDep,
     inference: InferenceService = Depends(get_inference_service),
 ) -> ModelListResponse:
     """
     List available models.
 
-    Returns models in OpenAI format. If no model is loaded,
-    returns an empty list (not an error).
+    When no model is locked: returns all available models (READY, LOADED, LOADING).
+    When a model is locked for steering: returns only the locked model.
     """
     data: list[ModelObject] = []
 
-    if inference.is_model_loaded():
-        model_info = inference.get_loaded_model_info()
-        if model_info:
+    locked = await service.get_locked_model()
+
+    if locked:
+        # Locked mode: only return the locked model
+        created = int(locked.loaded_at.timestamp()) if locked.loaded_at else int(locked.created_at.timestamp())
+        data.append(
+            ModelObject(
+                id=locked.name,
+                created=created,
+                owned_by=locked.repo_id or "miLLM",
+            )
+        )
+    else:
+        # Unlocked mode: return all available models
+        models = await service.get_available_models()
+        for m in models:
+            created = int(m.loaded_at.timestamp()) if m.loaded_at else int(m.created_at.timestamp())
             data.append(
                 ModelObject(
-                    id=model_info.name,
-                    created=int(model_info.loaded_at.timestamp()),
-                    owned_by="miLLM",
+                    id=m.name,
+                    created=created,
+                    owned_by=m.repo_id or "miLLM",
                 )
             )
-            logger.debug("models_list_request", model_count=1)
-    else:
-        logger.debug("models_list_request", model_count=0)
 
+    logger.debug("models_list_request", model_count=len(data))
     return ModelListResponse(data=data)
 
 
@@ -56,24 +73,29 @@ async def list_models(
 )
 async def get_model(
     model_id: str,
+    service: ModelServiceDep,
     inference: InferenceService = Depends(get_inference_service),
 ) -> ModelObject | JSONResponse:
     """
     Get details for a specific model.
 
-    Returns 404 if model not found or model_id doesn't match loaded model.
+    Returns 404 if model not found in available models.
     """
-    if not inference.is_model_loaded():
+    # Check if model exists in database by name
+    model = await service.find_model_by_name(model_id)
+    if not model:
         return model_not_found_error(model_id)
 
-    model_info = inference.get_loaded_model_info()
-    if not model_info or model_info.name != model_id:
+    # If locked to a different model, hide this one
+    locked = await service.get_locked_model()
+    if locked and locked.id != model.id:
         return model_not_found_error(model_id)
 
     logger.debug("model_get_request", model_id=model_id)
 
+    created = int(model.loaded_at.timestamp()) if model.loaded_at else int(model.created_at.timestamp())
     return ModelObject(
-        id=model_info.name,
-        created=int(model_info.loaded_at.timestamp()),
-        owned_by="miLLM",
+        id=model.name,
+        created=created,
+        owned_by=model.repo_id or "miLLM",
     )

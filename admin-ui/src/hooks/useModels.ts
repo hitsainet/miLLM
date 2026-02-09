@@ -93,6 +93,28 @@ export function useModels() {
     },
   });
 
+  const lockMutation = useMutation({
+    mutationFn: (id: number) => modelApi.lock(id),
+    onSuccess: (model) => {
+      queryClient.invalidateQueries({ queryKey: ['models'] });
+      toast.success(`Model "${model.name}" locked for steering`);
+    },
+    onError: (error: Error) => {
+      toast.error(`Lock failed: ${error.message}`);
+    },
+  });
+
+  const unlockMutation = useMutation({
+    mutationFn: (id: number) => modelApi.unlock(id),
+    onSuccess: (model) => {
+      queryClient.invalidateQueries({ queryKey: ['models'] });
+      toast.info(`Model "${model.name}" unlocked`);
+    },
+    onError: (error: Error) => {
+      toast.error(`Unlock failed: ${error.message}`);
+    },
+  });
+
   const [previewData, setPreviewData] = useState<ModelPreviewResponse | null>(null);
 
   const previewMutation = useMutation({
@@ -129,6 +151,10 @@ export function useModels() {
     isPreviewingModel: previewMutation.isPending,
     previewData,
     clearPreview: () => setPreviewData(null),
+    lockModel: lockMutation.mutate,
+    unlockModel: unlockMutation.mutate,
+    isLocking: lockMutation.isPending,
+    isUnlockingModel: unlockMutation.isPending,
   };
 }
 

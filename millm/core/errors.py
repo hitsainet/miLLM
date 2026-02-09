@@ -74,6 +74,13 @@ class ModelBusyError(MiLLMError):
     status_code = 409
 
 
+class ModelLockedError(MiLLMError):
+    """Raised when a model operation is blocked because a model is locked for steering."""
+
+    code = "MODEL_LOCKED"
+    status_code = 409
+
+
 # =============================================================================
 # Resource Errors
 # =============================================================================

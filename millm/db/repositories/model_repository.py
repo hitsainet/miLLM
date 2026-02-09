@@ -97,6 +97,47 @@ class ModelRepository:
         )
         return result.scalar_one_or_none()
 
+    async def find_by_name(self, name: str) -> Model | None:
+        """
+        Find a model by its display name.
+
+        Args:
+            name: The model's display name.
+
+        Returns:
+            The Model instance or None if not found.
+        """
+        result = await self.session.execute(
+            select(Model).where(Model.name == name)
+        )
+        return result.scalar_one_or_none()
+
+    async def get_locked_model(self) -> Model | None:
+        """
+        Get the currently locked model (if any).
+
+        Returns:
+            The locked Model instance or None.
+        """
+        result = await self.session.execute(
+            select(Model).where(Model.locked == True)  # noqa: E712
+        )
+        return result.scalar_one_or_none()
+
+    async def get_available_models(self) -> list[Model]:
+        """
+        Get all models that are available for use (READY, LOADED, or LOADING).
+
+        Returns:
+            List of available Model instances.
+        """
+        result = await self.session.execute(
+            select(Model)
+            .where(Model.status.in_([ModelStatus.READY, ModelStatus.LOADED, ModelStatus.LOADING]))
+            .order_by(Model.created_at.desc())
+        )
+        return list(result.scalars().all())
+
     async def find_by_repo_quantization(
         self, repo_id: str, quantization: QuantizationType
     ) -> Model | None:

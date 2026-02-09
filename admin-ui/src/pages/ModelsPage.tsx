@@ -1,5 +1,5 @@
 import { useState } from 'react';
-import { Server, Info, Play } from 'lucide-react';
+import { Server, Info, Play, Lock } from 'lucide-react';
 import { useModels } from '@hooks/useModels';
 import { useServerStore } from '@stores/serverStore';
 import { ModelLoadForm, LoadedModelCard, ModelDetailsModal } from '@components/models';
@@ -24,6 +24,10 @@ export function ModelsPage() {
     isPreviewingModel,
     previewData,
     clearPreview,
+    lockModel,
+    unlockModel,
+    isLocking,
+    isUnlockingModel,
   } = useModels();
 
   // State for selected model in modal
@@ -217,6 +221,13 @@ export function ModelsPage() {
                     </div>
                   )}
 
+                  {/* Lock indicator */}
+                  {model.locked && (
+                    <span title="Locked for steering">
+                      <Lock className="w-3.5 h-3.5 text-yellow-400" />
+                    </span>
+                  )}
+
                   {/* Status Badge */}
                   {getStatusBadge(model.status)}
 
@@ -280,9 +291,13 @@ export function ModelsPage() {
         onUnload={handleUnloadFromModal}
         onDelete={handleDeleteFromModal}
         onDownloadFromPreview={handleDownloadFromPreview}
+        onLock={(id) => lockModel(id)}
+        onUnlock={(id) => unlockModel(id)}
         isLoadingModel={isLoadingModel}
         isUnloading={isUnloading}
         isDeleting={isDeleting}
+        isLocking={isLocking}
+        isUnlockingModel={isUnlockingModel}
         loadedModel={loadedModel}
       />
     </div>

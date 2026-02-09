@@ -157,6 +157,10 @@ class ModelResponse(BaseModel):
         default=None,
         description="Error message if status is ERROR",
     )
+    locked: bool = Field(
+        default=False,
+        description="Whether the model is locked for steering (prevents auto-unload)",
+    )
     download_progress: int | None = Field(
         default=None,
         description="Download progress percentage (0-100) when status is DOWNLOADING",

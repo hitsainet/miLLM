@@ -4,20 +4,27 @@ OpenAI-compatible chat completions endpoint.
 POST /v1/chat/completions - Create chat completion
 
 Supports both streaming and non-streaming responses.
+Auto-loads requested model if not already loaded (Ollama-like behavior).
 """
 
+import asyncio
 from typing import Union
 
 from fastapi import APIRouter, Depends
 from fastapi.responses import JSONResponse, StreamingResponse
 
-from millm.api.dependencies import get_inference_service
-from millm.api.routes.openai.errors import model_not_found_error, model_not_loaded_error
+from millm.api.dependencies import ModelServiceDep, get_inference_service
+from millm.api.routes.openai.errors import (
+    model_locked_error,
+    model_not_found_error,
+    server_error,
+)
 from millm.api.schemas.openai import (
     ChatCompletionRequest,
     ChatCompletionResponse,
     OpenAIErrorResponse,
 )
+from millm.core.errors import ModelLockedError
 from millm.core.logging import get_logger
 from millm.services.inference_service import InferenceService
 
@@ -34,6 +41,7 @@ logger = get_logger(__name__)
 )
 async def create_chat_completion(
     request: ChatCompletionRequest,
+    service: ModelServiceDep,
     inference: InferenceService = Depends(get_inference_service),
 ) -> Union[ChatCompletionResponse, StreamingResponse, JSONResponse]:
     """
@@ -41,21 +49,32 @@ async def create_chat_completion(
 
     Accepts messages in OpenAI format and returns a completion.
     Supports both streaming (stream=true) and non-streaming responses.
+    Auto-loads the requested model if not already loaded.
     """
-    # Check if model is loaded
-    if not inference.is_model_loaded():
-        return model_not_loaded_error()
+    # Check if requested model exists in database
+    model = await service.find_model_by_name(request.model)
+    if not model:
+        return model_not_found_error(request.model)
 
-    # Validate model name matches loaded model
+    # Ensure the model is loaded (auto-load if needed)
     model_info = inference.get_loaded_model_info()
-    if model_info and request.model != model_info.name:
-        return model_not_found_error(request.model, model_info.name)
+    if not model_info or model_info.name != request.model:
+        try:
+            await service.load_model_and_wait(model.id)
+        except ModelLockedError:
+            locked = await service.get_locked_model()
+            locked_name = locked.name if locked else "unknown"
+            return model_locked_error(request.model, locked_name)
+        except asyncio.TimeoutError:
+            return server_error(f"Model '{request.model}' took too long to load")
+        except Exception as e:
+            logger.error("auto_load_failed", model=request.model, error=str(e))
+            return server_error(f"Failed to load model '{request.model}': {str(e)}")
 
     # Apply profile override if specified
     if request.profile:
         try:
             from millm.services.sae_service import AttachedSAEState
-            from millm.api.dependencies import _monitoring_service
             from millm.db.base import async_session_factory
             from millm.db.repositories.profile_repository import ProfileRepository
 

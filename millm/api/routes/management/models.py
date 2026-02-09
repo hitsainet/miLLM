@@ -170,6 +170,47 @@ async def unload_model(
 
 
 @router.post(
+    "/{model_id}/lock",
+    response_model=ApiResponse[ModelResponse],
+    summary="Lock a model",
+    description="Lock a loaded model for steering (prevents auto-unload by inference requests).",
+)
+async def lock_model(
+    model_id: ModelId,
+    service: ModelServiceDep,
+) -> ApiResponse[ModelResponse]:
+    """
+    Lock a model for steering.
+
+    The model must be in LOADED state. Only one model can be locked at a time.
+    While locked, the model is the only one returned by /v1/models and cannot
+    be auto-unloaded by inference requests targeting other models.
+    """
+    model = await service.lock_model(model_id)
+    return ApiResponse.ok(ModelResponse.from_model(model))
+
+
+@router.post(
+    "/{model_id}/unlock",
+    response_model=ApiResponse[ModelResponse],
+    summary="Unlock a model",
+    description="Unlock a model to allow auto-unload by inference requests.",
+)
+async def unlock_model(
+    model_id: ModelId,
+    service: ModelServiceDep,
+) -> ApiResponse[ModelResponse]:
+    """
+    Unlock a model.
+
+    After unlocking, all downloaded models are visible via /v1/models and
+    inference requests can auto-load any available model.
+    """
+    model = await service.unlock_model(model_id)
+    return ApiResponse.ok(ModelResponse.from_model(model))
+
+
+@router.post(
     "/{model_id}/cancel",
     response_model=ApiResponse[ModelResponse],
     summary="Cancel download",

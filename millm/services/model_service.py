@@ -27,6 +27,7 @@ from millm.core.errors import (
     ModelAlreadyExistsError,
     ModelAlreadyLoadedError,
     ModelBusyError,
+    ModelLockedError,
     ModelNotFoundError,
     ModelNotLoadedError,
 )
@@ -1008,11 +1009,12 @@ class ModelService:
             # Force unload anyway
             self.loader.unload()
 
-        # Update database
+        # Auto-unlock on unload
         model = await self.repository.update(
             model_id,
             status=ModelStatus.READY,
             loaded_at=None,
+            locked=False,
         )
 
         # Emit event
@@ -1061,6 +1063,159 @@ class ModelService:
             "device": loaded.device,
             "dtype": loaded.dtype,
         }
+
+    # =========================================================================
+    # Lock/Unlock Operations
+    # =========================================================================
+
+    async def lock_model(self, model_id: int) -> Model:
+        """
+        Lock a model to prevent auto-unload (used for steering).
+
+        The model must be in LOADED state. Only one model can be locked at a time.
+
+        Args:
+            model_id: The model's database ID
+
+        Returns:
+            The updated model record
+
+        Raises:
+            ModelNotFoundError: If model doesn't exist
+            ModelNotLoadedError: If model is not loaded
+            ModelLockedError: If another model is already locked
+        """
+        model = await self.get_model(model_id)
+
+        if model.status != ModelStatus.LOADED:
+            raise ModelNotLoadedError(
+                f"Model {model_id} must be loaded before it can be locked",
+                details={"model_id": model_id, "status": model.status.value},
+            )
+
+        # Check if another model is already locked
+        locked = await self.repository.get_locked_model()
+        if locked and locked.id != model_id:
+            raise ModelLockedError(
+                f"Model '{locked.name}' (ID {locked.id}) is already locked. Unlock it first.",
+                details={"locked_model_id": locked.id, "locked_model_name": locked.name},
+            )
+
+        model = await self.repository.update(model_id, locked=True)
+        logger.info("model_locked", model_id=model_id)
+        return model
+
+    async def unlock_model(self, model_id: int) -> Model:
+        """
+        Unlock a model to allow auto-unload.
+
+        Args:
+            model_id: The model's database ID
+
+        Returns:
+            The updated model record
+
+        Raises:
+            ModelNotFoundError: If model doesn't exist
+        """
+        model = await self.get_model(model_id)
+        model = await self.repository.update(model_id, locked=False)
+        logger.info("model_unlocked", model_id=model_id)
+        return model
+
+    async def get_locked_model(self) -> Model | None:
+        """
+        Get the currently locked model (if any).
+
+        Returns:
+            The locked model or None.
+        """
+        return await self.repository.get_locked_model()
+
+    async def load_model_and_wait(
+        self,
+        model_id: int,
+        timeout: float = 180.0,
+    ) -> Model:
+        """
+        Load a model and wait for it to complete loading.
+
+        Used by the OpenAI-compatible endpoints for auto-load on demand.
+        Calls load_model() then polls until status becomes LOADED or ERROR.
+
+        Args:
+            model_id: The model's database ID
+            timeout: Maximum time in seconds to wait for load (default 180s)
+
+        Returns:
+            The loaded model record
+
+        Raises:
+            ModelNotFoundError: If model doesn't exist
+            ModelBusyError: If another load is in progress
+            ModelLockedError: If a different model is locked
+            asyncio.TimeoutError: If loading exceeds timeout
+        """
+        model = await self.get_model(model_id)
+
+        # If already loaded, return immediately
+        if model.status == ModelStatus.LOADED and self.loader.loaded_model_id == model_id:
+            return model
+
+        # Check if locked model prevents loading this one
+        locked = await self.repository.get_locked_model()
+        if locked and locked.id != model_id:
+            raise ModelLockedError(
+                f"Model '{locked.name}' is locked for steering. "
+                f"Cannot auto-load '{model.name}'.",
+                details={"locked_model_id": locked.id, "requested_model_id": model_id},
+            )
+
+        # Start loading (this returns immediately with status=LOADING)
+        await self.load_model(model_id)
+
+        # Poll until loaded or error
+        start = time.monotonic()
+        while time.monotonic() - start < timeout:
+            await asyncio.sleep(0.5)
+            updated = await self.repository.get_by_id(model_id)
+            if updated is None:
+                raise ModelNotFoundError(
+                    f"Model {model_id} disappeared during loading",
+                    details={"model_id": model_id},
+                )
+            if updated.status == ModelStatus.LOADED:
+                return updated
+            if updated.status == ModelStatus.ERROR:
+                raise ModelBusyError(
+                    f"Model failed to load: {updated.error_message}",
+                    details={"model_id": model_id, "error": updated.error_message},
+                )
+
+        raise asyncio.TimeoutError(
+            f"Model {model_id} did not finish loading within {timeout}s"
+        )
+
+    async def find_model_by_name(self, name: str) -> Model | None:
+        """
+        Find a model by its display name.
+
+        Args:
+            name: The model's display name
+
+        Returns:
+            The model or None if not found
+        """
+        return await self.repository.find_by_name(name)
+
+    async def get_available_models(self) -> list[Model]:
+        """
+        Get all models available for use (READY, LOADED, LOADING).
+
+        Returns:
+            List of available models
+        """
+        return await self.repository.get_available_models()
 
     # =========================================================================
     # Delete Operations

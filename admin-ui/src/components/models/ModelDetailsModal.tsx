@@ -14,6 +14,8 @@ import {
   Heart,
   Download,
   Scale,
+  Lock,
+  Unlock,
 } from 'lucide-react';
 import { Modal, Button, Spinner, Badge } from '@components/common';
 import type { ModelInfo, ModelPreviewResponse } from '@/types';
@@ -35,12 +37,20 @@ export interface ModelDetailsModalProps {
   onDelete?: (id: number) => void;
   /** Callback to download from preview with selected quantization */
   onDownloadFromPreview?: (quantization: string, trustRemoteCode: boolean) => void;
+  /** Callback to lock the model for steering */
+  onLock?: (id: number) => void;
+  /** Callback to unlock the model */
+  onUnlock?: (id: number) => void;
   /** Whether a model is currently being loaded */
   isLoadingModel?: boolean;
   /** Whether a model is currently being unloaded */
   isUnloading?: boolean;
   /** Whether a model is currently being deleted */
   isDeleting?: boolean;
+  /** Whether a model is currently being locked */
+  isLocking?: boolean;
+  /** Whether a model is currently being unlocked */
+  isUnlockingModel?: boolean;
   /** The currently loaded model (to check if another model is loaded) */
   loadedModel?: ModelInfo | null;
 }
@@ -62,9 +72,13 @@ export function ModelDetailsModal({
   onUnload,
   onDelete,
   onDownloadFromPreview,
+  onLock,
+  onUnlock,
   isLoadingModel,
   isUnloading,
   isDeleting,
+  isLocking,
+  isUnlockingModel,
   loadedModel,
 }: ModelDetailsModalProps) {
   const [selectedQuantization, setSelectedQuantization] = useState('Q4');
@@ -137,6 +151,29 @@ export function ModelDetailsModal({
         </Button>
       )}
       <div className="flex-1" />
+      {canUnload && model.locked && (
+        <Button
+          variant="secondary"
+          size="sm"
+          onClick={() => onUnlock?.(model.id)}
+          disabled={isUnlockingModel}
+        >
+          {isUnlockingModel ? <Spinner size="sm" /> : <Unlock className="w-4 h-4" />}
+          Unlock
+        </Button>
+      )}
+      {canUnload && !model.locked && (
+        <Button
+          variant="secondary"
+          size="sm"
+          onClick={() => onLock?.(model.id)}
+          disabled={isLocking}
+          title="Lock model to prevent auto-unload during steering"
+        >
+          {isLocking ? <Spinner size="sm" /> : <Lock className="w-4 h-4" />}
+          Lock
+        </Button>
+      )}
       {canUnload && (
         <Button
           variant="secondary"
@@ -212,7 +249,15 @@ export function ModelDetailsModal({
               )}
             </div>
           </div>
-          {model && getStatusBadge(model.status)}
+          <div className="flex items-center gap-2">
+            {model?.locked && (
+              <Badge variant="warning">
+                <Lock className="w-3 h-3 mr-1" />
+                Locked
+              </Badge>
+            )}
+            {model && getStatusBadge(model.status)}
+          </div>
         </div>
 
         {/* Error Message */}

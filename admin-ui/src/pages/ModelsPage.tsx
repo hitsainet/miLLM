@@ -238,19 +238,12 @@ export function ModelsPage() {
                         e.stopPropagation();
                         load(model.id);
                       }}
-                      disabled={isLoadingModel || loadedModel !== null}
-                      className={`
-                        flex items-center gap-1 px-2 py-1 rounded text-xs font-medium
-                        transition-colors
-                        ${loadedModel !== null
-                          ? 'text-slate-500 cursor-not-allowed'
-                          : 'text-primary-400 hover:text-primary-300 hover:bg-primary-500/10'
-                        }
-                      `}
-                      title={loadedModel !== null ? 'Unload current model first' : 'Load model'}
+                      disabled={isLoadingModel}
+                      className="flex items-center gap-1 px-2 py-1 rounded text-xs font-medium transition-colors text-primary-400 hover:text-primary-300 hover:bg-primary-500/10 disabled:text-slate-500 disabled:cursor-not-allowed"
+                      title={loadedModel ? 'Switch to this model' : 'Load model'}
                     >
                       <Play className="w-3 h-3" />
-                      Load
+                      {loadedModel ? 'Switch' : 'Load'}
                     </button>
                   )}
                 </div>

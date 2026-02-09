@@ -190,11 +190,10 @@ export function ModelDetailsModal({
           variant="primary"
           size="sm"
           onClick={() => onLoad?.(model.id)}
-          disabled={isLoadingModel || !!anotherModelLoaded}
-          title={anotherModelLoaded ? 'Unload current model first' : undefined}
+          disabled={isLoadingModel}
         >
           {isLoadingModel ? <Spinner size="sm" /> : <Play className="w-4 h-4" />}
-          {anotherModelLoaded ? 'Unload current first' : 'Load Model'}
+          {anotherModelLoaded ? 'Switch Model' : 'Load Model'}
         </Button>
       )}
     </div>

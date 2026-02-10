@@ -318,41 +318,38 @@ class ModelService:
         Runs in thread pool. Updates database and emits events upon completion/failure.
         Implements retry logic with exponential backoff for transient failures.
         """
-        import threading
-
         last_error: Optional[Exception] = None
-        stop_progress_monitor = threading.Event()
-
-        # Get expected download size for progress tracking
-        expected_size = 0
-        try:
-            expected_size = self.downloader.get_expected_download_size(
-                repo_id=request.repo_id,
-                token=request.hf_token,
-            )
-            logger.info(
-                "download_expected_size",
-                model_id=model_id,
-                expected_bytes=expected_size,
-                expected_mb=expected_size // (1024 * 1024) if expected_size else 0,
-            )
-        except Exception as e:
-            logger.warning(
-                "failed_to_get_expected_size",
-                model_id=model_id,
-                error=str(e),
-            )
-
-        # Start progress monitoring thread
-        progress_thread = threading.Thread(
-            target=self._monitor_download_progress,
-            args=(model_id, request.repo_id, request.quantization.value, stop_progress_monitor, expected_size),
-            daemon=True,
-        )
-        progress_thread.start()
 
         # Initialize progress tracking
         self._download_progress[model_id] = 0
+
+        # Create progress callback that emits WebSocket events
+        def on_progress(pct: float, downloaded: int, total: int) -> None:
+            progress = int(pct)
+            self._download_progress[model_id] = progress
+
+            # Emit WebSocket progress event
+            if self.emitter and self._main_loop:
+                try:
+                    asyncio.run_coroutine_threadsafe(
+                        self.emitter.emit_download_progress(
+                            model_id=model_id,
+                            progress=progress,
+                            downloaded_bytes=downloaded,
+                            total_bytes=total if total > 0 else None,
+                        ),
+                        self._main_loop,
+                    )
+                except Exception:
+                    pass  # Don't let emit errors break downloading
+
+            logger.debug(
+                "download_progress_update",
+                model_id=model_id,
+                progress=progress,
+                downloaded_bytes=downloaded,
+                total_bytes=total,
+            )
 
         try:
             for attempt in range(MAX_DOWNLOAD_RETRIES):
@@ -370,10 +367,11 @@ class ModelService:
                         max_attempts=MAX_DOWNLOAD_RETRIES,
                     )
 
-                    # Perform download
+                    # Perform download with progress callback
                     cache_path = self.downloader.download(
                         repo_id=request.repo_id,
                         quantization=request.quantization.value,
+                        progress_callback=on_progress,
                         token=request.hf_token,
                         trust_remote_code=request.trust_remote_code,
                     )
@@ -474,132 +472,10 @@ class ModelService:
             return ""
 
         finally:
-            # Stop progress monitoring and clean up
-            stop_progress_monitor.set()
+            # Clean up download tracking
             self._active_downloads.pop(model_id, None)
             self._cancelled_downloads.discard(model_id)
             self._download_progress.pop(model_id, None)
-
-    def _monitor_download_progress(
-        self,
-        model_id: int,
-        repo_id: str,
-        quantization: str,
-        stop_event: "threading.Event",
-        expected_size: int = 0,
-    ) -> None:
-        """
-        Monitor download progress by checking directory size.
-
-        Runs in a separate thread and periodically checks the download directory
-        to estimate progress. Emits WebSocket events with progress updates.
-
-        Args:
-            model_id: The model's database ID
-            repo_id: HuggingFace repository ID
-            quantization: Quantization type
-            stop_event: Event to signal when to stop monitoring
-            expected_size: Expected total download size in bytes (0 if unknown)
-        """
-        import threading
-        from pathlib import Path
-
-        from millm.core.config import settings
-
-        # Get the target directory path (same as downloader._get_local_dir)
-        download_dir = self.downloader.get_local_dir_path(repo_id, quantization)
-
-        # Track previous size for progress calculation
-        last_progress = 0
-        last_size = 0
-        check_interval = 1.0  # Check every second
-        stall_counter = 0
-
-        logger.info(
-            "download_progress_monitor_started",
-            model_id=model_id,
-            download_dir=str(download_dir),
-            expected_size=expected_size,
-        )
-
-        while not stop_event.is_set():
-            try:
-                # Calculate current size of download directory (including partial files)
-                current_size = 0
-                file_count = 0
-                if download_dir.exists():
-                    for file in download_dir.rglob("*"):
-                        if file.is_file():
-                            try:
-                                current_size += file.stat().st_size
-                                file_count += 1
-                            except OSError:
-                                pass  # File might be in use
-
-                # Calculate progress
-                progress = 0
-                if expected_size > 0 and current_size > 0:
-                    # Use actual size-based progress
-                    progress = int((current_size / expected_size) * 100)
-                    progress = max(1, min(99, progress))  # Keep between 1-99 while downloading
-                elif current_size > 0:
-                    # No expected size - use heuristic based on file count and size growth
-                    if current_size > last_size:
-                        # Still downloading - increment progress slowly
-                        progress = min(last_progress + 1, 95)
-                        stall_counter = 0
-                    else:
-                        # Size not growing - might be stalled or finalizing
-                        stall_counter += 1
-                        if stall_counter > 5:
-                            progress = max(last_progress, 5)  # Keep last progress
-                        else:
-                            progress = last_progress
-                else:
-                    # No files yet - just started
-                    progress = 1
-
-                # Track size change
-                last_size = current_size
-
-                # Ensure progress only increases
-                if progress > last_progress:
-                    last_progress = progress
-                    self._download_progress[model_id] = progress
-
-                    # Emit WebSocket progress event
-                    if self.emitter and self._main_loop:
-                        try:
-                            asyncio.run_coroutine_threadsafe(
-                                self.emitter.emit_download_progress(
-                                    model_id=model_id,
-                                    progress=progress,
-                                    downloaded_bytes=current_size,
-                                    total_bytes=expected_size if expected_size > 0 else None,
-                                ),
-                                self._main_loop,
-                            )
-                        except Exception:
-                            pass  # Don't let emit errors break monitoring
-
-                    logger.debug(
-                        "download_progress_update",
-                        model_id=model_id,
-                        progress=progress,
-                        current_bytes=current_size,
-                        expected_bytes=expected_size,
-                        file_count=file_count,
-                    )
-
-            except Exception as e:
-                logger.debug(
-                    "download_progress_monitor_error",
-                    model_id=model_id,
-                    error=str(e),
-                )
-
-            # Wait for next check or stop signal
-            stop_event.wait(timeout=check_interval)
 
     def _is_retryable_error(self, error: Exception) -> bool:
         """

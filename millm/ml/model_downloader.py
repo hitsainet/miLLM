@@ -6,6 +6,7 @@ and error handling for common scenarios (gated models, missing repos).
 """
 
 import shutil
+import threading
 from pathlib import Path
 from typing import Any, Callable, Optional
 
@@ -16,6 +17,7 @@ from huggingface_hub.utils import (
     GatedRepoError,
     RepositoryNotFoundError,
 )
+from tqdm.auto import tqdm as tqdm_auto
 
 from millm.core.config import settings
 from millm.core.errors import (
@@ -28,8 +30,58 @@ from millm.core.resilience import huggingface_circuit, CircuitOpenError
 
 logger = structlog.get_logger()
 
-# Type alias for progress callback
+# Type alias for progress callback: (progress_pct, downloaded_bytes, total_bytes)
 ProgressCallback = Callable[[float, int, int], None]
+
+
+class _DownloadProgressTqdm(tqdm_auto):
+    """
+    Custom tqdm that aggregates byte-level progress from parallel HF downloads.
+
+    HuggingFace's snapshot_download creates one tqdm instance per file.
+    This class aggregates all instances into a single progress percentage
+    and reports it via a callback.
+    """
+
+    _lock = threading.Lock()
+    _total_bytes: int = 0
+    _downloaded_bytes: int = 0
+    _callback: Optional[ProgressCallback] = None
+    _last_pct: int = 0
+
+    @classmethod
+    def _reset(cls, callback: Optional[ProgressCallback] = None) -> None:
+        """Reset shared state before a new download."""
+        with cls._lock:
+            cls._total_bytes = 0
+            cls._downloaded_bytes = 0
+            cls._callback = callback
+            cls._last_pct = 0
+
+    def __init__(self, *args: Any, **kwargs: Any) -> None:
+        # Disable actual tqdm output
+        kwargs["disable"] = True
+        super().__init__(*args, **kwargs)
+        # Each instance tracks one file; self.total is that file's size
+        if self.total and self.total > 0:
+            with _DownloadProgressTqdm._lock:
+                _DownloadProgressTqdm._total_bytes += int(self.total)
+
+    def update(self, n: int = 1) -> None:  # type: ignore[override]
+        super().update(n)
+        if n <= 0:
+            return
+        with _DownloadProgressTqdm._lock:
+            _DownloadProgressTqdm._downloaded_bytes += int(n)
+            total = _DownloadProgressTqdm._total_bytes
+            downloaded = _DownloadProgressTqdm._downloaded_bytes
+            cb = _DownloadProgressTqdm._callback
+        if cb and total > 0:
+            pct = min(int((downloaded / total) * 100), 99)
+            # Only call back when percentage actually changes
+            if pct > _DownloadProgressTqdm._last_pct:
+                _DownloadProgressTqdm._last_pct = pct
+                cb(float(pct), downloaded, total)
 
 
 class ModelDownloader:
@@ -58,15 +110,19 @@ class ModelDownloader:
         local_dir: str,
         token: Optional[str],
         resume: bool,
+        tqdm_class: Optional[type] = None,
     ) -> None:
         """Download with circuit breaker protection."""
-        snapshot_download(
-            repo_id=repo_id,
-            local_dir=local_dir,
-            local_dir_use_symlinks=False,
-            token=token,
-            resume_download=resume,
-        )
+        kwargs: dict[str, Any] = {
+            "repo_id": repo_id,
+            "local_dir": local_dir,
+            "local_dir_use_symlinks": False,
+            "token": token,
+            "resume_download": resume,
+        }
+        if tqdm_class is not None:
+            kwargs["tqdm_class"] = tqdm_class
+        snapshot_download(**kwargs)
 
     def _get_local_dir(self, repo_id: str, quantization: str) -> Path:
         """Generate the local directory path for a model."""
@@ -138,6 +194,12 @@ class ModelDownloader:
         )
 
         try:
+            # Set up progress tracking via custom tqdm class
+            tqdm_cls = None
+            if progress_callback is not None:
+                _DownloadProgressTqdm._reset(callback=progress_callback)
+                tqdm_cls = _DownloadProgressTqdm
+
             # Use circuit-breaker-protected snapshot_download for reliable downloading
             # It handles resume, parallel downloads, caching, and failure detection
             self._snapshot_download_with_circuit(
@@ -145,6 +207,7 @@ class ModelDownloader:
                 local_dir=str(local_dir),
                 token=token or settings.HF_TOKEN,
                 resume=resume,
+                tqdm_class=tqdm_cls,
             )
 
             logger.info(

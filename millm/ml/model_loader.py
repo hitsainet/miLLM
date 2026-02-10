@@ -195,10 +195,24 @@ class ModelLoadContext:
 
         # Load tokenizer first (small, quick)
         logger.debug("loading_tokenizer", model_id=self.model_id)
-        self.tokenizer = AutoTokenizer.from_pretrained(
-            cache_path,
-            trust_remote_code=trust_remote_code,
-        )
+        try:
+            self.tokenizer = AutoTokenizer.from_pretrained(
+                cache_path,
+                trust_remote_code=trust_remote_code,
+            )
+        except ImportError as e:
+            if trust_remote_code:
+                logger.warning(
+                    "tokenizer_trust_remote_code_fallback",
+                    model_id=self.model_id,
+                    error=str(e),
+                )
+                self.tokenizer = AutoTokenizer.from_pretrained(
+                    cache_path,
+                    trust_remote_code=False,
+                )
+            else:
+                raise
 
         # Ensure pad token is set
         if self.tokenizer.pad_token is None:
@@ -206,13 +220,32 @@ class ModelLoadContext:
 
         # Load model (large, slow)
         logger.debug("loading_model_weights", model_id=self.model_id)
-        self.model = AutoModelForCausalLM.from_pretrained(
-            cache_path,
-            quantization_config=quantization_config,
-            torch_dtype=torch_dtype,
-            device_map="auto" if device == "cuda" else None,
-            trust_remote_code=trust_remote_code,
-        )
+        try:
+            self.model = AutoModelForCausalLM.from_pretrained(
+                cache_path,
+                quantization_config=quantization_config,
+                torch_dtype=torch_dtype,
+                device_map="auto" if device == "cuda" else None,
+                trust_remote_code=trust_remote_code,
+            )
+        except ImportError as e:
+            if trust_remote_code:
+                # Custom model code may reference removed transformers internals.
+                # Fall back to built-in transformers implementation.
+                logger.warning(
+                    "trust_remote_code_fallback",
+                    model_id=self.model_id,
+                    error=str(e),
+                )
+                self.model = AutoModelForCausalLM.from_pretrained(
+                    cache_path,
+                    quantization_config=quantization_config,
+                    torch_dtype=torch_dtype,
+                    device_map="auto" if device == "cuda" else None,
+                    trust_remote_code=False,
+                )
+            else:
+                raise
 
         # Get memory usage
         memory_used_mb = 0

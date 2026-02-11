@@ -863,3 +863,360 @@ class TestRequestQueue:
         queue = service.request_queue
         assert queue.max_concurrent == 1
         assert queue.max_pending == 5
+
+
+# =============================================================================
+# Tests: CBM Integration
+# =============================================================================
+
+
+class TestCBMInit:
+    """Tests for CBM initialization in InferenceService."""
+
+    def test_cbm_disabled_by_default(self, service):
+        """CBM backend is None by default."""
+        assert service._cbm_backend is None
+
+    def test_cbm_enabled_creates_backend(self, loaded_model_state):
+        """Setting enable_cbm=True creates a ContinuousBatchingBackend."""
+        with patch("millm.services.inference_service.torch") as mock_torch:
+            mock_torch.cuda.is_available.return_value = False
+            svc = InferenceService(
+                enable_cbm=True,
+                cbm_config={
+                    "max_queue_size": 64,
+                    "default_temperature": 0.5,
+                },
+            )
+        from millm.services.cbm_backend import ContinuousBatchingBackend
+
+        assert isinstance(svc._cbm_backend, ContinuousBatchingBackend)
+        assert svc._cbm_backend._max_queue_size == 64
+        assert svc._cbm_backend._default_temperature == 0.5
+
+    def test_cbm_enabled_without_config(self, loaded_model_state):
+        """CBM with no config dict uses defaults."""
+        with patch("millm.services.inference_service.torch") as mock_torch:
+            mock_torch.cuda.is_available.return_value = False
+            svc = InferenceService(enable_cbm=True)
+
+        assert svc._cbm_backend is not None
+        assert svc._cbm_backend._max_queue_size == 256  # default
+
+
+class TestUseCBM:
+    """Tests for _use_cbm method."""
+
+    def test_false_when_no_backend(self, service):
+        """Returns False when CBM backend is None."""
+        assert service._use_cbm() is False
+
+    def test_false_when_backend_not_running(self, service):
+        """Returns False when CBM backend exists but is not running."""
+        service._cbm_backend = MagicMock()
+        service._cbm_backend.is_running = False
+        assert service._use_cbm() is False
+
+    def test_true_when_backend_running(self, service):
+        """Returns True when CBM backend is running."""
+        service._cbm_backend = MagicMock()
+        service._cbm_backend.is_running = True
+        assert service._use_cbm() is True
+
+
+class TestCBMLifecycle:
+    """Tests for on_model_loaded and on_model_unloading."""
+
+    def test_on_model_loaded_starts_cbm(self, service, mock_model, mock_tokenizer):
+        """on_model_loaded starts CBM backend when model is loaded."""
+        mock_backend = MagicMock()
+        service._cbm_backend = mock_backend
+
+        service.on_model_loaded()
+
+        mock_backend.start.assert_called_once_with(mock_model, mock_tokenizer)
+
+    def test_on_model_loaded_noop_when_no_backend(self, service):
+        """on_model_loaded is a no-op when CBM is not configured."""
+        service._cbm_backend = None
+        service.on_model_loaded()  # Should not raise
+
+    def test_on_model_loaded_noop_when_no_model(self, service_no_model):
+        """on_model_loaded is a no-op when no model is loaded."""
+        mock_backend = MagicMock()
+        service_no_model._cbm_backend = mock_backend
+
+        service_no_model.on_model_loaded()
+
+        mock_backend.start.assert_not_called()
+
+    def test_on_model_loaded_handles_start_failure(self, service):
+        """on_model_loaded handles exceptions from CBM start gracefully."""
+        mock_backend = MagicMock()
+        mock_backend.start.side_effect = RuntimeError("CBM init failed")
+        service._cbm_backend = mock_backend
+
+        service.on_model_loaded()  # Should not raise
+
+    def test_on_model_unloading_stops_cbm(self, service):
+        """on_model_unloading stops a running CBM backend."""
+        mock_backend = MagicMock()
+        mock_backend.is_running = True
+        service._cbm_backend = mock_backend
+
+        service.on_model_unloading()
+
+        mock_backend.stop.assert_called_once()
+
+    def test_on_model_unloading_noop_when_not_running(self, service):
+        """on_model_unloading is a no-op when CBM is not running."""
+        mock_backend = MagicMock()
+        mock_backend.is_running = False
+        service._cbm_backend = mock_backend
+
+        service.on_model_unloading()
+
+        mock_backend.stop.assert_not_called()
+
+    def test_on_model_unloading_noop_when_no_backend(self, service):
+        """on_model_unloading is a no-op when CBM is not configured."""
+        service._cbm_backend = None
+        service.on_model_unloading()  # Should not raise
+
+
+class TestCBMChatCompletion:
+    """Tests for CBM chat completion delegation."""
+
+    @pytest.fixture
+    def cbm_service(self, service, mock_tokenizer):
+        """Create a service with mocked CBM backend."""
+        mock_backend = AsyncMock()
+        mock_backend.is_running = True
+        mock_backend.generate = AsyncMock(
+            return_value=([10, 11, 12], "stop")
+        )
+        service._cbm_backend = mock_backend
+
+        # Mock tokenizer.encode to return tensor-like result
+        mock_tokenizer.encode = MagicMock(
+            return_value=torch.tensor([[1, 2, 3, 4, 5]])
+        )
+        return service
+
+    @pytest.mark.asyncio
+    async def test_delegates_to_cbm_when_running(self, cbm_service, chat_request):
+        """create_chat_completion delegates to CBM when backend is running."""
+        response = await cbm_service.create_chat_completion(chat_request)
+
+        assert response.id.startswith("chatcmpl-")
+        assert response.model == "test-model"
+        assert len(response.choices) == 1
+        assert response.choices[0].message.role == "assistant"
+        assert response.choices[0].message.content == "Hello, world!"
+        cbm_service._cbm_backend.generate.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_cbm_response_usage(self, cbm_service, chat_request):
+        """CBM response includes correct token usage."""
+        response = await cbm_service.create_chat_completion(chat_request)
+
+        assert response.usage.prompt_tokens == 5
+        assert response.usage.completion_tokens == 3
+        assert response.usage.total_tokens == 8
+
+    @pytest.mark.asyncio
+    async def test_cbm_finish_reason_propagated(self, cbm_service, chat_request):
+        """CBM finish reason is included in response."""
+        cbm_service._cbm_backend.generate = AsyncMock(
+            return_value=([10, 11, 12], "length")
+        )
+        response = await cbm_service.create_chat_completion(chat_request)
+
+        assert response.choices[0].finish_reason == "length"
+
+    @pytest.mark.asyncio
+    async def test_cbm_stop_sequences(self, cbm_service, mock_tokenizer):
+        """CBM applies stop sequences and overrides finish_reason to 'stop'."""
+        mock_tokenizer.decode.return_value = "Hello<stop>world"
+        cbm_service._cbm_backend.generate = AsyncMock(
+            return_value=([10, 11, 12], "length")
+        )
+        request = ChatCompletionRequest(
+            model="test-model",
+            messages=[ChatMessage(role="user", content="Hi")],
+            stop=["<stop>"],
+        )
+        response = await cbm_service.create_chat_completion(request)
+
+        assert response.choices[0].message.content == "Hello"
+        assert response.choices[0].finish_reason == "stop"
+
+
+class TestCBMStreamChatCompletion:
+    """Tests for CBM streaming chat completion."""
+
+    @pytest.fixture
+    def cbm_stream_service(self, service, mock_tokenizer):
+        """Create a service with mocked CBM streaming backend."""
+        mock_backend = MagicMock()
+        mock_backend.is_running = True
+
+        async def mock_generate_stream(input_ids, max_new_tokens, request_id):
+            yield [10]
+            yield [11]
+            yield [12]
+
+        mock_backend.generate_stream = mock_generate_stream
+        service._cbm_backend = mock_backend
+
+        mock_tokenizer.encode = MagicMock(
+            return_value=torch.tensor([[1, 2, 3, 4, 5]])
+        )
+        # Different decode results for each chunk
+        mock_tokenizer.decode = MagicMock(side_effect=["Hello", " world", "!"])
+        return service
+
+    @pytest.mark.asyncio
+    async def test_streams_sse_chunks(self, cbm_stream_service, chat_request):
+        """CBM streaming yields SSE-formatted chunks."""
+        chunks = []
+        async for chunk in cbm_stream_service.stream_chat_completion(chat_request):
+            chunks.append(chunk)
+
+        # First chunk (role) + 3 content chunks + final chunk + [DONE]
+        assert len(chunks) >= 5
+        for chunk in chunks:
+            assert chunk.startswith("data: ")
+            assert chunk.endswith("\n\n")
+
+    @pytest.mark.asyncio
+    async def test_stream_first_chunk_has_role(self, cbm_stream_service, chat_request):
+        """First SSE chunk contains role='assistant'."""
+        chunks = []
+        async for chunk in cbm_stream_service.stream_chat_completion(chat_request):
+            chunks.append(chunk)
+
+        first_data = json.loads(chunks[0].removeprefix("data: ").strip())
+        assert first_data["choices"][0]["delta"]["role"] == "assistant"
+
+    @pytest.mark.asyncio
+    async def test_stream_ends_with_done(self, cbm_stream_service, chat_request):
+        """CBM stream ends with 'data: [DONE]'."""
+        chunks = []
+        async for chunk in cbm_stream_service.stream_chat_completion(chat_request):
+            chunks.append(chunk)
+
+        assert chunks[-1] == "data: [DONE]\n\n"
+
+    @pytest.mark.asyncio
+    async def test_stream_final_chunk_has_finish_reason(
+        self, cbm_stream_service, chat_request
+    ):
+        """Penultimate chunk has a finish_reason."""
+        chunks = []
+        async for chunk in cbm_stream_service.stream_chat_completion(chat_request):
+            chunks.append(chunk)
+
+        final_data = json.loads(chunks[-2].removeprefix("data: ").strip())
+        assert final_data["choices"][0]["finish_reason"] in ["stop", "length"]
+
+
+class TestCBMTextCompletion:
+    """Tests for CBM text completion."""
+
+    @pytest.fixture
+    def cbm_text_service(self, service, mock_tokenizer):
+        """Create a service with mocked CBM backend for text completion."""
+        mock_backend = AsyncMock()
+        mock_backend.is_running = True
+        mock_backend.generate = AsyncMock(
+            return_value=([10, 11, 12], "stop")
+        )
+        service._cbm_backend = mock_backend
+
+        mock_tokenizer.encode = MagicMock(
+            return_value=torch.tensor([[1, 2, 3, 4, 5]])
+        )
+        return service
+
+    @pytest.mark.asyncio
+    async def test_delegates_to_cbm(self, cbm_text_service, text_request):
+        """create_text_completion delegates to CBM when backend is running."""
+        response = await cbm_text_service.create_text_completion(text_request)
+
+        assert response.id.startswith("cmpl-")
+        assert response.model == "test-model"
+        assert len(response.choices) == 1
+        assert response.choices[0].text == "Hello, world!"
+        cbm_text_service._cbm_backend.generate.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_cbm_text_batch_prompts(self, cbm_text_service):
+        """CBM handles batch of text prompts."""
+        request = TextCompletionRequest(
+            model="test-model",
+            prompt=["First", "Second"],
+        )
+        response = await cbm_text_service.create_text_completion(request)
+
+        assert len(response.choices) == 2
+        assert response.choices[0].index == 0
+        assert response.choices[1].index == 1
+        # generate called once per prompt
+        assert cbm_text_service._cbm_backend.generate.call_count == 2
+
+    @pytest.mark.asyncio
+    async def test_cbm_text_usage(self, cbm_text_service, text_request):
+        """CBM text completion includes correct usage."""
+        response = await cbm_text_service.create_text_completion(text_request)
+
+        assert response.usage.prompt_tokens == 5
+        assert response.usage.completion_tokens == 3
+        assert response.usage.total_tokens == 8
+
+    @pytest.mark.asyncio
+    async def test_cbm_text_stop_sequences(self, cbm_text_service, mock_tokenizer):
+        """CBM text completion applies stop sequences."""
+        mock_tokenizer.decode.return_value = "Once upon<end>a time"
+        cbm_text_service._cbm_backend.generate = AsyncMock(
+            return_value=([10, 11, 12, 13], "length")
+        )
+        request = TextCompletionRequest(
+            model="test-model",
+            prompt="Once",
+            stop=["<end>"],
+        )
+        response = await cbm_text_service.create_text_completion(request)
+
+        assert response.choices[0].text == "Once upon"
+        assert response.choices[0].finish_reason == "stop"
+
+
+class TestCBMDoesNotAffectEmbeddings:
+    """Verify embeddings always use queue path, not CBM."""
+
+    @pytest.fixture
+    def mock_model_for_embeddings(self, mock_model):
+        """Set up model to return hidden states."""
+        mock_output = MagicMock()
+        mock_hidden = torch.randn(1, 5, 64)
+        mock_output.hidden_states = [mock_hidden]
+        mock_model.return_value = mock_output
+        return mock_model
+
+    @pytest.mark.asyncio
+    async def test_embeddings_use_queue_when_cbm_enabled(
+        self, service, mock_model_for_embeddings
+    ):
+        """Embeddings always go through request queue, even with CBM enabled."""
+        mock_backend = MagicMock()
+        mock_backend.is_running = True
+        service._cbm_backend = mock_backend
+
+        request = EmbeddingRequest(model="test-model", input="Hello")
+        response = await service.create_embeddings(request)
+
+        assert response.object == "list"
+        assert len(response.data) == 1
+        # CBM generate should NOT be called for embeddings
+        mock_backend.generate.assert_not_called()

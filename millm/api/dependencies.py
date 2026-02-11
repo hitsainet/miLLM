@@ -153,9 +153,25 @@ def get_inference_service() -> "InferenceService":
     Returns:
         InferenceService instance (cached).
     """
+    from millm.core.config import settings
     from millm.services.inference_service import InferenceService
 
-    return InferenceService()
+    return InferenceService(
+        max_concurrent=settings.MAX_CONCURRENT_REQUESTS,
+        max_pending=settings.MAX_PENDING_REQUESTS,
+        kv_cache_mode=settings.KV_CACHE_MODE,
+        enable_prefix_cache=settings.ENABLE_PREFIX_CACHE,
+        prefix_cache_max_entries=settings.PREFIX_CACHE_MAX_ENTRIES,
+        speculative_model=settings.SPECULATIVE_MODEL,
+        speculative_num_tokens=settings.SPECULATIVE_NUM_TOKENS,
+        enable_cbm=settings.ENABLE_CONTINUOUS_BATCHING,
+        cbm_config={
+            "max_queue_size": settings.CBM_MAX_QUEUE_SIZE,
+            "default_temperature": settings.CBM_DEFAULT_TEMPERATURE,
+            "default_top_p": settings.CBM_DEFAULT_TOP_P,
+            "default_max_tokens": settings.CBM_DEFAULT_MAX_TOKENS,
+        },
+    )
 
 
 # Type alias for injected InferenceService

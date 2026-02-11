@@ -91,6 +91,7 @@ class DetailedHealthResponse(BaseModel):
     model_name: Optional[str] = Field(None, description="Name of loaded model")
     sae_attached: bool = Field(False, description="Whether an SAE is currently attached")
     sae_id: Optional[str] = Field(None, description="ID of attached SAE")
+    inference: Optional[dict[str, Any]] = Field(None, description="Inference backend info")
 
 
 # Track server start time for uptime calculation
@@ -275,6 +276,23 @@ async def detailed_health_check(
         if overall_status == HealthStatus.HEALTHY:
             overall_status = HealthStatus.DEGRADED
 
+    # Inference backend info
+    inference_info: dict[str, Any] = {}
+    try:
+        queue = inference_service.request_queue
+        cbm_enabled = inference_service._cbm_backend is not None
+        cbm_running = inference_service._use_cbm()
+        inference_info = {
+            "backend": "cbm" if cbm_running else "queue",
+            "cbm_enabled": cbm_enabled,
+            "cbm_running": cbm_running,
+            "queue_pending": queue.pending_count,
+            "queue_max_concurrent": queue.max_concurrent,
+            "queue_max_pending": queue.max_pending,
+        }
+    except Exception:
+        pass
+
     return DetailedHealthResponse(
         status=overall_status,
         version=__version__,
@@ -285,6 +303,7 @@ async def detailed_health_check(
         model_name=model_name,
         sae_attached=False,  # TODO: Get from SAE service
         sae_id=None,
+        inference=inference_info or None,
     )
 
 

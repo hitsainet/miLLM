@@ -31,6 +31,8 @@ class LoadedModel:
     num_parameters: int = 0
     device: str = "unknown"
     dtype: str = "unknown"
+    attn_implementation: str = "unknown"
+    quantization_method: str = "unknown"  # "bitsandbytes", "gptq", "awq", "none"
 
 
 class LoadedModelState:
@@ -147,6 +149,8 @@ class ModelLoadContext:
         quantization: str,
         trust_remote_code: bool = False,
         device: str = "cuda",
+        torch_compile: bool = False,
+        torch_compile_mode: str = "reduce-overhead",
     ) -> LoadedModel:
         """
         Load model with quantization config.
@@ -162,7 +166,7 @@ class ModelLoadContext:
         """
         try:
             import torch
-            from transformers import AutoModelForCausalLM, AutoTokenizer, BitsAndBytesConfig
+            from transformers import AutoConfig, AutoModelForCausalLM, AutoTokenizer, BitsAndBytesConfig
         except ImportError as e:
             raise ModelLoadError(
                 "Required packages not installed. Install torch and transformers.",
@@ -176,6 +180,31 @@ class ModelLoadContext:
             quantization=quantization,
         )
 
+        # Detect best attention implementation
+        attn_impl = "sdpa"  # PyTorch native SDPA (default in transformers 4.36+)
+        try:
+            import flash_attn  # noqa: F401
+            attn_impl = "flash_attention_2"
+            logger.info("flash_attention_available", version=getattr(flash_attn, "__version__", "unknown"))
+        except ImportError:
+            logger.info("flash_attention_not_available_using_sdpa")
+
+        # Detect if model is already pre-quantized (GPTQ/AWQ)
+        quant_method = "none"
+        is_pre_quantized = False
+        try:
+            config = AutoConfig.from_pretrained(cache_path, trust_remote_code=trust_remote_code)
+            pre_quant_config = getattr(config, "quantization_config", None)
+            if pre_quant_config is not None:
+                if isinstance(pre_quant_config, dict):
+                    quant_method = pre_quant_config.get("quant_method", "unknown")
+                else:
+                    quant_method = getattr(pre_quant_config, "quant_method", "unknown")
+                is_pre_quantized = quant_method in ("gptq", "awq")
+                logger.info("pre_quantized_model_detected", quant_method=quant_method)
+        except Exception:
+            pass
+
         # Configure quantization
         # Use bfloat16 instead of float16: same memory (2 bytes/param) but much larger
         # numeric range (max ~3.4e38 vs ~65504). Many modern models (Gemma 3, Llama 3, etc.)
@@ -183,15 +212,20 @@ class ModelLoadContext:
         quantization_config = None
         torch_dtype = torch.bfloat16
 
-        if quantization == "Q4":
+        if is_pre_quantized:
+            # Model is already quantized (GPTQ/AWQ) — skip bitsandbytes
+            logger.info("skipping_bnb_for_pre_quantized", quant_method=quant_method)
+        elif quantization == "Q4":
             quantization_config = BitsAndBytesConfig(
                 load_in_4bit=True,
                 bnb_4bit_compute_dtype=torch.bfloat16,
                 bnb_4bit_use_double_quant=True,
                 bnb_4bit_quant_type="nf4",
             )
+            quant_method = "bitsandbytes"
         elif quantization == "Q8":
             quantization_config = BitsAndBytesConfig(load_in_8bit=True)
+            quant_method = "bitsandbytes"
 
         # Load tokenizer first (small, quick)
         logger.debug("loading_tokenizer", model_id=self.model_id)
@@ -219,7 +253,7 @@ class ModelLoadContext:
             self.tokenizer.pad_token = self.tokenizer.eos_token
 
         # Load model (large, slow)
-        logger.debug("loading_model_weights", model_id=self.model_id)
+        logger.debug("loading_model_weights", model_id=self.model_id, attn_impl=attn_impl)
         try:
             self.model = AutoModelForCausalLM.from_pretrained(
                 cache_path,
@@ -227,6 +261,7 @@ class ModelLoadContext:
                 torch_dtype=torch_dtype,
                 device_map="auto" if device == "cuda" else None,
                 trust_remote_code=trust_remote_code,
+                attn_implementation=attn_impl,
             )
         except ImportError as e:
             if trust_remote_code:
@@ -243,6 +278,7 @@ class ModelLoadContext:
                     torch_dtype=torch_dtype,
                     device_map="auto" if device == "cuda" else None,
                     trust_remote_code=False,
+                    attn_implementation=attn_impl,
                 )
             else:
                 raise
@@ -280,6 +316,19 @@ class ModelLoadContext:
         except Exception:
             pass
 
+        # Apply torch.compile for faster decoding (skip for bitsandbytes which is incompatible)
+        if torch_compile and quant_method != "bitsandbytes":
+            try:
+                logger.info("torch_compile_starting", mode=torch_compile_mode)
+                self.model.forward = torch.compile(
+                    self.model.forward,
+                    mode=torch_compile_mode,
+                    fullgraph=False,  # Allow hooks and dynamic control flow
+                )
+                logger.info("torch_compile_complete", mode=torch_compile_mode)
+            except Exception as e:
+                logger.warning("torch_compile_failed_continuing_without", error=str(e))
+
         logger.info(
             "model_load_complete",
             model_id=self.model_id,
@@ -287,6 +336,8 @@ class ModelLoadContext:
             num_parameters=num_parameters,
             device=device_str,
             dtype=dtype_str,
+            attn_implementation=attn_impl,
+            quantization_method=quant_method,
         )
 
         return LoadedModel(
@@ -299,6 +350,8 @@ class ModelLoadContext:
             num_parameters=num_parameters,
             device=device_str,
             dtype=dtype_str,
+            attn_implementation=attn_impl,
+            quantization_method=quant_method,
         )
 
 
@@ -336,6 +389,8 @@ class ModelLoader:
         quantization: str,
         estimated_memory_mb: int,
         trust_remote_code: bool = False,
+        torch_compile: bool = False,
+        torch_compile_mode: str = "reduce-overhead",
     ) -> LoadedModel:
         """
         Load a model into GPU memory.
@@ -350,6 +405,8 @@ class ModelLoader:
             quantization: Quantization type ("FP16", "Q8", "Q4")
             estimated_memory_mb: Estimated memory requirement in MB
             trust_remote_code: Whether to trust remote code
+            torch_compile: Whether to apply torch.compile to model.forward
+            torch_compile_mode: Compilation mode ("default", "reduce-overhead", "max-autotune")
 
         Returns:
             LoadedModel instance
@@ -388,6 +445,8 @@ class ModelLoader:
                 cache_path=cache_path,
                 quantization=quantization,
                 trust_remote_code=trust_remote_code,
+                torch_compile=torch_compile,
+                torch_compile_mode=torch_compile_mode,
             )
             self.state.set(loaded)
             return loaded

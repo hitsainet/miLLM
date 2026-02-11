@@ -762,6 +762,8 @@ class ModelService:
                 quantization=quantization,
                 estimated_memory_mb=estimated_memory_mb,
                 trust_remote_code=trust_remote_code,
+                torch_compile=settings.TORCH_COMPILE,
+                torch_compile_mode=settings.TORCH_COMPILE_MODE,
             )
 
             # Update database (thread-safe async call)
@@ -777,6 +779,13 @@ class ModelService:
                 model_id=model_id,
                 memory_used_mb=loaded.memory_used_mb,
             )
+
+            # Notify inference service (starts CBM if enabled)
+            try:
+                from millm.api.dependencies import get_inference_service
+                get_inference_service().on_model_loaded()
+            except Exception:
+                pass
 
         except Exception as e:
             logger.error("load_failed", model_id=model_id, error=str(e))
@@ -854,6 +863,13 @@ class ModelService:
             )
 
         logger.info("unload_started", model_id=model_id, timeout=timeout)
+
+        # Stop CBM before unloading model
+        try:
+            from millm.api.dependencies import get_inference_service
+            get_inference_service().on_model_unloading()
+        except Exception:
+            pass
 
         # Wait for pending inference requests to drain
         try:

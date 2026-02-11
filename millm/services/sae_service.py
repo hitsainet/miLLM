@@ -751,6 +751,22 @@ class SAEService:
             device="cuda" if torch.cuda.is_available() else "cpu",
         )
 
+        # Match SAE dtype to model dtype to avoid per-forward-pass casts
+        model = model_state.current.model
+        model_dtype = getattr(model, "dtype", None)
+        if model_dtype is None and hasattr(model, "config"):
+            model_dtype = getattr(model.config, "torch_dtype", None)
+        if model_dtype is not None and loaded_sae.W_enc.dtype != model_dtype:
+            logger.info(
+                "sae_dtype_cast",
+                from_dtype=str(loaded_sae.W_enc.dtype),
+                to_dtype=str(model_dtype),
+            )
+            loaded_sae.W_enc = loaded_sae.W_enc.to(model_dtype)
+            loaded_sae.b_enc = loaded_sae.b_enc.to(model_dtype)
+            loaded_sae.W_dec = loaded_sae.W_dec.to(model_dtype)
+            loaded_sae.b_dec = loaded_sae.b_dec.to(model_dtype)
+
         # Install hook
         model = model_state.current.model
         handle = self._hooker.install(model, layer, loaded_sae)

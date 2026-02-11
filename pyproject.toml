@@ -72,6 +72,16 @@ dev = [
     "types-python-dateutil",
 ]
 
+perf = [
+    # FlashAttention-2 (requires SM80+ GPU: A100, RTX 3090, etc.)
+    "flash-attn>=2.7.0",
+    # GPTQ pre-quantized model support
+    "auto-gptq>=0.7.0",
+    # AWQ pre-quantized model support + optimization utilities
+    "autoawq>=0.2.0",
+    "optimum>=1.21.0",
+]
+
 redis = [
     "redis>=5.0.0",
 ]

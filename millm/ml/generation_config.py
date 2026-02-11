@@ -43,6 +43,7 @@ class GenerationConfig:
     stop_sequences: Optional[list[str]] = None
     frequency_penalty: float = 0.0
     presence_penalty: float = 0.0
+    cache_implementation: Optional[str] = None  # "static" or None for dynamic
 
     @classmethod
     def from_request(
@@ -103,6 +104,10 @@ class GenerationConfig:
             "do_sample": self.do_sample,
         }
 
+        # Static KV cache for faster decoding (works with torch.compile)
+        if self.cache_implementation:
+            kwargs["cache_implementation"] = self.cache_implementation
+
         if self.do_sample:
             # Only set temperature and top_p when sampling
             kwargs["temperature"] = self.temperature
@@ -136,6 +141,7 @@ class GenerationConfig:
             stop_sequences=self.stop_sequences,
             frequency_penalty=self.frequency_penalty,
             presence_penalty=self.presence_penalty,
+            cache_implementation=self.cache_implementation,
         )
 
     def with_stop_sequences(
@@ -150,4 +156,5 @@ class GenerationConfig:
             stop_sequences=stop_sequences,
             frequency_penalty=self.frequency_penalty,
             presence_penalty=self.presence_penalty,
+            cache_implementation=self.cache_implementation,
         )

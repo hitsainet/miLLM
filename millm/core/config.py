@@ -57,6 +57,32 @@ class Settings(BaseSettings):
     # Auto-load model on startup (model ID or name, empty to disable)
     AUTO_LOAD_MODEL: Optional[str] = None
 
+    # Performance: Inference concurrency
+    MAX_CONCURRENT_REQUESTS: int = 2
+    MAX_PENDING_REQUESTS: int = 10
+
+    # Performance: torch.compile
+    TORCH_COMPILE: bool = False
+    TORCH_COMPILE_MODE: str = "reduce-overhead"  # "default", "reduce-overhead", "max-autotune"
+
+    # Performance: KV cache
+    KV_CACHE_MODE: str = "static"  # "static" or "dynamic"
+
+    # Performance: Prefix caching
+    ENABLE_PREFIX_CACHE: bool = True
+    PREFIX_CACHE_MAX_ENTRIES: int = 5
+
+    # Performance: Speculative decoding
+    SPECULATIVE_MODEL: Optional[str] = None  # HF model ID for draft model
+    SPECULATIVE_NUM_TOKENS: int = 5
+
+    # Performance: Continuous Batching (Phase 4)
+    ENABLE_CONTINUOUS_BATCHING: bool = False  # Opt-in, starts CBM on model load
+    CBM_MAX_QUEUE_SIZE: int = 256
+    CBM_DEFAULT_TEMPERATURE: float = 0.7
+    CBM_DEFAULT_TOP_P: float = 0.95
+    CBM_DEFAULT_MAX_TOKENS: int = 512
+
     @property
     def cors_origins_list(self) -> list[str]:
         """Parse CORS origins from comma-separated string."""

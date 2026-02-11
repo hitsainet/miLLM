@@ -66,7 +66,7 @@ class Settings(BaseSettings):
     TORCH_COMPILE_MODE: str = "reduce-overhead"  # "default", "reduce-overhead", "max-autotune"
 
     # Performance: KV cache
-    KV_CACHE_MODE: str = "static"  # "static" or "dynamic"
+    KV_CACHE_MODE: str = "dynamic"  # "static" (requires C compiler for triton) or "dynamic"
 
     # Performance: Prefix caching
     ENABLE_PREFIX_CACHE: bool = True

@@ -1,8 +1,38 @@
-import { useState } from 'react';
-import { Download, Layers, Search, File, Check } from 'lucide-react';
+import { useState, useMemo } from 'react';
+import { Download, Layers, Search, FolderOpen, Check } from 'lucide-react';
 import { Card, CardHeader, Button, Input } from '@components/common';
 import { saeApi } from '@/services/api';
 import type { DownloadSAERequest, PreviewSAEResponse, SAEFileInfo } from '@/types';
+
+/** An SAE directory group containing all files for one SAE */
+interface SAEGroup {
+  dirPath: string;
+  files: SAEFileInfo[];
+  totalSizeBytes: number;
+  layer: number | null;
+  width: string | null;
+}
+
+/** Group individual SAE files into directory-level SAE groups */
+function groupFilesIntoSAEs(files: SAEFileInfo[]): SAEGroup[] {
+  const groups = new Map<string, SAEGroup>();
+  for (const file of files) {
+    const lastSlash = file.path.lastIndexOf('/');
+    const dirPath = lastSlash > 0 ? file.path.substring(0, lastSlash) : '.';
+    if (!groups.has(dirPath)) {
+      groups.set(dirPath, {
+        dirPath, files: [], totalSizeBytes: 0,
+        layer: file.layer, width: file.width,
+      });
+    }
+    const group = groups.get(dirPath)!;
+    group.files.push(file);
+    group.totalSizeBytes += file.size_bytes || 0;
+    if (group.layer === null && file.layer !== null) group.layer = file.layer;
+    if (!group.width && file.width) group.width = file.width;
+  }
+  return Array.from(groups.values());
+}
 
 interface SAEDownloadFormProps {
   onSubmit: (data: DownloadSAERequest) => void;
@@ -55,7 +85,7 @@ export function SAEDownloadForm({
   const [isPreviewing, setIsPreviewing] = useState(false);
   const [previewData, setPreviewData] = useState<PreviewSAEResponse | null>(null);
   const [previewError, setPreviewError] = useState<string | null>(null);
-  const [selectedFiles, setSelectedFiles] = useState<SAEFileInfo[]>([]);
+  const [selectedDirs, setSelectedDirs] = useState<Set<string>>(new Set());
 
   const validateRepository = (): boolean => {
     const newErrors: Record<string, string> = {};
@@ -76,7 +106,7 @@ export function SAEDownloadForm({
     setIsPreviewing(true);
     setPreviewError(null);
     setPreviewData(null);
-    setSelectedFiles([]);
+    setSelectedDirs(new Set());
 
     try {
       const data = await saeApi.preview({
@@ -92,31 +122,39 @@ export function SAEDownloadForm({
     }
   };
 
-  const toggleFileSelection = (file: SAEFileInfo) => {
-    setSelectedFiles((prev) => {
-      const isSelected = prev.some((f) => f.path === file.path);
-      if (isSelected) {
-        return prev.filter((f) => f.path !== file.path);
+  // Compute SAE groups from preview files
+  const saeGroups = useMemo(() => {
+    if (!previewData) return [];
+    return groupFilesIntoSAEs(previewData.files);
+  }, [previewData]);
+
+  const toggleDirSelection = (dirPath: string) => {
+    setSelectedDirs(prev => {
+      const next = new Set(prev);
+      if (next.has(dirPath)) {
+        next.delete(dirPath);
       } else {
-        return [...prev, file];
+        next.add(dirPath);
       }
+      return next;
     });
   };
 
   const handleDownload = () => {
     if (!validateRepository()) return;
 
-    // If files are selected, download each one
-    if (selectedFiles.length > 0) {
-      selectedFiles.forEach((file) => {
+    if (selectedDirs.size > 0) {
+      // Download each selected SAE directory
+      const selected = saeGroups.filter(g => selectedDirs.has(g.dirPath));
+      selected.forEach((group) => {
         onSubmit({
           repository_id: repositoryId.trim(),
           revision: revision.trim() || undefined,
-          file_path: file.path,
+          file_path: group.files[0].path, // backend extracts parent dir
         });
       });
     } else {
-      // Fallback: download entire repository (no file selected)
+      // Fallback: download entire repository
       onSubmit({
         repository_id: repositoryId.trim(),
         revision: revision.trim() || undefined,
@@ -124,17 +162,18 @@ export function SAEDownloadForm({
     }
   };
 
-  // Group files by layer for better organization
-  const groupedFiles = previewData?.files.reduce((acc, file) => {
-    const layer = file.layer ?? -1;
-    if (!acc[layer]) {
-      acc[layer] = [];
-    }
-    acc[layer].push(file);
-    return acc;
-  }, {} as Record<number, SAEFileInfo[]>) || {};
+  // Group SAE directories by layer for display
+  const groupsByLayer = useMemo(() => {
+    const map: Record<number, SAEGroup[]> = {};
+    saeGroups.forEach((group) => {
+      const layer = group.layer ?? -1;
+      if (!map[layer]) map[layer] = [];
+      map[layer].push(group);
+    });
+    return map;
+  }, [saeGroups]);
 
-  const sortedLayers = Object.keys(groupedFiles)
+  const sortedLayers = Object.keys(groupsByLayer)
     .map(Number)
     .sort((a, b) => a - b);
 
@@ -157,7 +196,7 @@ export function SAEDownloadForm({
               onChange={(e) => {
                 setRepositoryId(e.target.value);
                 setPreviewData(null);
-                setSelectedFiles([]);
+                setSelectedDirs(new Set());
               }}
               error={errors.repositoryId}
             />
@@ -170,7 +209,7 @@ export function SAEDownloadForm({
               onChange={(e) => {
                 setRevision(e.target.value);
                 setPreviewData(null);
-                setSelectedFiles([]);
+                setSelectedDirs(new Set());
               }}
               helperText="Branch, tag, or commit"
             />
@@ -212,7 +251,7 @@ export function SAEDownloadForm({
             {/* Repository Info */}
             <div className="flex items-center justify-between text-sm">
               <span className="text-slate-400">
-                Found <span className="text-slate-200 font-medium">{previewData.total_files}</span> SAE files
+                Found <span className="text-slate-200 font-medium">{saeGroups.length}</span> SAE{saeGroups.length !== 1 ? 's' : ''}
               </span>
               {previewData.model_id && (
                 <span className="text-slate-500">
@@ -221,131 +260,126 @@ export function SAEDownloadForm({
               )}
             </div>
 
-            {/* File List */}
+            {/* SAE Directory List */}
             <div className="max-h-80 overflow-y-auto border border-slate-700/50 rounded-lg">
-              {sortedLayers.map((layer) => (
-                <div key={layer}>
-                  {/* Layer Header */}
-                  {layer >= 0 && (
-                    <div className="sticky top-0 px-3 py-2 bg-slate-800/90 border-b border-slate-700/50 backdrop-blur-sm flex items-center justify-between">
-                      <span className="text-xs font-medium text-slate-400 uppercase tracking-wider">
-                        Layer {layer}
-                      </span>
-                      <button
-                        type="button"
-                        onClick={(e) => {
-                          e.stopPropagation();
-                          const layerFiles = groupedFiles[layer];
-                          const allSelected = layerFiles.every((f) =>
-                            selectedFiles.some((sf) => sf.path === f.path)
-                          );
-                          if (allSelected) {
-                            // Deselect all in this layer
-                            setSelectedFiles((prev) =>
-                              prev.filter((f) => !layerFiles.some((lf) => lf.path === f.path))
-                            );
-                          } else {
-                            // Select all in this layer
-                            setSelectedFiles((prev) => {
-                              const newSelection = [...prev];
-                              layerFiles.forEach((lf) => {
-                                if (!newSelection.some((f) => f.path === lf.path)) {
-                                  newSelection.push(lf);
-                                }
+              {sortedLayers.map((layer) => {
+                const layerGroups = groupsByLayer[layer];
+                const allSelected = layerGroups.every(g => selectedDirs.has(g.dirPath));
+                return (
+                  <div key={layer}>
+                    {/* Layer Header */}
+                    {layer >= 0 && (
+                      <div className="sticky top-0 px-3 py-2 bg-slate-800/90 border-b border-slate-700/50 backdrop-blur-sm flex items-center justify-between">
+                        <span className="text-xs font-medium text-slate-400 uppercase tracking-wider">
+                          Layer {layer}
+                        </span>
+                        <button
+                          type="button"
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            if (allSelected) {
+                              setSelectedDirs(prev => {
+                                const next = new Set(prev);
+                                layerGroups.forEach(g => next.delete(g.dirPath));
+                                return next;
                               });
-                              return newSelection;
-                            });
-                          }
-                        }}
-                        className="text-xs text-primary-400/70 hover:text-primary-400 transition-colors"
-                      >
-                        {groupedFiles[layer].every((f) =>
-                          selectedFiles.some((sf) => sf.path === f.path)
-                        )
-                          ? 'Deselect all'
-                          : 'Select all'}
-                      </button>
-                    </div>
-                  )}
-
-                  {/* Files in Layer - sorted naturally by path */}
-                  {[...groupedFiles[layer]].sort((a, b) => naturalSortCompare(a.path, b.path)).map((file) => {
-                    const isSelected = selectedFiles.some((f) => f.path === file.path);
-                    return (
-                      <div
-                        key={file.path}
-                        onClick={() => toggleFileSelection(file)}
-                        className={`
-                          flex items-center justify-between px-3 py-2 cursor-pointer
-                          transition-colors border-b border-slate-700/30
-                          ${isSelected
-                            ? 'bg-primary-500/10 border-primary-500/30'
-                            : 'hover:bg-slate-800/50'
-                          }
-                        `}
-                      >
-                        <div className="flex items-center gap-3 min-w-0">
-                          <div className={`
-                            w-5 h-5 rounded flex items-center justify-center flex-shrink-0
-                            ${isSelected
-                              ? 'bg-primary-500 text-white'
-                              : 'bg-slate-700/50 text-slate-500'
+                            } else {
+                              setSelectedDirs(prev => {
+                                const next = new Set(prev);
+                                layerGroups.forEach(g => next.add(g.dirPath));
+                                return next;
+                              });
                             }
-                          `}>
-                            {isSelected ? (
-                              <Check className="w-3 h-3" />
-                            ) : (
-                              <File className="w-3 h-3" />
-                            )}
-                          </div>
-                          <span className="text-sm text-slate-300 truncate font-mono">
-                            {file.path}
-                          </span>
-                        </div>
-                        <div className="flex items-center gap-3 flex-shrink-0 ml-4">
-                          {file.width && (
-                            <span className="text-xs text-slate-500 font-mono">
-                              {file.width}
-                            </span>
-                          )}
-                          <span className="text-xs text-slate-500 min-w-[60px] text-right">
-                            {formatSize(file.size_bytes)}
-                          </span>
-                        </div>
+                          }}
+                          className="text-xs text-primary-400/70 hover:text-primary-400 transition-colors"
+                        >
+                          {allSelected ? 'Deselect all' : 'Select all'}
+                        </button>
                       </div>
-                    );
-                  })}
-                </div>
-              ))}
+                    )}
 
-              {previewData.total_files === 0 && (
+                    {/* SAE directories in this layer */}
+                    {[...layerGroups].sort((a, b) => naturalSortCompare(a.dirPath, b.dirPath)).map((group) => {
+                      const isSelected = selectedDirs.has(group.dirPath);
+                      return (
+                        <div
+                          key={group.dirPath}
+                          onClick={() => toggleDirSelection(group.dirPath)}
+                          className={`
+                            flex items-center justify-between px-3 py-2 cursor-pointer
+                            transition-colors border-b border-slate-700/30
+                            ${isSelected
+                              ? 'bg-primary-500/10 border-primary-500/30'
+                              : 'hover:bg-slate-800/50'
+                            }
+                          `}
+                        >
+                          <div className="flex items-center gap-3 min-w-0">
+                            <div className={`
+                              w-5 h-5 rounded flex items-center justify-center flex-shrink-0
+                              ${isSelected
+                                ? 'bg-primary-500 text-white'
+                                : 'bg-slate-700/50 text-slate-500'
+                              }
+                            `}>
+                              {isSelected ? (
+                                <Check className="w-3 h-3" />
+                              ) : (
+                                <FolderOpen className="w-3 h-3" />
+                              )}
+                            </div>
+                            <span className="text-sm text-slate-300 truncate font-mono">
+                              {group.dirPath}
+                            </span>
+                          </div>
+                          <div className="flex items-center gap-3 flex-shrink-0 ml-4">
+                            {group.width && (
+                              <span className="text-xs text-slate-500 font-mono">
+                                {group.width}
+                              </span>
+                            )}
+                            <span className="text-xs text-slate-500">
+                              {group.files.length} file{group.files.length !== 1 ? 's' : ''}
+                            </span>
+                            <span className="text-xs text-slate-500 min-w-[60px] text-right">
+                              {formatSize(group.totalSizeBytes)}
+                            </span>
+                          </div>
+                        </div>
+                      );
+                    })}
+                  </div>
+                );
+              })}
+
+              {saeGroups.length === 0 && (
                 <div className="p-6 text-center text-slate-500">
                   No SAE files found in this repository
                 </div>
               )}
             </div>
 
-            {/* Selected Files Info */}
-            {selectedFiles.length > 0 && (
+            {/* Selected SAEs Info */}
+            {selectedDirs.size > 0 && (
               <div className="p-3 rounded-lg bg-slate-800/50 border border-slate-700/50">
                 <div className="flex items-center justify-between mb-2">
                   <p className="text-sm text-slate-400">
-                    Selected: <span className="text-slate-200 font-medium">{selectedFiles.length} SAE{selectedFiles.length !== 1 ? 's' : ''}</span>
+                    Selected: <span className="text-slate-200 font-medium">{selectedDirs.size} SAE{selectedDirs.size !== 1 ? 's' : ''}</span>
                   </p>
                   <button
                     type="button"
-                    onClick={() => setSelectedFiles([])}
+                    onClick={() => setSelectedDirs(new Set())}
                     className="text-xs text-slate-500 hover:text-slate-300 transition-colors"
                   >
                     Clear all
                   </button>
                 </div>
                 <div className="space-y-1 max-h-24 overflow-y-auto">
-                  {selectedFiles.map((file) => (
-                    <div key={file.path} className="text-xs text-slate-500 font-mono truncate">
-                      {file.path}
-                      {file.layer !== null && ` (L${file.layer})`}
-                      {file.width && ` • ${file.width}`}
+                  {saeGroups.filter(g => selectedDirs.has(g.dirPath)).map((group) => (
+                    <div key={group.dirPath} className="text-xs text-slate-500 font-mono truncate">
+                      {group.dirPath}
+                      {group.layer !== null && ` (L${group.layer})`}
+                      {group.width && ` • ${group.width}`}
                     </div>
                   ))}
                 </div>
@@ -360,12 +394,12 @@ export function SAEDownloadForm({
           variant="primary"
           onClick={handleDownload}
           loading={isLoading}
-          disabled={!repositoryId.trim() || (previewData !== null && selectedFiles.length === 0)}
+          disabled={!repositoryId.trim() || (previewData !== null && selectedDirs.size === 0)}
           leftIcon={<Layers className="w-4 h-4" />}
           className="w-full"
         >
-          {selectedFiles.length > 0
-            ? `Download ${selectedFiles.length} Selected SAE${selectedFiles.length !== 1 ? 's' : ''}`
+          {selectedDirs.size > 0
+            ? `Download ${selectedDirs.size} Selected SAE${selectedDirs.size !== 1 ? 's' : ''}`
             : (previewData ? 'Select SAEs to Download' : 'Download SAE Repository')}
         </Button>
 
@@ -373,7 +407,7 @@ export function SAEDownloadForm({
         <div className="text-xs text-slate-500 bg-slate-800/30 rounded-lg p-3">
           <p className="font-medium text-slate-400 mb-1">Note:</p>
           <p>{previewData
-            ? 'Click to select multiple SAE files. Selected files will be downloaded individually.'
+            ? 'Click to select SAEs to download. Each SAE directory (config + weights) is downloaded as a unit.'
             : 'Downloads the entire SAE repository. Layer selection is done when attaching the SAE to a model.'
           }</p>
         </div>

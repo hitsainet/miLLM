@@ -11,6 +11,7 @@ Implementation notes:
 4. Steering integration is transparent to API layer
 """
 
+import asyncio
 import uuid
 from datetime import datetime
 from threading import Thread
@@ -449,35 +450,36 @@ class InferenceService:
                     cached_prefix, prefix_token_count = cached_prefix_result
 
             for i in range(n):
-                # Generate
-                with torch.no_grad():
-                    generate_kwargs = self._build_generate_kwargs(gen_config, inputs)
+                # Generate - offload to thread to avoid blocking the event loop
+                generate_kwargs = self._build_generate_kwargs(gen_config, inputs)
 
-                    # Use cached prefix KV states if available
-                    if cached_prefix is not None and prefix_token_count > 0:
-                        generate_kwargs["past_key_values"] = cached_prefix
-                        # Only pass continuation tokens (after the cached prefix)
-                        generate_kwargs["input_ids"] = inputs.input_ids[:, prefix_token_count:]
-                        # Attention mask must cover ALL tokens (cached + continuation)
-                        generate_kwargs["attention_mask"] = inputs.attention_mask
+                # Use cached prefix KV states if available
+                if cached_prefix is not None and prefix_token_count > 0:
+                    generate_kwargs["past_key_values"] = cached_prefix
+                    # Only pass continuation tokens (after the cached prefix)
+                    generate_kwargs["input_ids"] = inputs.input_ids[:, prefix_token_count:]
+                    # Attention mask must cover ALL tokens (cached + continuation)
+                    generate_kwargs["attention_mask"] = inputs.attention_mask
 
-                    outputs = self._model.generate(**generate_kwargs)
+                outputs = await asyncio.to_thread(
+                    self._generate_sync, generate_kwargs
+                )
 
-                    # Cache system prompt prefix on first miss
-                    if (
-                        system_prompt
-                        and cached_prefix is None
-                        and self._prefix_cache.enabled
-                        and hasattr(outputs, "past_key_values")
-                    ):
-                        try:
-                            self._cache_prefix(
-                                system_prompt,
-                                outputs.past_key_values,
-                                prefix_token_count,
-                            )
-                        except Exception:
-                            pass  # Cache failure should never affect generation
+                # Cache system prompt prefix on first miss
+                if (
+                    system_prompt
+                    and cached_prefix is None
+                    and self._prefix_cache.enabled
+                    and hasattr(outputs, "past_key_values")
+                ):
+                    try:
+                        self._cache_prefix(
+                            system_prompt,
+                            outputs.past_key_values,
+                            prefix_token_count,
+                        )
+                    except Exception:
+                        pass  # Cache failure should never affect generation
 
                 # Notify monitoring after generation
                 self._notify_monitoring(request_id=completion_id)
@@ -770,12 +772,13 @@ class InferenceService:
                 prompt_tokens = inputs.input_ids.shape[1]
                 self._check_context_length(prompt_tokens, gen_config.max_new_tokens)
 
-                # Generate
-                with torch.no_grad():
-                    generate_kwargs = self._build_generate_kwargs(
-                        gen_config, inputs
-                    )
-                    outputs = self._model.generate(**generate_kwargs)
+                # Generate - offload to thread to avoid blocking the event loop
+                generate_kwargs = self._build_generate_kwargs(
+                    gen_config, inputs
+                )
+                outputs = await asyncio.to_thread(
+                    self._generate_sync, generate_kwargs
+                )
 
                 # Notify monitoring after generation
                 self._notify_monitoring(request_id=completion_id)
@@ -1095,6 +1098,17 @@ class InferenceService:
     # =========================================================================
     # Private Methods
     # =========================================================================
+
+    def _generate_sync(self, generation_kwargs: dict) -> Any:
+        """
+        Run model.generate() synchronously (for use with asyncio.to_thread).
+
+        This keeps the blocking GPU computation off the async event loop,
+        allowing FastAPI to continue serving health checks, WebSocket
+        connections, and other requests during inference.
+        """
+        with torch.no_grad():
+            return self._model.generate(**generation_kwargs)
 
     def _generate_in_thread(
         self, generation_kwargs: dict, errors: Optional[list] = None

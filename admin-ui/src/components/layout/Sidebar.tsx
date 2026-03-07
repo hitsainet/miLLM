@@ -18,7 +18,7 @@ const navItems = [
   { id: 'models', label: 'Models', path: '/models', icon: Server },
   { id: 'sae', label: 'SAEs', path: '/sae', icon: Layers },
   { id: 'steering', label: 'Steering', path: '/steering', icon: Sliders },
-  { id: 'monitoring', label: 'Monitoring', path: '/monitoring', icon: Activity },
+  { id: 'monitoring', label: 'Probe', path: '/monitoring', icon: Activity },
   { id: 'profiles', label: 'Profiles', path: '/profiles', icon: FileJson },
   { id: 'settings', label: 'Settings', path: '/settings', icon: Settings },
 ];

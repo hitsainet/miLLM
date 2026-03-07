@@ -155,7 +155,7 @@ export function MonitoringPage() {
           <Info className="w-5 h-5 text-primary-400 flex-shrink-0 mt-0.5" />
           <div className="text-sm text-slate-400">
             <p className="mb-2">
-              <strong className="text-slate-300">Monitoring:</strong> Captures the top-K most activated features for each inference request.
+              <strong className="text-slate-300">Probing:</strong> Captures the top-K most activated features for each inference request.
             </p>
             <p>
               <strong className="text-slate-300">Tip:</strong> Use monitoring to understand which features are active and their typical activation ranges.

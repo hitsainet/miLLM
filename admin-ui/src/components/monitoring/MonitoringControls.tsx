@@ -47,7 +47,7 @@ export function MonitoringControls({
             />
             <div>
               <h3 className="text-sm font-medium text-slate-200">
-                Feature Monitoring
+                Feature Probing
               </h3>
               <p className="text-xs text-slate-500">
                 {isEnabled

@@ -9,7 +9,7 @@ const pageTitles: Record<string, string> = {
   '/models': 'Models',
   '/sae': 'Sparse Autoencoders',
   '/steering': 'Feature Steering',
-  '/monitoring': 'Feature Monitoring',
+  '/monitoring': 'Feature Probing',
   '/profiles': 'Steering Profiles',
   '/settings': 'Settings',
 };

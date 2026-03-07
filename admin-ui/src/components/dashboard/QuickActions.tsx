@@ -70,7 +70,7 @@ export function QuickActions({
       title: 'Monitor Activations',
       description: 'View real-time feature activations during inference',
       action: () => navigate('/monitoring'),
-      actionLabel: 'Go to Monitoring',
+      actionLabel: 'Go to Probe',
       icon: <Activity className="w-5 h-5" />,
     },
   ];
@@ -189,7 +189,7 @@ export function ActionButtons({ hasModel, hasSAE }: ActionButtonsProps) {
           onClick={() => navigate('/monitoring')}
           disabled={!hasSAE}
         >
-          View Monitoring
+          View Probe
         </Button>
       </div>
     </Card>

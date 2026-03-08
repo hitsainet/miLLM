@@ -79,8 +79,13 @@ class LoadedModelState:
         with self._lock:
             if self._loaded:
                 try:
-                    # Delete model and tokenizer references
+                    # Move model to CPU first to release GPU tensors before deleting.
+                    # bitsandbytes models don't support .to("cpu"), so we skip on error.
                     if self._loaded.model is not None:
+                        try:
+                            self._loaded.model.to("cpu")
+                        except Exception:
+                            pass
                         del self._loaded.model
                     if self._loaded.tokenizer is not None:
                         del self._loaded.tokenizer
@@ -89,17 +94,46 @@ class LoadedModelState:
                 finally:
                     self._loaded = None
 
-            # Force GPU memory release
             try:
                 import torch
 
                 if torch.cuda.is_available():
-                    torch.cuda.empty_cache()
-            except ImportError:
-                pass
+                    # Log memory before cleanup
+                    free_before, total = torch.cuda.mem_get_info()
+                    used_before = (total - free_before) / (1024 * 1024)
 
-            # Force Python garbage collection
-            gc.collect()
+                    # Ensure all async CUDA operations are complete
+                    torch.cuda.synchronize()
+
+                    # GC first: Python must release bitsandbytes objects (which hold
+                    # raw CUDA allocations via cudaMalloc) before empty_cache can
+                    # reclaim them.  Multiple passes handle circular references.
+                    gc.collect()
+                    gc.collect()
+
+                    # Now release PyTorch's cached memory blocks
+                    torch.cuda.empty_cache()
+
+                    # Release any IPC handles
+                    torch.cuda.ipc_collect()
+
+                    # Final GC pass for anything freed by empty_cache
+                    gc.collect()
+
+                    # If significant memory still held, try resetting CUDA state.
+                    # reset_peak_memory_stats is safe and clears internal bookkeeping.
+                    torch.cuda.reset_peak_memory_stats()
+
+                    free_after, _ = torch.cuda.mem_get_info()
+                    used_after = (total - free_after) / (1024 * 1024)
+                    logger.info(
+                        "gpu_memory_cleanup",
+                        used_before_mb=int(used_before),
+                        used_after_mb=int(used_after),
+                        freed_mb=int(used_before - used_after),
+                    )
+            except ImportError:
+                gc.collect()
 
 
 class ModelLoadContext:
@@ -127,6 +161,10 @@ class ModelLoadContext:
             )
             # Clean up on failure
             if self.model is not None:
+                try:
+                    self.model.to("cpu")
+                except Exception:
+                    pass
                 del self.model
             if self.tokenizer is not None:
                 del self.tokenizer
@@ -135,11 +173,14 @@ class ModelLoadContext:
                 import torch
 
                 if torch.cuda.is_available():
+                    torch.cuda.synchronize()
+                    gc.collect()
+                    gc.collect()
                     torch.cuda.empty_cache()
+                    torch.cuda.ipc_collect()
+                    gc.collect()
             except ImportError:
-                pass
-
-            gc.collect()
+                gc.collect()
 
         return False  # Don't suppress exception
 

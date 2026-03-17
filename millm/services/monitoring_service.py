@@ -333,14 +333,22 @@ class MonitoringService:
         if limit is not None:
             records = records[:limit]
 
-        # Convert to dicts
+        # Convert to dicts with activations as array of {feature_index, activation}
         return [
             {
                 "timestamp": r.timestamp,
                 "request_id": r.request_id,
                 "token_position": r.token_position,
-                "activations": r.activations,
-                "top_k": r.top_features,
+                "activations": [
+                    {"feature_index": idx, "activation": val}
+                    for idx, val in sorted(
+                        r.activations.items(), key=lambda x: x[1], reverse=True
+                    )
+                ],
+                "top_k": [
+                    {"feature_index": idx, "activation": val}
+                    for idx, val in r.top_features
+                ],
             }
             for r in records
         ]

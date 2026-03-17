@@ -72,6 +72,13 @@ class MonitoringState(BaseModel):
     history_count: int = Field(..., description="Current history count")
 
 
+class FeatureActivation(BaseModel):
+    """A single feature activation value."""
+
+    feature_index: int = Field(..., description="Feature index")
+    activation: float = Field(..., description="Activation value")
+
+
 class ActivationRecord(BaseModel):
     """Record of feature activations from a single forward pass."""
 
@@ -81,13 +88,13 @@ class ActivationRecord(BaseModel):
         description="Associated inference request ID",
     )
     token_position: int = Field(..., description="Token position in sequence")
-    activations: dict[int, float] = Field(
+    activations: list[FeatureActivation] = Field(
         ...,
-        description="Feature activations (feature_idx → value)",
+        description="Feature activations sorted by value descending",
     )
-    top_k: list[tuple[int, float]] = Field(
+    top_k: list[FeatureActivation] = Field(
         default_factory=list,
-        description="Top-K most active features [(idx, value), ...]",
+        description="Top-K most active features",
     )
 
 

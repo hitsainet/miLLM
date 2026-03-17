@@ -320,7 +320,7 @@ class InferenceService:
         """
         try:
             from millm.services.sae_service import AttachedSAEState
-            from millm.api.dependencies import _monitoring_service
+            import millm.api.dependencies as deps
 
             sae_state = AttachedSAEState()
             sae = sae_state.attached_sae
@@ -328,15 +328,41 @@ class InferenceService:
                 return
 
             activations = sae.get_last_feature_activations()
-            if activations is None or _monitoring_service is None:
+            monitoring_service = deps._monitoring_service
+
+            if activations is None:
+                logger.warning(
+                    "monitoring_no_activations",
+                    sae_id=sae_state.attached_sae_id,
+                    monitoring_enabled=sae.is_monitoring_enabled,
+                )
                 return
 
-            _monitoring_service.on_activation(
+            if monitoring_service is None:
+                # Lazily initialize monitoring service if not yet created
+                # (normally created by FastAPI DI on first monitoring API call)
+                from millm.services.monitoring_service import MonitoringService
+                from millm.sockets.progress import progress_emitter
+                from millm.services.sae_service import SAEService
+                from millm.db.base import async_session_factory
+                from millm.db.repositories.sae_repository import SAERepository
+
+                async_session = async_session_factory()
+                repo = SAERepository(async_session)
+                sae_service = SAEService(repository=repo)
+                monitoring_service = MonitoringService(
+                    sae_service=sae_service,
+                    emitter=progress_emitter,
+                )
+                deps._monitoring_service = monitoring_service
+                logger.info("monitoring_service_initialized_from_inference")
+
+            monitoring_service.on_activation(
                 activations, request_id=request_id
             )
         except Exception as e:
             # Never let monitoring errors affect inference
-            logger.debug("monitoring_notification_failed", error=str(e))
+            logger.warning("monitoring_notification_failed", error=str(e))
 
     def _check_context_length(self, prompt_tokens: int, max_new_tokens: int) -> None:
         """

@@ -142,6 +142,12 @@ class ProgressEmitter:
     def set_sio(self, sio: socketio.AsyncServer) -> None:
         """Set the Socket.IO server instance."""
         self._sio = sio
+        # Capture the main event loop so background threads can schedule
+        # coroutines (e.g. monitoring activation emissions during inference)
+        try:
+            self._main_loop = asyncio.get_running_loop()
+        except RuntimeError:
+            self._main_loop = None
 
     async def emit_download_progress(
         self,
@@ -527,15 +533,16 @@ class ProgressEmitter:
             except RuntimeError:
                 # No running loop in this thread - find the main loop
                 # and schedule the coroutine there
-                import threading
                 if hasattr(self, "_main_loop") and self._main_loop:
                     asyncio.run_coroutine_threadsafe(
                         self._sio.emit("monitoring:activation", data),
                         self._main_loop,
                     )
-        except Exception:
+                else:
+                    logger.warning("monitoring_emit_no_loop", msg="No event loop available for WebSocket emission")
+        except Exception as e:
             # Don't let emission errors affect inference
-            pass
+            logger.warning("monitoring_emit_failed", error=str(e))
 
     async def emit_monitoring_state_changed(
         self,

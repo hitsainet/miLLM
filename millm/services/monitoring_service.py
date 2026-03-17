@@ -227,9 +227,10 @@ class MonitoringService:
             token_position: Token position in sequence.
             top_k: Number of top features to capture.
         """
-        # Flatten if needed (take last position if sequence)
-        if activations.dim() > 1:
-            activations = activations[-1]  # Last token
+        # Flatten to 1D (take last position along each leading dimension)
+        # Handles (batch, seq_len, d_sae), (seq_len, d_sae), or (d_sae,)
+        while activations.dim() > 1:
+            activations = activations[-1]
 
         # Convert to dict and compute top-k
         acts_dict: dict[int, float] = {}

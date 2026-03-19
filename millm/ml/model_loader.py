@@ -279,8 +279,22 @@ class ModelLoadContext:
                 cache_path,
                 trust_remote_code=trust_remote_code,
             )
-        except ImportError as e:
-            if trust_remote_code:
+        except (ImportError, ValueError) as e:
+            # Fall back for models with custom tokenizer classes (e.g. LiquidAI
+            # TokenizersBackend) — use PreTrainedTokenizerFast if tokenizer.json exists
+            import os
+            tokenizer_json = os.path.join(cache_path, "tokenizer.json")
+            if os.path.exists(tokenizer_json):
+                from transformers import PreTrainedTokenizerFast
+                logger.warning(
+                    "tokenizer_fallback_to_fast",
+                    model_id=self.model_id,
+                    error=str(e),
+                )
+                self.tokenizer = PreTrainedTokenizerFast(
+                    tokenizer_file=tokenizer_json,
+                )
+            elif trust_remote_code:
                 logger.warning(
                     "tokenizer_trust_remote_code_fallback",
                     model_id=self.model_id,

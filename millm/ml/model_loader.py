@@ -307,7 +307,7 @@ class ModelLoadContext:
             "attn_implementation": attn_impl,
         }
         if quantization_config is not None and device == "cuda" and torch.cuda.is_available():
-            gpu_mem = torch.cuda.get_device_properties(0).total_mem
+            gpu_mem = torch.cuda.get_device_properties(0).total_memory
             # Reserve 2GB for KV cache and overhead
             max_gpu = f"{int(gpu_mem / (1024**3)) - 2}GiB"
             load_kwargs["max_memory"] = {0: max_gpu, "cpu": "64GiB"}

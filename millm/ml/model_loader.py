@@ -295,14 +295,28 @@ class ModelLoadContext:
 
         # Load model (large, slow)
         logger.debug("loading_model_weights", model_id=self.model_id, attn_impl=attn_impl)
+
+        # For bitsandbytes quantization, set max_memory to ensure large models
+        # are quantized in CPU RAM and only quantized weights are placed on GPU.
+        # This prevents OOM when the full FP16 model exceeds GPU VRAM.
+        load_kwargs = {
+            "quantization_config": quantization_config,
+            "torch_dtype": torch_dtype,
+            "device_map": "auto" if device == "cuda" else None,
+            "trust_remote_code": trust_remote_code,
+            "attn_implementation": attn_impl,
+        }
+        if quantization_config is not None and device == "cuda" and torch.cuda.is_available():
+            gpu_mem = torch.cuda.get_device_properties(0).total_mem
+            # Reserve 2GB for KV cache and overhead
+            max_gpu = f"{int(gpu_mem / (1024**3)) - 2}GiB"
+            load_kwargs["max_memory"] = {0: max_gpu, "cpu": "64GiB"}
+            logger.info("quantized_load_memory_map", max_gpu=max_gpu)
+
         try:
             self.model = AutoModelForCausalLM.from_pretrained(
                 cache_path,
-                quantization_config=quantization_config,
-                torch_dtype=torch_dtype,
-                device_map="auto" if device == "cuda" else None,
-                trust_remote_code=trust_remote_code,
-                attn_implementation=attn_impl,
+                **load_kwargs,
             )
         except ImportError as e:
             if trust_remote_code:
@@ -313,13 +327,10 @@ class ModelLoadContext:
                     model_id=self.model_id,
                     error=str(e),
                 )
+                load_kwargs["trust_remote_code"] = False
                 self.model = AutoModelForCausalLM.from_pretrained(
                     cache_path,
-                    quantization_config=quantization_config,
-                    torch_dtype=torch_dtype,
-                    device_map="auto" if device == "cuda" else None,
-                    trust_remote_code=False,
-                    attn_implementation=attn_impl,
+                    **load_kwargs,
                 )
             else:
                 raise

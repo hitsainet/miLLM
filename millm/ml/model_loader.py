@@ -230,7 +230,7 @@ class ModelLoadContext:
         except ImportError:
             logger.info("flash_attention_not_available_using_sdpa")
 
-        # Detect if model is already pre-quantized (GPTQ/AWQ/BitNet)
+        # Detect if model is already pre-quantized (GPTQ/AWQ/BitNet/etc.)
         quant_method = "none"
         is_pre_quantized = False
         try:
@@ -241,10 +241,25 @@ class ModelLoadContext:
                     quant_method = pre_quant_config.get("quant_method", "unknown")
                 else:
                     quant_method = getattr(pre_quant_config, "quant_method", "unknown")
-                is_pre_quantized = quant_method in ("gptq", "awq", "bitnet")
+                # Any model with a native quantization config should not have
+                # bitsandbytes applied on top
+                is_pre_quantized = True
                 logger.info("pre_quantized_model_detected", quant_method=quant_method)
-        except Exception:
-            pass
+        except Exception as e:
+            # Also check config.json directly as fallback
+            import os, json as _json
+            config_path = os.path.join(cache_path, "config.json")
+            if os.path.exists(config_path):
+                try:
+                    with open(config_path) as f:
+                        raw_config = _json.load(f)
+                    if "quantization_config" in raw_config:
+                        quant_method = raw_config["quantization_config"].get("quant_method", "unknown")
+                        is_pre_quantized = True
+                        logger.info("pre_quantized_detected_from_json", quant_method=quant_method)
+                except Exception:
+                    pass
+            logger.warning("config_load_for_quant_detection_failed", error=str(e))
 
         # Configure quantization
         # Use bfloat16 instead of float16: same memory (2 bytes/param) but much larger

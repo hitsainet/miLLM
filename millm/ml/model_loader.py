@@ -498,9 +498,9 @@ class ModelLoader:
                 "PyTorch is not installed. Install with CUDA support.",
             )
 
-        # Check memory availability
+        # Check memory availability (skip for quantized models that use CPU offloading)
         available_mb = get_available_memory_mb()
-        if available_mb < estimated_memory_mb:
+        if quantization.upper() not in ("Q4", "Q2") and available_mb < estimated_memory_mb:
             raise InsufficientMemoryError(
                 f"Not enough GPU memory. Need ~{estimated_memory_mb}MB, have {available_mb}MB",
                 details={

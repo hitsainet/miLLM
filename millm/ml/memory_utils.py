@@ -17,6 +17,7 @@ BYTES_PER_PARAM = {
     "FP16": 2.0,
     "Q8": 1.0,
     "Q4": 0.5,
+    "Q2": 0.25,
 }
 
 # Overhead factor for KV cache, activations, etc.

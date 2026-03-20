@@ -464,10 +464,12 @@ class ModelLoadContext:
                 cache_path,
                 **load_kwargs,
             )
-        except ImportError as e:
+        except (ImportError, OSError) as e:
             if trust_remote_code:
-                # Custom model code may reference removed transformers internals.
-                # Fall back to built-in transformers implementation.
+                # Custom model code may reference missing .py files or removed
+                # transformers internals. Fall back to built-in implementation
+                # (e.g. BitNet auto_map references local .py but class is now
+                # built into transformers).
                 logger.warning(
                     "trust_remote_code_fallback",
                     model_id=self.model_id,

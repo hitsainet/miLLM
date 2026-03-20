@@ -230,7 +230,7 @@ class ModelLoadContext:
         except ImportError:
             logger.info("flash_attention_not_available_using_sdpa")
 
-        # Detect if model is already pre-quantized (GPTQ/AWQ)
+        # Detect if model is already pre-quantized (GPTQ/AWQ/BitNet)
         quant_method = "none"
         is_pre_quantized = False
         try:
@@ -241,7 +241,7 @@ class ModelLoadContext:
                     quant_method = pre_quant_config.get("quant_method", "unknown")
                 else:
                     quant_method = getattr(pre_quant_config, "quant_method", "unknown")
-                is_pre_quantized = quant_method in ("gptq", "awq")
+                is_pre_quantized = quant_method in ("gptq", "awq", "bitnet")
                 logger.info("pre_quantized_model_detected", quant_method=quant_method)
         except Exception:
             pass

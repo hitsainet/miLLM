@@ -45,6 +45,9 @@ class QuantizationType(str, enum.Enum):
     Q8 = "Q8"
     Q4 = "Q4"
     Q2 = "Q2"
+    GPTQ = "GPTQ"
+    AWQ = "AWQ"
+    BITNET = "BITNET"
 
 
 class Model(Base):

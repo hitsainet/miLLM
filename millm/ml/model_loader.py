@@ -13,7 +13,7 @@ from typing import Any, Optional
 import structlog
 
 from millm.core.errors import InsufficientMemoryError, ModelLoadError
-from millm.ml.memory_utils import get_available_memory_mb
+from millm.ml.memory_utils import get_available_cpu_memory_mb, get_available_memory_mb
 
 logger = structlog.get_logger()
 
@@ -136,6 +136,46 @@ class LoadedModelState:
                 gc.collect()
 
 
+def _get_auto_model_class(config: Any) -> Any:
+    """
+    Determine the appropriate Auto model class based on model config.
+
+    Inspects the config's architectures field to pick the right class.
+    Falls back to AutoModelForCausalLM -> AutoModel.
+
+    Args:
+        config: HuggingFace model config object
+
+    Returns:
+        The appropriate Auto model class.
+    """
+    from transformers import AutoModel, AutoModelForCausalLM, AutoModelForSeq2SeqLM
+
+    # Check architectures field for seq2seq indicators
+    architectures = getattr(config, "architectures", []) or []
+    model_type = getattr(config, "model_type", "")
+
+    seq2seq_indicators = [
+        "ConditionalGeneration",
+        "Seq2Seq",
+        "EncoderDecoder",
+        "ForConditionalGeneration",
+    ]
+    seq2seq_model_types = {"t5", "bart", "mbart", "pegasus", "marian", "blenderbot"}
+
+    for arch in architectures:
+        if any(indicator in arch for indicator in seq2seq_indicators):
+            logger.info("auto_model_class_seq2seq", architecture=arch)
+            return AutoModelForSeq2SeqLM
+
+    if model_type.lower() in seq2seq_model_types:
+        logger.info("auto_model_class_seq2seq_by_type", model_type=model_type)
+        return AutoModelForSeq2SeqLM
+
+    # Default: causal LM (GPT-style)
+    return AutoModelForCausalLM
+
+
 class ModelLoadContext:
     """
     Context manager for safe model loading.
@@ -221,6 +261,13 @@ class ModelLoadContext:
             quantization=quantization,
         )
 
+        # Validate that quantization requiring CUDA actually has CUDA available
+        if quantization.upper() in ("Q4", "Q8", "Q2") and not torch.cuda.is_available():
+            raise ModelLoadError(
+                f"Quantization type {quantization} requires CUDA, but no GPU is available.",
+                details={"quantization": quantization},
+            )
+
         # Detect best attention implementation
         attn_impl = "sdpa"  # PyTorch native SDPA (default in transformers 4.36+)
         try:
@@ -233,6 +280,7 @@ class ModelLoadContext:
         # Detect if model is already pre-quantized (GPTQ/AWQ/BitNet/etc.)
         quant_method = "none"
         is_pre_quantized = False
+        config = None
         try:
             config = AutoConfig.from_pretrained(cache_path, trust_remote_code=trust_remote_code)
             pre_quant_config = getattr(config, "quantization_config", None)
@@ -277,7 +325,6 @@ class ModelLoadContext:
                 bnb_4bit_compute_dtype=torch.bfloat16,
                 bnb_4bit_use_double_quant=True,
                 bnb_4bit_quant_type="nf4",
-                llm_int8_enable_fp32_cpu_offload=True,
             )
             quant_method = "bitsandbytes"
         elif quantization == "Q8":
@@ -294,7 +341,7 @@ class ModelLoadContext:
                 cache_path,
                 trust_remote_code=trust_remote_code,
             )
-        except (ImportError, ValueError) as e:
+        except (ImportError, ValueError, OSError) as e:
             # Fall back for models with custom tokenizer classes (e.g. LiquidAI
             # TokenizersBackend) — use PreTrainedTokenizerFast if tokenizer.json exists
             import os
@@ -309,6 +356,38 @@ class ModelLoadContext:
                 self.tokenizer = PreTrainedTokenizerFast(
                     tokenizer_file=tokenizer_json,
                 )
+                # Load special tokens from tokenizer_config.json if available
+                import json as _json
+                tokenizer_config_path = os.path.join(cache_path, "tokenizer_config.json")
+                if os.path.exists(tokenizer_config_path):
+                    try:
+                        with open(tokenizer_config_path) as f:
+                            tok_config = _json.load(f)
+                        special_token_keys = [
+                            "bos_token", "eos_token", "unk_token",
+                            "pad_token", "sep_token", "cls_token",
+                            "mask_token",
+                        ]
+                        special_tokens = {}
+                        for key in special_token_keys:
+                            val = tok_config.get(key)
+                            if val is not None:
+                                # Value can be a string or a dict with "content" key
+                                if isinstance(val, dict):
+                                    val = val.get("content", None)
+                                if val is not None:
+                                    special_tokens[key] = val
+                        if special_tokens:
+                            self.tokenizer.add_special_tokens(special_tokens)
+                            logger.info(
+                                "loaded_special_tokens_from_config",
+                                tokens=list(special_tokens.keys()),
+                            )
+                    except Exception as tok_err:
+                        logger.warning(
+                            "failed_to_load_special_tokens",
+                            error=str(tok_err),
+                        )
             elif trust_remote_code:
                 logger.warning(
                     "tokenizer_trust_remote_code_fallback",
@@ -321,6 +400,14 @@ class ModelLoadContext:
                 )
             else:
                 raise
+
+        # Validate eos_token is set (critical for generation)
+        if self.tokenizer.eos_token is None:
+            logger.warning(
+                "tokenizer_missing_eos_token",
+                model_id=self.model_id,
+                msg="eos_token is None after loading — generation may not terminate properly",
+            )
 
         # Ensure pad token is set
         if self.tokenizer.pad_token is None:
@@ -338,16 +425,42 @@ class ModelLoadContext:
             "device_map": "auto" if device == "cuda" else None,
             "trust_remote_code": trust_remote_code,
             "attn_implementation": attn_impl,
+            "low_cpu_mem_usage": True,
         }
         if quantization_config is not None and device == "cuda" and torch.cuda.is_available():
-            gpu_mem = torch.cuda.get_device_properties(0).total_memory
-            # Reserve 2GB for KV cache and overhead
-            max_gpu = f"{int(gpu_mem / (1024**3)) - 2}GiB"
-            load_kwargs["max_memory"] = {0: max_gpu, "cpu": "64GiB"}
-            logger.info("quantized_load_memory_map", max_gpu=max_gpu)
+            # Use 90% of free GPU memory instead of total minus a fixed offset
+            free_gpu, _ = torch.cuda.mem_get_info(0)
+            max_gpu_bytes = int(free_gpu * 0.9)
+            max_gpu = f"{max_gpu_bytes // (1024**3)}GiB"
+
+            # Derive CPU memory dynamically (leave ~4GB headroom for OS)
+            cpu_avail_mb = get_available_cpu_memory_mb()
+            if cpu_avail_mb > 0:
+                cpu_headroom_mb = 4096  # 4 GB for OS
+                usable_cpu_mb = max(cpu_avail_mb - cpu_headroom_mb, 1024)
+                max_cpu = f"{usable_cpu_mb // 1024}GiB"
+            else:
+                max_cpu = "64GiB"  # Fallback if detection fails
+                logger.warning("cpu_memory_detection_failed_using_fallback", fallback=max_cpu)
+
+            load_kwargs["max_memory"] = {0: max_gpu, "cpu": max_cpu}
+            logger.info("quantized_load_memory_map", max_gpu=max_gpu, max_cpu=max_cpu)
+
+        # Auto-detect the appropriate model class
+        ModelClass = AutoModelForCausalLM  # default
+        if config is not None:
+            try:
+                ModelClass = _get_auto_model_class(config)
+                if ModelClass is not AutoModelForCausalLM:
+                    logger.info(
+                        "using_auto_model_class",
+                        model_class=ModelClass.__name__,
+                    )
+            except Exception as e:
+                logger.warning("auto_model_class_detection_failed", error=str(e))
 
         try:
-            self.model = AutoModelForCausalLM.from_pretrained(
+            self.model = ModelClass.from_pretrained(
                 cache_path,
                 **load_kwargs,
             )
@@ -361,17 +474,48 @@ class ModelLoadContext:
                     error=str(e),
                 )
                 load_kwargs["trust_remote_code"] = False
-                self.model = AutoModelForCausalLM.from_pretrained(
+                self.model = ModelClass.from_pretrained(
                     cache_path,
                     **load_kwargs,
                 )
             else:
                 raise
+        except Exception as e:
+            # If the chosen ModelClass fails, try AutoModelForCausalLM as fallback,
+            # and then AutoModel as a last resort
+            if ModelClass is not AutoModelForCausalLM:
+                logger.warning(
+                    "model_class_fallback_to_causal_lm",
+                    original_class=ModelClass.__name__,
+                    error=str(e),
+                )
+                try:
+                    self.model = AutoModelForCausalLM.from_pretrained(
+                        cache_path,
+                        **load_kwargs,
+                    )
+                except Exception:
+                    from transformers import AutoModel
+                    logger.warning(
+                        "model_class_fallback_to_auto_model",
+                        error=str(e),
+                    )
+                    self.model = AutoModel.from_pretrained(
+                        cache_path,
+                        **load_kwargs,
+                    )
+            else:
+                raise
 
-        # Get memory usage
+        # Get memory usage using mem_get_info for accuracy (includes bitsandbytes allocations)
         memory_used_mb = 0
         if torch.cuda.is_available():
-            memory_used_mb = int(torch.cuda.memory_allocated() / (1024 * 1024))
+            try:
+                free_after, total = torch.cuda.mem_get_info(0)
+                memory_used_mb = int((total - free_after) / (1024 * 1024))
+            except Exception:
+                # Fallback to memory_allocated if mem_get_info fails
+                memory_used_mb = int(torch.cuda.memory_allocated() / (1024 * 1024))
 
         # Get model properties
         num_parameters = 0
@@ -476,6 +620,7 @@ class ModelLoader:
         trust_remote_code: bool = False,
         torch_compile: bool = False,
         torch_compile_mode: str = "reduce-overhead",
+        is_pre_quantized: bool = False,
     ) -> LoadedModel:
         """
         Load a model into GPU memory.
@@ -492,6 +637,7 @@ class ModelLoader:
             trust_remote_code: Whether to trust remote code
             torch_compile: Whether to apply torch.compile to model.forward
             torch_compile_mode: Compilation mode ("default", "reduce-overhead", "max-autotune")
+            is_pre_quantized: Whether the model is already pre-quantized (GPTQ/AWQ/etc.)
 
         Returns:
             LoadedModel instance
@@ -505,6 +651,11 @@ class ModelLoader:
             import torch
 
             if not torch.cuda.is_available():
+                # Quantized models absolutely require CUDA
+                if quantization.upper() in ("Q4", "Q8", "Q2"):
+                    raise ModelLoadError(
+                        f"CUDA is not available. GPU required for {quantization} quantization.",
+                    )
                 raise ModelLoadError(
                     "CUDA is not available. GPU required for model loading.",
                 )
@@ -513,9 +664,10 @@ class ModelLoader:
                 "PyTorch is not installed. Install with CUDA support.",
             )
 
-        # Check memory availability (skip for quantized models that use CPU offloading)
+        # Check memory availability (skip for quantized/offloadable models that use CPU offloading)
         available_mb = get_available_memory_mb()
-        if quantization.upper() not in ("Q4", "Q2") and available_mb < estimated_memory_mb:
+        skip_mem_check = is_pre_quantized or quantization.upper() in ("Q4", "Q2")
+        if not skip_mem_check and available_mb < estimated_memory_mb:
             raise InsufficientMemoryError(
                 f"Not enough GPU memory. Need ~{estimated_memory_mb}MB, have {available_mb}MB",
                 details={

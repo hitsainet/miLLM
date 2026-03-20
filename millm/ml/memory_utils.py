@@ -14,10 +14,14 @@ logger = structlog.get_logger()
 
 # Bytes per parameter for different quantization types
 BYTES_PER_PARAM = {
+    "FP32": 4.0,
     "FP16": 2.0,
     "Q8": 1.0,
     "Q4": 0.5,
     "Q2": 0.25,
+    "GPTQ": 0.5,
+    "AWQ": 0.5,
+    "BITNET": 0.25,
 }
 
 # Overhead factor for KV cache, activations, etc.
@@ -73,6 +77,7 @@ def estimate_memory_mb(params_str: Optional[str], quantization: str) -> int:
     Estimate VRAM needed for loading a model.
 
     Formula:
+    - FP32: params * 4 bytes
     - FP16: params * 2 bytes
     - Q8: params * 1 byte
     - Q4: params * 0.5 bytes
@@ -80,7 +85,7 @@ def estimate_memory_mb(params_str: Optional[str], quantization: str) -> int:
 
     Args:
         params_str: Parameter count string (e.g., "7B", "2.5B")
-        quantization: Quantization type ("FP16", "Q8", "Q4")
+        quantization: Quantization type ("FP16", "Q8", "Q4", etc.)
 
     Returns:
         Estimated memory requirement in megabytes, or 0 if estimation fails.
@@ -89,11 +94,50 @@ def estimate_memory_mb(params_str: Optional[str], quantization: str) -> int:
     if params == 0:
         return 0
 
-    bytes_per_param = BYTES_PER_PARAM.get(quantization.upper(), 2.0)
+    quant_upper = quantization.upper()
+    if quant_upper not in BYTES_PER_PARAM:
+        logger.warning(
+            "unknown_quantization_type_for_memory_estimate",
+            quantization=quantization,
+            fallback_bytes_per_param=2.0,
+        )
+    bytes_per_param = BYTES_PER_PARAM.get(quant_upper, 2.0)
     base_bytes = params * bytes_per_param
     with_overhead = base_bytes * MEMORY_OVERHEAD_FACTOR
 
     return int(with_overhead / (1024 * 1024))
+
+
+def get_available_cpu_memory_mb() -> int:
+    """
+    Get available CPU (system) memory in megabytes.
+
+    Uses psutil if available, falls back to /proc/meminfo on Linux.
+
+    Returns:
+        Available system memory in MB, or 0 if detection fails.
+    """
+    # Try psutil first
+    try:
+        import psutil
+
+        return int(psutil.virtual_memory().available / (1024 * 1024))
+    except ImportError:
+        pass
+
+    # Fallback: parse /proc/meminfo (Linux only)
+    try:
+        with open("/proc/meminfo") as f:
+            for line in f:
+                if line.startswith("MemAvailable:"):
+                    # Value is in kB
+                    kb = int(line.split()[1])
+                    return kb // 1024
+    except Exception:
+        pass
+
+    logger.warning("could_not_detect_available_cpu_memory")
+    return 0
 
 
 def get_available_memory_mb(device: int = 0) -> int:

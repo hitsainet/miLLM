@@ -42,8 +42,6 @@ dependencies = [
     "bitsandbytes>=0.45.0",
     "accelerate>=1.2.0",
     "safetensors>=0.5.0",
-    "mamba-ssm>=2.2.0",
-    "causal-conv1d>=1.4.0",
 
     # SSE for streaming
     "sse-starlette>=2.2.0",
@@ -57,6 +55,11 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+cuda = [
+    # Optimized CUDA kernels for SSM/Mamba models (requires CUDA toolkit to build)
+    "mamba-ssm>=2.2.0",
+    "causal-conv1d>=1.4.0",
+]
 dev = [
     # Testing
     "pytest>=8.3.0",

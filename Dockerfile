@@ -27,6 +27,11 @@ COPY millm/__init__.py millm/__init__.py
 # Install dependencies (torch bundles its own CUDA runtime)
 RUN pip install --no-cache-dir . || pip install --no-cache-dir -e .
 
+# Install mamba-ssm from pre-built wheels (requires CUDA at compile time,
+# so we use pre-built wheels that match the torch CUDA version)
+RUN pip install --no-cache-dir causal-conv1d mamba-ssm --no-build-isolation 2>/dev/null || \
+    echo "WARN: mamba-ssm not available as pre-built wheel, SSM models will use slow torch fallback"
+
 # Copy application code
 COPY millm/ /app/millm/
 COPY alembic.ini /app/

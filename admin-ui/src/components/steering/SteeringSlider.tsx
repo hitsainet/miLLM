@@ -1,6 +1,6 @@
 import { useState, useEffect } from 'react';
 import { X, Hash, ExternalLink } from 'lucide-react';
-import { Button, Slider } from '@components/common';
+import { Button } from '@components/common';
 
 interface SteeringSliderProps {
   featureIndex: number;
@@ -21,8 +21,8 @@ export function SteeringSlider({
   onRemove,
   disabled,
   label,
-  min = -200,
-  max = 200,
+  min = -300,
+  max = 300,
   step = 0.1,
 }: SteeringSliderProps) {
   const [localStrength, setLocalStrength] = useState(strength);
@@ -35,19 +35,6 @@ export function SteeringSlider({
 
   const roundToStep = (value: number) => Math.round(value * 10) / 10;
 
-  const handleSliderChange = (value: number) => {
-    // Only update local state during drag - no API call
-    const rounded = roundToStep(value);
-    setLocalStrength(rounded);
-    setInputValue(String(rounded));
-  };
-
-  const handleSliderCommit = (value: number) => {
-    // Call API only when drag ends
-    const rounded = roundToStep(value);
-    onStrengthChange(rounded);
-  };
-
   const handleInputChange = (e: React.ChangeEvent<HTMLInputElement>) => {
     setInputValue(e.target.value);
   };
@@ -55,12 +42,12 @@ export function SteeringSlider({
   const handleInputBlur = () => {
     const value = parseFloat(inputValue);
     if (!isNaN(value)) {
-      const clamped = Math.round(Math.max(min, Math.min(max, value)));
+      const clamped = roundToStep(Math.max(min, Math.min(max, value)));
       setLocalStrength(clamped);
       setInputValue(String(clamped));
       onStrengthChange(clamped);
     } else {
-      setInputValue(String(Math.round(localStrength)));
+      setInputValue(String(localStrength));
     }
   };
 
@@ -102,38 +89,26 @@ export function SteeringSlider({
         )}
       </div>
 
-      {/* Slider */}
-      <div className="flex-1">
-        <Slider
+      {/* Strength Input - direct entry with 0.1 step arrows */}
+      <div className="flex-1 flex items-center justify-center">
+        <input
+          type="number"
+          step={step}
           min={min}
           max={max}
-          step={step}
-          value={localStrength}
-          onChange={handleSliderChange}
-          onChangeEnd={handleSliderCommit}
+          value={inputValue}
+          onChange={handleInputChange}
+          onBlur={handleInputBlur}
+          onKeyDown={handleInputKeyDown}
           disabled={disabled}
-          showValue={false}
+          className={`
+            w-24 px-3 py-1.5 bg-slate-900/50 border border-slate-700 rounded-lg text-center text-sm font-mono
+            focus:outline-none focus:ring-1 focus:ring-primary-500 focus:border-primary-500
+            disabled:opacity-50 disabled:cursor-not-allowed
+            ${getStrengthColor()}
+          `}
         />
       </div>
-
-      {/* Value Input */}
-      <input
-        type="number"
-        step={step}
-        min={min}
-        max={max}
-        value={inputValue}
-        onChange={handleInputChange}
-        onBlur={handleInputBlur}
-        onKeyDown={handleInputKeyDown}
-        disabled={disabled}
-        className={`
-          w-16 px-2 py-1 bg-slate-900/50 border border-slate-700 rounded text-center text-sm font-mono
-          focus:outline-none focus:ring-1 focus:ring-primary-500 focus:border-primary-500
-          disabled:opacity-50 disabled:cursor-not-allowed
-          ${getStrengthColor()}
-        `}
-      />
 
       {/* Remove Button */}
       <Button

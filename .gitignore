@@ -1,3 +1,8 @@
+# Docusaurus manual
+manual/node_modules/
+manual/build/
+manual/.docusaurus/
+
 # Python
 __pycache__/
 *.py[cod]

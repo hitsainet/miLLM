@@ -14,7 +14,7 @@ import {
 import { useUIStore } from '@/stores/uiStore';
 
 const navItems = [
-  { id: 'dashboard', label: 'Dashboard', path: '/', icon: LayoutDashboard },
+  { id: 'dashboard', label: 'Dashboard', path: '/dashboard', icon: LayoutDashboard },
   { id: 'models', label: 'Models', path: '/models', icon: Server },
   { id: 'sae', label: 'SAEs', path: '/sae', icon: Layers },
   { id: 'steering', label: 'Steering', path: '/steering', icon: Sliders },

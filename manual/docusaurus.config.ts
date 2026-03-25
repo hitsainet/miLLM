@@ -5,7 +5,7 @@ import type * as Preset from '@docusaurus/preset-classic';
 const config: Config = {
   title: 'miLLM Manual',
   tagline: 'Mechanistic Interpretability LLM Server — Feature Steering & Real-Time Probing',
-  favicon: 'img/favicon.ico',
+  favicon: 'img/favicon.svg',
 
   url: 'https://onegaishimas.github.io',
   baseUrl: '/miLLM/',

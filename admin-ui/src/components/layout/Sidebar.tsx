@@ -10,6 +10,7 @@ import {
   Settings,
   ChevronLeft,
   ChevronRight,
+  BookOpen,
 } from 'lucide-react';
 import { useUIStore } from '@/stores/uiStore';
 
@@ -44,12 +45,23 @@ export function Sidebar() {
             <Zap className="w-5 h-5 text-white" />
           </div>
           {!collapsed && (
-            <div className="overflow-hidden">
-              <div className="text-lg font-bold text-slate-100">miLLM</div>
-              <div className="text-[10px] text-slate-500 leading-tight">
-                Interpretability Server
+            <>
+              <div className="overflow-hidden">
+                <div className="text-lg font-bold text-slate-100">miLLM</div>
+                <div className="text-[10px] text-slate-500 leading-tight">
+                  Interpretability Server
+                </div>
               </div>
-            </div>
+              <a
+                href="https://hitsainet.github.io/miLLM/"
+                target="_blank"
+                rel="noopener noreferrer"
+                title="User Manual"
+                className="ml-auto p-1 rounded hover:bg-slate-700 transition-colors"
+              >
+                <BookOpen className="w-4 h-4 text-slate-400 hover:text-primary-400" />
+              </a>
+            </>
           )}
         </div>
       </div>

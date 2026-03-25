@@ -5,6 +5,8 @@ title: Model Management
 
 # Model Management
 
+![miLLM Models Page](/img/miLLM_Models_01.jpg)
+
 ## Loading a Model
 
 1. Navigate to **Models** in the sidebar

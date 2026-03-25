@@ -5,6 +5,8 @@ title: Dashboard &amp; Navigation
 
 # Dashboard &amp; Navigation
 
+![miLLM Dashboard](/img/miLLM_Dashboard_01.jpg)
+
 ## Sidebar Navigation
 
 The collapsible sidebar provides access to all pages. A persistent **status bar** at the top right shows the loaded model, SAE status, GPU metrics, and WebSocket connection state.
@@ -69,6 +71,16 @@ The persistent bar across the top right of every page shows:
 - **SAE status** — `No SAE` badge if not attached
 - **GPU metrics** — utilization %, memory, temperature (compact)
 - **Connection** — `Connected` (green) or `Disconnected` (red)
+
+## Settings Page
+
+![miLLM Settings Page](/img/miLLM_Settings_01.jpg)
+
+The **Settings** page provides:
+- **Theme toggle** — Switch between light and dark mode
+- **Connection status** — WebSocket state and reconnect button
+- **Server information** — API version, base paths, WebSocket endpoint
+- **Keyboard shortcuts** reference
 
 :::tip Keyboard Shortcuts
 - `G + D` — Go to Dashboard

@@ -5,6 +5,8 @@ title: Profiles
 
 # Profiles
 
+![miLLM Profiles Page](/img/miLLM_Profiles_01.jpg)
+
 Profiles save steering configurations for reuse and sharing.
 
 ## Creating a Profile

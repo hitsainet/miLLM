@@ -5,6 +5,8 @@ title: SAE Management
 
 # SAE Management
 
+![miLLM SAEs Page](/img/miLLM_SAEs_01.jpg)
+
 A Sparse Autoencoder (SAE) must be attached to a model layer before steering or monitoring can work.
 
 ## Downloading SAEs

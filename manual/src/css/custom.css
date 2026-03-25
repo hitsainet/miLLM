@@ -56,9 +56,18 @@
   box-shadow: 0 2px 8px rgba(0, 0, 0, 0.08);
 }
 
+[data-theme='dark'] .navbar {
+  background: linear-gradient(135deg, #0f172a 0%, #134e4a 100%);
+  border-bottom: 2px solid #14b8a6;
+}
+
 .navbar__title {
   font-weight: 800;
   letter-spacing: -0.02em;
+}
+
+[data-theme='dark'] .navbar__title {
+  color: #2dd4bf;
 }
 
 /* ========== Hero / Landing Page ========== */
@@ -161,13 +170,27 @@ code {
 }
 
 /* ========== Sidebar ========== */
+[data-theme='dark'] .menu {
+  background-color: #0f172a;
+}
+
 .menu__link--active:not(.menu__link--sublist) {
   border-right: 3px solid var(--ifm-color-primary);
   font-weight: 600;
 }
 
+[data-theme='dark'] .menu__link--active:not(.menu__link--sublist) {
+  background-color: rgba(45, 212, 191, 0.12);
+  color: #2dd4bf;
+}
+
 .menu__list-item-collapsible:hover {
   background-color: var(--ifm-menu-color-background-active);
+}
+
+[data-theme='dark'] .menu__link:hover {
+  color: #5eead4;
+  background-color: rgba(45, 212, 191, 0.08);
 }
 
 /* ========== TOC (right sidebar) ========== */
@@ -209,6 +232,28 @@ h2 {
 
 .breadcrumbs__link:hover {
   color: var(--ifm-color-primary);
+}
+
+/* ========== Links & Accents ========== */
+[data-theme='dark'] a {
+  color: #2dd4bf;
+}
+
+[data-theme='dark'] a:hover {
+  color: #5eead4;
+}
+
+[data-theme='dark'] .pagination-nav__link {
+  border-color: #334155;
+  background: #1e293b;
+}
+
+[data-theme='dark'] .pagination-nav__link:hover {
+  border-color: #14b8a6;
+}
+
+[data-theme='dark'] .pagination-nav__sublabel {
+  color: #94a3b8;
 }
 
 /* ========== Scrollbar (dark mode) ========== */

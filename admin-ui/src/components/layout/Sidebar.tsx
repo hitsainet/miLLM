@@ -21,6 +21,9 @@ const navItems = [
   { id: 'steering', label: 'Steering', path: '/steering', icon: Sliders },
   { id: 'monitoring', label: 'Probe', path: '/monitoring', icon: Activity },
   { id: 'profiles', label: 'Profiles', path: '/profiles', icon: FileJson },
+];
+
+const bottomNavItems = [
   { id: 'settings', label: 'Settings', path: '/settings', icon: Settings },
 ];
 
@@ -45,51 +48,79 @@ export function Sidebar() {
             <Zap className="w-5 h-5 text-white" />
           </div>
           {!collapsed && (
-            <>
-              <div className="overflow-hidden">
-                <div className="text-lg font-bold text-slate-100">miLLM</div>
-                <div className="text-[10px] text-slate-500 leading-tight">
-                  Interpretability Server
-                </div>
+            <div className="overflow-hidden">
+              <div className="text-lg font-bold text-slate-100">miLLM</div>
+              <div className="text-[10px] text-slate-500 leading-tight">
+                Interpretability Server
               </div>
-              <a
-                href="https://hitsainet.github.io/miLLM/"
-                target="_blank"
-                rel="noopener noreferrer"
-                title="User Manual"
-                className="ml-auto p-1 rounded hover:bg-slate-700 transition-colors"
-              >
-                <BookOpen className="w-4 h-4 text-slate-400 hover:text-primary-400" />
-              </a>
-            </>
+            </div>
           )}
         </div>
       </div>
 
-      {/* Navigation */}
-      <nav className="p-3 space-y-1">
-        {navItems.map((item) => (
-          <NavLink
-            key={item.id}
-            to={item.path}
-            className={({ isActive }) => `
-              flex items-center gap-3 px-3 py-2.5 rounded-lg
-              transition-all duration-200
-              ${isActive
-                ? 'bg-primary-500/10 text-primary-400'
-                : 'text-slate-400 hover:bg-slate-800 hover:text-slate-200'
-              }
-              ${collapsed ? 'justify-center' : ''}
-            `}
-            title={collapsed ? item.label : undefined}
-          >
-            <item.icon className="w-5 h-5 flex-shrink-0" />
-            {!collapsed && (
-              <span className="text-sm font-medium">{item.label}</span>
-            )}
-          </NavLink>
-        ))}
-      </nav>
+      {/* Navigation - flex column to push settings to bottom */}
+      <div className="flex flex-col h-[calc(100vh-4rem)]">
+        <nav className="p-3 space-y-1 flex-1">
+          {navItems.map((item) => (
+            <NavLink
+              key={item.id}
+              to={item.path}
+              className={({ isActive }) => `
+                flex items-center gap-3 px-3 py-2.5 rounded-lg
+                transition-all duration-200
+                ${isActive
+                  ? 'bg-primary-500/10 text-primary-400'
+                  : 'text-slate-400 hover:bg-slate-800 hover:text-slate-200'
+                }
+                ${collapsed ? 'justify-center' : ''}
+              `}
+              title={collapsed ? item.label : undefined}
+            >
+              <item.icon className="w-5 h-5 flex-shrink-0" />
+              {!collapsed && (
+                <span className="text-sm font-medium">{item.label}</span>
+              )}
+            </NavLink>
+          ))}
+        </nav>
+
+        {/* Bottom nav (Settings + Manual link) */}
+        <div className="p-3 border-t border-slate-700/50">
+          {bottomNavItems.map((item) => (
+            <div key={item.id} className="flex items-center">
+              <NavLink
+                to={item.path}
+                className={({ isActive }) => `
+                  flex-1 flex items-center gap-3 px-3 py-2.5 rounded-lg
+                  transition-all duration-200
+                  ${isActive
+                    ? 'bg-primary-500/10 text-primary-400'
+                    : 'text-slate-400 hover:bg-slate-800 hover:text-slate-200'
+                  }
+                  ${collapsed ? 'justify-center' : ''}
+                `}
+                title={collapsed ? item.label : undefined}
+              >
+                <item.icon className="w-5 h-5 flex-shrink-0" />
+                {!collapsed && (
+                  <span className="text-sm font-medium">{item.label}</span>
+                )}
+              </NavLink>
+              {!collapsed && (
+                <a
+                  href="https://hitsainet.github.io/miLLM/"
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  title="User Manual"
+                  className="flex-shrink-0 p-2 rounded hover:bg-slate-700 transition-colors"
+                >
+                  <BookOpen className="w-4 h-4 text-slate-400 hover:text-primary-400" />
+                </a>
+              )}
+            </div>
+          ))}
+        </div>
+      </div>
 
       {/* Collapse Toggle */}
       <button

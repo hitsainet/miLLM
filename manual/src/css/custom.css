@@ -1,52 +1,52 @@
 /**
- * miStudio Manual — Custom Theme
- * Emerald accent matching the miStudio application UI (slate + emerald palette)
+ * miLLM Manual — Custom Theme
+ * Teal/cyan accent matching the miLLM application UI (slate + teal palette)
  */
 
 /* ========== Light Mode ========== */
 :root {
-  --ifm-color-primary: #059669;
-  --ifm-color-primary-dark: #047857;
-  --ifm-color-primary-darker: #046c4e;
-  --ifm-color-primary-darkest: #035c42;
-  --ifm-color-primary-light: #10b981;
-  --ifm-color-primary-lighter: #34d399;
-  --ifm-color-primary-lightest: #6ee7b7;
+  --ifm-color-primary: #0d9488;
+  --ifm-color-primary-dark: #0f766e;
+  --ifm-color-primary-darker: #115e59;
+  --ifm-color-primary-darkest: #134e4a;
+  --ifm-color-primary-light: #14b8a6;
+  --ifm-color-primary-lighter: #2dd4bf;
+  --ifm-color-primary-lightest: #5eead4;
   --ifm-code-font-size: 95%;
   --ifm-font-family-base: 'Inter', system-ui, -apple-system, sans-serif;
   --ifm-heading-font-weight: 700;
-  --docusaurus-highlighted-code-line-bg: rgba(5, 150, 105, 0.1);
+  --docusaurus-highlighted-code-line-bg: rgba(13, 148, 136, 0.1);
 
   /* Sidebar */
-  --ifm-menu-color-active: #059669;
-  --ifm-menu-color-background-active: rgba(5, 150, 105, 0.08);
+  --ifm-menu-color-active: #0d9488;
+  --ifm-menu-color-background-active: rgba(13, 148, 136, 0.08);
 
   /* Table styling */
-  --ifm-table-stripe-background: rgba(5, 150, 105, 0.04);
+  --ifm-table-stripe-background: rgba(13, 148, 136, 0.04);
   --ifm-table-border-color: #e2e8f0;
 }
 
-/* ========== Dark Mode (matches miStudio's slate-950 theme) ========== */
+/* ========== Dark Mode (matches miLLM's slate-900 dark theme) ========== */
 [data-theme='dark'] {
-  --ifm-color-primary: #34d399;
-  --ifm-color-primary-dark: #10b981;
-  --ifm-color-primary-darker: #059669;
-  --ifm-color-primary-darkest: #047857;
-  --ifm-color-primary-light: #6ee7b7;
-  --ifm-color-primary-lighter: #a7f3d0;
-  --ifm-color-primary-lightest: #d1fae5;
+  --ifm-color-primary: #2dd4bf;
+  --ifm-color-primary-dark: #14b8a6;
+  --ifm-color-primary-darker: #0d9488;
+  --ifm-color-primary-darkest: #0f766e;
+  --ifm-color-primary-light: #5eead4;
+  --ifm-color-primary-lighter: #99f6e4;
+  --ifm-color-primary-lightest: #ccfbf1;
   --ifm-background-color: #0f172a;
   --ifm-background-surface-color: #1e293b;
   --ifm-navbar-background-color: #0f172a;
   --ifm-footer-background-color: #020617;
-  --docusaurus-highlighted-code-line-bg: rgba(52, 211, 153, 0.15);
+  --docusaurus-highlighted-code-line-bg: rgba(45, 212, 191, 0.15);
 
   /* Sidebar */
-  --ifm-menu-color-active: #34d399;
-  --ifm-menu-color-background-active: rgba(52, 211, 153, 0.1);
+  --ifm-menu-color-active: #2dd4bf;
+  --ifm-menu-color-background-active: rgba(45, 212, 191, 0.1);
 
   /* Table styling */
-  --ifm-table-stripe-background: rgba(52, 211, 153, 0.05);
+  --ifm-table-stripe-background: rgba(45, 212, 191, 0.05);
   --ifm-table-border-color: #334155;
 }
 
@@ -63,11 +63,11 @@
 
 /* ========== Hero / Landing Page ========== */
 .hero {
-  background: linear-gradient(135deg, #059669 0%, #0d9488 50%, #0891b2 100%);
+  background: linear-gradient(135deg, #0d9488 0%, #0891b2 50%, #0284c7 100%);
 }
 
 [data-theme='dark'] .hero {
-  background: linear-gradient(135deg, #064e3b 0%, #134e4a 50%, #164e63 100%);
+  background: linear-gradient(135deg, #134e4a 0%, #164e63 50%, #0c4a6e 100%);
 }
 
 /* ========== Admonitions (make them pop) ========== */
@@ -78,8 +78,8 @@
 }
 
 .alert--tip {
-  --ifm-alert-background-color: rgba(16, 185, 129, 0.08);
-  --ifm-alert-border-color: #10b981;
+  --ifm-alert-background-color: rgba(13, 148, 136, 0.08);
+  --ifm-alert-border-color: #14b8a6;
   border-left-width: 4px;
 }
 
@@ -100,7 +100,7 @@
 }
 
 [data-theme='dark'] .alert--tip {
-  --ifm-alert-background-color: rgba(16, 185, 129, 0.12);
+  --ifm-alert-background-color: rgba(13, 148, 136, 0.12);
 }
 
 [data-theme='dark'] .alert--warning {
@@ -135,11 +135,11 @@ table tbody tr:nth-child(even) {
 }
 
 table tbody tr:hover {
-  background-color: rgba(5, 150, 105, 0.08);
+  background-color: rgba(13, 148, 136, 0.08);
 }
 
 [data-theme='dark'] table tbody tr:hover {
-  background-color: rgba(52, 211, 153, 0.08);
+  background-color: rgba(45, 212, 191, 0.08);
 }
 
 /* ========== Code Blocks ========== */
@@ -151,12 +151,12 @@ table tbody tr:hover {
 code {
   border-radius: 4px;
   padding: 2px 6px;
-  background-color: rgba(5, 150, 105, 0.08);
+  background-color: rgba(13, 148, 136, 0.08);
   color: var(--ifm-color-primary-dark);
 }
 
 [data-theme='dark'] code {
-  background-color: rgba(52, 211, 153, 0.1);
+  background-color: rgba(45, 212, 191, 0.1);
   color: var(--ifm-color-primary-light);
 }
 

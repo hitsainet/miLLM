@@ -7,35 +7,68 @@ title: Dashboard &amp; Navigation
 
 ## Sidebar Navigation
 
-The collapsible sidebar provides access to all pages:
+The collapsible sidebar provides access to all pages. A persistent **status bar** at the top right shows the loaded model, SAE status, GPU metrics, and WebSocket connection state.
 
-| Page | Icon | Purpose |
-|------|------|---------|
-| **Dashboard** | Home | System overview, GPU metrics, quick actions |
-| **Models** | Server | Download, load, unload, and manage LLMs |
-| **SAEs** | Layers | Download, attach, and manage Sparse Autoencoders |
-| **Steering** | Sliders | Configure feature steering values |
-| **Probe** | Activity | Real-time activation monitoring |
-| **Profiles** | FileJson | Save/load steering configurations |
-| **Settings** | Settings | Theme, connection status, server info |
+| Page | Purpose |
+|------|---------|
+| **Dashboard** | System overview, GPU metrics, quick start guide |
+| **Models** | Download, load, unload, and manage LLMs |
+| **SAEs** | Download, attach, and manage Sparse Autoencoders |
+| **Steering** | Configure feature steering values |
+| **Probe** | Real-time activation monitoring |
+| **Profiles** | Save/load steering configurations |
+| **Settings** | Theme, connection status, server info |
 
 ## Dashboard Overview
 
-The dashboard shows four status cards at a glance:
+### System Status
 
-- **Model:** Currently loaded model or "No Model" warning
-- **SAE:** Attached SAE and layer or "Not Attached" warning
-- **Steering:** Whether steering is enabled and feature count
-- **Probe:** Whether monitoring is active
+Four status cards show the current state at a glance:
 
-Below these, four GPU metric cards show real-time hardware status:
+| Card | States |
+|------|--------|
+| **Model** | `LOADED` (green, shows model name) or `No Model` warning |
+| **SAE** | `ATTACHED` (green, shows layer) or `NOT ATTACHED` (yellow) |
+| **Steering** | `ACTIVE` with feature count, or `WAITING` (attach SAE first) |
+| **Probe** | `LIVE` when monitoring, or `WAITING` (attach SAE first) |
 
-| Metric | Color Coding |
-|--------|-------------|
-| **GPU Utilization** | Percentage of compute in use |
-| **GPU Memory** | Used/Total in GB |
-| **GPU Temperature** | Green &lt;70°C, Yellow 70–85°C, Red ≥85°C |
-| **CPU Usage** | System CPU percentage |
+### System Metrics
+
+Four real-time GPU metric cards below the status:
+
+| Metric | Format | Notes |
+|--------|--------|-------|
+| **GPU Utilization** | Percentage (e.g., 24%) | 100% = fully utilized |
+| **GPU Memory** | Used/Total GB (e.g., 9.5/24.0 GB) | Watch for &gt;90% before starting jobs |
+| **GPU Temperature** | Degrees C (e.g., 64°C) | Green &lt;70°C, Yellow 70–85°C, Red ≥85°C |
+| **CPU Usage** | Percentage | System CPU load |
+
+### Quick Start Guide
+
+The dashboard includes a **step-by-step Quick Start** checklist:
+
+1. **Load a Model** — Download and load from HuggingFace *(green checkmark when complete)*
+2. **Download &amp; Attach SAE** — Get an SAE and hook it to a model layer
+3. **Configure Steering** — Add features and set strength values
+4. **Monitor Activations** — Watch which features fire during inference
+
+Steps unlock progressively — each step links directly to the relevant page.
+
+### Quick Actions
+
+Four shortcut buttons provide direct access to:
+- **Manage Model** → Models page
+- **Attach SAE** → SAEs page
+- **Configure Steering** → Steering page
+- **View Probe** → Probe page
+
+## Top Status Bar
+
+The persistent bar across the top right of every page shows:
+- **Model name** (teal badge) or nothing if unloaded
+- **SAE status** — `No SAE` badge if not attached
+- **GPU metrics** — utilization %, memory, temperature (compact)
+- **Connection** — `Connected` (green) or `Disconnected` (red)
 
 :::tip Keyboard Shortcuts
 - `G + D` — Go to Dashboard

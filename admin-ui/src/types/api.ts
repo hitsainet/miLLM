@@ -23,13 +23,14 @@ export interface ModelInfo {
   source: ModelSource;
   quantization: QuantizationType;
   params: string;
-  memory_mb: number;
+  disk_size_mb: number | null;
+  estimated_memory_mb: number | null;
   local_path: string;
   status: ModelStatus;
   created_at: string;
   updated_at: string;
   locked?: boolean;
-  // Extended properties
+  // Extended properties (injected for loaded model)
   num_parameters?: number;
   memory_footprint?: number;
   device?: string;

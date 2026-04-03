@@ -373,7 +373,7 @@ export function ModelDetailsModal({
                 <span className="text-xs">Disk Size</span>
               </div>
               <p className="text-lg font-semibold text-slate-200">
-                {model.memory_mb ? formatSize(model.memory_mb) : 'Unknown'}
+                {model.disk_size_mb ? formatSize(model.disk_size_mb) : 'Unknown'}
               </p>
             </div>
             <div className="bg-slate-800/50 rounded-lg p-3">

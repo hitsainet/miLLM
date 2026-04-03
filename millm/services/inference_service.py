@@ -164,6 +164,34 @@ class InferenceService:
             raise RuntimeError("No model is loaded")
         return self._model_state.current.tokenizer
 
+    def _get_input_device(self) -> str:
+        """
+        Return the device where model inputs (input_ids) should be placed.
+
+        For device_map="auto" models, model.device returns "cpu" (a dispatch
+        device), which doesn't reflect where the embedding layer actually lives.
+        We inspect hf_device_map first, then fall back to the first parameter's
+        device, and finally to self._device.
+        """
+        if not self._model_state.is_loaded:
+            return self._device
+        hf_model = self._model_state.current.model
+        # device_map models expose hf_device_map; find where embeddings live
+        device_map = getattr(hf_model, "hf_device_map", None)
+        if device_map:
+            for key in ("", "model.embed_tokens", "transformer.wte",
+                        "model.embedding", "model.shared", "model.embed"):
+                if key in device_map:
+                    return str(device_map[key])
+            # Fall back to the device of the first mapped layer
+            first = next(iter(device_map.values()))
+            return str(first)
+        # Non-device_map model: use first parameter device
+        try:
+            return str(next(hf_model.parameters()).device)
+        except StopIteration:
+            return self._device
+
     @property
     def prefix_cache(self) -> PrefixCache:
         """Get the prefix cache."""
@@ -297,7 +325,7 @@ class InferenceService:
                 cache_implementation="static",
             )
         kwargs = gen_config.to_generate_kwargs()
-        kwargs.update({k: v.to(self._device) for k, v in inputs.items()})
+        kwargs.update({k: v.to(self._get_input_device()) for k, v in inputs.items()})
         kwargs["pad_token_id"] = (
             self._tokenizer.pad_token_id or self._tokenizer.eos_token_id
         )
@@ -459,7 +487,7 @@ class InferenceService:
 
         async with self._request_queue.acquire():
             # Tokenize input
-            inputs = self._tokenizer(prompt, return_tensors="pt").to(self._device)
+            inputs = self._tokenizer(prompt, return_tensors="pt").to(self._get_input_device())
             prompt_tokens = inputs.input_ids.shape[1]
 
             # Build generation config
@@ -591,7 +619,7 @@ class InferenceService:
 
         async with self._request_queue.acquire():
             # Tokenize
-            inputs = self._tokenizer(prompt, return_tensors="pt").to(self._device)
+            inputs = self._tokenizer(prompt, return_tensors="pt").to(self._get_input_device())
 
             # Set up streamer
             streamer = TextIteratorStreamer(
@@ -793,7 +821,7 @@ class InferenceService:
             for i, prompt_text in enumerate(prompts):
                 # Tokenize input
                 inputs = self._tokenizer(prompt_text, return_tensors="pt").to(
-                    self._device
+                    self._get_input_device()
                 )
                 prompt_tokens = inputs.input_ids.shape[1]
                 self._check_context_length(prompt_tokens, gen_config.max_new_tokens)
@@ -892,7 +920,7 @@ class InferenceService:
                 # Tokenize
                 encoded = self._tokenizer(
                     text, return_tensors="pt", padding=True, truncation=True
-                ).to(self._device)
+                ).to(self._get_input_device())
                 total_tokens += encoded.input_ids.shape[1]
 
                 # Get embeddings from last hidden layer

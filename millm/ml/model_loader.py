@@ -526,14 +526,16 @@ class ModelLoadContext:
         except Exception:
             pass
 
-        # Get device info
+        # Get device info — check hf_device_map first since device_map="auto"
+        # models always have model.device == "cpu" (the dispatch device), which is
+        # misleading. hf_device_map shows where layers actually live.
         device_str = "unknown"
         try:
-            if hasattr(self.model, "device"):
+            if hasattr(self.model, "hf_device_map") and self.model.hf_device_map:
+                devices = set(str(d) for d in self.model.hf_device_map.values())
+                device_str = ", ".join(sorted(devices)) if devices else "auto"
+            elif hasattr(self.model, "device"):
                 device_str = str(self.model.device)
-            elif hasattr(self.model, "hf_device_map"):
-                devices = set(self.model.hf_device_map.values())
-                device_str = ", ".join(str(d) for d in devices) if devices else "auto"
         except Exception:
             pass
 

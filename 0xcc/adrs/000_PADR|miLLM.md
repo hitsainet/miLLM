@@ -439,7 +439,7 @@ class SAENotAttachedError(MiLLMError):
 # api/schemas/model.py
 class ModelDownloadRequest(BaseModel):
     repo_id: str = Field(..., example="google/gemma-2-2b")
-    quantization: Literal["Q4", "Q8", "FP16"] = "Q4"
+    quantization: Literal["FP32", "FP16", "Q8", "Q4", "Q2"] = "Q4"
     trust_remote_code: bool = False
     hf_token: Optional[str] = None
 
@@ -837,7 +837,7 @@ npm run dev
 | WebSocket | python-socketio | ^5.10 | Real-time communication |
 | ML Framework | PyTorch | ^2.0 | Model inference |
 | Transformers | transformers | ^4.36 | Model loading |
-| Quantization | bitsandbytes | ^0.42 | 4-bit/8-bit quantization |
+| Quantization | bitsandbytes | ^0.42 | FP32/FP16/Q8/Q4/Q2 quantization |
 | HuggingFace | huggingface-hub | ^0.20 | Model downloads |
 | SAE | sae-lens | ^0.x | SAE loading and operations |
 | Logging | structlog | ^24.1 | Structured logging |

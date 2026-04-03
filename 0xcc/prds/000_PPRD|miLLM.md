@@ -132,7 +132,7 @@ Discovery → Installation → Model Setup → SAE Configuration → Steering Ex
 
 1. **Discovery:** User learns about miLLM's SAE steering capabilities
 2. **Installation:** Docker pull or pip install, single command startup
-3. **Model Setup:** Download model from HuggingFace, select quantization
+3. **Model Setup:** Preview model metadata from HuggingFace, select quantization (FP32/FP16/Q8/Q4/Q2), download
 4. **SAE Configuration:** Download SAE, attach to model layer
 5. **Steering Experimentation:** Adjust features, observe effects in real-time
 6. **Profile Management:** Save successful configurations for reuse
@@ -152,9 +152,10 @@ Discovery → Installation → Model Setup → SAE Configuration → Steering Ex
 #### Model Management
 - Hugging Face model downloading and loading (Transformers format)
 - Support for safetensors and pytorch formats
-- 4-bit and 8-bit quantization via bitsandbytes
+- Multiple quantization levels via bitsandbytes (FP32, FP16, Q8, Q4, Q2)
 - Local model caching
-- Memory requirement estimation
+- Memory requirement estimation with per-quantization size previews
+- Rich model preview with HuggingFace metadata (downloads, likes, tags, license, architecture)
 
 #### SAE Management
 - SAE downloading from Hugging Face (SAELens format and compatible formats)
@@ -239,10 +240,11 @@ Organized by logical workflow (matching UI structure):
 #### Models (FR-1.x)
 - FR-1.1: Download models from Hugging Face by identifier
 - FR-1.2: Load models in Transformers format (safetensors/pytorch)
-- FR-1.3: Support 4-bit and 8-bit quantization
+- FR-1.3: Support multiple quantization levels (FP32, FP16, Q8, Q4, Q2)
 - FR-1.4: Cache downloaded models locally
-- FR-1.5: Display memory requirements before loading
+- FR-1.5: Display memory requirements before loading with per-quantization estimates
 - FR-1.6: Support extensible model formats via Transformers
+- FR-1.7: Preview model metadata from HuggingFace (downloads, likes, tags, license, architecture) before downloading
 
 #### SAEs (FR-2.x)
 - FR-2.1: Download SAEs from Hugging Face by identifier
@@ -346,9 +348,10 @@ Features organized by UI workflow tabs, with requirements matrix:
 
 **Key Capabilities:**
 - HuggingFace repository search/download
-- Quantization selection (Q4, Q8, FP16)
+- Quantization selection (FP32, FP16, Q8, Q4, Q2)
 - Model loading/unloading
-- Memory estimation display
+- Memory estimation display with per-quantization breakdown
+- Rich model preview with HuggingFace metadata and download-from-preview
 - Local cache management
 
 **Dependencies:** None (foundational)

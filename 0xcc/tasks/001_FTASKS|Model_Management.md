@@ -238,7 +238,7 @@
   - [x] 10.2 Implement LoadedModelState singleton class with thread-safe access
   - [x] 10.3 Implement ModelLoadContext context manager for safe loading
   - [x] 10.4 Implement ModelLoader class with load() method
-  - [x] 10.5 Add BitsAndBytesConfig support for Q4 and Q8 quantization
+  - [x] 10.5 Add BitsAndBytesConfig support for all quantization levels (FP32, FP16, Q8, Q4, Q2)
   - [x] 10.6 Implement unload() method with GPU memory cleanup
   - [x] 10.7 Write unit tests in `tests/unit/ml/test_model_loader.py`
 

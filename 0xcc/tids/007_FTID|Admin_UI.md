@@ -140,18 +140,45 @@ export default defineConfig({
 **src/types/api.ts**
 ```typescript
 // Model Types
+export type QuantizationLevel = 'FP32' | 'FP16' | 'Q8' | 'Q4' | 'Q2';
+
 export interface ModelInfo {
   id: string;
   name: string;
   device: string;
   dtype: string;
+  quantization: QuantizationLevel;
   loaded_at: string;
+}
+
+export interface ModelDownloadRequest {
+  repo_id: string;
+  quantization: QuantizationLevel;
+  trust_remote_code?: boolean;
+  hf_token?: string;
 }
 
 export interface LoadModelRequest {
   model_id: string;
   device?: 'auto' | 'cuda' | 'cpu';
-  dtype?: 'auto' | 'float16' | 'bfloat16' | 'float32';
+  quantization?: QuantizationLevel;
+}
+
+export interface ModelPreviewInfo {
+  repo_id: string;
+  downloads: number;
+  likes: number;
+  pipeline_tag: string | null;
+  model_type: string | null;
+  architectures: string[];
+  tags: string[];
+  license: string | null;
+  language: string | null;
+  parameter_count: number | null;
+  memory_requirements: Record<QuantizationLevel, {
+    estimated_mb: number;
+    bytes_per_param: number;
+  }>;
 }
 
 // SAE Types
@@ -613,8 +640,12 @@ async function request<T>(
 export const api = {
   // Models
   getModel: () => request<ModelInfo | null>('GET', '/api/models'),
-  loadModel: (req: LoadModelRequest) =>
+  previewModel: (repoId: string) =>
+    request<ModelPreviewInfo>('GET', `/api/models/preview?repo_id=${encodeURIComponent(repoId)}`),
+  downloadModel: (req: ModelDownloadRequest) =>
     request<ModelInfo>('POST', '/api/models', req),
+  loadModel: (req: LoadModelRequest) =>
+    request<ModelInfo>('POST', `/api/models/${req.model_id}/load`, req),
   unloadModel: () => request<void>('DELETE', '/api/models'),
 
   // SAE
@@ -1163,13 +1194,15 @@ interface ModalProps {
   title: string;
   children: React.ReactNode;
   footer?: React.ReactNode;
-  size?: 'sm' | 'md' | 'lg';
+  size?: 'sm' | 'md' | 'lg' | '2xl' | '3xl';
 }
 
 const sizeStyles = {
   sm: 'max-w-md',
   md: 'max-w-lg',
   lg: 'max-w-2xl',
+  '2xl': 'max-w-4xl',
+  '3xl': 'max-w-6xl',
 };
 
 export function Modal({ id, title, children, footer, size = 'md' }: ModalProps) {
@@ -1246,6 +1279,203 @@ export function Modal({ id, title, children, footer, size = 'md' }: ModalProps) 
     </div>
   );
 }
+```
+
+### 6.6 ModelDetailsModal
+
+**src/components/models/ModelDetailsModal.tsx**
+```typescript
+import { useState } from 'react';
+import { Modal } from '@/components/common/Modal';
+import { Button } from '@/components/common/Button';
+import { Badge } from '@/components/common/Badge';
+import type { ModelPreviewInfo, QuantizationLevel } from '@/types/api';
+
+interface ModelDetailsModalProps {
+  preview: ModelPreviewInfo | null;
+  onDownload: (quantization: QuantizationLevel, trustRemoteCode: boolean) => void;
+  isDownloading?: boolean;
+}
+
+const QUANTIZATION_LABELS: Record<QuantizationLevel, { label: string; description: string }> = {
+  FP32: { label: 'FP32 (Full Precision)', description: '~4 bytes/param + 20% overhead' },
+  FP16: { label: 'FP16 (Half Precision)', description: '~2 bytes/param + 20% overhead' },
+  Q8: { label: 'Q8 (8-bit)', description: '~1 byte/param + 20% overhead' },
+  Q4: { label: 'Q4 (4-bit) - Recommended', description: '~0.5 bytes/param + 20% overhead' },
+  Q2: { label: 'Q2 (2-bit)', description: '~0.25 bytes/param + 20% overhead' },
+};
+
+const QUANTIZATION_ORDER: QuantizationLevel[] = ['FP32', 'FP16', 'Q8', 'Q4', 'Q2'];
+
+export function ModelDetailsModal({
+  preview,
+  onDownload,
+  isDownloading = false,
+}: ModelDetailsModalProps) {
+  const [selectedQuantization, setSelectedQuantization] = useState<QuantizationLevel>('Q4');
+  const [trustRemoteCode, setTrustRemoteCode] = useState(false);
+
+  if (!preview) return null;
+
+  const formatBytes = (mb: number) => {
+    if (mb >= 1024) return `${(mb / 1024).toFixed(1)} GB`;
+    return `${mb.toFixed(0)} MB`;
+  };
+
+  return (
+    <Modal id="model-details" title={`Model Details: ${preview.repo_id}`} size="2xl"
+      footer={
+        <>
+          <Button variant="secondary" onClick={() => {}}>Cancel</Button>
+          <Button
+            variant="primary"
+            loading={isDownloading}
+            onClick={() => onDownload(selectedQuantization, trustRemoteCode)}
+          >
+            Download ({QUANTIZATION_LABELS[selectedQuantization].label.split(' ')[0]})
+          </Button>
+        </>
+      }
+    >
+      <div className="space-y-6">
+        {/* Metadata Section */}
+        <div className="grid grid-cols-3 gap-4">
+          <div className="text-center p-3 bg-slate-700/50 rounded-lg">
+            <div className="text-lg font-semibold text-slate-100">
+              {preview.downloads.toLocaleString()}
+            </div>
+            <div className="text-xs text-slate-400">Downloads</div>
+          </div>
+          <div className="text-center p-3 bg-slate-700/50 rounded-lg">
+            <div className="text-lg font-semibold text-slate-100">
+              {preview.likes.toLocaleString()}
+            </div>
+            <div className="text-xs text-slate-400">Likes</div>
+          </div>
+          <div className="text-center p-3 bg-slate-700/50 rounded-lg">
+            <div className="text-lg font-semibold text-slate-100">
+              {preview.pipeline_tag || 'N/A'}
+            </div>
+            <div className="text-xs text-slate-400">Pipeline</div>
+          </div>
+        </div>
+
+        {/* Architecture Info */}
+        <div>
+          <h4 className="text-sm font-medium text-slate-300 mb-2">Architecture</h4>
+          <p className="text-sm text-slate-400">
+            {preview.model_type || 'Unknown'} — {preview.architectures.join(', ') || 'N/A'}
+          </p>
+        </div>
+
+        {/* Tags */}
+        <div>
+          <h4 className="text-sm font-medium text-slate-300 mb-2">Tags</h4>
+          <div className="flex flex-wrap gap-2">
+            {preview.tags.map((tag) => (
+              <Badge key={tag} variant="default">{tag}</Badge>
+            ))}
+          </div>
+        </div>
+
+        {/* License & Language */}
+        <div className="flex gap-6">
+          <div>
+            <span className="text-sm text-slate-400">License:</span>{' '}
+            <span className="text-sm text-slate-200">{preview.license || 'N/A'}</span>
+          </div>
+          <div>
+            <span className="text-sm text-slate-400">Language:</span>{' '}
+            <span className="text-sm text-slate-200">{preview.language || 'N/A'}</span>
+          </div>
+        </div>
+
+        {/* Memory Requirements Table */}
+        <div>
+          <h4 className="text-sm font-medium text-slate-300 mb-2">Memory Requirements</h4>
+          <table className="w-full text-sm">
+            <thead>
+              <tr className="text-slate-400 border-b border-slate-700">
+                <th className="py-2 text-left">Format</th>
+                <th className="py-2 text-left">Description</th>
+                <th className="py-2 text-right">Est. Size</th>
+                <th className="py-2 text-center">Select</th>
+              </tr>
+            </thead>
+            <tbody>
+              {QUANTIZATION_ORDER.map((level) => (
+                <tr
+                  key={level}
+                  className={`border-b border-slate-700/50 cursor-pointer hover:bg-slate-700/30
+                    ${selectedQuantization === level ? 'bg-blue-900/20' : ''}`}
+                  onClick={() => setSelectedQuantization(level)}
+                >
+                  <td className="py-2.5 font-mono text-slate-200">{level}</td>
+                  <td className="py-2.5 text-slate-400">
+                    {QUANTIZATION_LABELS[level].description}
+                  </td>
+                  <td className="py-2.5 text-right font-mono text-slate-200">
+                    {formatBytes(preview.memory_requirements[level].estimated_mb)}
+                  </td>
+                  <td className="py-2.5 text-center">
+                    <input
+                      type="radio"
+                      name="quantization"
+                      checked={selectedQuantization === level}
+                      onChange={() => setSelectedQuantization(level)}
+                      className="accent-blue-500"
+                    />
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+
+        {/* Trust Remote Code */}
+        <div className="flex items-center gap-2">
+          <input
+            type="checkbox"
+            id="trustRemoteCode"
+            checked={trustRemoteCode}
+            onChange={(e) => setTrustRemoteCode(e.target.checked)}
+            className="accent-blue-500"
+          />
+          <label htmlFor="trustRemoteCode" className="text-sm text-amber-400">
+            Trust Remote Code
+            <span className="text-slate-500 ml-1">
+              — Required for some models (Phi-4, CodeLlama, etc.)
+            </span>
+          </label>
+        </div>
+      </div>
+    </Modal>
+  );
+}
+```
+
+### 6.7 ModelLoadForm Quantization Options
+
+The ModelLoadForm component provides quantization selection across all 5 levels:
+
+**src/components/models/ModelLoadForm.tsx** (quantization options)
+```typescript
+const QUANTIZATION_OPTIONS: { value: QuantizationLevel; label: string }[] = [
+  { value: 'FP32', label: 'FP32 (Full Precision)' },
+  { value: 'FP16', label: 'FP16 (Half Precision)' },
+  { value: 'Q8', label: 'Q8 (8-bit)' },
+  { value: 'Q4', label: 'Q4 (4-bit) - Recommended' },
+  { value: 'Q2', label: 'Q2 (2-bit)' },
+];
+
+// Memory estimation formula (bytes per parameter + 20% overhead)
+const MEMORY_ESTIMATES: Record<QuantizationLevel, number> = {
+  FP32: 4.0 * 1.2,   // 4 bytes/param + 20% overhead
+  FP16: 2.0 * 1.2,   // 2 bytes/param + 20% overhead
+  Q8: 1.0 * 1.2,     // 1 byte/param + 20% overhead
+  Q4: 0.5 * 1.2,     // 0.5 bytes/param + 20% overhead
+  Q2: 0.25 * 1.2,    // 0.25 bytes/param + 20% overhead
+};
 ```
 
 ---

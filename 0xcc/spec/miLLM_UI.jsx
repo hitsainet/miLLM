@@ -567,9 +567,11 @@ const ModelsPage = ({ models, onLoadModel }) => {
           <div style={styles.inputGroup}>
             <label style={styles.label}>Quantization Format</label>
             <select style={styles.select} value={quantization} onChange={(e) => setQuantization(e.target.value)}>
-              <option value="Q4">Q4 (4-bit) - Recommended</option>
+              <option value="FP32">FP32 (Full Precision)</option>
+              <option value="FP16">FP16 (Half Precision)</option>
               <option value="Q8">Q8 (8-bit)</option>
-              <option value="FP16">FP16 (Full Precision)</option>
+              <option value="Q4">Q4 (4-bit) - Recommended</option>
+              <option value="Q2">Q2 (2-bit)</option>
             </select>
           </div>
         </div>

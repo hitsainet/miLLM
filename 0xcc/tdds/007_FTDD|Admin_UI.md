@@ -88,6 +88,7 @@ App
 │   │
 │   ├── ModelsPage
 │   │   ├── ModelLoadForm
+│   │   ├── ModelDetailsModal
 │   │   └── LoadedModelCard
 │   │
 │   ├── SAEPage
@@ -122,7 +123,7 @@ App
 └── Shared Components
     ├── Button
     ├── Card
-    ├── Modal
+    ├── Modal (supports sizes: sm, md, lg, 2xl, 3xl)
     ├── Slider
     ├── Input
     ├── Select
@@ -528,7 +529,73 @@ export const socketClient = new SocketClient();
 2. Subscribe to WebSocket events for real-time updates
 3. Status cards update reactively from Zustand store
 
-### 6.2 Steering Page
+### 6.2 Models Page
+
+**Purpose:** Download, load, and manage models with preview and quantization selection
+
+**Layout:**
+```
+┌──────────────────────────────────────────────────────────┐
+│  Models                                                    │
+├──────────────────────────────────────────────────────────┤
+│  Download from HuggingFace                                 │
+│  ┌──────────────────────────────────────────────────────┐ │
+│  │ Repo ID: [google/gemma-2-2b_______]                   │ │
+│  │ Quantization: [FP32 | FP16 | Q8 | Q4* | Q2]         │ │
+│  │ Access Token: [________________________] (optional)   │ │
+│  │ ☐ Trust Remote Code                                   │ │
+│  │ [Preview]  [Download]                                 │ │
+│  └──────────────────────────────────────────────────────┘ │
+├──────────────────────────────────────────────────────────┤
+│  Your Models (3)                                           │
+│  ┌──────────────────────────────────────────────────────┐ │
+│  │ gemma-2-2b │ 2.5B │ Q4 │ 1.8 GB │ [Loaded] [Unload] │ │
+│  │ gemma-2-9b │ 9B   │ Q4 │ 5.2 GB │ [Ready]  [Load]   │ │
+│  └──────────────────────────────────────────────────────┘ │
+└──────────────────────────────────────────────────────────┘
+```
+
+**Model Preview Modal (2xl size):**
+```
+┌──────────────────────────────────────────────────────────┐
+│  Model Details: google/gemma-2-2b                   [×]  │
+├──────────────────────────────────────────────────────────┤
+│  Downloads: 1.2M  Likes: 456  Pipeline: text-generation │
+│  Architecture: Gemma2ForCausalLM                         │
+│  Tags: [pytorch] [safetensors] [gemma2]                  │
+│  License: gemma  Language: en                            │
+│                                                          │
+│  Memory Requirements                                     │
+│  ┌───────────┬──────────┬────────────┐                   │
+│  │ Format    │ Est. Size│  Select    │                   │
+│  ├───────────┼──────────┼────────────┤                   │
+│  │ FP32      │ 12.0 GB  │  ○         │                   │
+│  │ FP16      │  6.0 GB  │  ○         │                   │
+│  │ Q8        │  3.0 GB  │  ○         │                   │
+│  │ Q4        │  1.5 GB  │  ● (rec.)  │                   │
+│  │ Q2        │  0.8 GB  │  ○         │                   │
+│  └───────────┴──────────┴────────────┘                   │
+│  ☐ Trust Remote Code                                     │
+│                                      [Cancel] [Download] │
+└──────────────────────────────────────────────────────────┘
+```
+
+**Data Flow:**
+1. User enters repo ID and clicks Preview
+2. API fetches model metadata from HuggingFace
+3. ModelDetailsModal displays metadata with memory estimates for all 5 quantization levels
+4. User selects quantization via radio buttons and clicks Download
+5. Download progress tracked via WebSocket events
+6. Model appears in list with selected quantization level
+
+**Interactions:**
+- Preview: Opens ModelDetailsModal with fetched HuggingFace metadata
+- Download from preview: Initiates download with selected quantization and trust_remote_code
+- Download from form: Direct download without preview
+- Load: Loads a downloaded model into GPU memory
+- Unload: Unloads model from GPU memory with confirmation
+
+### 6.3 Steering Page
 
 **Purpose:** Configure feature steering values
 
@@ -554,7 +621,7 @@ export const socketClient = new SocketClient();
 - Clear button: Optimistic removal + API call
 - Enable toggle: Immediate API call
 
-### 6.3 Monitoring Page
+### 6.4 Monitoring Page
 
 **Purpose:** Real-time activation observation
 
@@ -886,6 +953,7 @@ admin-ui/
 │   │   │   └── QuickActions.tsx
 │   │   ├── models/
 │   │   │   ├── ModelLoadForm.tsx
+│   │   │   ├── ModelDetailsModal.tsx
 │   │   │   └── LoadedModelCard.tsx
 │   │   ├── sae/
 │   │   │   ├── SAEDownloadForm.tsx

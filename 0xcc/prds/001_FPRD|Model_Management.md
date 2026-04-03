@@ -32,7 +32,7 @@ Users running local LLMs face several challenges:
 
 ### Feature Goals
 1. **Simplify Model Acquisition:** One-click download from HuggingFace with automatic quantization
-2. **Enable Memory Optimization:** Support 4-bit and 8-bit quantization via bitsandbytes
+2. **Enable Memory Optimization:** Support multiple quantization levels (FP32, FP16, Q8, Q4, Q2) via bitsandbytes
 3. **Provide Visibility:** Display memory estimates before loading to prevent OOM errors
 4. **Support Flexibility:** Allow both HuggingFace downloads and local model paths
 5. **Ensure Reliability:** Graceful handling of downloads, loads, and errors
@@ -59,7 +59,7 @@ Users can easily acquire and manage models without leaving the miLLM interface, 
 
 **Acceptance Criteria:**
 - [ ] Can enter HuggingFace repository ID (e.g., "google/gemma-2-2b")
-- [ ] Can select quantization format (Q4, Q8, FP16)
+- [ ] Can select quantization format (FP32, FP16, Q8, Q4, Q2)
 - [ ] Can optionally provide HF access token for gated models
 - [ ] Can enable/disable trust_remote_code per download
 - [ ] Download shows real-time progress percentage
@@ -125,9 +125,11 @@ Users can easily acquire and manage models without leaving the miLLM interface, 
 **Acceptance Criteria:**
 - [ ] Can click "Preview" to fetch model info from HuggingFace
 - [ ] Shows model name, parameter count, architecture
-- [ ] Shows estimated disk space and memory requirements per quantization
+- [ ] Shows rich HuggingFace metadata: downloads count, likes count, tags, pipeline_tag, model_type, architectures, license, and language
+- [ ] Shows estimated disk space and memory requirements for all quantization levels (FP32, FP16, Q8, Q4, Q2) with ~20% overhead for inference runtime
 - [ ] Shows whether trust_remote_code is required
 - [ ] Shows whether model is gated (requires token)
+- [ ] Can download directly from preview modal by selecting quantization and optionally enabling trust_remote_code
 
 ### Secondary User Scenarios
 
@@ -177,7 +179,7 @@ Users can easily acquire and manage models without leaving the miLLM interface, 
 #### EC-1.6: Model Load OOM
 - **Trigger:** GPU runs out of memory during load
 - **Behavior:** Catch OOM, clean up partial load, report error
-- **Message:** "Out of memory loading model. Try a smaller model or higher quantization (Q4)."
+- **Message:** "Out of memory loading model. Try a smaller model or higher quantization (Q4 or Q2)."
 
 #### EC-1.7: Unload with Pending Requests
 - **Trigger:** Unload requested while inference in progress
@@ -205,11 +207,13 @@ Users can easily acquire and manage models without leaving the miLLM interface, 
 
 | ID | Requirement | Priority |
 |----|-------------|----------|
-| MM-Q1 | System shall support 4-bit quantization via bitsandbytes | Must |
-| MM-Q2 | System shall support 8-bit quantization via bitsandbytes | Must |
-| MM-Q3 | System shall support FP16 (full precision) loading | Must |
-| MM-Q4 | System shall apply quantization at download time (save quantized weights) | Must |
-| MM-Q5 | System shall display memory savings for each quantization option | Should |
+| MM-Q1 | System shall support FP32 (full 32-bit precision) loading | Must |
+| MM-Q2 | System shall support FP16 (half precision) loading | Must |
+| MM-Q3 | System shall support 8-bit quantization (Q8) via bitsandbytes | Must |
+| MM-Q4 | System shall support 4-bit quantization (Q4) via bitsandbytes (recommended default) | Must |
+| MM-Q5 | System shall support 2-bit quantization (Q2) via bitsandbytes | Must |
+| MM-Q6 | System shall apply quantization at download time (save quantized weights) | Must |
+| MM-Q7 | System shall display memory savings for each quantization option | Should |
 
 ### Model Caching (FR-1.4)
 
@@ -235,11 +239,12 @@ Users can easily acquire and manage models without leaving the miLLM interface, 
 
 | ID | Requirement | Priority |
 |----|-------------|----------|
-| MM-M1 | System shall estimate memory requirements before loading | Must |
-| MM-M2 | System shall display current GPU memory availability | Must |
-| MM-M3 | System shall warn if estimated memory exceeds available | Must |
-| MM-M4 | System shall verify actual memory availability before load | Must |
-| MM-M5 | Memory estimates shall be within 20% of actual usage | Should |
+| MM-M1 | System shall estimate memory requirements for all quantization levels (FP32, FP16, Q8, Q4, Q2) | Must |
+| MM-M2 | System shall include ~20% overhead in estimates for inference runtime (KV cache, activations) | Must |
+| MM-M3 | System shall display current GPU memory availability | Must |
+| MM-M4 | System shall warn if estimated memory exceeds available | Must |
+| MM-M5 | System shall verify actual memory availability before load | Must |
+| MM-M6 | Memory estimates shall be within 20% of actual usage | Should |
 
 ### Model Unloading
 
@@ -258,7 +263,7 @@ interface ModelDownloadRequest {
   source: 'huggingface' | 'local';
   repo_id?: string;           // For HuggingFace: "google/gemma-2-2b"
   local_path?: string;        // For local: "/path/to/model" (absolute path)
-  quantization: 'Q4' | 'Q8' | 'FP16';
+  quantization: 'FP32' | 'FP16' | 'Q8' | 'Q4' | 'Q2';
   trust_remote_code: boolean; // Default: false
   hf_token?: string;          // Optional, for gated models
   custom_name?: string;       // Optional display name
@@ -279,7 +284,7 @@ interface Model {
   repo_id: string | null;
   local_path: string | null;
   params: string;             // "2.5B", "9B", etc.
-  quantization: 'Q4' | 'Q8' | 'FP16';
+  quantization: 'FP32' | 'FP16' | 'Q8' | 'Q4' | 'Q2';
   disk_size_mb: number;
   estimated_memory_mb: number;
   status: 'downloading' | 'ready' | 'loading' | 'loaded' | 'error';
@@ -294,7 +299,7 @@ interface Model {
 
 1. **Repository ID Validation:** Must match pattern `owner/repo-name`
 2. **Local Path Validation:** Must be absolute path, must exist, must contain config.json or model files
-3. **Quantization Compatibility:** Q4/Q8 require CUDA GPU; FP16 can run on CPU (slow)
+3. **Quantization Compatibility:** Q2/Q4/Q8 require CUDA GPU via bitsandbytes; FP16 and FP32 can run on CPU (slow)
 4. **Single Model Loaded:** Loading new model triggers unload of current
 5. **Cannot Delete Loaded:** Must unload before deletion allowed
 6. **Graceful Unload Timeout:** 30 seconds max wait for pending requests
@@ -312,7 +317,7 @@ interface Model {
 
 #### Download Form Fields
 1. **Repository ID Input:** Text field with placeholder "e.g., google/gemma-2-2b"
-2. **Quantization Dropdown:** Q4 (default, recommended), Q8, FP16
+2. **Quantization Dropdown:** FP32, FP16, Q8, Q4 (default, recommended), Q2
 3. **Access Token Input:** Password field, optional
 4. **Trust Remote Code Checkbox:** Unchecked by default, with warning text
 5. **Preview Button:** Secondary style
@@ -321,7 +326,7 @@ interface Model {
 #### Model Card Elements
 - **Icon:** Server icon in cyan circle
 - **Model Name:** Bold, primary text
-- **Metadata Line 1:** "2.5B params • Q4 quantization • 1.8 GB memory"
+- **Metadata Line 1:** "2.5B params • Q4 quantization • 1.8 GB memory" (quantization shows one of FP32/FP16/Q8/Q4/Q2)
 - **Metadata Line 2:** Repository ID or local path (monospace, smaller)
 - **Status Badge:** "Loaded" (green), "Ready" (cyan), "Downloading" (yellow)
 - **Action Buttons:**
@@ -336,10 +341,11 @@ interface Model {
 2. User selects quantization (default Q4)
 3. User optionally enters HF token
 4. User optionally checks trust_remote_code
-5. User clicks "Preview" (optional) → Shows model info modal
-6. User clicks "Download" → Button becomes disabled, shows spinner
-7. Progress bar appears in new model card
-8. On complete: Success toast, card shows "Ready" status
+5. User clicks "Preview" (optional) → Shows model info modal with rich metadata
+6. User can download directly from preview modal by selecting quantization and optionally enabling trust_remote_code
+7. Alternatively, user clicks "Download" from the main form → Button becomes disabled, shows spinner
+8. Progress bar appears in new model card
+9. On complete: Success toast, card shows "Ready" status
 
 #### Load Flow
 1. User clicks "Load" on a "Ready" model
@@ -388,7 +394,7 @@ CREATE TABLE models (
     local_path VARCHAR(500),
     params VARCHAR(50),
     architecture VARCHAR(100),
-    quantization VARCHAR(10) NOT NULL CHECK (quantization IN ('Q4', 'Q8', 'FP16')),
+    quantization VARCHAR(10) NOT NULL CHECK (quantization IN ('FP32', 'FP16', 'Q8', 'Q4', 'Q2')),
     disk_size_mb INTEGER,
     estimated_memory_mb INTEGER,
     cache_path VARCHAR(500) NOT NULL,
@@ -414,7 +420,7 @@ CREATE INDEX idx_models_repo_id ON models(repo_id);
 | name | Required, 1-255 chars, no special chars except `-_` |
 | repo_id | Pattern: `^[a-zA-Z0-9_-]+/[a-zA-Z0-9_.-]+$` |
 | local_path | Absolute path, exists, contains model files |
-| quantization | Enum: Q4, Q8, FP16 |
+| quantization | Enum: FP32, FP16, Q8, Q4, Q2 |
 | disk_size_mb | Positive integer |
 | estimated_memory_mb | Positive integer |
 
@@ -433,6 +439,8 @@ $MODEL_CACHE_DIR/
 │   │   ├── config.json
 │   │   ├── model.safetensors
 │   │   └── tokenizer.json
+│   ├── google--gemma-2-2b--FP16/
+│   │   └── ...
 │   └── meta-llama--Llama-3.2-3B--Q8/
 │       └── ...
 └── local/
@@ -461,7 +469,7 @@ $MODEL_CACHE_DIR/
 
 ### Technology Stack Constraints
 
-- **Quantization:** bitsandbytes requires NVIDIA GPU with CUDA
+- **Quantization:** bitsandbytes requires NVIDIA GPU with CUDA (for Q2, Q4, Q8 levels)
 - **Model Formats:** Support safetensors and pytorch (.bin) via Transformers
 - **HuggingFace:** Use huggingface_hub library for downloads
 - **Memory:** torch.cuda operations for memory queries
@@ -520,14 +528,26 @@ Response: {
     architecture: string,
     requires_trust_remote_code: boolean,
     is_gated: boolean,
+    downloads: number,             // HuggingFace download count
+    likes: number,                 // HuggingFace likes count
+    tags: string[],                // HuggingFace tags
+    pipeline_tag: string | null,   // e.g., "text-generation"
+    model_type: string | null,     // e.g., "gemma2"
+    architectures: string[],       // From model config, e.g., ["Gemma2ForCausalLM"]
+    license: string | null,        // e.g., "gemma", "apache-2.0"
+    language: string | null,       // e.g., "en" (from card_data)
     estimated_sizes: {
-      Q4: { disk_mb: number, memory_mb: number },
+      FP32: { disk_mb: number, memory_mb: number },
+      FP16: { disk_mb: number, memory_mb: number },
       Q8: { disk_mb: number, memory_mb: number },
-      FP16: { disk_mb: number, memory_mb: number }
+      Q4: { disk_mb: number, memory_mb: number },
+      Q2: { disk_mb: number, memory_mb: number }
     }
   }
 }
 ```
+
+Memory estimates include ~20% overhead to account for inference runtime (KV cache, activations, optimizer states). Users can download directly from the preview modal by selecting a quantization level and optionally enabling trust_remote_code.
 
 #### Load Model
 ```
@@ -742,7 +762,7 @@ Only the currently loaded model appears in this list.
 
 ### Infrastructure Dependencies
 
-- **GPU:** NVIDIA with CUDA support (for Q4/Q8)
+- **GPU:** NVIDIA with CUDA support (for Q2/Q4/Q8 quantization)
 - **Disk:** Sufficient space for model cache (10GB+ recommended)
 - **Network:** Internet access for HuggingFace downloads
 - **Memory:** Sufficient VRAM for target models
@@ -883,7 +903,7 @@ test('complete model workflow', async ({ page }) => {
 3. **HuggingFace download** - Core download functionality
 4. **Progress WebSocket** - Real-time updates
 5. **Model loading (FP16)** - Basic load without quantization
-6. **Quantization integration** - Q4/Q8 support
+6. **Quantization integration** - FP32/Q8/Q4/Q2 support via bitsandbytes
 7. **Memory estimation** - Pre-load checks
 8. **Local path support** - Alternative source
 9. **UI components** - Frontend implementation
@@ -953,9 +973,9 @@ From `0xcc/spec/miLLM_UI.jsx`, the Models page includes:
 |--------|-------------|--------------|
 | FR-1.1 | Download from HuggingFace | MM-D1 |
 | FR-1.2 | Load Transformers format | MM-L1 |
-| FR-1.3 | 4-bit/8-bit quantization | MM-Q1, MM-Q2 |
+| FR-1.3 | Multiple quantization levels (FP32, FP16, Q8, Q4, Q2) | MM-Q1 through MM-Q5 |
 | FR-1.4 | Cache models locally | MM-C1, MM-C2 |
-| FR-1.5 | Display memory requirements | MM-M1, MM-M2 |
+| FR-1.5 | Display memory requirements | MM-M1 through MM-M3 |
 | FR-1.6 | Extensible format support | Via Transformers library |
 
 ---

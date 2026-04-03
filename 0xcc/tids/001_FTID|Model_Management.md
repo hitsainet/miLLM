@@ -114,13 +114,15 @@ src/
 │   │   ├── Input.tsx
 │   │   ├── Select.tsx
 │   │   ├── Badge.tsx
-│   │   └── ProgressBar.tsx
+│   │   ├── ProgressBar.tsx
+│   │   └── Modal.tsx               # Reusable modal (sizes: sm, md, lg, xl, 2xl, 3xl)
 │   └── models/
 │       ├── ModelCard.tsx            # Single model display
 │       ├── ModelList.tsx            # Grid of ModelCards
+│       ├── ModelLoadForm.tsx        # Model load form with quantization selection
 │       ├── DownloadForm.tsx         # Download input form
 │       ├── MemoryEstimate.tsx       # Memory display component
-│       └── ModelPreviewModal.tsx    # Preview before download
+│       └── ModelDetailsModal.tsx    # Preview modal with download capability
 │
 ├── pages/
 │   └── ModelsPage.tsx               # Models tab content
@@ -342,10 +344,24 @@ export function ModelsPage() {
   const { models, loadedModelId, downloadProgress } = useModelStore();
   const { loadModel, unloadModel, deleteModel } = useModelStore();
 
+  // Track preview repo for download-from-preview flow
+  const [previewRepoId, setPreviewRepoId] = useState<string | null>(null);
+
   // Fetch on mount
   useEffect(() => {
     useModelStore.getState().fetchModels();
   }, []);
+
+  // Handle download initiated from the preview/details modal
+  const handleDownloadFromPreview = (repoId: string, quantization: string, trustRemoteCode: boolean) => {
+    setPreviewRepoId(repoId);
+    useModelStore.getState().downloadModel({
+      source: 'huggingface',
+      repo_id: repoId,
+      quantization: quantization as QuantizationType,
+      trust_remote_code: trustRemoteCode,
+    });
+  };
 
   return (
     <div>
@@ -356,6 +372,7 @@ export function ModelsPage() {
         onUnload={unloadModel}
         onDelete={deleteModel}
       />
+      {/* ModelDetailsModal receives onDownloadFromPreview callback */}
     </div>
   );
 }
@@ -393,9 +410,11 @@ class ModelSource(str, enum.Enum):
 
 
 class QuantizationType(str, enum.Enum):
-    Q4 = "Q4"
-    Q8 = "Q8"
+    FP32 = "FP32"
     FP16 = "FP16"
+    Q8 = "Q8"
+    Q4 = "Q4"
+    Q2 = "Q2"
 
 
 class Model(Base):
@@ -468,7 +487,7 @@ def upgrade():
         sa.Column('local_path', sa.String(500), nullable=True),
         sa.Column('params', sa.String(50), nullable=True),
         sa.Column('architecture', sa.String(100), nullable=True),
-        sa.Column('quantization', sa.Enum('Q4', 'Q8', 'FP16', name='quantizationtype'), nullable=False),
+        sa.Column('quantization', sa.Enum('FP32', 'FP16', 'Q8', 'Q4', 'Q2', name='quantizationtype'), nullable=False),
         sa.Column('disk_size_mb', sa.Integer(), nullable=True),
         sa.Column('estimated_memory_mb', sa.Integer(), nullable=True),
         sa.Column('cache_path', sa.String(500), nullable=False),
@@ -647,15 +666,17 @@ async def preview_model(
 # millm/api/schemas/model.py
 
 from pydantic import BaseModel, Field, field_validator, model_validator
-from typing import Optional, Dict, Any
+from typing import Any, Optional, Dict, List, Union
 from datetime import datetime
 from enum import Enum
 
 
 class QuantizationType(str, Enum):
-    Q4 = "Q4"
-    Q8 = "Q8"
+    FP32 = "FP32"
     FP16 = "FP16"
+    Q8 = "Q8"
+    Q4 = "Q4"
+    Q2 = "Q2"
 
 
 class ModelSource(str, Enum):
@@ -721,7 +742,15 @@ class ModelPreviewResponse(BaseModel):
     architecture: str
     requires_trust_remote_code: bool
     is_gated: bool
-    estimated_sizes: Dict[str, SizeEstimate]  # Q4, Q8, FP16
+    estimated_sizes: Dict[str, SizeEstimate]  # FP32, FP16, Q8, Q4, Q2
+    downloads: int = 0
+    likes: int = 0
+    tags: Optional[list[str]] = None
+    pipeline_tag: Optional[str] = None
+    model_type: Optional[str] = None
+    architectures: Optional[list[str]] = None
+    license: Optional[str] = None
+    language: Optional[Any] = None  # str or list[str]
 
 
 class ModelResponse(BaseModel):
@@ -1237,9 +1266,11 @@ export function DownloadForm() {
   };
 
   const quantizationOptions = [
-    { value: 'Q4', label: 'Q4 (4-bit, smallest, recommended)' },
-    { value: 'Q8', label: 'Q8 (8-bit, balanced)' },
-    { value: 'FP16', label: 'FP16 (full precision, largest)' },
+    { value: 'FP32', label: 'FP32 - Full Precision (largest)' },
+    { value: 'FP16', label: 'FP16 - Half Precision' },
+    { value: 'Q8', label: 'Q8 - 8-bit' },
+    { value: 'Q4', label: 'Q4 - 4-bit (Recommended)' },
+    { value: 'Q2', label: 'Q2 - 2-bit (smallest)' },
   ];
 
   return (
@@ -1459,7 +1490,7 @@ class ModelDownloader:
 
         Args:
             repo_id: HuggingFace repo (e.g., "google/gemma-2-2b")
-            quantization: Q4, Q8, or FP16
+            quantization: FP32, FP16, Q8, Q4, or Q2
             progress_callback: Called with (progress_pct, downloaded_bytes, total_bytes)
             token: HuggingFace access token for gated models
             trust_remote_code: Whether model requires trust_remote_code
@@ -1498,15 +1529,34 @@ class ModelDownloader:
             raise DownloadFailedError(f"Download failed: {str(e)}")
 
     def get_model_info(self, repo_id: str, token: Optional[str] = None) -> dict:
-        """Get model info without downloading."""
+        """Get model info without downloading, including rich HuggingFace metadata."""
         try:
             info = self.hf_api.model_info(repo_id, token=token)
+
+            # Extract model_type and architectures from info.config
+            config = getattr(info, "config", None) or {}
+            model_type = config.get("model_type") if isinstance(config, dict) else None
+            architectures = config.get("architectures") if isinstance(config, dict) else None
+
+            # Extract license and language from info.card_data
+            card_data = getattr(info, "card_data", None)
+            license_info = getattr(card_data, "license", None) if card_data else None
+            language = getattr(card_data, "language", None) if card_data else None
+
             return {
                 "name": info.modelId.split("/")[-1],
                 "params": self._extract_params(info),
                 "architecture": getattr(info, "pipeline_tag", "unknown"),
                 "is_gated": info.gated,
                 "requires_trust_remote_code": self._check_trust_remote_code(info),
+                "downloads": getattr(info, "downloads", 0) or 0,
+                "likes": getattr(info, "likes", 0) or 0,
+                "tags": getattr(info, "tags", None),
+                "pipeline_tag": getattr(info, "pipeline_tag", None),
+                "model_type": model_type,
+                "architectures": architectures,
+                "license": license_info,
+                "language": language,
             }
         except RepositoryNotFoundError:
             raise RepoNotFoundError(f"Repository '{repo_id}' not found")
@@ -1645,7 +1695,17 @@ class ModelLoadContext:
         quantization_config = None
         torch_dtype = torch.float16
 
-        if quantization == "Q4":
+        if quantization == "FP32":
+            torch_dtype = torch.float32
+        elif quantization == "Q2":
+            quantization_config = BitsAndBytesConfig(
+                load_in_4bit=True,
+                bnb_4bit_compute_dtype=torch.float16,
+                bnb_4bit_use_double_quant=True,
+                bnb_4bit_quant_type="nf4",
+                bnb_4bit_quant_storage=torch.uint8,
+            )
+        elif quantization == "Q4":
             quantization_config = BitsAndBytesConfig(
                 load_in_4bit=True,
                 bnb_4bit_compute_dtype=torch.float16,
@@ -1654,6 +1714,7 @@ class ModelLoadContext:
             )
         elif quantization == "Q8":
             quantization_config = BitsAndBytesConfig(load_in_8bit=True)
+        # FP16 uses default torch_dtype=torch.float16 with no quantization_config
 
         # Load tokenizer first (small)
         self.tokenizer = AutoTokenizer.from_pretrained(
@@ -1753,24 +1814,54 @@ def parse_params(params_str: str) -> int:
     return int(value * multipliers.get(suffix, 1))
 
 
+def estimate_disk_mb(params_str: str, quantization: str) -> int:
+    """
+    Estimate disk space needed for model.
+
+    Formula (bytes per parameter):
+    - FP32: ~4 bytes/param
+    - FP16: ~2 bytes/param
+    - Q8: ~1 byte/param
+    - Q4: ~0.5 bytes/param
+    - Q2: ~0.25 bytes/param
+    """
+    params = parse_params(params_str)
+    if params == 0:
+        return 0
+
+    disk_bytes_per_param = {
+        "FP32": 4.0,
+        "FP16": 2.0,
+        "Q8": 1.0,
+        "Q4": 0.5,
+        "Q2": 0.25,
+    }
+
+    base_bytes = params * disk_bytes_per_param.get(quantization, 2.0)
+    return int(base_bytes / (1024 * 1024))
+
+
 def estimate_memory_mb(params_str: str, quantization: str) -> int:
     """
     Estimate VRAM needed for model.
 
-    Formula:
-    - FP16: params * 2 bytes
-    - Q8: params * 1 byte
-    - Q4: params * 0.5 bytes
-    Plus ~20% overhead for KV cache, activations
+    Formula (bytes per parameter, including ~20% overhead for KV cache, activations):
+    - FP32: ~4.8 bytes/param (4 bytes + 20% overhead)
+    - FP16: ~2.4 bytes/param (2 bytes + 20% overhead)
+    - Q8: ~1.2 bytes/param (1 byte + 20% overhead)
+    - Q4: ~0.6 bytes/param (0.5 bytes + 20% overhead)
+    - Q2: ~0.3 bytes/param (0.25 bytes + 20% overhead)
     """
     params = parse_params(params_str)
     if params == 0:
         return 0
 
     bytes_per_param = {
+        "FP32": 4.0,
         "FP16": 2.0,
         "Q8": 1.0,
         "Q4": 0.5,
+        "Q2": 0.25,
     }
 
     base_bytes = params * bytes_per_param.get(quantization, 2.0)
@@ -1880,6 +1971,14 @@ def mock_model_downloader():
         "architecture": "causal-lm",
         "is_gated": False,
         "requires_trust_remote_code": False,
+        "downloads": 12345,
+        "likes": 678,
+        "tags": ["pytorch", "text-generation"],
+        "pipeline_tag": "text-generation",
+        "model_type": "gemma2",
+        "architectures": ["Gemma2ForCausalLM"],
+        "license": "apache-2.0",
+        "language": "en",
     }
     return downloader
 
@@ -2526,7 +2625,7 @@ def download(
 
     Args:
         repo_id: HuggingFace repository ID (e.g., "google/gemma-2-2b")
-        quantization: Quantization level (Q4, Q8, or FP16)
+        quantization: Quantization level (FP32, FP16, Q8, Q4, or Q2)
         progress_callback: Optional callback for progress updates.
             Called with (progress_pct, downloaded_bytes, total_bytes)
         token: Optional HuggingFace access token for gated models
@@ -2611,11 +2710,13 @@ def download(
 | `src/components/common/Select.tsx` | Component | P1 |
 | `src/components/common/Badge.tsx` | Component | P1 |
 | `src/components/common/ProgressBar.tsx` | Component | P1 |
+| `src/components/common/Modal.tsx` | Component | P1 |
 | `src/components/models/ModelCard.tsx` | Component | P1 |
 | `src/components/models/ModelList.tsx` | Component | P1 |
+| `src/components/models/ModelLoadForm.tsx` | Component | P1 |
 | `src/components/models/DownloadForm.tsx` | Component | P1 |
 | `src/components/models/MemoryEstimate.tsx` | Component | P2 |
-| `src/components/models/ModelPreviewModal.tsx` | Component | P2 |
+| `src/components/models/ModelDetailsModal.tsx` | Component | P1 |
 | `src/pages/ModelsPage.tsx` | Page | P1 |
 
 ---

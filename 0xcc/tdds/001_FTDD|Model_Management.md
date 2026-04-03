@@ -31,7 +31,7 @@ Model Management provides the foundational capability for miLLM to acquire, stor
 | Progress | Broadcast to all clients | Single user assumption |
 | Cache | Hierarchical directories | Clean, browsable |
 | Cleanup | Context managers | Automatic, Pythonic |
-| Quantization | bitsandbytes auto | Load with config, cache quantized |
+| Quantization | bitsandbytes | 5 levels: FP32, FP16, Q8, Q4, Q2 |
 
 ---
 
@@ -115,7 +115,7 @@ POST /api/models ─────────► ModelService.download_model()
         │                           │       └─► Progress callback
         │                           │               └─► sio.emit('model:download:progress')
         │                           │
-        │                           ├─► Apply quantization (if not FP16)
+        │                           ├─► Apply quantization (if not FP32/FP16)
         │                           ├─► Update DB (status: ready)
         │                           └─► sio.emit('model:download:complete')
         │
@@ -230,9 +230,11 @@ class ModelSource(str, enum.Enum):
     LOCAL = "local"
 
 class QuantizationType(str, enum.Enum):
-    Q4 = "Q4"
-    Q8 = "Q8"
+    FP32 = "FP32"
     FP16 = "FP16"
+    Q8 = "Q8"
+    Q4 = "Q4"
+    Q2 = "Q2"
 
 class Model(Base):
     __tablename__ = "models"
@@ -280,7 +282,7 @@ class Model(Base):
 ```
 $MODEL_CACHE_DIR/
 ├── huggingface/
-│   ├── google--gemma-2-2b--Q4/
+│   ├── google--gemma-2-2b--Q4/       # Quantization: FP32, FP16, Q8, Q4, Q2
 │   │   ├── config.json
 │   │   ├── generation_config.json
 │   │   ├── model.safetensors
@@ -322,7 +324,7 @@ class ModelDownloadRequest(BaseModel):
     source: ModelSource
     repo_id: Optional[str] = Field(None, pattern=r'^[\w-]+/[\w.-]+$')
     local_path: Optional[str] = None
-    quantization: QuantizationType = QuantizationType.Q4
+    quantization: QuantizationType = QuantizationType.Q4  # FP32, FP16, Q8, Q4 (default), Q2
     trust_remote_code: bool = False
     hf_token: Optional[str] = None
     custom_name: Optional[str] = None
@@ -334,6 +336,24 @@ class ModelDownloadRequest(BaseModel):
         if self.source == ModelSource.LOCAL and not self.local_path:
             raise ValueError("local_path required for local source")
         return self
+
+class SizeEstimate(BaseModel):
+    quantization: QuantizationType
+    estimated_memory_mb: int
+
+class ModelPreviewResponse(BaseModel):
+    repo_id: str
+    name: str
+    params: Optional[str] = None
+    size_estimates: list[SizeEstimate]  # Memory estimates for all 5 quantization levels
+    downloads: int                       # HuggingFace download count
+    likes: int                           # HuggingFace likes count
+    tags: Optional[list[str]] = None     # HuggingFace tags
+    pipeline_tag: Optional[str] = None   # e.g., "text-generation"
+    model_type: Optional[str] = None     # e.g., "gemma2"
+    architectures: Optional[list[str]] = None  # From model config, e.g., ["Gemma2ForCausalLM"]
+    license: Optional[str] = None        # e.g., "gemma", "apache-2.0"
+    language: Optional[Union[str, list[str]]] = None  # From card_data, e.g., "en" or ["en", "fr"]
 ```
 
 ---
@@ -377,7 +397,11 @@ async def cancel_download(model_id: int) -> ApiResponse[None]:
 
 @router.post("/preview")
 async def preview_model(request: ModelPreviewRequest) -> ApiResponse[ModelPreviewResponse]:
-    """Get model info from HuggingFace without downloading."""
+    """Get rich model metadata from HuggingFace without downloading.
+    Returns size estimates for all quantization levels, plus HuggingFace
+    community metrics (downloads, likes, tags) and model configuration
+    details (architectures, pipeline_tag, license, language).
+    Users can initiate a download directly from the preview modal."""
 ```
 
 ### Response Format
@@ -617,9 +641,11 @@ src/
 │   └── models/
 │       ├── ModelCard.tsx           # Single model display
 │       ├── ModelList.tsx           # List of models
+│       ├── ModelDetailsModal.tsx   # Preview modal with HF metadata and download action
+│       ├── ModelLoadForm.tsx       # Load form with quantization selection
 │       ├── DownloadForm.tsx        # Download input form
 │       ├── ProgressBar.tsx         # Download/load progress
-│       └── MemoryEstimate.tsx      # Memory usage display
+│       └── MemoryEstimate.tsx      # Memory usage display (all 5 quantization levels)
 │
 ├── pages/
 │   └── ModelsPage.tsx              # Models tab page
@@ -908,25 +934,39 @@ def estimate_memory_mb(params_str: str, quantization: QuantizationType) -> int:
     """
     Estimate VRAM needed for model.
 
-    Rough formula:
+    Rough formula (bytes per parameter):
+    - FP32: params * 4 bytes
     - FP16: params * 2 bytes
     - Q8: params * 1 byte
     - Q4: params * 0.5 bytes
-    Plus ~20% overhead for KV cache, activations
+    - Q2: params * 0.25 bytes
+    Plus ~20% overhead for KV cache, activations, inference runtime
     """
     # Parse params (e.g., "2.5B" -> 2.5e9)
     params = parse_params(params_str)
 
     bytes_per_param = {
+        QuantizationType.FP32: 4.0,
         QuantizationType.FP16: 2.0,
         QuantizationType.Q8: 1.0,
         QuantizationType.Q4: 0.5,
+        QuantizationType.Q2: 0.25,
     }
 
     base_bytes = params * bytes_per_param[quantization]
     with_overhead = base_bytes * 1.2  # 20% overhead
 
     return int(with_overhead / (1024 * 1024))  # Convert to MB
+
+def estimate_all_quantizations(params_str: str) -> list[dict]:
+    """
+    Return memory estimates for all 5 quantization levels.
+    Used by the preview endpoint to show users size options.
+    """
+    return [
+        {"quantization": qt.value, "estimated_memory_mb": estimate_memory_mb(params_str, qt)}
+        for qt in QuantizationType
+    ]
 
 def get_available_memory_mb() -> int:
     """Get available GPU memory in MB."""
@@ -1206,7 +1246,7 @@ logger.info("model_download_started",
 
 | Risk | Likelihood | Impact | Mitigation |
 |------|------------|--------|------------|
-| bitsandbytes GPU compatibility | Medium | High | Test on target GPUs; fallback to FP16 |
+| bitsandbytes GPU compatibility | Medium | High | Test on target GPUs; fallback to higher precision |
 | HuggingFace download failures | Medium | Medium | Retry logic; clear error messages |
 | OOM during load | Medium | Medium | Pre-check memory; context manager cleanup |
 | Thread pool exhaustion | Low | Medium | Max workers = 2; queue downloads |
@@ -1217,14 +1257,18 @@ logger.info("model_download_started",
 ```python
 # bitsandbytes fallback
 def load_with_fallback(cache_path: str, quantization: QuantizationType):
-    """Attempt quantized load, fallback to FP16 if fails."""
-    if quantization in (QuantizationType.Q4, QuantizationType.Q8):
+    """Attempt quantized load, fallback to higher precision if fails."""
+    if quantization in (QuantizationType.Q2, QuantizationType.Q4, QuantizationType.Q8):
         try:
             return load_quantized(cache_path, quantization)
         except Exception as e:
-            logger.warning("Quantized load failed, falling back to FP16", error=str(e))
+            logger.warning("Quantized load failed, falling back to FP16",
+                          quantization=quantization.value, error=str(e))
             return load_fp16(cache_path)
-    return load_fp16(cache_path)
+    elif quantization == QuantizationType.FP16:
+        return load_fp16(cache_path)
+    else:
+        return load_fp32(cache_path)
 ```
 
 ### Alternative Approaches Considered
@@ -1367,6 +1411,40 @@ GET /api/models
   ]
 }
 ```
+
+### Preview Model
+```json
+POST /api/models/preview
+{
+  "repo_id": "google/gemma-2-2b"
+}
+
+{
+  "success": true,
+  "data": {
+    "repo_id": "google/gemma-2-2b",
+    "name": "gemma-2-2b",
+    "params": "2.5B",
+    "size_estimates": [
+      { "quantization": "FP32", "estimated_memory_mb": 12000 },
+      { "quantization": "FP16", "estimated_memory_mb": 6000 },
+      { "quantization": "Q8", "estimated_memory_mb": 3000 },
+      { "quantization": "Q4", "estimated_memory_mb": 1500 },
+      { "quantization": "Q2", "estimated_memory_mb": 750 }
+    ],
+    "downloads": 1250000,
+    "likes": 3400,
+    "tags": ["transformers", "pytorch", "gemma2", "text-generation"],
+    "pipeline_tag": "text-generation",
+    "model_type": "gemma2",
+    "architectures": ["Gemma2ForCausalLM"],
+    "license": "gemma",
+    "language": "en"
+  }
+}
+```
+
+The preview modal displays this metadata and allows users to select a quantization level (FP32, FP16, Q8, Q4, Q2) and optionally enable `trust_remote_code` before initiating a download directly from the preview.
 
 ### Download Error
 ```json

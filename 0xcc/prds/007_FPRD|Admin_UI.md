@@ -55,16 +55,19 @@ A React-based single-page application that:
 
 ### 2.2 Model Management
 
-**US-7.2:** As a user, I want to load and unload models through the UI so I can manage the inference server.
+**US-7.2:** As a user, I want to download, load, and unload models through the UI so I can manage the inference server.
 
 **Acceptance Criteria:**
-- Form to enter model ID (HuggingFace path)
+- Form to enter HuggingFace repository ID with quantization selection (FP32, FP16, Q8, Q4, Q2)
+- Preview button to fetch and display model metadata before downloading
+- Model preview modal showing: downloads, likes, pipeline tag, architecture info (model_type, architectures), tags, license, language, and a memory requirements table with radio buttons for each quantization level (FP32, FP16, Q8, Q4, Q2)
+- Memory estimates in preview: FP32 (~4B/param + 20% overhead), FP16 (~2B/param + 20%), Q8 (~1B/param + 20%), Q4 (~0.5B/param + 20%), Q2 (~0.25B/param + 20%)
+- Download directly from the preview modal with selected quantization and trust_remote_code option
 - Optional device selection (auto/cuda/cpu)
-- Optional dtype selection (auto/float16/bfloat16/float32)
 - Load button with loading spinner during operation
 - Unload button (disabled when no model loaded)
-- Progress indication for model loading
-- Error display if loading fails
+- Progress indication for model download and loading
+- Error display if download or loading fails
 - Success notification on completion
 
 ### 2.3 SAE Management
@@ -164,11 +167,14 @@ A React-based single-page application that:
 
 | ID | Requirement | Priority |
 |----|-------------|----------|
-| UI-M1 | Model load form with all parameters | Must |
-| UI-M2 | Loading progress indicator | Must |
-| UI-M3 | Current model info display | Must |
-| UI-M4 | Unload button with confirmation | Must |
-| UI-M5 | Model loading history (session only) | Could |
+| UI-M1 | Model download form with HuggingFace repo ID and quantization selection (FP32, FP16, Q8, Q4, Q2) | Must |
+| UI-M2 | Preview button that opens a model details modal with metadata (downloads, likes, pipeline tag, architecture, tags, license, language) and memory requirements table for all quantization levels | Must |
+| UI-M3 | Download from preview modal with selected quantization level and trust_remote_code option | Must |
+| UI-M4 | Download and loading progress indicators | Must |
+| UI-M5 | Current model info display | Must |
+| UI-M6 | Model load form with quantization selection (FP32, FP16, Q8, Q4, Q2) and device options | Must |
+| UI-M7 | Unload button with confirmation | Must |
+| UI-M8 | Model loading history (session only) | Could |
 
 ### 3.4 SAE Page
 

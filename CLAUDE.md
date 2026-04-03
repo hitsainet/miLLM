@@ -8,26 +8,21 @@
 - **Current Feature:** All features implemented, audited, and hardened
 
 ## Quick Resume Commands
-```bash
+```
 # XCC session start sequence
 "Please help me resume where I left off"
-# Or manual if needed:
-@CLAUDE.md
-@0xcc/session_state.json
+# Or manual if needed: read CLAUDE.md, 0xcc/session_state.json
 ls -la 0xcc/*/
 
-# Research integration (requires ref MCP server)
-# Format: "Use /mcp ref search '[context-specific search term]'"
+# Load project context on demand (use Read tool):
+#   0xcc/prds/000_PPRD|miLLM.md
+#   0xcc/adrs/000_PADR|miLLM.md
 
-# Load project context
-@0xcc/prds/000_PPRD|miLLM.md
-@0xcc/adrs/000_PADR|miLLM.md
-
-# Load current work area based on phase
-@0xcc/prds/      # For PRD work
-@0xcc/tdds/      # For TDD work  
-@0xcc/tids/      # For TID work
-@0xcc/tasks/     # For task execution
+# Load current work area based on phase:
+#   0xcc/prds/      # For PRD work
+#   0xcc/tdds/      # For TDD work
+#   0xcc/tids/      # For TID work
+#   0xcc/tasks/     # For task execution
 ```
 
 ## Housekeeping Commands
@@ -131,14 +126,14 @@ refactor(services): extract HuggingFace logic
    - `[###]_FTASKS|[feature-name].md` → `0xcc/tasks/` (Task List)
 
 ### Instruction Documents Reference
-- `@0xcc/instruct/001_create-project-prd.md` - Creates project vision and feature breakdown
-- `@0xcc/instruct/002_create-adr.md` - Establishes tech stack and standards
-- `@0xcc/instruct/003_create-feature-prd.md` - Details individual feature requirements
-- `@0xcc/instruct/004_create-tdd.md` - Creates technical architecture and design
-- `@0xcc/instruct/005_create-tid.md` - Provides implementation guidance and coding hints
-- `@0xcc/instruct/006_generate-tasks.md` - Generates actionable development tasks
-- `@0xcc/instruct/007_process-task-list.md` - Guides task execution and progress tracking
-- `@0xcc/instruct/008_housekeeping.md` - Session management and context preservation
+- `0xcc/instruct/001_create-project-prd.md` - Creates project vision and feature breakdown
+- `0xcc/instruct/002_create-adr.md` - Establishes tech stack and standards
+- `0xcc/instruct/003_create-feature-prd.md` - Details individual feature requirements
+- `0xcc/instruct/004_create-tdd.md` - Creates technical architecture and design
+- `0xcc/instruct/005_create-tid.md` - Provides implementation guidance and coding hints
+- `0xcc/instruct/006_generate-tasks.md` - Generates actionable development tasks
+- `0xcc/instruct/007_process-task-list.md` - Guides task execution and progress tracking
+- `0xcc/instruct/008_housekeeping.md` - Session management and context preservation
 
 ## Document Inventory
 
@@ -257,29 +252,28 @@ git commit -m "docs: completed [task] - Next: [specific action]"
 ```
 
 ### Context Recovery (If Lost)
-```bash
-# Mild context loss
-@CLAUDE.md
-@0xcc/session_state.json
-ls -la 0xcc/*/
-@0xcc/instruct/[current-phase].md
+```
+# Mild context loss - read these files:
+#   CLAUDE.md
+#   0xcc/session_state.json
+#   ls -la 0xcc/*/
+#   0xcc/instruct/[current-phase].md
 
-# Severe context loss
-@CLAUDE.md
-@0xcc/prds/000_PPRD|miLLM.md
-@0xcc/adrs/000_PADR|miLLM.md
-ls -la 0xcc/*/
-@0xcc/instruct/
+# Severe context loss - read these files:
+#   CLAUDE.md
+#   0xcc/prds/000_PPRD|miLLM.md
+#   0xcc/adrs/000_PADR|miLLM.md
+#   ls -la 0xcc/*/
 ```
 
 ### Resume Commands for Next Session
-```bash
+```
 # Standard resume sequence
 "Please help me resume where I left off"
-# Or manual if needed:
-@CLAUDE.md
-@0xcc/session_state.json
-@[specific-file-currently-working-on]
+# Or manual if needed, read these files:
+#   CLAUDE.md
+#   0xcc/session_state.json
+#   [specific-file-currently-working-on]
 # Specific next action: [detailed action]
 ```
 
@@ -381,7 +375,7 @@ After each development session, update:
   - 0xcc/prds/000_PPRD|miLLM.md
   - 0xcc/adrs/000_PADR|miLLM.md
 - **Files Modified:** CLAUDE.md
-- **Next:** Create Model Management TDD using @0xcc/instruct/004_create-tdd.md
+- **Next:** Create Model Management TDD using `0xcc/instruct/004_create-tdd.md`
 
 ### Session 1 (continued): Feature 1 PRD
 - **Accomplished:**
@@ -402,7 +396,7 @@ After each development session, update:
   - Hard delete (remove files from disk)
 - **Files Created:** 0xcc/prds/001_FPRD|Model_Management.md
 - **Files Modified:** CLAUDE.md
-- **Next:** Create Model Management TDD using @0xcc/instruct/004_create-tdd.md
+- **Next:** Create Model Management TDD using `0xcc/instruct/004_create-tdd.md`
 
 ### Session: February 1, 2026 - Zustand Reactivity Bug Fix
 - **Issue:** Steering page UI not updating when clicking "Enable" despite backend succeeding (toast showed success)
@@ -501,12 +495,12 @@ project-root/
 - **Project Files:** Standard locations (src/, tests/, package.json, etc.)
 
 ### Emergency Contacts & Resources
-- **Framework Documentation:** @0xcc/instruct/000_README.md
-- **Current Project PRD:** @0xcc/prds/000_PPRD|miLLM.md
-- **Tech Standards:** @0xcc/adrs/000_PADR|miLLM.md
-- **BRD Reference:** @0xcc/docs/miLLM_BRD_v1.0.md
-- **UI Mockup:** @0xcc/spec/miLLM_UI.jsx
-- **Housekeeping Guide:** @0xcc/instruct/008_housekeeping.md
+- **Framework Documentation:** `0xcc/instruct/000_README.md`
+- **Current Project PRD:** `0xcc/prds/000_PPRD|miLLM.md`
+- **Tech Standards:** `0xcc/adrs/000_PADR|miLLM.md`
+- **BRD Reference:** `0xcc/docs/miLLM_BRD_v1.0.md`
+- **UI Mockup:** `0xcc/spec/miLLM_UI.jsx`
+- **Housekeeping Guide:** `0xcc/instruct/008_housekeeping.md`
 
 ---
 

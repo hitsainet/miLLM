@@ -166,7 +166,7 @@ and integration with existing chat interfaces.
 
 -   Docker containerization
 
--   4-bit and 8-bit quantization support via bitsandbytes
+-   Multiple quantization levels (FP32, FP16, Q8, Q4, Q2) via bitsandbytes
 
 -   Request queuing for single-user, multiple-request scenarios
 
@@ -213,8 +213,9 @@ and integration with existing chat interfaces.
   FR-1.2   System shall load models in Hugging Face  Must Have
            Transformers format (safetensors/pytorch) 
 
-  FR-1.3   System shall support 4-bit and 8-bit      Must Have
-           quantization via bitsandbytes             
+  FR-1.3   System shall support multiple quantization  Must Have
+           levels (FP32, FP16, Q8, Q4, Q2) via
+           bitsandbytes
 
   FR-1.4   System shall cache downloaded models      Must Have
            locally                                   
@@ -477,7 +478,7 @@ miLLM and miStudio shall communicate via a defined file/API contract:
 -   SAE Framework: Compatible with TransformerLens or equivalent hooking
     mechanism
 
--   Quantization: bitsandbytes library for 4-bit/8-bit support
+-   Quantization: bitsandbytes library for multiple quantization levels (FP32, FP16, Q8, Q4, Q2)
 
 -   Container Runtime: Docker with NVIDIA Container Toolkit support
 

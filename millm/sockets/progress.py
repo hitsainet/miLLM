@@ -584,6 +584,8 @@ def create_socket_io() -> socketio.AsyncServer:
         cors_allowed_origins="*",
         logger=False,  # Use structlog instead
         engineio_logger=False,
+        ping_timeout=60,    # Increased from 20s for Cloudflare tunnel latency
+        ping_interval=25,   # Keep default but pair with longer timeout
     )
 
     # Register event handlers

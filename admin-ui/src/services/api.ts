@@ -112,7 +112,33 @@ async function request<T>(
   };
 
   const response = await fetch(url, { ...options, headers });
-  const data: ApiResponse<T> = await response.json();
+
+  // Check content type before attempting JSON parse — nginx error pages are HTML
+  const contentType = response.headers.get('content-type') ?? '';
+  if (!contentType.includes('application/json')) {
+    throw new ApiError(
+      'SERVER_ERROR',
+      `Server returned ${response.status} ${response.statusText || 'error'}`
+    );
+  }
+
+  let data: ApiResponse<T>;
+  try {
+    data = await response.json();
+  } catch {
+    throw new ApiError('PARSE_ERROR', `Invalid response from server (status ${response.status})`);
+  }
+
+  // Handle FastAPI validation errors (422) which use { detail: [...] } format
+  if (response.status === 422) {
+    const detail = (data as unknown as { detail: Array<{ msg: string }> | string })?.detail;
+    const message = Array.isArray(detail)
+      ? detail.map((d) => d.msg).join('; ')
+      : typeof detail === 'string'
+        ? detail
+        : 'Validation error';
+    throw new ApiError('VALIDATION_ERROR', message);
+  }
 
   if (!data.success || data.error) {
     throw new ApiError(

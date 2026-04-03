@@ -352,6 +352,13 @@ class ModelDownloader:
                 details={"repo_id": repo_id},
             )
 
+        except Exception as e:
+            logger.error("model_info_failed", repo_id=repo_id, error=str(e))
+            raise DownloadFailedError(
+                f"Failed to fetch model info: {str(e)}",
+                details={"repo_id": repo_id, "error": str(e)},
+            )
+
     def _extract_params(self, info) -> str:
         """Extract parameter count from model info."""
         # Try to get from safetensors metadata

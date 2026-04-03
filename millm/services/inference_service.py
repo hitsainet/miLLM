@@ -164,6 +164,26 @@ class InferenceService:
             raise RuntimeError("No model is loaded")
         return self._model_state.current.tokenizer
 
+    @staticmethod
+    def _normalize_device(d: object) -> str:
+        """
+        Convert an accelerate device_map value to a valid PyTorch device string.
+
+        accelerate stores device_map values as integers (0, 1, ...) for CUDA
+        devices, or as the strings "cpu" / "disk".  PyTorch's .to() only accepts
+        proper device strings like "cuda:0", so integers must be converted.
+        """
+        if isinstance(d, int):
+            return f"cuda:{d}"
+        s = str(d)
+        if s == "cpu" or s.startswith("cuda"):
+            return s
+        # Bare integer stored as string (shouldn't happen, but be safe)
+        try:
+            return f"cuda:{int(s)}"
+        except ValueError:
+            return s
+
     def _get_input_device(self) -> str:
         """
         Return the device where model inputs (input_ids) should be placed.
@@ -175,21 +195,28 @@ class InferenceService:
         """
         if not self._model_state.is_loaded:
             return self._device
-        hf_model = self._model_state.current.model
-        # device_map models expose hf_device_map; find where embeddings live
-        device_map = getattr(hf_model, "hf_device_map", None)
-        if device_map:
-            for key in ("", "model.embed_tokens", "transformer.wte",
-                        "model.embedding", "model.shared", "model.embed"):
-                if key in device_map:
-                    return str(device_map[key])
-            # Fall back to the device of the first mapped layer
-            first = next(iter(device_map.values()))
-            return str(first)
-        # Non-device_map model: use first parameter device
         try:
+            hf_model = self._model_state.current.model
+            # device_map models expose hf_device_map; find where embeddings live
+            device_map = getattr(hf_model, "hf_device_map", None)
+            if device_map:
+                for key in ("", "model.embed_tokens", "transformer.wte",
+                            "model.embedding", "model.shared", "model.embed"):
+                    if key in device_map:
+                        d = self._normalize_device(device_map[key])
+                        # Skip "disk" (offloaded to disk, not a valid .to() target)
+                        if d != "disk":
+                            return d
+                # Fall back to the device of the first non-disk layer
+                for val in device_map.values():
+                    d = self._normalize_device(val)
+                    if d not in ("disk", "cpu"):
+                        return d
+                # All layers on CPU or disk — return cpu
+                return "cpu"
+            # Non-device_map model: use first parameter device
             return str(next(hf_model.parameters()).device)
-        except StopIteration:
+        except Exception:
             return self._device
 
     @property

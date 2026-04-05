@@ -1,5 +1,5 @@
 import { useState, useEffect } from 'react';
-import { X, Hash, ExternalLink } from 'lucide-react';
+import { Hash, ExternalLink } from 'lucide-react';
 import { Button } from '@components/common';
 
 interface SteeringSliderProps {
@@ -116,9 +116,9 @@ export function SteeringSlider({
         size="sm"
         onClick={onRemove}
         disabled={disabled}
-        className="flex-shrink-0 opacity-0 group-hover:opacity-100 transition-opacity text-slate-400 hover:text-red-400"
+        className="flex-shrink-0 text-slate-500 hover:text-red-400 text-xs"
       >
-        <X className="w-4 h-4" />
+        Remove
       </Button>
     </div>
   );

@@ -251,10 +251,7 @@ class LoadedSAE:
                 f"Feature index {feature_idx} out of range [0, {self.d_sae})"
             )
 
-        if value == 0:
-            self._steering_values.pop(feature_idx, None)
-        else:
-            self._steering_values[feature_idx] = value
+        self._steering_values[feature_idx] = value
         self._rebuild_steering_vector()
 
     def set_steering_batch(self, steering: dict[int, float]) -> None:
@@ -272,10 +269,7 @@ class LoadedSAE:
                 raise ValueError(f"Feature index {idx} out of range [0, {self.d_sae})")
 
         for idx, val in steering.items():
-            if val == 0:
-                self._steering_values.pop(idx, None)
-            else:
-                self._steering_values[idx] = val
+            self._steering_values[idx] = val
         self._rebuild_steering_vector()
 
     def clear_steering(self, feature_idx: Optional[int] = None) -> None:

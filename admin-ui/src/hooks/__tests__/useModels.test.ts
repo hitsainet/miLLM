@@ -4,8 +4,8 @@ import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { createElement } from 'react';
 import type { ModelInfo, ModelDownloadRequest } from '@/types';
 
-// Mock the api module
-const mockModelApi = {
+// Use vi.hoisted so these variables are available when vi.mock factories run
+const mockModelApi = vi.hoisted(() => ({
   list: vi.fn(),
   download: vi.fn(),
   load: vi.fn(),
@@ -13,16 +13,15 @@ const mockModelApi = {
   delete: vi.fn(),
   cancelDownload: vi.fn(),
   preview: vi.fn(),
-};
+}));
 
 vi.mock('@/services/api', () => ({
   modelApi: mockModelApi,
 }));
 
-// Mock the server store
-const mockSetModels = vi.fn();
-const mockSetLoadedModel = vi.fn();
-const mockSetModelLoading = vi.fn();
+const mockSetModels = vi.hoisted(() => vi.fn());
+const mockSetLoadedModel = vi.hoisted(() => vi.fn());
+const mockSetModelLoading = vi.hoisted(() => vi.fn());
 
 vi.mock('@/stores/serverStore', () => ({
   useServerStore: Object.assign(
@@ -44,13 +43,12 @@ vi.mock('@/stores/serverStore', () => ({
   ),
 }));
 
-// Mock the toast hook
-const mockToast = {
+const mockToast = vi.hoisted(() => ({
   success: vi.fn(),
   error: vi.fn(),
   warning: vi.fn(),
   info: vi.fn(),
-};
+}));
 
 vi.mock('../useToast', () => ({
   useToast: () => mockToast,

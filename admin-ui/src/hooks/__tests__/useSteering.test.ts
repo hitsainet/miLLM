@@ -4,8 +4,8 @@ import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { createElement } from 'react';
 import type { SteeringState, FeatureSteering } from '@/types';
 
-// Mock the steering API
-const mockSteeringApi = {
+// Use vi.hoisted so these variables are available when vi.mock factories run
+const mockSteeringApi = vi.hoisted(() => ({
   getState: vi.fn(),
   set: vi.fn(),
   batch: vi.fn(),
@@ -13,14 +13,13 @@ const mockSteeringApi = {
   clear: vi.fn(),
   enable: vi.fn(),
   disable: vi.fn(),
-};
+}));
 
 vi.mock('@/services/api', () => ({
   steeringApi: mockSteeringApi,
 }));
 
-// Mock the server store
-const mockSetSteering = vi.fn();
+const mockSetSteering = vi.hoisted(() => vi.fn());
 
 vi.mock('@/stores/serverStore', () => ({
   useServerStore: Object.assign(
@@ -34,13 +33,12 @@ vi.mock('@/stores/serverStore', () => ({
   ),
 }));
 
-// Mock the toast hook
-const mockToast = {
+const mockToast = vi.hoisted(() => ({
   success: vi.fn(),
   error: vi.fn(),
   warning: vi.fn(),
   info: vi.fn(),
-};
+}));
 
 vi.mock('../useToast', () => ({
   useToast: () => mockToast,

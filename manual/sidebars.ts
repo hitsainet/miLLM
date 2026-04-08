@@ -10,6 +10,14 @@ const sidebars: SidebarsConfig = {
         'getting-started/introduction',
         'getting-started/installation',
         'getting-started/dashboard',
+        {
+          type: 'category',
+          label: 'Installation Guides',
+          items: [
+            'getting-started/install-guide-compose',
+            'getting-started/install-guide-k8s',
+          ],
+        },
       ],
     },
     {

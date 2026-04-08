@@ -72,7 +72,7 @@ services:
       - PORT=8000
       - DEBUG=${DEBUG:-false}
       - LOG_LEVEL=${LOG_LEVEL:-INFO}
-      - CORS_ORIGINS=${CORS_ORIGINS:-http://localhost,http://localhost:3000,http://millm.mcslab.io}
+      - CORS_ORIGINS=${CORS_ORIGINS:-http://localhost,http://localhost:3000,http://millm.hitsai.local}
       - AUTO_LOAD_MODEL=${AUTO_LOAD_MODEL:-}
     ports:
       - "${API_PORT:-8000}:8000"

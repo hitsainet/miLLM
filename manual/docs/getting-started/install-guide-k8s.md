@@ -184,9 +184,9 @@ Confirm `GPU_NODE` is recorded from the Pre-Flight section.
 ### Domain Name
 
 Ask the user:
-> "What hostname should miLLM be accessible at? Press Enter to use the default: `k8s-millm.mcslab.io`"
+> "What hostname should miLLM be accessible at? Press Enter to use the default: `k8s-millm.hitsai.local`"
 
-Record as `DOMAIN`. Default: `k8s-millm.mcslab.io`.
+Record as `DOMAIN`. Default: `k8s-millm.hitsai.local`.
 
 Ask the user:
 > "What is the IP address of the GPU node ($GPU_NODE)?"
@@ -251,7 +251,7 @@ sed -i "s|millm:millm@postgres|millm:$POSTGRES_PASSWORD@postgres|g" k8s/millm-de
 
 **CORS origins:**
 ```bash
-sed -i "s|http://k8s-millm.mcslab.io,http://k8s-millm.hitsai.net,http://localhost:3000|$CORS_ORIGINS|g" k8s/millm-deployment.local.yaml
+sed -i "s|http://k8s-millm.hitsai.local,http://k8s-millm.hitsai.net,http://localhost:3000|$CORS_ORIGINS|g" k8s/millm-deployment.local.yaml
 ```
 
 **HuggingFace token** (if provided):

@@ -28,7 +28,7 @@ miLLM is designed to work standalone or as part of a larger research stack:
 - **With custom scripts:** Use the OpenAI Python SDK pointed at miLLM for programmatic access
 
 :::info OpenAI API Compatibility
-Any tool that speaks the OpenAI API format can use miLLM. Set `base_url` to your miLLM instance (e.g., `http://millm.mcslab.io/v1`) and it works as a drop-in replacement — with the addition of feature steering.
+Any tool that speaks the OpenAI API format can use miLLM. Set `base_url` to your miLLM instance (e.g., `http://millm.hitsai.local/v1`) and it works as a drop-in replacement — with the addition of feature steering.
 :::
 
 ## Key Concepts

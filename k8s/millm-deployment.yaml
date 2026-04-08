@@ -131,7 +131,7 @@ spec:
       hostAliases:
         - ip: "192.168.244.61"
           hostnames:
-            - "k8s-millm.mcslab.io"
+            - "k8s-millm.hitsai.local"
       initContainers:
         - name: fix-permissions
           image: busybox:latest
@@ -157,7 +157,7 @@ spec:
             - name: HF_HOME
               value: "/data/hf_cache"
             - name: CORS_ORIGINS
-              value: "http://k8s-millm.mcslab.io,http://k8s-millm.hitsai.net,http://localhost:3000"
+              value: "http://k8s-millm.hitsai.local,http://k8s-millm.hitsai.net,http://localhost:3000"
             - name: LOG_LEVEL
               value: "INFO"
             - name: LOG_FORMAT
@@ -245,7 +245,7 @@ metadata:
 spec:
   ingressClassName: public
   rules:
-    - host: k8s-millm.mcslab.io
+    - host: k8s-millm.hitsai.local
       http:
         paths:
           - path: /api
@@ -334,7 +334,7 @@ metadata:
 spec:
   ingressClassName: public
   rules:
-    - host: k8s-millm.mcslab.io
+    - host: k8s-millm.hitsai.local
       http:
         paths:
           - path: /socket.io

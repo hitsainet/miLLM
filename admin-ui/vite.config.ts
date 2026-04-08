@@ -19,7 +19,7 @@ export default defineConfig({
   },
   server: {
     port: 3000,
-    allowedHosts: ['millm.mcslab.io', 'localhost'],
+    allowedHosts: ['millm.hitsai.local', 'localhost'],
     proxy: {
       '/api': {
         target: 'http://localhost:8000',

@@ -22,7 +22,7 @@ miLLM exposes an OpenAI-compatible API at `/v1`, making it a drop-in replacement
 from openai import OpenAI
 
 client = OpenAI(
-    base_url="http://millm.mcslab.io/v1",
+    base_url="http://millm.hitsai.local/v1",
     api_key="not-needed"  # miLLM doesn't require auth
 )
 

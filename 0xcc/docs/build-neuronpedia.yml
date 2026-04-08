@@ -62,7 +62,7 @@ jobs:
           NEXT_PUBLIC_DEMO_MODE=false
 
           # Contact email
-          NEXT_PUBLIC_CONTACT_EMAIL_ADDRESS=admin@mcslab.io
+          NEXT_PUBLIC_CONTACT_EMAIL_ADDRESS=admin@hitsai.local
 
           # Local inference secrets (will use K8s secrets at runtime)
           INFERENCE_SERVER_SECRET=local-secret

@@ -177,9 +177,9 @@ curl -sf --max-time 10 https://hub.docker.com > /dev/null && echo "OK" || echo "
 ### Domain Name
 
 Ask the user:
-> "What hostname should miLLM be accessible at? Press Enter to use the default: `millm.mcslab.io`"
+> "What hostname should miLLM be accessible at? Press Enter to use the default: `millm.hitsai.local`"
 
-Record as `DOMAIN`. Default: `millm.mcslab.io`.
+Record as `DOMAIN`. Default: `millm.hitsai.local`.
 
 ```bash
 grep -q "$DOMAIN" /etc/hosts || echo "127.0.0.1  $DOMAIN" | sudo tee -a /etc/hosts
@@ -253,7 +253,7 @@ EOF
 
 ### Step 3 — Update nginx domain (if not using default)
 
-If `DOMAIN` differs from `millm.mcslab.io`, update the nginx config:
+If `DOMAIN` differs from `millm.hitsai.local`, update the nginx config:
 ```bash
 sed -i "s/millm\.mcslab\.io/$DOMAIN/g" nginx/nginx.conf
 ```

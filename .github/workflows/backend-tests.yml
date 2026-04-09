@@ -1,0 +1,49 @@
+name: Backend Tests
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'millm/**'
+      - 'tests/**'
+      - 'pyproject.toml'
+      - '.github/workflows/backend-tests.yml'
+  pull_request:
+    branches: [main]
+    paths:
+      - 'millm/**'
+      - 'tests/**'
+      - 'pyproject.toml'
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    env:
+      FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+      SECRET_KEY: ci-test-secret-key-minimum-32-characters-long
+      DATA_DIR: /tmp/millm-ci
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+          cache-dependency-path: pyproject.toml
+
+      - name: Install PyTorch (CPU)
+        run: |
+          pip install torch==2.9.1 --index-url https://download.pytorch.org/whl/cpu
+
+      - name: Install package with dev dependencies
+        run: |
+          pip install -e ".[dev]"
+
+      - name: Run unit tests
+        run: |
+          # integration/ and e2e/ require a real database and full stack
+          python -m pytest tests/unit/ \
+            -m "not slow" \
+            -v --no-cov --tb=short

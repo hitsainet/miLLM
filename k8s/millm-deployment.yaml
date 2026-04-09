@@ -32,7 +32,7 @@ spec:
             - name: POSTGRES_USER
               value: millm
             - name: POSTGRES_PASSWORD
-              value: millm
+              value: changeme  # CHANGE THIS: use a strong password, must match DATABASE_URL below
             - name: PGDATA
               value: /var/lib/postgresql/data/pgdata
           ports:
@@ -126,12 +126,20 @@ spec:
       labels:
         app: millm-backend
     spec:
-      nodeSelector:
-        kubernetes.io/hostname: mcs-lnxgpu01
-      hostAliases:
-        - ip: "192.168.244.61"
-          hostnames:
-            - "k8s-millm.hitsai.local"
+      # nodeSelector: Pin to a specific node if your cluster requires it.
+      # Replace the hostname with your node's name, or remove this section
+      # for default scheduling.
+      # nodeSelector:
+      #   kubernetes.io/hostname: your-gpu-node-hostname
+
+      # hostAliases: Required if your cluster nodes cannot resolve the ingress
+      # hostname via DNS. Set the IP to your ingress controller's external IP
+      # and the hostname to match your ingress rule.
+      # hostAliases:
+      #   - ip: "YOUR_INGRESS_IP"
+      #     hostnames:
+      #       - "k8s-millm.your-domain.local"
+
       initContainers:
         - name: fix-permissions
           image: busybox:latest
@@ -147,7 +155,7 @@ spec:
             - containerPort: 8000
           env:
             - name: DATABASE_URL
-              value: "postgresql+asyncpg://millm:millm@postgres:5432/millm"
+              value: "postgresql+asyncpg://millm:changeme@postgres:5432/millm"  # CHANGE THIS: match POSTGRES_PASSWORD above
             - name: REDIS_URL
               value: "redis://redis:6379/0"
             - name: MODEL_CACHE_DIR
@@ -157,7 +165,7 @@ spec:
             - name: HF_HOME
               value: "/data/hf_cache"
             - name: CORS_ORIGINS
-              value: "http://k8s-millm.hitsai.local,http://k8s-millm.hitsai.net,http://localhost:3000"
+              value: "http://k8s-millm.your-domain.local,http://localhost:3000"  # CHANGE THIS: set to your actual domain(s)
             - name: LOG_LEVEL
               value: "INFO"
             - name: LOG_FORMAT

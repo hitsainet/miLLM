@@ -17,6 +17,7 @@ from pydantic import BaseModel, Field
 from millm import __version__
 from millm.api.dependencies import get_inference_service, get_model_loader
 from millm.core.resilience import CircuitBreaker, huggingface_circuit
+from millm.services.sae_service import AttachedSAEState
 
 router = APIRouter(prefix="/api/health", tags=["system"])
 
@@ -205,11 +206,12 @@ async def readiness_check(
 
     # Get model and SAE status
     model_loaded = False
-    sae_attached = False
     try:
         model_loaded = model_loader.is_loaded
     except Exception:
         pass
+
+    sae_attached = AttachedSAEState().is_attached
 
     response = ReadinessResponse(
         ready=is_ready,
@@ -293,6 +295,7 @@ async def detailed_health_check(
     except Exception:
         pass
 
+    sae_state = AttachedSAEState()
     return DetailedHealthResponse(
         status=overall_status,
         version=__version__,
@@ -301,8 +304,8 @@ async def detailed_health_check(
         circuit_breakers=circuit_breakers,
         model_loaded=model_loaded,
         model_name=model_name,
-        sae_attached=False,  # TODO: Get from SAE service
-        sae_id=None,
+        sae_attached=sae_state.is_attached,
+        sae_id=sae_state.attached_sae_id,
         inference=inference_info or None,
     )
 
@@ -473,6 +476,13 @@ async def get_metrics(
     hf_status = get_circuit_breaker_status(huggingface_circuit)
     circuit_open = hf_status.is_open
 
+    sae_state = AttachedSAEState()
+    sae_attached = sae_state.is_attached
+    attached_sae = sae_state.attached_sae
+    steering_enabled = attached_sae.is_steering_enabled if attached_sae else False
+    monitoring_enabled = attached_sae.is_monitoring_enabled if attached_sae else False
+    active_features = len(attached_sae.get_steering_values()) if attached_sae and steering_enabled else 0
+
     return MetricsResponse(
         total_requests=metrics_counter.total_requests,
         active_requests=metrics_counter.active_requests,
@@ -481,11 +491,11 @@ async def get_metrics(
         model_name=model_name,
         model_load_count=metrics_counter.model_load_count,
         model_unload_count=metrics_counter.model_unload_count,
-        sae_attached=False,  # TODO: Get from SAE service
-        sae_id=None,
-        steering_enabled=False,  # TODO: Get from steering service
-        active_features=0,
-        monitoring_enabled=False,  # TODO: Get from monitoring service
+        sae_attached=sae_attached,
+        sae_id=sae_state.attached_sae_id,
+        steering_enabled=steering_enabled,
+        active_features=active_features,
+        monitoring_enabled=monitoring_enabled,
         monitored_features=0,
         circuit_breaker_open=circuit_open,
         circuit_breaker_trips=metrics_counter.circuit_breaker_trips,

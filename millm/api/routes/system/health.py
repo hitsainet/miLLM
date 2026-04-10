@@ -571,3 +571,17 @@ async def get_prometheus_metrics(
     ]
 
     return PlainTextResponse(content="\n".join(lines), media_type="text/plain")
+
+
+@router.get("/version", summary="Get application version")
+def get_version():
+    """Return application version from VERSION file, falling back to package __version__."""
+    from pathlib import Path
+    for candidate in [
+        Path(__file__).parents[5] / "VERSION",
+        Path(__file__).parents[4] / "VERSION",
+        Path(__file__).parents[3] / "VERSION",
+    ]:
+        if candidate.exists():
+            return {"version": candidate.read_text().strip(), "app": "miLLM"}
+    return {"version": __version__, "app": "miLLM"}

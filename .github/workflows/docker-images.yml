@@ -4,6 +4,8 @@ on:
   push:
     branches:
       - main
+    tags:
+      - 'v*'
 
 jobs:
   build:
@@ -45,6 +47,15 @@ jobs:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
 
+      - name: Extract version tag
+        id: version
+        run: |
+          if [[ "${GITHUB_REF}" == refs/tags/v* ]]; then
+            echo "tags=${{ matrix.image.repo }}:latest,${{ matrix.image.repo }}:${GITHUB_REF#refs/tags/}" >> $GITHUB_OUTPUT
+          else
+            echo "tags=${{ matrix.image.repo }}:latest" >> $GITHUB_OUTPUT
+          fi
+
       - name: Extract metadata for Docker
         id: meta
         uses: docker/metadata-action@v5
@@ -61,7 +72,7 @@ jobs:
           file: ${{ matrix.image.dockerfile }}
           target: ${{ matrix.image.target || '' }}
           push: true
-          tags: ${{ steps.meta.outputs.tags }}
+          tags: ${{ steps.version.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
           cache-from: type=gha
           cache-to: type=gha,mode=max

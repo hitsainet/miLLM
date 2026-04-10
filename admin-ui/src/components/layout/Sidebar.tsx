@@ -14,6 +14,8 @@ import {
 } from 'lucide-react';
 import { useUIStore } from '@/stores/uiStore';
 
+const APP_VERSION = '0.5.0';
+
 const navItems = [
   { id: 'dashboard', label: 'Dashboard', path: '/dashboard', icon: LayoutDashboard },
   { id: 'models', label: 'Models', path: '/models', icon: Server },
@@ -121,6 +123,20 @@ export function Sidebar() {
           ))}
         </div>
       </div>
+
+      {/* Version badge */}
+      {!collapsed && (
+        <div className="px-4 py-2 border-t border-slate-700/50">
+          <a
+            href="https://github.com/hitsainet/millm/releases"
+            target="_blank"
+            rel="noopener noreferrer"
+            className="text-[10px] text-slate-500 hover:text-emerald-400 transition-colors font-mono"
+          >
+            v{APP_VERSION}
+          </a>
+        </div>
+      )}
 
       {/* Collapse Toggle */}
       <button

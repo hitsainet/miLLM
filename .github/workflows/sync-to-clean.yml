@@ -4,6 +4,8 @@ on:
   push:
     branches:
       - main
+    tags:
+      - 'v*'
 
 jobs:
   sync:
@@ -53,4 +55,10 @@ jobs:
           git config --unset-all http.https://github.com/.extraheader || true
           git config --global --unset-all http.https://github.com/.extraheader || true
 
-          git push --force "https://x-access-token:${SYNC_TOKEN}@github.com/hitsainet/millm.git" main
+          REMOTE="https://x-access-token:${SYNC_TOKEN}@github.com/hitsainet/millm.git"
+          git push --force "$REMOTE" main
+
+          # Forward version tags to the clean repo
+          if [[ "${GITHUB_REF}" == refs/tags/v* ]]; then
+            git push "$REMOTE" "${GITHUB_REF}"
+          fi

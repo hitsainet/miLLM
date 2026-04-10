@@ -1,0 +1,37 @@
+name: Create GitHub Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+jobs:
+  release:
+    # HARD STOP: only run in hitsainet/millm (public repo)
+    if: github.repository == 'hitsainet/millm'
+
+    runs-on: ubuntu-latest
+
+    permissions:
+      contents: write
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          generate_release_notes: true
+          make_latest: true
+          body: |
+            ## Docker Images
+
+            ```
+            docker pull hitsai/millm-backend:${{ github.ref_name }}
+            docker pull hitsai/millm-admin-ui:${{ github.ref_name }}
+            ```
+
+            ## Changelog

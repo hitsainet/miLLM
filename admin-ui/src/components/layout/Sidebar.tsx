@@ -86,7 +86,7 @@ export function Sidebar() {
           ))}
         </nav>
 
-        {/* Bottom nav (Settings + Manual link) */}
+        {/* Bottom nav (Settings + Manual link) + version badge */}
         <div className="p-3 border-t border-slate-700/50">
           {bottomNavItems.map((item) => (
             <div key={item.id} className="flex items-center">
@@ -121,22 +121,20 @@ export function Sidebar() {
               )}
             </div>
           ))}
+          {!collapsed && (
+            <div className="px-3 pt-1">
+              <a
+                href="https://github.com/hitsainet/millm/releases"
+                target="_blank"
+                rel="noopener noreferrer"
+                className="text-[10px] text-slate-500 hover:text-emerald-400 transition-colors font-mono"
+              >
+                v{APP_VERSION}
+              </a>
+            </div>
+          )}
         </div>
       </div>
-
-      {/* Version badge */}
-      {!collapsed && (
-        <div className="px-4 py-2 border-t border-slate-700/50">
-          <a
-            href="https://github.com/hitsainet/millm/releases"
-            target="_blank"
-            rel="noopener noreferrer"
-            className="text-[10px] text-slate-500 hover:text-emerald-400 transition-colors font-mono"
-          >
-            v{APP_VERSION}
-          </a>
-        </div>
-      )}
 
       {/* Collapse Toggle */}
       <button

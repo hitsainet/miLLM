@@ -25,6 +25,9 @@ RUN npm run build
 # =============================================================================
 FROM nginx:alpine AS production
 
+# Update Alpine packages to fix known CVEs
+RUN apk upgrade --no-cache
+
 # Copy built assets from builder
 COPY --from=builder /app/dist /usr/share/nginx/html
 

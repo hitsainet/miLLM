@@ -14,15 +14,19 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 
 WORKDIR /app
 
-# Install minimal system deps
+# Install minimal system deps and upgrade packages with known CVEs
 RUN apt-get update && apt-get install -y --no-install-recommends \
     libpq5 \
     curl \
+    && apt-get upgrade -y openssl \
     && rm -rf /var/lib/apt/lists/*
 
 # Copy only requirements first for better caching
 COPY pyproject.toml ./
 COPY millm/__init__.py millm/__init__.py
+
+# Upgrade wheel to fix CVE-2026-24049 (path traversal, fixed in 0.46.2)
+RUN pip install --no-cache-dir --upgrade "wheel>=0.46.2"
 
 # Install dependencies (torch bundles its own CUDA runtime)
 RUN pip install --no-cache-dir . || pip install --no-cache-dir -e .

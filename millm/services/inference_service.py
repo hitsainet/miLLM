@@ -303,6 +303,11 @@ class InferenceService:
                 return msg.content
         return None
 
+    def _is_hybrid_or_mamba_model(self) -> bool:
+        """True if the loaded model requires a hybrid cache (DynamicCache is incompatible)."""
+        model_type = getattr(getattr(self._model, "config", None), "model_type", "")
+        return "hybrid" in model_type.lower() or "mamba" in model_type.lower()
+
     def _try_prefix_cache(
         self, system_prompt: str, gen_config: GenerationConfig
     ) -> Optional[tuple[Any, int]]:
@@ -312,6 +317,11 @@ class InferenceService:
         Returns (past_key_values, token_count) or None if not cached.
         """
         if not self._prefix_cache.enabled:
+            return None
+        # Hybrid/mamba models require a HybridCache (with mamba layer slots). The cached
+        # past_key_values is a DynamicCache (attention-only), so reusing it raises
+        # `has_previous_state can only be called on LinearAttention layers`.
+        if self._is_hybrid_or_mamba_model():
             return None
 
         steering_hash = PrefixCache.get_steering_hash()
@@ -325,6 +335,9 @@ class InferenceService:
     ) -> None:
         """Store prefix KV states in cache."""
         if not self._prefix_cache.enabled:
+            return
+        # See _try_prefix_cache — never cache for hybrid/mamba models.
+        if self._is_hybrid_or_mamba_model():
             return
 
         steering_hash = PrefixCache.get_steering_hash()

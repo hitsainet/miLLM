@@ -352,6 +352,24 @@ class InferenceService:
                 cache_implementation="static",
             )
         kwargs = gen_config.to_generate_kwargs()
+
+        # Newer transformers pre-allocates the KV cache before _prefill via _init_cache.
+        # Hybrid models (GraniteMoEHybrid, etc.) require cache_implementation="hybrid"
+        # so transformers creates a HybridCache instead of DynamicCache. Without this,
+        # _update_mamba_mask receives a DynamicCache and raises ValueError.
+        # Use the model's own generation_config as the authoritative source when set.
+        if "cache_implementation" not in kwargs or kwargs.get("cache_implementation") is None:
+            model_cache_impl = getattr(
+                getattr(self._model, "generation_config", None),
+                "cache_implementation",
+                None,
+            )
+            if model_cache_impl:
+                kwargs["cache_implementation"] = model_cache_impl
+            else:
+                model_type = getattr(getattr(self._model, "config", None), "model_type", "")
+                if "hybrid" in model_type.lower() or "mamba" in model_type.lower():
+                    kwargs["cache_implementation"] = "hybrid"
         kwargs.update({k: v.to(self._get_input_device()) for k, v in inputs.items()})
         kwargs["pad_token_id"] = (
             self._tokenizer.pad_token_id or self._tokenizer.eos_token_id

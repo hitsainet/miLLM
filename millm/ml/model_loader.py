@@ -176,6 +176,40 @@ def _get_auto_model_class(config: Any) -> Any:
     return AutoModelForCausalLM
 
 
+def _patch_granite_hybrid_mamba_mask(model: Any) -> None:
+    """
+    Patch GraniteMoEHybrid models so _update_mamba_mask tolerates attention-only caches.
+
+    The model class unconditionally calls has_previous_state() on the cache, which
+    raises ValueError when no LinearAttention layers exist. Some granite-4.0-micro
+    configs have layers_block_type empty and layer_types all "attention", yet still
+    route through GraniteMoeHybridForCausalLM — making this path unreachable-but-taken.
+
+    We wrap _update_mamba_mask to catch the ValueError and fall back to the
+    attention_mask, which is the correct behavior when the model has no mamba layers.
+    """
+    model_type = getattr(getattr(model, "config", None), "model_type", "") or ""
+    if "granitemoehybrid" not in model_type.lower():
+        return
+
+    inner = getattr(model, "model", None)
+    if inner is None or not hasattr(inner, "_update_mamba_mask"):
+        return
+
+    original = inner._update_mamba_mask
+
+    def _safe_update_mamba_mask(attention_mask, past_key_values):
+        try:
+            return original(attention_mask, past_key_values)
+        except ValueError:
+            # No LinearAttention layers in cache — this model instance has no mamba
+            # layers despite the hybrid class. Return the attention_mask unmodified.
+            return attention_mask
+
+    inner._update_mamba_mask = _safe_update_mamba_mask
+    logger.info("patched_granite_hybrid_mamba_mask", model_type=model_type)
+
+
 class ModelLoadContext:
     """
     Context manager for safe model loading.
@@ -508,6 +542,14 @@ class ModelLoadContext:
                     )
             else:
                 raise
+
+        # Workaround for GraniteMoEHybrid models whose config has no mamba layers
+        # (layers_block_type empty, all layer_types == "attention") but whose model
+        # class still unconditionally calls _update_mamba_mask during forward().
+        # This fails because has_previous_state() on the DynamicCache raises when
+        # no LinearAttention layers exist. Patch _update_mamba_mask on the inner
+        # model so it tolerates attention-only caches.
+        _patch_granite_hybrid_mamba_mask(self.model)
 
         # Get memory usage using mem_get_info for accuracy (includes bitsandbytes allocations)
         memory_used_mb = 0

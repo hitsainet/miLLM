@@ -816,7 +816,7 @@ class InferenceService:
                 yield "data: [DONE]\n\n"
 
             except Exception as e:
-                logger.error("streaming_error", error=str(e))
+                logger.exception("streaming_error", error=str(e))
                 # Try to send error in SSE format
                 import json
 
@@ -824,7 +824,7 @@ class InferenceService:
                     error_event = json.dumps(
                         {
                             "error": {
-                                "message": f"Streaming error: {str(e)}",
+                                "message": "An internal server error occurred during streaming",
                                 "type": "server_error",
                                 "code": "streaming_error",
                             }

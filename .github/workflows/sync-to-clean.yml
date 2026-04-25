@@ -7,6 +7,9 @@ on:
     tags:
       - 'v*'
 
+permissions:
+  contents: read
+
 jobs:
   sync:
     # HARD STOP: only run in Onegaishimas/miLLM (private repo)

@@ -11,6 +11,9 @@ on:
     paths:
       - 'admin-ui/**'
 
+permissions:
+  contents: read
+
 jobs:
   ci:
     runs-on: ubuntu-latest

@@ -15,6 +15,9 @@ on:
       - 'tests/**'
       - 'pyproject.toml'
 
+permissions:
+  contents: read
+
 jobs:
   test:
     runs-on: ubuntu-latest

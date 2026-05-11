@@ -296,6 +296,92 @@ class InferenceService:
         except Exception:
             return False
 
+    async def _apply_request_profile(self, profile_name: str) -> Optional[dict]:
+        """
+        Apply per-request profile steering override.
+
+        Must be called INSIDE the request-queue semaphore so that only one
+        request can mutate the global steering state at a time.  Saves the
+        current steering state and returns it so _restore_request_profile can
+        undo the override after generation completes.
+
+        Returns None if the profile couldn't be applied (not found, no SAE
+        attached, or any error) — in that case no restore is needed.
+        """
+        try:
+            from millm.services.sae_service import AttachedSAEState
+            from millm.db.base import async_session_factory
+            from millm.db.repositories.profile_repository import ProfileRepository
+
+            sae = AttachedSAEState().attached_sae
+            if sae is None:
+                return None
+
+            async with async_session_factory() as session:
+                repo = ProfileRepository(session)
+                profile = await repo.get_by_name(profile_name)
+
+            if not profile or not profile.steering:
+                return None
+
+            # Save the state we are about to overwrite
+            saved: dict = {
+                "values": sae.get_steering_values(),
+                "enabled": sae.is_steering_enabled,
+            }
+
+            # Apply the profile's steering values
+            steering = {int(k): float(v) for k, v in profile.steering.items()}
+            sae.set_steering_batch(steering)
+            sae.enable_steering(True)
+
+            # Prefix cache was built under old steering — flush it
+            self._prefix_cache.clear()
+
+            logger.info(
+                "request_profile_applied",
+                profile=profile_name,
+                features=len(steering),
+            )
+            return saved
+
+        except Exception as e:
+            logger.warning(
+                "request_profile_apply_failed",
+                profile=profile_name,
+                error=str(e),
+            )
+            return None
+
+    def _restore_request_profile(self, saved: Optional[dict]) -> None:
+        """
+        Restore SAE steering to the state it was in before this request's
+        profile override.  Always called in a finally block.
+
+        If saved is None (apply_request_profile found nothing to override)
+        this is a no-op.
+        """
+        if saved is None:
+            return
+        try:
+            from millm.services.sae_service import AttachedSAEState
+
+            sae = AttachedSAEState().attached_sae
+            if sae is None:
+                return
+
+            sae.clear_steering()
+            if saved["values"]:
+                sae.set_steering_batch(saved["values"])
+            sae.enable_steering(saved["enabled"])
+
+            # Flush again so the restored state's new hash takes effect cleanly
+            self._prefix_cache.clear()
+
+            logger.debug("request_profile_steering_restored")
+        except Exception as e:
+            logger.warning("request_profile_restore_failed", error=str(e))
+
     def _is_monitoring_enabled(self) -> bool:
         """Check if SAE feature monitoring is currently enabled."""
         try:
@@ -383,6 +469,18 @@ class InferenceService:
         steering_hash = PrefixCache.get_steering_hash()
         entry = self._prefix_cache.get(system_prompt, steering_hash)
         if entry is not None:
+            # Defense-in-depth: verify steering hasn't changed between the lookup
+            # and now.  With max_concurrent=1 and profile overrides applied inside
+            # the semaphore (after Fix #1) this check should always pass, but it
+            # guards against future concurrency increases.
+            current_hash = PrefixCache.get_steering_hash()
+            if current_hash != steering_hash:
+                logger.debug(
+                    "prefix_cache_stale_steering_hash_skipping",
+                    stored=steering_hash,
+                    current=current_hash,
+                )
+                return None
             return entry.past_key_values, entry.prompt_token_count
         return None
 
@@ -493,23 +591,15 @@ class InferenceService:
 
             monitoring_service = deps._monitoring_service
             if monitoring_service is None:
-                # Lazily initialize monitoring service if not yet created
-                # (normally created by FastAPI DI on first monitoring API call)
-                from millm.services.monitoring_service import MonitoringService
-                from millm.sockets.progress import progress_emitter
-                from millm.services.sae_service import SAEService
-                from millm.db.base import async_session_factory
-                from millm.db.repositories.sae_repository import SAERepository
-
-                async_session = async_session_factory()
-                repo = SAERepository(async_session)
-                sae_service = SAEService(repository=repo)
-                monitoring_service = MonitoringService(
-                    sae_service=sae_service,
-                    emitter=progress_emitter,
-                )
-                deps._monitoring_service = monitoring_service
-                logger.info("monitoring_service_initialized_from_inference")
+                # MonitoringService is a singleton initialized by get_monitoring_service()
+                # when the monitoring API is first used.  If it hasn't been initialized
+                # yet, the SAE activations were captured but there is no recipient to
+                # forward them to — just skip rather than trying to construct a
+                # MonitoringService here (which would create a DB session inside a
+                # synchronous post-generation path and use a broken SAEService with
+                # no cache_dir).  Activations will be forwarded once monitoring is
+                # configured via the /api/monitoring endpoint.
+                return
 
             if batch_size == 1:
                 # Serial path: single request — accurate attribution
@@ -637,88 +727,100 @@ class InferenceService:
         total_completion_tokens = 0
 
         async with self._request_queue.acquire():
-            # Tokenize input
-            inputs = self._tokenizer(prompt, return_tensors="pt").to(self._get_input_device())
-            prompt_tokens = inputs.input_ids.shape[1]
+            # Per-request profile override: applied inside the semaphore so that
+            # concurrent requests cannot race on the global steering state.
+            # The previous state is restored in the finally block below.
+            _saved_steering = None
+            if request.profile:
+                _saved_steering = await self._apply_request_profile(request.profile)
 
-            # Build generation config
-            gen_config = GenerationConfig.from_request(request)
-            self._check_context_length(prompt_tokens, gen_config.max_new_tokens)
+            try:
+                # Tokenize input
+                inputs = self._tokenizer(prompt, return_tensors="pt").to(self._get_input_device())
+                prompt_tokens = inputs.input_ids.shape[1]
 
-            # Try prefix caching for system prompts
-            system_prompt = self._get_system_prompt(request.messages)
-            cached_prefix = None
-            prefix_token_count = 0
-            if system_prompt:
-                cached_prefix_result = self._try_prefix_cache(system_prompt, gen_config)
-                if cached_prefix_result:
-                    cached_prefix, prefix_token_count = cached_prefix_result
+                # Build generation config
+                gen_config = GenerationConfig.from_request(request)
+                self._check_context_length(prompt_tokens, gen_config.max_new_tokens)
 
-            for i in range(n):
-                # Generate - offload to thread to avoid blocking the event loop
-                generate_kwargs = self._build_generate_kwargs(gen_config, inputs)
+                # Try prefix caching for system prompts
+                system_prompt = self._get_system_prompt(request.messages)
+                cached_prefix = None
+                prefix_token_count = 0
+                if system_prompt:
+                    cached_prefix_result = self._try_prefix_cache(system_prompt, gen_config)
+                    if cached_prefix_result:
+                        cached_prefix, prefix_token_count = cached_prefix_result
 
-                # Use cached prefix KV states if available
-                if cached_prefix is not None and prefix_token_count > 0:
-                    generate_kwargs["past_key_values"] = cached_prefix
-                    # Only pass continuation tokens (after the cached prefix)
-                    generate_kwargs["input_ids"] = inputs.input_ids[:, prefix_token_count:]
-                    # Attention mask must cover ALL tokens (cached + continuation)
-                    generate_kwargs["attention_mask"] = inputs.attention_mask
+                for i in range(n):
+                    # Generate - offload to thread to avoid blocking the event loop
+                    generate_kwargs = self._build_generate_kwargs(gen_config, inputs)
 
-                outputs = await asyncio.to_thread(
-                    self._generate_sync, generate_kwargs
-                )
+                    # Use cached prefix KV states if available
+                    if cached_prefix is not None and prefix_token_count > 0:
+                        generate_kwargs["past_key_values"] = cached_prefix
+                        # Only pass continuation tokens (after the cached prefix)
+                        generate_kwargs["input_ids"] = inputs.input_ids[:, prefix_token_count:]
+                        # Attention mask must cover ALL tokens (cached + continuation)
+                        generate_kwargs["attention_mask"] = inputs.attention_mask
 
-                # Cache system prompt prefix on first miss
-                if (
-                    system_prompt
-                    and cached_prefix is None
-                    and self._prefix_cache.enabled
-                    and hasattr(outputs, "past_key_values")
-                ):
-                    try:
-                        self._cache_prefix(
-                            system_prompt,
-                            outputs.past_key_values,
-                            prefix_token_count,
+                    outputs = await asyncio.to_thread(
+                        self._generate_sync, generate_kwargs
+                    )
+
+                    # Cache system prompt prefix on first miss
+                    if (
+                        system_prompt
+                        and cached_prefix is None
+                        and self._prefix_cache.enabled
+                        and hasattr(outputs, "past_key_values")
+                    ):
+                        try:
+                            self._cache_prefix(
+                                system_prompt,
+                                outputs.past_key_values,
+                                prefix_token_count,
+                            )
+                        except Exception:
+                            pass  # Cache failure should never affect generation
+
+                    # Notify monitoring after generation
+                    self._notify_monitoring(request_id=completion_id)
+
+                    # Decode output
+                    generated_ids = outputs[0][prompt_tokens:]
+                    completion_text = self._tokenizer.decode(
+                        generated_ids, skip_special_tokens=True
+                    )
+                    completion_tokens = len(generated_ids)
+
+                    # Apply stop sequences
+                    completion_text, stopped_by_sequence = self._apply_stop_sequences(
+                        completion_text, gen_config.stop_sequences
+                    )
+
+                    # Determine finish reason
+                    if stopped_by_sequence:
+                        finish_reason = "stop"
+                    else:
+                        finish_reason = self._determine_finish_reason(
+                            completion_tokens, gen_config.max_new_tokens
                         )
-                    except Exception:
-                        pass  # Cache failure should never affect generation
 
-                # Notify monitoring after generation
-                self._notify_monitoring(request_id=completion_id)
-
-                # Decode output
-                generated_ids = outputs[0][prompt_tokens:]
-                completion_text = self._tokenizer.decode(
-                    generated_ids, skip_special_tokens=True
-                )
-                completion_tokens = len(generated_ids)
-
-                # Apply stop sequences
-                completion_text, stopped_by_sequence = self._apply_stop_sequences(
-                    completion_text, gen_config.stop_sequences
-                )
-
-                # Determine finish reason
-                if stopped_by_sequence:
-                    finish_reason = "stop"
-                else:
-                    finish_reason = self._determine_finish_reason(
-                        completion_tokens, gen_config.max_new_tokens
+                    choices.append(
+                        ChatCompletionChoice(
+                            index=i,
+                            message=ChatMessage(role="assistant", content=completion_text),
+                            finish_reason=finish_reason,
+                        )
                     )
 
-                choices.append(
-                    ChatCompletionChoice(
-                        index=i,
-                        message=ChatMessage(role="assistant", content=completion_text),
-                        finish_reason=finish_reason,
-                    )
-                )
+                    total_prompt_tokens += prompt_tokens
+                    total_completion_tokens += completion_tokens
 
-                total_prompt_tokens += prompt_tokens
-                total_completion_tokens += completion_tokens
+            finally:
+                # Restore steering to its pre-request state regardless of success/failure.
+                self._restore_request_profile(_saved_steering)
 
         model_info = self.get_loaded_model_info()
         model_name = model_info.name if model_info else "unknown"
@@ -772,8 +874,14 @@ class InferenceService:
         prompt = self._format_chat_messages(request.messages)
 
         async with self._request_queue.acquire():
+            # Per-request profile override (same logic as non-streaming path)
+            _saved_steering = None
+            if request.profile:
+                _saved_steering = await self._apply_request_profile(request.profile)
+
             # Tokenize
             inputs = self._tokenizer(prompt, return_tensors="pt").to(self._get_input_device())
+            prompt_tokens = inputs["input_ids"].shape[1]
 
             # Set up streamer
             streamer = TextIteratorStreamer(
@@ -818,74 +926,84 @@ class InferenceService:
                 stopped_by_sequence = False
 
                 for token in streamer:
-                    if token:
-                        # Check if accumulated text contains a stop sequence
-                        if stop_sequences:
-                            accumulated_text += token
-                            truncated, found = self._apply_stop_sequences(
-                                accumulated_text, stop_sequences
-                            )
-                            if found:
-                                # Yield only the portion before stop sequence
-                                remaining = truncated[
-                                    len(accumulated_text) - len(token) :
-                                ]
-                                if remaining:
-                                    chunk = ChatCompletionChunk(
-                                        id=completion_id,
-                                        created=created,
-                                        model=model_name,
-                                        choices=[
-                                            ChatCompletionChunkChoice(
-                                                index=0,
-                                                delta=ChatCompletionChunkDelta(
-                                                    content=remaining
-                                                ),
-                                                finish_reason=None,
-                                            )
-                                        ],
-                                    )
-                                    yield f"data: {chunk.model_dump_json(exclude_none=True)}\n\n"
-                                stopped_by_sequence = True
-                                break
+                    if not token:
+                        continue
 
-                        token_count += 1
-                        chunk = ChatCompletionChunk(
-                            id=completion_id,
-                            created=created,
-                            model=model_name,
-                            choices=[
-                                ChatCompletionChunkChoice(
-                                    index=0,
-                                    delta=ChatCompletionChunkDelta(content=token),
-                                    finish_reason=None,
-                                )
-                            ],
+                    # Count every token emitted, including a partial stop-sequence
+                    # token.  Previously token_count += 1 appeared after the break
+                    # and was unreachable on the stop-sequence path, making
+                    # _determine_finish_reason compare a count one short of the
+                    # actual generation length.
+                    token_count += 1
+
+                    if stop_sequences:
+                        accumulated_text += token
+                        truncated, found = self._apply_stop_sequences(
+                            accumulated_text, stop_sequences
                         )
-                        yield f"data: {chunk.model_dump_json(exclude_none=True)}\n\n"
+                        if found:
+                            # Yield only the portion before the stop sequence
+                            remaining = truncated[len(accumulated_text) - len(token):]
+                            if remaining:
+                                chunk = ChatCompletionChunk(
+                                    id=completion_id,
+                                    created=created,
+                                    model=model_name,
+                                    choices=[
+                                        ChatCompletionChunkChoice(
+                                            index=0,
+                                            delta=ChatCompletionChunkDelta(
+                                                content=remaining
+                                            ),
+                                            finish_reason=None,
+                                        )
+                                    ],
+                                )
+                                yield f"data: {chunk.model_dump_json(exclude_none=True)}\n\n"
+                            stopped_by_sequence = True
+                            break
 
-                # Notify monitoring after generation completes
-                self._notify_monitoring(request_id=completion_id)
-
-                # Check for thread errors
-                if thread_error:
-                    error_msg = str(thread_error[0])
-                    logger.error("generation_failed_during_stream", error=error_msg)
-                    # Send error as final SSE event before closing
-                    import json
-
-                    error_event = json.dumps(
-                        {
-                            "error": {
-                                "message": f"Generation error: {error_msg}",
-                                "type": "server_error",
-                                "code": "generation_error",
-                            }
-                        }
+                    chunk = ChatCompletionChunk(
+                        id=completion_id,
+                        created=created,
+                        model=model_name,
+                        choices=[
+                            ChatCompletionChunkChoice(
+                                index=0,
+                                delta=ChatCompletionChunkDelta(content=token),
+                                finish_reason=None,
+                            )
+                        ],
                     )
+                    yield f"data: {chunk.model_dump_json(exclude_none=True)}\n\n"
+
+                # Check for thread errors before notifying monitoring — if the
+                # thread crashed, its captured activations may be incomplete.
+                if thread_error:
+                    import json as _json
+                    error_msg = str(thread_error[0])
+                    logger.error(
+                        "generation_failed_during_stream",
+                        error=error_msg,
+                        completion_id=completion_id,
+                    )
+                    # Signal the client with an SSE error event followed by [DONE].
+                    # The HTTP status is already 200 at this point; this is the
+                    # standard approach for signalling mid-stream errors over SSE.
+                    error_event = _json.dumps({
+                        "error": {
+                            "message": "Generation failed during streaming. "
+                                       "See server logs for details.",
+                            "type": "server_error",
+                            "code": "generation_error",
+                        }
+                    })
                     yield f"data: {error_event}\n\n"
                     yield "data: [DONE]\n\n"
                     return
+
+                # Notify monitoring after successful generation
+                self._notify_monitoring(request_id=completion_id)
 
                 # Determine finish reason
                 if stopped_by_sequence:
@@ -895,7 +1013,8 @@ class InferenceService:
                         token_count, gen_config.max_new_tokens
                     )
 
-                # Send final chunk with finish_reason
+                # Send final chunk with finish_reason and token usage.
+                # Intermediate chunks omit `usage` (exclude_none=True strips it).
                 final_chunk = ChatCompletionChunk(
                     id=completion_id,
                     created=created,
@@ -907,6 +1026,10 @@ class InferenceService:
                             finish_reason=finish_reason,
                         )
                     ],
+                    usage=Usage(
+                        prompt_tokens=prompt_tokens,
+                        completion_tokens=token_count,
+                    ),
                 )
                 yield f"data: {final_chunk.model_dump_json(exclude_none=True)}\n\n"
                 yield "data: [DONE]\n\n"
@@ -933,7 +1056,26 @@ class InferenceService:
             finally:
                 thread.join(timeout=5.0)
                 if thread.is_alive():
-                    logger.warning("generation_thread_did_not_complete_cleanly")
+                    # The generation thread did not finish within 5 seconds.  This
+                    # typically means model.generate() is stuck (CUDA deadlock, OOM
+                    # pending, or infinite loop in a stopping criterion).  Python
+                    # cannot forcibly terminate threads, so the stuck thread will
+                    # continue occupying GPU memory.  Signal the streamer to
+                    # unblock any waiting iterators, log an error, and let the
+                    # request queue release so subsequent requests can proceed —
+                    # they may OOM, but at least the server remains responsive.
+                    # If this happens repeatedly, restarting the server is required.
+                    try:
+                        streamer.on_finalize(None, None)  # unblock iterator
+                    except Exception:
+                        pass
+                    logger.error(
+                        "generation_thread_hung_after_5s",
+                        completion_id=completion_id,
+                        hint="GPU may be stuck. Restart the server if this recurs.",
+                    )
+                # Restore steering to its pre-request state (Fix #1: steering race)
+                self._restore_request_profile(_saved_steering)
 
     # =========================================================================
     # Text Completions

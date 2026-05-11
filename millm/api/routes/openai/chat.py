@@ -60,29 +60,10 @@ async def create_chat_completion(
     if model_info.name != request.model:
         return model_not_found_error(request.model, model_info.name)
 
-    # Apply profile override if specified
-    if request.profile:
-        try:
-            from millm.services.sae_service import AttachedSAEState
-            from millm.db.base import async_session_factory
-            from millm.db.repositories.profile_repository import ProfileRepository
-
-            async with async_session_factory() as session:
-                repo = ProfileRepository(session)
-                profile = await repo.get_by_name(request.profile)
-                if profile and profile.steering:
-                    sae_state = AttachedSAEState()
-                    sae = sae_state.attached_sae
-                    if sae:
-                        sae.set_steering_batch(profile.get_steering_dict())
-                        sae.enable_steering(True)
-                        logger.info(
-                            "profile_applied",
-                            profile=request.profile,
-                            features=len(profile.steering),
-                        )
-        except Exception as e:
-            logger.warning("profile_apply_failed", profile=request.profile, error=str(e))
+    # Profile override (request.profile) is applied inside the inference service's
+    # request-queue semaphore to prevent concurrent requests from racing on the
+    # global SAE steering state.  The previous steering is restored after each
+    # generation completes.  See InferenceService._apply_request_profile.
 
     logger.info(
         "chat_completion_request",

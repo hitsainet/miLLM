@@ -188,7 +188,12 @@ class ChatCompletionChunk(BaseModel):
     """
     Streaming chunk response.
 
-    Usage: chunk.model_dump_json() for SSE data field.
+    Usage: chunk.model_dump_json(exclude_none=True) for SSE data field.
+
+    The final chunk (the one that carries finish_reason) also carries a
+    `usage` field so clients can track token consumption from streamed
+    responses.  Intermediate chunks leave `usage=None` which is excluded
+    by exclude_none=True.
     """
 
     id: str
@@ -196,6 +201,7 @@ class ChatCompletionChunk(BaseModel):
     created: int
     model: str
     choices: list[ChatCompletionChunkChoice]
+    usage: Optional["Usage"] = None
 
 
 # =============================================================================

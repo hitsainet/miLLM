@@ -59,11 +59,25 @@ class ModelDownloadRequest(BaseModel):
     @field_validator("local_path")
     @classmethod
     def validate_local_path(cls, v: str | None) -> str | None:
-        """Validate that local_path is absolute."""
+        """Validate that local_path is an absolute path outside system directories."""
         if v is None:
             return v
         if not v.startswith("/"):
             raise ValueError("local_path must be an absolute path")
+        # Normalise to collapse any .. segments before the prefix check.
+        from pathlib import Path
+        try:
+            normalised = str(Path(v).resolve())
+        except (ValueError, OSError):
+            raise ValueError("local_path contains invalid characters")
+        # Block directories that can never contain model files and whose
+        # existence could be probed via error messages.
+        _BLOCKED = ("/proc", "/sys", "/dev", "/run", "/boot", "/etc", "/var/run", "/tmp")
+        for blocked in _BLOCKED:
+            if normalised == blocked or normalised.startswith(blocked + "/"):
+                raise ValueError(
+                    f"local_path may not point to system directory: {blocked}"
+                )
         return v
 
 

@@ -180,7 +180,7 @@ async def readiness_check(
         components.append(ComponentHealth(
             name="model_loader",
             status=HealthStatus.UNHEALTHY,
-            message=str(e),
+            message="Component check failed — see server logs",
         ))
         overall_status = HealthStatus.UNHEALTHY
 
@@ -266,7 +266,7 @@ async def detailed_health_check(
         components.append(ComponentHealth(
             name="model_loader",
             status=HealthStatus.UNHEALTHY,
-            message=str(e),
+            message="Component check failed — see server logs",
         ))
         overall_status = HealthStatus.UNHEALTHY
 

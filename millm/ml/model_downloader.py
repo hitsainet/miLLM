@@ -255,9 +255,10 @@ class ModelDownloader:
         except Exception as e:
             error_msg = str(e).lower()
 
-            # Check for token-related errors
+            # Check for token-related errors — log status code only, not full response
+            # body which could theoretically contain auth details in some edge cases.
             if "401" in error_msg or "unauthorized" in error_msg:
-                logger.warning("invalid_token", repo_id=repo_id, error=str(e))
+                logger.warning("invalid_token", repo_id=repo_id, error="401 Unauthorized")
                 raise InvalidTokenError(
                     "HuggingFace token is invalid or expired",
                     details={"repo_id": repo_id},
@@ -340,15 +341,17 @@ class ModelDownloader:
                 details={"repo_id": repo_id, "circuit_error": str(e)},
             )
 
-        except RepositoryNotFoundError:
-            raise RepoNotFoundError(
-                f"Repository '{repo_id}' not found",
-                details={"repo_id": repo_id},
-            )
-
+        # GatedRepoError must be caught before RepositoryNotFoundError because
+        # GatedRepoError is a subclass of RepositoryNotFoundError.
         except GatedRepoError:
             raise GatedModelError(
                 f"Model '{repo_id}' is gated. Please provide a valid access token.",
+                details={"repo_id": repo_id},
+            )
+
+        except RepositoryNotFoundError:
+            raise RepoNotFoundError(
+                f"Repository '{repo_id}' not found",
                 details={"repo_id": repo_id},
             )
 

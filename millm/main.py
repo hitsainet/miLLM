@@ -60,7 +60,11 @@ async def _auto_load_model(model_identifier: str) -> None:
                     break
 
         if not model:
-            logger.warning("auto_load_model_not_found", model=model_identifier)
+            logger.error(
+                "auto_load_model_not_found",
+                model=model_identifier,
+                hint="Check AUTO_LOAD_MODEL env var — model must exist in the database.",
+            )
             return
 
         if model.status.value == "loaded":
@@ -68,11 +72,12 @@ async def _auto_load_model(model_identifier: str) -> None:
             return
 
         if model.status.value != "ready":
-            logger.warning(
+            logger.error(
                 "auto_load_model_not_ready",
                 model_id=model.id,
                 name=model.name,
                 status=model.status.value,
+                hint="Model must be in 'ready' status to auto-load on startup.",
             )
             return
 
@@ -96,7 +101,12 @@ async def _auto_load_model(model_identifier: str) -> None:
                 )
                 return
 
-        logger.warning("auto_load_model_timeout", model_id=model.id, name=model.name)
+        logger.error(
+            "auto_load_model_timeout",
+            model_id=model.id,
+            name=model.name,
+            hint="Model load did not complete within 2 minutes. Check GPU memory and logs.",
+        )
 
 
 @asynccontextmanager
@@ -267,10 +277,14 @@ All errors return a standard response format:
     )
 
     # CORS middleware
+    # allow_credentials=False: the server has no authentication in v1.0, so there
+    # are no cookies or auth headers to forward. Combining allow_credentials=True
+    # with a wildcard origin causes Starlette to reflect the request Origin header
+    # rather than responding with "*", which grants every origin credential access.
     app.add_middleware(
         CORSMiddleware,
         allow_origins=settings.cors_origins_list,
-        allow_credentials=True,
+        allow_credentials=False,
         allow_methods=["*"],
         allow_headers=["*"],
     )

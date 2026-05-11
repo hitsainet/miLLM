@@ -6,6 +6,8 @@ Routes errors to the correct format based on the request path:
 - All other endpoints -> Management API format (ApiResponse)
 """
 
+import logging
+
 from fastapi import Request
 from fastapi.responses import JSONResponse
 
@@ -117,7 +119,7 @@ async def generic_exception_handler(request: Request, exc: Exception) -> JSONRes
         message=user_message,
         details={
             "type": type(exc).__name__,
-            "technical_message": str(exc) if logger.isEnabledFor(10) else "See server logs",
+            "technical_message": str(exc) if logger.is_enabled_for(logging.DEBUG) else "See server logs",
         },
     )
 

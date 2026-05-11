@@ -3,7 +3,7 @@ Pydantic schemas for SAE API endpoints.
 """
 
 from datetime import datetime
-from typing import Any
+from typing import Annotated, Any
 
 from pydantic import BaseModel, Field, field_validator
 
@@ -31,10 +31,30 @@ class DownloadSAERequest(BaseModel):
         description="Specific SAE file path to download (e.g., 'layer_12/width_16k/average_l0_50/params.npz'). Downloads only this file and its directory.",
         examples=["layer_12/width_16k/average_l0_50/params.npz"],
     )
-    hf_token: str | None = Field(
+    hf_token: Annotated[str | None, Field(exclude=True)] = Field(
         default=None,
-        description="HuggingFace access token for gated repositories (never logged)",
+        description="HuggingFace access token for gated repositories (never logged or serialized)",
     )
+
+    @field_validator("file_path")
+    @classmethod
+    def validate_file_path(cls, v: str | None) -> str | None:
+        """Reject path traversal sequences in file_path.
+
+        file_path is used to build an allow_patterns glob for snapshot_download.
+        A '..' component could expand the pattern to match unintended repository
+        files (e.g., sibling directories). Repository files are remote, so this
+        is not a local filesystem risk, but it is still an input-integrity issue.
+        """
+        if v is None:
+            return v
+        from pathlib import PurePosixPath
+        parts = PurePosixPath(v).parts
+        if ".." in parts or v.startswith("/"):
+            raise ValueError(
+                "file_path must be a relative path with no '..' components"
+            )
+        return v
 
 
 class AttachSAERequest(BaseModel):
@@ -82,10 +102,19 @@ class SteeringBatchRequest(BaseModel):
     @field_validator("steering")
     @classmethod
     def validate_steering(cls, v: dict[int, float]) -> dict[int, float]:
-        """Validate all indices are non-negative."""
-        for idx in v.keys():
+        """Validate indices are non-negative and the batch is a reasonable size."""
+        _MAX_BATCH_FEATURES = 1000
+        if len(v) > _MAX_BATCH_FEATURES:
+            raise ValueError(
+                f"Batch steering may not specify more than {_MAX_BATCH_FEATURES} features"
+            )
+        for idx, val in v.items():
             if idx < 0:
                 raise ValueError(f"Feature index {idx} must be non-negative")
+            if not (-200.0 <= val <= 200.0):
+                raise ValueError(
+                    f"Steering value {val} for feature {idx} must be in [-200, 200]"
+                )
         return v
 
 
@@ -299,10 +328,10 @@ class PreviewSAERequest(BaseModel):
         max_length=100,
         description="Git revision (branch, tag, or commit hash)",
     )
-    hf_token: str | None = Field(
+    hf_token: Annotated[str | None, Field(exclude=True)] = Field(
         default=None,
         max_length=255,
-        description="HuggingFace access token for gated repositories",
+        description="HuggingFace access token for gated repositories (never logged or serialized)",
     )
 
 

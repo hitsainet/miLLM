@@ -255,7 +255,7 @@ class SAEDownloader:
         repo_folder_name = repository_id.replace("/", "--")
 
         # Check if snapshot exists
-        snapshots_dir = self.cache_dir / "models--" + repo_folder_name / "snapshots"
+        snapshots_dir = self.cache_dir / ("models--" + repo_folder_name) / "snapshots"
         if snapshots_dir.exists():
             # Return first snapshot (most recent)
             snapshots = list(snapshots_dir.iterdir())

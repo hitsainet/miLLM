@@ -6,7 +6,7 @@ POST /v1/embeddings - Create embeddings
 Requires a model to already be loaded via the Management API.
 """
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, Response
 from fastapi.responses import JSONResponse
 
 from millm.api.dependencies import ModelServiceDep, get_inference_service
@@ -36,6 +36,7 @@ logger = get_logger(__name__)
 async def create_embeddings(
     request: EmbeddingRequest,
     service: ModelServiceDep,
+    response: Response,
     inference: InferenceService = Depends(get_inference_service),
 ) -> EmbeddingResponse | JSONResponse:
     """
@@ -63,5 +64,5 @@ async def create_embeddings(
         input_count=input_count,
     )
 
-    response = await inference.create_embeddings(request)
-    return response
+    response.headers["X-miLLM-Backend"] = inference.backend_name
+    return await inference.create_embeddings(request)

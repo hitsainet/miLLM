@@ -173,13 +173,13 @@ class TestToGenerateKwargs:
         assert "repetition_penalty" in kwargs
         assert kwargs["repetition_penalty"] > 1.0
 
-    def test_presence_penalty_skipped_when_frequency_already_set(self):
-        # frequency_penalty takes priority; presence_penalty should not override
+    def test_both_penalties_combine_additively(self):
+        # Both penalties are combined: combined = freq + 0.5 * presence
+        # frequency=1.0, presence=1.0 → combined=1.5 → 1.0 + 1.5*0.25 = 1.375
         kwargs = GenerationConfig(
             frequency_penalty=1.0, presence_penalty=1.0, do_sample=False
         ).to_generate_kwargs()
-        # repetition_penalty from frequency_penalty=1.0 → 1.0 + 1.0*0.25 = 1.25
-        assert abs(kwargs["repetition_penalty"] - 1.25) < 0.01
+        assert abs(kwargs["repetition_penalty"] - 1.375) < 0.01
 
     def test_static_cache_included_when_set(self):
         kwargs = GenerationConfig(cache_implementation="static").to_generate_kwargs()

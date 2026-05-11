@@ -4,12 +4,19 @@ Generation configuration mapping.
 Maps OpenAI API parameters to Transformers generate() parameters.
 
 Mapping reference:
-- max_tokens → max_new_tokens
-- temperature → temperature (0 means greedy)
-- top_p → top_p
-- stop → stopping_criteria (custom implementation)
-- frequency_penalty → repetition_penalty (approximate)
-- presence_penalty → (not directly supported, uses repetition_penalty)
+- max_tokens        → max_new_tokens  (None → 512)
+- temperature       → temperature     (0 = greedy)
+- top_p             → top_p
+- stop              → post-generation truncation (InferenceService)
+- frequency_penalty ↘ combined linearly into repetition_penalty
+- presence_penalty  ↗ (see to_generate_kwargs for formula)
+
+Known approximations:
+- repetition_penalty is a single scalar applied uniformly to all seen tokens;
+  OpenAI's frequency/presence penalties have distinct semantics.  The mapping
+  is symmetric and principled but not a perfect equivalence.
+- max_tokens for the legacy /v1/completions endpoint intentionally deviates
+  from the OpenAI default of 16 tokens — see TextCompletionRequest.
 """
 
 from dataclasses import dataclass
@@ -113,21 +120,29 @@ class GenerationConfig:
             kwargs["temperature"] = self.temperature
             kwargs["top_p"] = self.top_p
 
-        # Approximate frequency_penalty with repetition_penalty
-        # OpenAI frequency_penalty: -2.0 to 2.0
-        # Transformers repetition_penalty: typically 1.0 to 2.0
-        # Map positive values to increased repetition penalty
-        if self.frequency_penalty > 0:
-            # Map 0-2 → 1.0-1.5 (conservative)
-            kwargs["repetition_penalty"] = 1.0 + (self.frequency_penalty * 0.25)
-        elif self.frequency_penalty < 0:
-            # Negative penalty encourages repetition (not well supported)
-            # Use a small decrease from 1.0
-            kwargs["repetition_penalty"] = max(0.8, 1.0 + (self.frequency_penalty * 0.1))
-
-        # presence_penalty can also contribute to repetition penalty
-        if self.presence_penalty > 0 and "repetition_penalty" not in kwargs:
-            kwargs["repetition_penalty"] = 1.0 + (self.presence_penalty * 0.25)
+        # Map OpenAI-style penalties to Transformers repetition_penalty.
+        #
+        # OpenAI exposes two independent concepts:
+        #   frequency_penalty (-2..+2): discourages repeating exact token sequences
+        #   presence_penalty  (-2..+2): encourages introducing new topics/tokens
+        #
+        # Transformers has a single repetition_penalty scalar that multiplies
+        # the logits of already-generated tokens (>1 = discourage, <1 = encourage).
+        # This is an approximation; a perfect mapping is not possible.
+        #
+        # Combined formula (symmetric):
+        #   combined = frequency_penalty + 0.5 * presence_penalty
+        #   repetition_penalty = 1.0 + combined * 0.25
+        #   clamped to [0.8, 1.8] to stay within the practical safe range
+        #
+        # Previous implementation used 0.25x for positive frequency but only 0.1x
+        # for negative, and silently discarded presence_penalty when frequency was
+        # non-zero.  This version treats both directions and both penalties
+        # consistently.
+        combined_penalty = self.frequency_penalty + (self.presence_penalty * 0.5)
+        if combined_penalty != 0.0:
+            raw = 1.0 + (combined_penalty * 0.25)
+            kwargs["repetition_penalty"] = max(0.8, min(1.8, raw))
 
         return kwargs
 

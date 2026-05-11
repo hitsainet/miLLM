@@ -6,7 +6,7 @@ POST /v1/completions - Create text completion (legacy endpoint)
 Requires a model to already be loaded via the Management API.
 """
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, Response
 from fastapi.responses import JSONResponse
 
 from millm.api.dependencies import ModelServiceDep, get_inference_service
@@ -38,6 +38,7 @@ logger = get_logger(__name__)
 async def create_completion(
     request: TextCompletionRequest,
     service: ModelServiceDep,
+    response: Response,
     inference: InferenceService = Depends(get_inference_service),
 ) -> TextCompletionResponse | JSONResponse:
     """
@@ -72,5 +73,5 @@ async def create_completion(
             param="stream",
         )
 
-    response = await inference.create_text_completion(request)
-    return response
+    response.headers["X-miLLM-Backend"] = inference.backend_name
+    return await inference.create_text_completion(request)

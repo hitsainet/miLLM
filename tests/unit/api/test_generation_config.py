@@ -141,8 +141,10 @@ class TestFromTextCompletionRequest:
             prompt="Once upon a time",
         )
         config = GenerationConfig.from_request(request)
-        # TextCompletionRequest default max_tokens is 16
-        assert config.max_new_tokens == 16
+        # TextCompletionRequest.max_tokens now defaults to None (→ 512) rather
+        # than the OpenAI spec value of 16, to avoid silently truncating output
+        # for local LLM users who forget to set max_tokens explicitly.
+        assert config.max_new_tokens == 512
         assert config.temperature == 1.0
 
     def test_text_completion_with_parameters(self):

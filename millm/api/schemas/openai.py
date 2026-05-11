@@ -71,13 +71,20 @@ class ChatCompletionRequest(BaseModel):
 
 
 class TextCompletionRequest(BaseModel):
-    """Text completion request - OpenAI format (legacy completions endpoint)."""
+    """Text completion request - OpenAI format (legacy completions endpoint).
+
+    Known deviation from the OpenAI API: max_tokens defaults to None (→ 512
+    in GenerationConfig) rather than the OpenAI spec value of 16.  The OpenAI
+    default is counterproductive for a self-hosted LLM where users always want
+    more than 16 tokens.  Clients that need the original 16-token behaviour
+    must set max_tokens=16 explicitly.
+    """
 
     model: str
     prompt: Union[str, list[str]]
     stream: bool = False
     n: int = Field(default=1, ge=1)
-    max_tokens: Optional[int] = Field(default=16, gt=0)
+    max_tokens: Optional[int] = Field(default=None, gt=0)
     temperature: float = Field(default=1.0, ge=0.0, le=2.0)
     top_p: float = Field(default=1.0, ge=0.0, le=1.0)
     stop: Optional[Union[str, list[str]]] = None

@@ -241,6 +241,71 @@ class InferenceService:
         """Whether to use continuous batching for generation."""
         return self._cbm_backend is not None and self._cbm_backend.is_running
 
+    @property
+    def backend_name(self) -> str:
+        """Active inference backend identifier for observability headers."""
+        return "cbm" if self._use_cbm() else "serial"
+
+    def get_backend_info(self) -> dict:
+        """
+        Return a description of the active inference backend and its capabilities.
+
+        Used by the /api/inference/status endpoint so operators and clients
+        can understand which path is serving requests and what its limitations are.
+        """
+        if self._use_cbm():
+            backend: dict = {
+                "backend": "cbm",
+                "description": "ContinuousBatchingManager (high-throughput batching)",
+                "capabilities": {
+                    "streaming": True,
+                    "prefix_cache": False,
+                    "per_request_sampling_params": False,
+                    "per_request_profile_override": False,
+                    "speculative_decoding": False,
+                },
+                "cbm_config": {
+                    "default_temperature": getattr(
+                        self._cbm_backend, "_default_temperature", None
+                    ),
+                    "default_top_p": getattr(
+                        self._cbm_backend, "_default_top_p", None
+                    ),
+                    "max_queue_size": getattr(
+                        self._cbm_backend, "_max_queue_size", None
+                    ),
+                },
+                "limitations": [
+                    "temperature and top_p are fixed at manager creation; "
+                    "requests with different values fall back to the serial path",
+                    "prefix cache is not consulted — no KV-state reuse across requests",
+                    "request.profile steering overrides are not applied in CBM mode",
+                    "CBM_FORCE_SERIAL_MONITORING=true routes monitored requests "
+                    "to the serial path for accurate activation attribution",
+                ],
+            }
+        else:
+            backend = {
+                "backend": "serial",
+                "description": "Serial request queue (one generation at a time)",
+                "capabilities": {
+                    "streaming": True,
+                    "prefix_cache": self._prefix_cache.enabled,
+                    "per_request_sampling_params": True,
+                    "per_request_profile_override": True,
+                    "speculative_decoding": self._speculative_model_id is not None,
+                },
+                "queue": {
+                    "max_concurrent": self._request_queue.max_concurrent,
+                    "max_pending": self._request_queue.max_pending,
+                    "current_pending": self._request_queue.pending_count,
+                },
+                "limitations": [
+                    "one generation active at a time; concurrent requests queue",
+                ],
+            }
+        return backend
+
     def _use_cbm_for_request(
         self,
         temperature: Optional[float] = None,
@@ -262,14 +327,22 @@ class InferenceService:
             return False
         matches = self._cbm_backend.sampling_params_match(temperature, top_p)
         if not matches:
-            logger.debug(
-                "cbm_sampling_params_mismatch_routing_to_serial",
+            # Elevated to INFO so operators can correlate latency jitter with
+            # requests that silently fell back from CBM to the serial path.
+            logger.info(
+                "cbm_routing_fallback_to_serial",
+                reason="sampling_params_mismatch",
                 request_temperature=temperature,
                 request_top_p=top_p,
+                cbm_temperature=getattr(self._cbm_backend, "_default_temperature", None),
+                cbm_top_p=getattr(self._cbm_backend, "_default_top_p", None),
             )
             return False
         if self._cbm_force_serial_monitoring and self._is_monitoring_enabled():
-            logger.debug("cbm_force_serial_monitoring_active_routing_to_serial")
+            logger.info(
+                "cbm_routing_fallback_to_serial",
+                reason="force_serial_monitoring_active",
+            )
             return False
         return True
 
@@ -652,15 +725,44 @@ class InferenceService:
             )
 
     def _determine_finish_reason(
-        self, generated_token_count: int, max_new_tokens: int
+        self,
+        generated_token_count: int,
+        max_new_tokens: int,
+        last_token_id: Optional[int] = None,
     ) -> str:
         """
         Determine finish_reason per OpenAI spec.
 
         Returns "length" if generation hit max_tokens, "stop" otherwise.
+
+        The OpenAI spec uses "stop" for both model-initiated stops (EOS token)
+        and user-supplied stop sequences.  We log the internal stop mechanism at
+        DEBUG level so operators can distinguish the two without changing the
+        API-visible value.
+
+        Args:
+            generated_token_count: Number of tokens generated.
+            max_new_tokens: The max_tokens limit for this request.
+            last_token_id: Optional last token ID for EOS detection (non-streaming
+                path only — TextIteratorStreamer does not expose individual IDs).
         """
         if generated_token_count >= max_new_tokens:
+            logger.debug("finish_reason_length", count=generated_token_count)
             return "length"
+
+        if last_token_id is not None:
+            try:
+                eos_id = getattr(self._tokenizer, "eos_token_id", None)
+                if eos_id is not None and last_token_id == eos_id:
+                    logger.debug("finish_reason_eos_token")
+                else:
+                    logger.debug(
+                        "finish_reason_stop_other",
+                        last_token_id=last_token_id,
+                    )
+            except Exception:
+                pass  # Tokenizer not available during testing
+
         return "stop"
 
     def _apply_stop_sequences(
@@ -799,12 +901,20 @@ class InferenceService:
                         completion_text, gen_config.stop_sequences
                     )
 
-                    # Determine finish reason
+                    # Determine finish reason.
+                    # Pass last_token_id for EOS detection — available only in
+                    # the non-streaming path where we have the full output IDs.
                     if stopped_by_sequence:
+                        logger.debug("finish_reason_stop_sequence")
                         finish_reason = "stop"
                     else:
+                        last_token_id = (
+                            int(generated_ids[-1]) if len(generated_ids) > 0 else None
+                        )
                         finish_reason = self._determine_finish_reason(
-                            completion_tokens, gen_config.max_new_tokens
+                            completion_tokens,
+                            gen_config.max_new_tokens,
+                            last_token_id=last_token_id,
                         )
 
                     choices.append(
@@ -1150,12 +1260,18 @@ class InferenceService:
                     )
                 )
 
-                # Determine finish reason
+                # Determine finish reason with EOS logging
                 if stopped_by_sequence:
+                    logger.debug("finish_reason_stop_sequence")
                     finish_reason = "stop"
                 else:
+                    last_token_id = (
+                        int(generated_ids[-1]) if len(generated_ids) > 0 else None
+                    )
                     finish_reason = self._determine_finish_reason(
-                        completion_tokens, gen_config.max_new_tokens
+                        completion_tokens,
+                        gen_config.max_new_tokens,
+                        last_token_id=last_token_id,
                     )
 
                 choices.append(

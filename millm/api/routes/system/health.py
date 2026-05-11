@@ -585,3 +585,38 @@ def get_version():
         if candidate.exists():
             return {"version": candidate.read_text().strip(), "app": "miLLM"}
     return {"version": __version__, "app": "miLLM"}
+
+
+@router.get(
+    "/inference",
+    summary="Inference backend status",
+    description=(
+        "Returns the active inference backend (serial queue or CBM), its "
+        "capabilities, and known limitations.  Useful for diagnosing latency "
+        "jitter when requests fall back from CBM to the serial path, and for "
+        "understanding which features are available under each backend.  "
+        "The X-miLLM-Backend response header on /v1/* endpoints reports the "
+        "same information per request."
+    ),
+    tags=["system"],
+)
+def get_inference_status(
+    inference=Depends(get_inference_service),
+) -> dict[str, Any]:
+    """
+    Describe the active inference backend and its per-request capabilities.
+
+    Serial backend capabilities:
+      - Per-request temperature / top_p
+      - Prefix KV-cache reuse across requests with the same system prompt
+      - Per-request steering profile override (request.profile)
+      - Speculative decoding (if SPECULATIVE_MODEL is configured)
+
+    CBM (ContinuousBatchingManager) backend capabilities:
+      - Higher throughput via request batching
+      - Fixed temperature / top_p (set at manager creation, not per request)
+      - No prefix cache, no profile override, no speculative decoding
+      - Requests with non-matching sampling params fall back to serial silently
+        (logged at INFO as cbm_routing_fallback_to_serial)
+    """
+    return inference.get_backend_info()

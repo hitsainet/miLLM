@@ -9,7 +9,7 @@ Requires a model to already be loaded via the Management API.
 
 from typing import Union
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, Response
 from fastapi.responses import JSONResponse, StreamingResponse
 
 from millm.api.dependencies import ModelServiceDep, get_inference_service
@@ -39,6 +39,7 @@ logger = get_logger(__name__)
 async def create_chat_completion(
     request: ChatCompletionRequest,
     service: ModelServiceDep,
+    response: Response,
     inference: InferenceService = Depends(get_inference_service),
 ) -> Union[ChatCompletionResponse, StreamingResponse, JSONResponse]:
     """
@@ -72,6 +73,10 @@ async def create_chat_completion(
         stream=request.stream,
     )
 
+    # X-miLLM-Backend header lets clients distinguish which inference path served
+    # the request (serial queue vs continuous batching) for latency debugging.
+    backend = inference.backend_name
+
     # Handle streaming vs non-streaming
     if request.stream:
         # Check queue capacity before committing to a 200 streaming response.
@@ -88,7 +93,10 @@ async def create_chat_completion(
         return StreamingResponse(
             inference.stream_chat_completion(request),
             media_type="text/event-stream",
+            headers={"X-miLLM-Backend": backend},
         )
     else:
-        response = await inference.create_chat_completion(request)
-        return response
+        # FastAPI's injected Response lets us set custom headers on the
+        # auto-serialised Pydantic response without wrapping it manually.
+        response.headers["X-miLLM-Backend"] = backend
+        return await inference.create_chat_completion(request)

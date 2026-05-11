@@ -1625,3 +1625,218 @@ class TestSpeculativeDecoding:
         assert "usage" in final, f"usage missing from final chunk: {final}"
         assert final["usage"]["prompt_tokens"] >= 0
         assert final["usage"]["completion_tokens"] >= 0
+
+
+# =============================================================================
+# Tests: finish_reason observability — Issue 8
+# =============================================================================
+
+
+class TestFinishReasonObservability:
+    """Verify finish_reason EOS/stop-sequence distinction is logged correctly."""
+
+    def test_returns_length_when_hit_max_tokens(self, service):
+        """finish_reason is 'length' when generated_count >= max_new_tokens."""
+        assert service._determine_finish_reason(512, 512) == "length"
+        assert service._determine_finish_reason(600, 512) == "length"
+
+    def test_returns_stop_when_under_max_tokens(self, service):
+        """finish_reason is 'stop' when generation ended before max_tokens."""
+        assert service._determine_finish_reason(10, 512) == "stop"
+        assert service._determine_finish_reason(0, 512) == "stop"
+
+    def test_returns_stop_with_eos_token_id(self, service, mock_tokenizer):
+        """finish_reason is still 'stop' when last token is EOS (API contract)."""
+        mock_tokenizer.eos_token_id = 2
+        result = service._determine_finish_reason(10, 512, last_token_id=2)
+        assert result == "stop"
+
+    def test_returns_stop_with_non_eos_last_token(self, service, mock_tokenizer):
+        """finish_reason is 'stop' for any non-length termination."""
+        mock_tokenizer.eos_token_id = 2
+        result = service._determine_finish_reason(10, 512, last_token_id=999)
+        assert result == "stop"
+
+    def test_last_token_id_none_does_not_crash(self, service):
+        """last_token_id=None is accepted safely."""
+        result = service._determine_finish_reason(10, 512, last_token_id=None)
+        assert result == "stop"
+
+
+# =============================================================================
+# Tests: penalty mapping formula — Issue 9
+# =============================================================================
+
+
+class TestPenaltyMapping:
+    """Verify the symmetric, combined, clamped penalty formula."""
+
+    def _kwargs(self, freq=0.0, pres=0.0):
+        from millm.ml.generation_config import GenerationConfig
+        return GenerationConfig(
+            frequency_penalty=freq,
+            presence_penalty=pres,
+            do_sample=False,
+        ).to_generate_kwargs()
+
+    def test_zero_penalties_omit_repetition_penalty(self):
+        assert "repetition_penalty" not in self._kwargs(0.0, 0.0)
+
+    def test_positive_frequency_raises_penalty(self):
+        rp = self._kwargs(freq=2.0)["repetition_penalty"]
+        assert rp > 1.0
+
+    def test_negative_frequency_lowers_penalty(self):
+        rp = self._kwargs(freq=-2.0)["repetition_penalty"]
+        assert rp < 1.0
+
+    def test_positive_presence_raises_penalty(self):
+        rp = self._kwargs(pres=2.0)["repetition_penalty"]
+        assert rp > 1.0
+
+    def test_both_penalties_combine(self):
+        """Both contribute: combined = freq + 0.5*pres."""
+        rp_freq_only = self._kwargs(freq=1.0)["repetition_penalty"]
+        rp_both = self._kwargs(freq=1.0, pres=2.0)["repetition_penalty"]
+        assert rp_both > rp_freq_only
+
+    def test_symmetric_formula(self):
+        """Positive and negative directions use the same 0.25 multiplier.
+
+        Use a small value (0.5) to stay well within the clamped range
+        [0.8, 1.8] so clamping doesn't affect the symmetry check.
+        """
+        rp_pos = self._kwargs(freq=0.5)["repetition_penalty"]  # 1.0 + 0.5*0.25 = 1.125
+        rp_neg = self._kwargs(freq=-0.5)["repetition_penalty"]  # 1.0 - 0.5*0.25 = 0.875
+        assert abs((rp_pos - 1.0) - (1.0 - rp_neg)) < 0.001
+
+    def test_clamped_at_max_value(self):
+        """repetition_penalty never exceeds 1.8."""
+        rp = self._kwargs(freq=2.0, pres=2.0)["repetition_penalty"]
+        assert rp <= 1.8
+
+    def test_clamped_at_min_value(self):
+        """repetition_penalty never goes below 0.8."""
+        rp = self._kwargs(freq=-2.0, pres=-2.0)["repetition_penalty"]
+        assert rp >= 0.8
+
+
+# =============================================================================
+# Tests: max_tokens default — Issue 10
+# =============================================================================
+
+
+class TestMaxTokensDefault:
+    """Verify TextCompletionRequest defaults to None (→ 512) not 16."""
+
+    def test_text_completion_request_default_is_none(self):
+        from millm.api.schemas.openai import TextCompletionRequest
+        req = TextCompletionRequest(model="m", prompt="hi")
+        assert req.max_tokens is None
+
+    def test_text_completion_generates_512_tokens_by_default(self):
+        from millm.api.schemas.openai import TextCompletionRequest
+        from millm.ml.generation_config import GenerationConfig
+        req = TextCompletionRequest(model="m", prompt="hi")
+        cfg = GenerationConfig.from_request(req)
+        assert cfg.max_new_tokens == 512
+
+    def test_chat_completion_still_defaults_to_none_maps_to_512(self):
+        from millm.api.schemas.openai import ChatCompletionRequest, ChatMessage
+        from millm.ml.generation_config import GenerationConfig
+        req = ChatCompletionRequest(
+            model="m",
+            messages=[ChatMessage(role="user", content="hi")],
+        )
+        cfg = GenerationConfig.from_request(req)
+        assert cfg.max_new_tokens == 512
+
+    def test_explicit_max_tokens_respected(self):
+        from millm.api.schemas.openai import TextCompletionRequest
+        from millm.ml.generation_config import GenerationConfig
+        req = TextCompletionRequest(model="m", prompt="hi", max_tokens=100)
+        cfg = GenerationConfig.from_request(req)
+        assert cfg.max_new_tokens == 100
+
+
+# =============================================================================
+# Tests: CBM/serial routing visibility — Issue 11
+# =============================================================================
+
+
+class TestBackendVisibility:
+    """Verify backend_name and get_backend_info expose routing information."""
+
+    def test_backend_name_serial_when_no_cbm(self, service):
+        """backend_name returns 'serial' when CBM is not configured."""
+        service._cbm_backend = None
+        assert service.backend_name == "serial"
+
+    def test_backend_name_serial_when_cbm_not_running(self, service):
+        """backend_name returns 'serial' when CBM manager is stopped."""
+        mock_backend = MagicMock()
+        mock_backend.is_running = False
+        service._cbm_backend = mock_backend
+        assert service.backend_name == "serial"
+
+    def test_backend_name_cbm_when_running(self, service):
+        """backend_name returns 'cbm' when ContinuousBatchingManager is active."""
+        mock_backend = MagicMock()
+        mock_backend.is_running = True
+        service._cbm_backend = mock_backend
+        assert service.backend_name == "cbm"
+
+    def test_get_backend_info_serial_structure(self, service):
+        """Serial backend info includes queue stats and capabilities."""
+        service._cbm_backend = None
+        info = service.get_backend_info()
+        assert info["backend"] == "serial"
+        assert "capabilities" in info
+        assert info["capabilities"]["per_request_sampling_params"] is True
+        assert info["capabilities"]["per_request_profile_override"] is True
+        assert "queue" in info
+        assert "limitations" in info
+
+    def test_get_backend_info_cbm_structure(self, service):
+        """CBM backend info includes cbm_config and limitations."""
+        mock_backend = MagicMock()
+        mock_backend.is_running = True
+        mock_backend._default_temperature = 0.7
+        mock_backend._default_top_p = 0.95
+        mock_backend._max_queue_size = 256
+        service._cbm_backend = mock_backend
+
+        info = service.get_backend_info()
+        assert info["backend"] == "cbm"
+        assert info["capabilities"]["per_request_sampling_params"] is False
+        assert info["capabilities"]["prefix_cache"] is False
+        assert "cbm_config" in info
+        assert len(info["limitations"]) >= 1
+
+    def test_cbm_routing_fallback_returns_false_on_mismatch(self, service):
+        """CBM sampling mismatch routes to serial path (returns False)."""
+        mock_backend = MagicMock()
+        mock_backend.is_running = True
+        mock_backend.sampling_params_match = MagicMock(return_value=False)
+        service._cbm_backend = mock_backend
+
+        result = service._use_cbm_for_request(temperature=0.1, top_p=0.5)
+
+        assert result is False
+        mock_backend.sampling_params_match.assert_called_once_with(0.1, 0.5)
+
+    def test_cbm_routing_fallback_logger_called(self, service):
+        """CBM sampling mismatch invokes the logger (INFO level in production)."""
+        mock_backend = MagicMock()
+        mock_backend.is_running = True
+        mock_backend.sampling_params_match = MagicMock(return_value=False)
+        service._cbm_backend = mock_backend
+
+        # Patch the module-level logger to capture the call
+        with patch("millm.services.inference_service.logger") as mock_logger:
+            service._use_cbm_for_request(temperature=0.1, top_p=0.5)
+
+        # info() should have been called with the routing event
+        mock_logger.info.assert_called_once()
+        call_args = mock_logger.info.call_args
+        assert "serial" in call_args[0][0] or "serial" in str(call_args)

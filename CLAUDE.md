@@ -2,10 +2,10 @@
 
 ## Current Status
 - **Phase:** Hardening & Documentation
-- **Last Session:** February 7, 2026 - Comprehensive audit + fix all 23 findings
-- **Next Steps:** Testing, deployment verification, v1.0 release prep
-- **Active Document:** Audit report findings (all resolved)
-- **Current Feature:** All features implemented, audited, and hardened
+- **Last Session:** May 11, 2026 - Inference optimisation, test fixes, security review, code review
+- **Next Steps:** v1.0 release prep — push commits, tag release, update docs
+- **Active Document:** None (all review findings resolved)
+- **Current Feature:** All features implemented; 705 tests passing; 4 commits staged for push
 
 ## Quick Resume Commands
 ```
@@ -192,11 +192,11 @@ refactor(services): extract HuggingFace logic
 - 🔄 **Needs Update:** Requires revision based on changes
 
 ## Housekeeping Status
-- **Last Checkpoint:** February 7, 2026 - Comprehensive audit + all fixes applied
+- **Last Checkpoint:** May 11, 2026 - Inference optimisation + test fixes + security + code review
 - **Last Transcript Save:** N/A
-- **Context Health:** Good
-- **Session Count:** Multiple sessions (documentation + implementation + bug fixes + audit)
-- **Total Development Time:** All features documented, implemented, audited, and hardened
+- **Context Health:** Excellent
+- **Session Count:** Multiple sessions (documentation + implementation + bug fixes + audit + hardening)
+- **Total Development Time:** All features implemented, audited, hardened, and 705 tests passing
 
 ## Task Execution Standards
 
@@ -443,6 +443,56 @@ After each development session, update:
   - Direct residual stream steering (miStudio/Neuronpedia compatible)
 - **Files Modified:** 20+ files across backend, frontend, and documentation
 - **Commits:** 8 commits covering SSE fix, chat template, OpenAI spec compliance, audit fixes
+
+### Session: May 11, 2026 - Inference Optimisation, Test Suite Fixes, Security & Code Review
+
+**Accomplished:**
+
+**Inference Performance (perf commit):**
+- Re-enabled speculative decoding with SAE attached (was incorrectly disabled — the hook fires correctly on the main model's verification pass)
+- CBM routing safety: `sampling_params_match()` added; requests with wrong temperature/top_p fall back to serial path
+- `CBM_FORCE_SERIAL_MONITORING` setting: when enabled, monitored requests bypass CBM for accurate per-request activation attribution
+- `TORCH_COMPILE=None` (auto-detect): enabled for CUDA + non-bitsandbytes models
+- SAE per-batch activation storage: `_last_feature_acts_per_item` list enables per-request routing in CBM batches
+
+**Security Hardening (security commit):**
+- CORS: removed `allow_credentials=True` (no auth → unnecessary and dangerous with wildcard origin)
+- Socket.IO CORS now reads `settings.CORS_ORIGINS` instead of hardcoded `"*"`
+- `local_path`: blocks /proc, /sys, /dev, /etc and other system dirs
+- SAE `file_path`: rejects `..` components
+- Batch steering: capped at 1000 features; batch endpoint now enforces [-200, 200] value range
+- SAE request schemas: `hf_token` added `Field(exclude=True)`
+- Health endpoint: replaced `str(e)` with generic message in component health responses
+- structlog API fix: `isEnabledFor` → `is_enabled_for`
+- GatedRepoError ordering fix in `get_model_info` (subclass caught by wrong handler)
+- `sae_downloader` path concatenation bug: `cache_dir / "models--" + name / "snapshots"` was a TypeError
+
+**Test Suite Fixes (85 pre-existing failures → 0 failures):**
+- Module-level `import torch` in memory_utils.py and model_loader.py for test patch targets
+- LoadedModel/ModelLoadContext constructor: added `model_name` arg to all test call sites
+- HuggingFace API: `HfHubHTTPError` now requires `response=` keyword
+- Integration test infrastructure: conftest files redirect `/app` paths to tmp_path; mock DB session
+- Multiple mock setup fixes (MagicMock name param, GPT-2 config spec, request queue overflow timing, circuit breaker isolation)
+
+**Business Logic Review (/review multi-agent analysis → fix commit):**
+- `MonitoringService` stale DB session (CRITICAL): singleton captured first request's SAE service with closed DB session; now uses `AttachedSAEState` directly
+- `QueueFullError` in streaming: pre-check added before `StreamingResponse` to return proper HTTP status
+- Prefix cache: flushed on profile activation/deactivation when steering changes
+- Profile activation: activating empty-steering profile now clears existing steering explicitly
+- Profile import: rejects invalid entries with 400 instead of silently dropping
+- Auto-load failures: escalated to `error` level with operator hints
+- Orphaned code: `SteeringError`, `InvalidFeatureIndexError`, `InvalidSteeringValueError` removed
+- Service→API layer violation: `ModelService` and `SAEService` now accept `inference_service` param
+
+**New Tests (+82):**
+- `tests/unit/ml/test_prefix_cache.py` — LRU eviction, invalidation, steering hash
+- `tests/unit/ml/test_generation_config.py` — from_request mapping, to_generate_kwargs
+- `tests/unit/core/test_config.py` — defaults, env override, cors_origins_list
+
+**Key Numbers:**
+- Tests: 705 passing (was 623 — +82 new tests), 0 failures (was 85 failures)
+- Commits: 4 clean commits (perf, security, test-fixes, review-fixes)
+- Files changed: ~40 production + test files across all concerns
 
 *[Add new sessions as they occur]*
 

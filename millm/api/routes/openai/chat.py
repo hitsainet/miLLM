@@ -93,6 +93,17 @@ async def create_chat_completion(
 
     # Handle streaming vs non-streaming
     if request.stream:
+        # Check queue capacity before committing to a 200 streaming response.
+        # If we let QueueFullError propagate from inside the generator, the HTTP
+        # status is already 200 and the client sees a malformed stream instead of
+        # a proper error response.
+        from millm.services.request_queue import QueueFullError
+        queue = inference.request_queue
+        if queue.pending_count >= queue.max_pending:
+            raise QueueFullError(
+                f"Request queue is full ({queue.pending_count}/{queue.max_pending} pending). "
+                "Please retry shortly."
+            )
         return StreamingResponse(
             inference.stream_chat_completion(request),
             media_type="text/event-stream",

@@ -97,7 +97,7 @@ class MonitoringService:
 
     def __init__(
         self,
-        sae_service: "SAEService",
+        sae_service: Optional["SAEService"] = None,
         emitter: Optional["ProgressEmitter"] = None,
         history_size: int = 100,
         throttle_ms: int = 100,
@@ -106,7 +106,9 @@ class MonitoringService:
         Initialize monitoring service.
 
         Args:
-            sae_service: SAE service dependency.
+            sae_service: Optional SAE service (used in tests for mocking).
+                When None the service accesses AttachedSAEState directly,
+                which avoids capturing a per-request DB session in a singleton.
             emitter: WebSocket event emitter.
             history_size: Max entries in history buffer.
             throttle_ms: Min milliseconds between WebSocket events.
@@ -131,6 +133,35 @@ class MonitoringService:
         self._monitored_features: Optional[list[int]] = None
 
         logger.debug(f"MonitoringService initialized with history_size={history_size}")
+
+    # ==========================================================================
+    # SAE state access
+    # ==========================================================================
+
+    def _get_attachment_status(self):
+        """Return attachment status from sae_service (tests) or singleton (production)."""
+        if self._sae_service is not None:
+            return self._sae_service.get_attachment_status()
+        from millm.services.sae_service import AttachedSAEState
+        state = AttachedSAEState()
+        from dataclasses import make_dataclass
+        # Build a lightweight status object matching the real AttachmentStatus shape
+        sae = state.attached_sae
+        class _Status:
+            is_attached = state.is_attached
+            sae_id = state.attached_sae_id
+            monitoring_enabled = sae.is_monitoring_enabled if sae else False
+        return _Status()
+
+    def _enable_monitoring(self, enabled: bool, features: Optional[list[int]]) -> None:
+        """Enable/disable monitoring via sae_service (tests) or singleton (production)."""
+        if self._sae_service is not None:
+            self._sae_service.enable_monitoring(enabled, features)
+            return
+        from millm.services.sae_service import AttachedSAEState
+        sae = AttachedSAEState().attached_sae
+        if sae is not None:
+            sae.enable_monitoring(enabled, features)
 
     # ==========================================================================
     # Configuration
@@ -161,9 +192,9 @@ class MonitoringService:
         self._monitored_features = features
 
         # Configure SAE monitoring
-        attachment = self._sae_service.get_attachment_status()
+        attachment = self._get_attachment_status()
         if attachment.is_attached:
-            self._sae_service.enable_monitoring(enabled, features)
+            self._enable_monitoring(enabled, features)
 
         if enabled and self._stats_start is None:
             self._stats_start = datetime.utcnow()
@@ -176,9 +207,9 @@ class MonitoringService:
 
     def set_enabled(self, enabled: bool) -> None:
         """Enable or disable monitoring."""
-        attachment = self._sae_service.get_attachment_status()
+        attachment = self._get_attachment_status()
         if attachment.is_attached:
-            self._sae_service.enable_monitoring(enabled, self._monitored_features)
+            self._enable_monitoring(enabled, self._monitored_features)
 
         if enabled and self._stats_start is None:
             self._stats_start = datetime.utcnow()
@@ -194,7 +225,7 @@ class MonitoringService:
         Returns:
             Dictionary with monitoring state.
         """
-        attachment = self._sae_service.get_attachment_status()
+        attachment = self._get_attachment_status()
 
         return {
             "enabled": attachment.monitoring_enabled,

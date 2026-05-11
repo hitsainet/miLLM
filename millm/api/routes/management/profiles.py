@@ -334,13 +334,24 @@ async def import_profile(
     Creates a new profile from the imported data. Validates the format
     and steering values before creating.
     """
-    # Convert string keys to int keys for steering
+    # Convert string keys to int keys for steering; reject on any conversion failure
+    # rather than silently dropping invalid entries — the caller must know if data
+    # was not imported.
     steering = {}
+    invalid_entries = []
     for k, v in request.steering.items():
         try:
             steering[int(k)] = float(v)
         except (ValueError, TypeError):
-            pass
+            invalid_entries.append(str(k))
+
+    if invalid_entries:
+        from millm.api.schemas.common import ApiResponse
+        return ApiResponse.fail(
+            code="VALIDATION_ERROR",
+            message=f"Invalid steering entries (cannot convert to int→float): {invalid_entries}",
+            details={"invalid_keys": invalid_entries},
+        )
 
     profile = await service.create_profile(
         name=request.name,

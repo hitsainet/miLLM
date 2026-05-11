@@ -133,6 +133,7 @@ async def get_model_service(
         downloader=get_model_downloader(),
         loader=get_model_loader(),
         emitter=progress_emitter,
+        inference_service=get_inference_service(),
     )
 
 
@@ -171,6 +172,7 @@ def get_inference_service() -> "InferenceService":
             "default_top_p": settings.CBM_DEFAULT_TOP_P,
             "default_max_tokens": settings.CBM_DEFAULT_MAX_TOKENS,
         },
+        cbm_force_serial_monitoring=settings.CBM_FORCE_SERIAL_MONITORING,
     )
 
 
@@ -226,6 +228,7 @@ async def get_sae_service(
         repository=repository,
         cache_dir=settings.SAE_CACHE_DIR,
         emitter=progress_emitter,
+        inference_service=get_inference_service(),
     )
 
 
@@ -241,22 +244,16 @@ SAEServiceDep = Annotated["SAEService", Depends(get_sae_service)]
 _monitoring_service = None
 
 
-async def get_monitoring_service(
-    sae_service: SAEServiceDep,
-    request: Request,
-) -> "MonitoringService":
+async def get_monitoring_service() -> "MonitoringService":
     """
-    Dependency that provides a MonitoringService.
+    Dependency that provides a MonitoringService singleton.
 
-    The monitoring service is a singleton stored in app state to preserve
-    history and statistics across requests.
+    The singleton preserves activation history and statistics across requests.
 
-    Args:
-        sae_service: Injected SAE service.
-        request: FastAPI request for accessing app state.
-
-    Returns:
-        MonitoringService instance.
+    SAE state is accessed directly via AttachedSAEState (process singleton)
+    rather than via a per-request SAEService, which would capture a DB session
+    that closes after the first request and causes all subsequent monitoring
+    operations to fail.
     """
     global _monitoring_service
 
@@ -265,7 +262,7 @@ async def get_monitoring_service(
         from millm.sockets.progress import progress_emitter
 
         _monitoring_service = MonitoringService(
-            sae_service=sae_service,
+            sae_service=None,  # Uses AttachedSAEState directly; see MonitoringService docs
             emitter=progress_emitter,
         )
 

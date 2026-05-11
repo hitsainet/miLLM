@@ -299,21 +299,37 @@ class ProfileService:
         feature_count = 0
 
         # Apply steering if requested
-        if apply_steering and profile.steering:
+        if apply_steering:
             attachment = self.sae_service.get_attachment_status()
-            if not attachment.is_attached:
-                raise SAENotAttachedError(
-                    "Cannot apply steering: no SAE is attached",
-                )
+            if profile.steering:
+                # Profile has steering values — require SAE to be attached
+                if not attachment.is_attached:
+                    raise SAENotAttachedError(
+                        "Cannot apply steering: no SAE is attached",
+                    )
+                # Convert string keys back to int and apply
+                steering = {int(k): v for k, v in profile.steering.items()}
+                self.sae_service.clear_steering()
+                self.sae_service.set_steering_batch(steering)
+                self.sae_service.enable_steering(True)
+                applied_steering = True
+                feature_count = len(steering)
+            elif attachment.is_attached:
+                # Profile has no steering values — clear any existing steering so
+                # the profile's (empty) steering state is correctly reflected.
+                self.sae_service.clear_steering()
+                self.sae_service.enable_steering(False)
+                applied_steering = True
+                feature_count = 0
 
-            # Convert string keys back to int and apply
-            steering = {int(k): v for k, v in profile.steering.items()}
-            self.sae_service.clear_steering()
-            self.sae_service.set_steering_batch(steering)
-            self.sae_service.enable_steering(True)
-
-            applied_steering = True
-            feature_count = len(steering)
+        # Invalidate the prefix cache whenever steering state changes on activation.
+        # Cached KV states encode the old steering delta; they must be recomputed.
+        if apply_steering:
+            try:
+                from millm.api.dependencies import get_inference_service
+                get_inference_service().prefix_cache.clear()
+            except Exception:
+                pass
 
         # Set profile as active
         await self.repository.set_active(profile_id)
@@ -359,6 +375,12 @@ class ProfileService:
             if attachment.is_attached:
                 self.sae_service.clear_steering()
                 cleared_steering = True
+                # Steering changed — flush prefix cache
+                try:
+                    from millm.api.dependencies import get_inference_service
+                    get_inference_service().prefix_cache.clear()
+                except Exception:
+                    pass
 
         # Deactivate profile
         await self.repository.deactivate(profile_id)

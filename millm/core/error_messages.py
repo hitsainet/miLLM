@@ -37,11 +37,6 @@ ERROR_MESSAGES: dict[str, str] = {
     "SAE_INCOMPATIBLE": "This SAE is not compatible with the currently loaded model. Please use a matching SAE.",
     "SAE_LOAD_FAILED": "Failed to load the SAE. Please check that the SAE files are valid.",
 
-    # Steering errors
-    "STEERING_ERROR": "An error occurred while applying feature steering.",
-    "INVALID_FEATURE_INDEX": "The feature index is out of range for this SAE.",
-    "INVALID_STEERING_VALUE": "The steering value is out of the valid range (-10 to +10).",
-
     # Profile errors
     "PROFILE_NOT_FOUND": "The requested profile could not be found.",
     "PROFILE_INCOMPATIBLE": "This profile is not compatible with the current model/SAE configuration.",

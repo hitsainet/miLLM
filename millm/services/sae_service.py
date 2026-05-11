@@ -160,6 +160,7 @@ class SAEService:
         repository: SAERepository,
         cache_dir: str,
         emitter: Optional[ProgressEmitter] = None,
+        inference_service: Optional[Any] = None,
     ) -> None:
         """
         Initialize the SAE service.
@@ -168,9 +169,13 @@ class SAEService:
             repository: SAE database repository.
             cache_dir: Directory for SAE cache.
             emitter: Progress event emitter for WebSocket updates.
+            inference_service: Optional InferenceService ref used during detach
+                to wait for in-flight requests.  When provided, avoids the
+                import of millm.api.dependencies (layer violation).
         """
         self.repository = repository
         self.emitter = emitter
+        self._inference_service = inference_service
 
         # Initialize components
         self._downloader = SAEDownloader(cache_dir)
@@ -835,13 +840,14 @@ class SAEService:
             )
 
         # Wait for any in-flight inference requests to complete
-        from millm.api.dependencies import get_inference_service
         try:
-            inference_svc = get_inference_service()
+            inference_svc = self._inference_service
+            if inference_svc is None:
+                from millm.api.dependencies import get_inference_service
+                inference_svc = get_inference_service()
             queue = inference_svc.request_queue
             if queue.pending_count > 0:
                 logger.info("waiting_for_pending_requests", pending=queue.pending_count)
-                import asyncio
                 for _ in range(30):  # Wait up to 3 seconds
                     if queue.pending_count == 0:
                         break

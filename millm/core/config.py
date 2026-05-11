@@ -62,7 +62,10 @@ class Settings(BaseSettings):
     MAX_PENDING_REQUESTS: int = 10
 
     # Performance: torch.compile
-    TORCH_COMPILE: bool = False
+    # None  → auto-detect: enabled for CUDA models that don't use bitsandbytes
+    # True  → always attempt compilation (loader still skips for bitsandbytes)
+    # False → never compile
+    TORCH_COMPILE: Optional[bool] = None
     TORCH_COMPILE_MODE: str = "reduce-overhead"  # "default", "reduce-overhead", "max-autotune"
 
     # Performance: KV cache
@@ -76,12 +79,16 @@ class Settings(BaseSettings):
     SPECULATIVE_MODEL: Optional[str] = None  # HF model ID for draft model
     SPECULATIVE_NUM_TOKENS: int = 5
 
-    # Performance: Continuous Batching (Phase 4)
+    # Performance: Continuous Batching
     ENABLE_CONTINUOUS_BATCHING: bool = False  # Opt-in, starts CBM on model load
     CBM_MAX_QUEUE_SIZE: int = 256
     CBM_DEFAULT_TEMPERATURE: float = 0.7
     CBM_DEFAULT_TOP_P: float = 0.95
     CBM_DEFAULT_MAX_TOKENS: int = 512
+    # When True, requests with SAE monitoring enabled are routed through the serial
+    # path instead of CBM, ensuring accurate per-request activation attribution.
+    # Trades throughput for monitoring fidelity. Default False (batch-level monitoring).
+    CBM_FORCE_SERIAL_MONITORING: bool = False
 
     @property
     def cors_origins_list(self) -> list[str]:

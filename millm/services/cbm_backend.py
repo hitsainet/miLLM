@@ -54,6 +54,25 @@ class ContinuousBatchingBackend:
         """Check if the CBM is running."""
         return self._started and self._manager is not None
 
+    def sampling_params_match(
+        self,
+        temperature: Optional[float],
+        top_p: Optional[float],
+        tol: float = 1e-3,
+    ) -> bool:
+        """
+        Return True if the given sampling params are compatible with this manager's config.
+
+        ContinuousBatchingManager uses a single fixed GenerationConfig, so requests
+        with different temperature/top_p must be routed to the serial path instead.
+        None means "use server default", which is always compatible.
+        """
+        if temperature is not None and abs(temperature - self._default_temperature) > tol:
+            return False
+        if top_p is not None and abs(top_p - self._default_top_p) > tol:
+            return False
+        return True
+
     def start(self, model: Any, tokenizer: Any) -> None:
         """
         Create and start the ContinuousBatchingManager.

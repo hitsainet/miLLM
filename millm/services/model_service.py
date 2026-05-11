@@ -55,6 +55,7 @@ class ModelService:
         downloader: ModelDownloader,
         loader: Optional[ModelLoader] = None,
         emitter: Optional[ProgressEmitter] = None,
+        inference_service: Optional[Any] = None,
     ) -> None:
         """
         Initialize the model service.
@@ -64,11 +65,14 @@ class ModelService:
             downloader: Model downloader for HuggingFace
             loader: Model loader for GPU loading
             emitter: Progress event emitter for WebSocket updates
+            inference_service: Optional InferenceService ref for CBM lifecycle hooks.
+                When provided, avoids importing from millm.api (layer violation).
         """
         self.repository = repository
         self.downloader = downloader
         self.loader = loader or ModelLoader()
         self.emitter = emitter
+        self._inference_service = inference_service
 
         # Thread pool for background tasks
         self._executor = ThreadPoolExecutor(
@@ -755,6 +759,30 @@ class ModelService:
             else:
                 full_cache_path = f"{settings.MODEL_CACHE_DIR}/{cache_path}"
 
+            # Resolve TORCH_COMPILE=None (auto-detect) to a concrete bool.
+            # Auto: enable for CUDA + non-bitsandbytes models; disable otherwise.
+            torch_compile_setting = settings.TORCH_COMPILE
+            if torch_compile_setting is None:
+                try:
+                    import torch as _torch
+                    is_bnb = quantization.upper() in ("Q4", "Q8", "Q2")
+                    torch_compile_resolved = _torch.cuda.is_available() and not is_bnb
+                except Exception:
+                    torch_compile_resolved = False
+                if torch_compile_resolved:
+                    logger.info(
+                        "torch_compile_auto_enabled",
+                        quantization=quantization,
+                    )
+                else:
+                    logger.info(
+                        "torch_compile_auto_disabled",
+                        reason="bitsandbytes_quantization" if quantization.upper() in ("Q4", "Q8", "Q2") else "no_cuda",
+                        quantization=quantization,
+                    )
+            else:
+                torch_compile_resolved = torch_compile_setting
+
             loaded = self.loader.load(
                 model_id=model_id,
                 model_name=model_name,
@@ -762,7 +790,7 @@ class ModelService:
                 quantization=quantization,
                 estimated_memory_mb=estimated_memory_mb,
                 trust_remote_code=trust_remote_code,
-                torch_compile=settings.TORCH_COMPILE,
+                torch_compile=torch_compile_resolved,
                 torch_compile_mode=settings.TORCH_COMPILE_MODE,
             )
 
@@ -782,8 +810,11 @@ class ModelService:
 
             # Notify inference service (starts CBM if enabled)
             try:
-                from millm.api.dependencies import get_inference_service
-                get_inference_service().on_model_loaded()
+                svc = self._inference_service
+                if svc is None:
+                    from millm.api.dependencies import get_inference_service
+                    svc = get_inference_service()
+                svc.on_model_loaded()
             except Exception:
                 pass
 
@@ -866,15 +897,21 @@ class ModelService:
 
         # Stop CBM before unloading model
         try:
-            from millm.api.dependencies import get_inference_service
-            get_inference_service().on_model_unloading()
+            svc = self._inference_service
+            if svc is None:
+                from millm.api.dependencies import get_inference_service
+                svc = get_inference_service()
+            svc.on_model_unloading()
         except Exception:
             pass
 
         # Wait for pending inference requests to drain
         try:
-            from millm.api.dependencies import get_inference_service
-            inference_svc = get_inference_service()
+            svc = self._inference_service
+            if svc is None:
+                from millm.api.dependencies import get_inference_service
+                svc = get_inference_service()
+            inference_svc = svc
             queue = inference_svc.request_queue
             if queue.pending_count > 0:
                 logger.info("waiting_for_pending_inference", pending=queue.pending_count)

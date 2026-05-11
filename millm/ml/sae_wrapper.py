@@ -107,7 +107,10 @@ class LoadedSAE:
         # Monitoring state
         self._monitoring_enabled: bool = False
         self._monitored_features: Optional[list[int]] = None
-        self._last_feature_acts: Optional[Tensor] = None
+        # Per-batch-item activations: index i → (seq_len, d_sae) tensor for request i.
+        # Serial path always produces a list of one item.
+        # CBM batches produce one item per batched request (index ≠ request_id).
+        self._last_feature_acts_per_item: list[Tensor] = []
 
         logger.debug(
             f"LoadedSAE initialized: d_in={self.d_in}, d_sae={self.d_sae}, "
@@ -252,7 +255,7 @@ class LoadedSAE:
             )
 
         self._steering_values[feature_idx] = value
-        self._rebuild_steering_vector()
+        self._rebuild_steering_delta()
 
     def set_steering_batch(self, steering: dict[int, float]) -> None:
         """
@@ -270,7 +273,7 @@ class LoadedSAE:
 
         for idx, val in steering.items():
             self._steering_values[idx] = val
-        self._rebuild_steering_vector()
+        self._rebuild_steering_delta()
 
     def clear_steering(self, feature_idx: Optional[int] = None) -> None:
         """
@@ -284,7 +287,7 @@ class LoadedSAE:
         elif feature_idx in self._steering_values:
             del self._steering_values[feature_idx]
 
-        self._rebuild_steering_vector()
+        self._rebuild_steering_delta()
 
     def get_steering_values(self) -> dict[int, float]:
         """Get current steering values (copy)."""
@@ -336,8 +339,6 @@ class LoadedSAE:
             f"delta norm={delta.norm().item():.4f}"
         )
 
-    # Alias for backward compatibility
-    _rebuild_steering_vector = _rebuild_steering_delta
 
     # ==========================================================================
     # Monitoring Methods
@@ -360,16 +361,52 @@ class LoadedSAE:
         self._monitored_features = features
 
         if not enabled:
-            self._last_feature_acts = None
+            self._last_feature_acts_per_item = []
 
     def get_last_feature_activations(self) -> Optional[Tensor]:
         """
-        Get feature activations from last forward pass.
+        Get feature activations for batch item 0 from the last forward pass.
+
+        For the serial inference path (batch_size=1), this is always the correct
+        single-request activation tensor of shape (seq_len, d_sae).
+
+        For CBM batches (batch_size > 1), this returns item 0's activations;
+        use get_feature_activations_for_item(idx) to retrieve other items.
 
         Returns:
-            Feature activations tensor or None if monitoring disabled.
+            Activations tensor (seq_len, d_sae) or None if monitoring disabled
+            or no forward pass has occurred yet.
         """
-        return self._last_feature_acts
+        if not self._last_feature_acts_per_item:
+            return None
+        return self._last_feature_acts_per_item[0]
+
+    def get_feature_activations_for_item(self, item_idx: int) -> Optional[Tensor]:
+        """
+        Get feature activations for a specific batch item.
+
+        For the serial path, item_idx is always 0. For CBM batches, item_idx
+        corresponds to position in the batch, not to a request ID (batch
+        composition is managed internally by ContinuousBatchingManager).
+
+        Args:
+            item_idx: Batch item index (0-indexed).
+
+        Returns:
+            Activations tensor (seq_len, d_sae) or None if index out of range.
+        """
+        if not self._last_feature_acts_per_item or item_idx >= len(self._last_feature_acts_per_item):
+            return None
+        return self._last_feature_acts_per_item[item_idx]
+
+    def get_last_batch_size(self) -> int:
+        """
+        Get the batch size from the last captured activation.
+
+        Returns 0 if no activation has been captured yet (or monitoring was
+        cleared by enable_monitoring(False)).
+        """
+        return len(self._last_feature_acts_per_item)
 
     @property
     def is_monitoring_enabled(self) -> bool:
@@ -377,15 +414,30 @@ class LoadedSAE:
         return self._monitoring_enabled
 
     def _capture_activations(self, feature_acts: Tensor) -> None:
-        """Capture activations for monitoring."""
+        """
+        Capture activations per batch item for monitoring.
+
+        Splits the batch dimension so each captured item corresponds to a single
+        request. The serial path always has batch_size=1 (one item). CBM batches
+        have batch_size > 1 but batch composition is opaque at this level.
+
+        Args:
+            feature_acts: Feature activations (batch_size, seq_len, d_sae) or
+                          (seq_len, d_sae) for unbatched inputs.
+        """
         if self._monitored_features is not None:
-            # Only capture selected features
-            self._last_feature_acts = (
-                feature_acts[..., self._monitored_features].detach().clone()
-            )
+            selected = feature_acts[..., self._monitored_features].detach()
         else:
-            # Capture all (may be memory intensive for large SAEs)
-            self._last_feature_acts = feature_acts.detach().clone()
+            selected = feature_acts.detach()
+
+        if selected.dim() >= 2:
+            batch_size = selected.shape[0]
+            self._last_feature_acts_per_item = [
+                selected[i].clone() for i in range(batch_size)
+            ]
+        else:
+            # Unbatched (1D) — treat as single item
+            self._last_feature_acts_per_item = [selected.clone()]
 
     # ==========================================================================
     # Memory Management

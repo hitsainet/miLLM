@@ -905,7 +905,7 @@ class TestCBMInit:
 
 
 class TestUseCBM:
-    """Tests for _use_cbm method."""
+    """Tests for _use_cbm and _use_cbm_for_request methods."""
 
     def test_false_when_no_backend(self, service):
         """Returns False when CBM backend is None."""
@@ -922,6 +922,61 @@ class TestUseCBM:
         service._cbm_backend = MagicMock()
         service._cbm_backend.is_running = True
         assert service._use_cbm() is True
+
+    def test_use_cbm_for_request_false_when_no_backend(self, service):
+        """_use_cbm_for_request returns False when backend is None."""
+        assert service._use_cbm_for_request(temperature=0.7, top_p=0.95) is False
+
+    def test_use_cbm_for_request_true_when_params_match(self, service):
+        """_use_cbm_for_request returns True when sampling params are compatible."""
+        service._cbm_backend = MagicMock()
+        service._cbm_backend.is_running = True
+        service._cbm_backend.sampling_params_match = MagicMock(return_value=True)
+        assert service._use_cbm_for_request(temperature=0.7, top_p=0.95) is True
+
+    def test_use_cbm_for_request_false_when_params_mismatch(self, service):
+        """_use_cbm_for_request returns False and logs when params differ from CBM config."""
+        service._cbm_backend = MagicMock()
+        service._cbm_backend.is_running = True
+        service._cbm_backend.sampling_params_match = MagicMock(return_value=False)
+        assert service._use_cbm_for_request(temperature=0.1, top_p=0.5) is False
+
+    def test_use_cbm_for_request_true_when_no_sampling_params(self, service):
+        """_use_cbm_for_request returns True when request has no sampling params (None)."""
+        service._cbm_backend = MagicMock()
+        service._cbm_backend.is_running = True
+        service._cbm_backend.sampling_params_match = MagicMock(return_value=True)
+        assert service._use_cbm_for_request() is True
+
+    def test_use_cbm_for_request_false_when_force_serial_monitoring_and_monitoring_on(self, service):
+        """CBM is bypassed when force_serial_monitoring=True and monitoring is enabled."""
+        service._cbm_backend = MagicMock()
+        service._cbm_backend.is_running = True
+        service._cbm_backend.sampling_params_match = MagicMock(return_value=True)
+        service._cbm_force_serial_monitoring = True
+
+        with patch.object(service, "_is_monitoring_enabled", return_value=True):
+            assert service._use_cbm_for_request() is False
+
+    def test_use_cbm_for_request_true_when_force_serial_monitoring_but_no_monitoring(self, service):
+        """CBM is still used when force_serial_monitoring=True but monitoring is disabled."""
+        service._cbm_backend = MagicMock()
+        service._cbm_backend.is_running = True
+        service._cbm_backend.sampling_params_match = MagicMock(return_value=True)
+        service._cbm_force_serial_monitoring = True
+
+        with patch.object(service, "_is_monitoring_enabled", return_value=False):
+            assert service._use_cbm_for_request() is True
+
+    def test_use_cbm_for_request_true_when_monitoring_on_but_force_serial_off(self, service):
+        """CBM is used when monitoring is enabled but force_serial_monitoring=False."""
+        service._cbm_backend = MagicMock()
+        service._cbm_backend.is_running = True
+        service._cbm_backend.sampling_params_match = MagicMock(return_value=True)
+        service._cbm_force_serial_monitoring = False
+
+        with patch.object(service, "_is_monitoring_enabled", return_value=True):
+            assert service._use_cbm_for_request() is True
 
 
 class TestCBMLifecycle:
@@ -992,6 +1047,7 @@ class TestCBMChatCompletion:
         """Create a service with mocked CBM backend."""
         mock_backend = AsyncMock()
         mock_backend.is_running = True
+        mock_backend.sampling_params_match = MagicMock(return_value=True)
         mock_backend.generate = AsyncMock(
             return_value=([10, 11, 12], "stop")
         )
@@ -1060,6 +1116,7 @@ class TestCBMStreamChatCompletion:
         """Create a service with mocked CBM streaming backend."""
         mock_backend = MagicMock()
         mock_backend.is_running = True
+        mock_backend.sampling_params_match = MagicMock(return_value=True)
 
         async def mock_generate_stream(input_ids, max_new_tokens, request_id):
             yield [10]
@@ -1129,6 +1186,7 @@ class TestCBMTextCompletion:
         """Create a service with mocked CBM backend for text completion."""
         mock_backend = AsyncMock()
         mock_backend.is_running = True
+        mock_backend.sampling_params_match = MagicMock(return_value=True)
         mock_backend.generate = AsyncMock(
             return_value=([10, 11, 12], "stop")
         )

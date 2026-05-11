@@ -83,6 +83,7 @@ class InferenceService:
         speculative_num_tokens: int = 5,
         enable_cbm: bool = False,
         cbm_config: Optional[dict] = None,
+        cbm_force_serial_monitoring: bool = False,
     ) -> None:
         """
         Initialize the inference service.
@@ -99,6 +100,9 @@ class InferenceService:
             speculative_num_tokens: Number of tokens for draft model to propose
             enable_cbm: Whether to enable continuous batching backend
             cbm_config: Configuration dict for CBM backend
+            cbm_force_serial_monitoring: When True, route requests with SAE
+                monitoring enabled through the serial path for accurate
+                per-request activation attribution instead of CBM batching.
         """
         self._model_service = model_service
         self._steering_service = steering_service
@@ -112,9 +116,18 @@ class InferenceService:
         )
         self._speculative_model_id = speculative_model
         self._speculative_num_tokens = speculative_num_tokens
-        self._draft_model: Any = None  # Lazy-loaded on first use
+        # Lazy-loaded on first use. Thread-safety note: with max_concurrent=1
+        # only one generate call is active at a time, so the double-init race
+        # (two requests both seeing None and both loading the draft model) is
+        # practically impossible. If max_concurrent is ever raised above 1, add
+        # a threading.Lock here before reading/writing _draft_model.
+        self._draft_model: Any = None
+        self._cbm_force_serial_monitoring = cbm_force_serial_monitoring
 
-        # Continuous Batching (Phase 4)
+        # Continuous Batching backend. Initialised once in __init__ when
+        # enable_cbm=True, then started in on_model_loaded(). The start() call
+        # itself is not thread-safe but on_model_loaded() is only ever called
+        # from the model-load worker thread, so no race exists in practice.
         self._cbm_backend: Any = None
         if enable_cbm:
             from millm.services.cbm_backend import ContinuousBatchingBackend
@@ -228,6 +241,38 @@ class InferenceService:
         """Whether to use continuous batching for generation."""
         return self._cbm_backend is not None and self._cbm_backend.is_running
 
+    def _use_cbm_for_request(
+        self,
+        temperature: Optional[float] = None,
+        top_p: Optional[float] = None,
+    ) -> bool:
+        """
+        Whether to route this specific request through the CBM backend.
+
+        ContinuousBatchingManager uses a fixed GenerationConfig (temperature, top_p
+        are baked in at manager creation). Requests with different sampling params
+        must fall back to the serial path to preserve correctness.
+
+        When cbm_force_serial_monitoring is True and SAE monitoring is active,
+        requests are also routed to the serial path so that captured activations
+        can be accurately attributed to this specific request (batch position ≠
+        request ID in CBM, so monitoring data would be inexact otherwise).
+        """
+        if not self._use_cbm():
+            return False
+        matches = self._cbm_backend.sampling_params_match(temperature, top_p)
+        if not matches:
+            logger.debug(
+                "cbm_sampling_params_mismatch_routing_to_serial",
+                request_temperature=temperature,
+                request_top_p=top_p,
+            )
+            return False
+        if self._cbm_force_serial_monitoring and self._is_monitoring_enabled():
+            logger.debug("cbm_force_serial_monitoring_active_routing_to_serial")
+            return False
+        return True
+
     def on_model_loaded(self) -> None:
         """Called after model is loaded. Starts CBM if enabled."""
         if self._cbm_backend is not None and self._model_state.is_loaded:
@@ -251,18 +296,29 @@ class InferenceService:
         except Exception:
             return False
 
+    def _is_monitoring_enabled(self) -> bool:
+        """Check if SAE feature monitoring is currently enabled."""
+        try:
+            from millm.services.sae_service import AttachedSAEState
+            sae_state = AttachedSAEState()
+            sae = sae_state.attached_sae
+            return sae is not None and sae.is_monitoring_enabled
+        except Exception:
+            return False
+
     def _get_draft_model(self) -> Any:
         """
         Lazy-load the draft model for speculative decoding.
 
-        Returns the draft model if configured and SAE is not attached,
-        None otherwise (speculative decoding auto-disables with steering).
-        """
-        # Auto-disable speculative decoding when SAE is attached
-        # (SAE hooks on main model don't apply to draft model's speculations)
-        if self._is_sae_attached():
-            return None
+        Returns the draft model if configured, None if not configured or load failed.
 
+        SAE steering is compatible with speculative decoding: the SAE hook fires on
+        the main model's verification pass (where it applies correctly), not on the
+        draft model. The draft model proposes tokens without knowledge of steering,
+        so acceptance rate is lower than baseline, but output correctness is
+        preserved — every accepted token was verified by the steered main model.
+        Monitoring captures real main-model activations from verification passes.
+        """
         if self._speculative_model_id is None:
             return None
 
@@ -389,11 +445,15 @@ class InferenceService:
         )
         kwargs["eos_token_id"] = self._tokenizer.eos_token_id
 
-        # Speculative decoding: use draft model when SAE is not attached
         draft_model = self._get_draft_model()
         if draft_model is not None:
             kwargs["assistant_model"] = draft_model
             kwargs["num_assistant_tokens"] = self._speculative_num_tokens
+            if self._is_sae_attached():
+                # Draft model is unsteered; acceptance rate is lower but output
+                # correctness is maintained — all accepted tokens are verified by
+                # the steered main model.
+                logger.debug("speculative_decoding_with_sae_attached_lower_acceptance_rate_expected")
 
         return kwargs
 
@@ -401,8 +461,17 @@ class InferenceService:
         """
         Forward captured activations to the monitoring service.
 
-        Reads last feature activations from the attached SAE (captured
-        during the forward hook) and sends them to MonitoringService.
+        Reads per-batch-item activations from the attached SAE and routes them
+        to the MonitoringService.
+
+        Serial path (batch_size == 1): the single item's activations are tagged
+        with the request_id for accurate per-request attribution.
+
+        CBM path (batch_size > 1): each batch item is emitted as a separate
+        event tagged "<request_id>:batch_<idx>" since the mapping from batch
+        position to request ID is not available from inside the hook.
+        Set CBM_FORCE_SERIAL_MONITORING=true to avoid this and get accurate
+        per-request data at the cost of disabling batching for monitored requests.
         """
         try:
             from millm.services.sae_service import AttachedSAEState
@@ -413,10 +482,8 @@ class InferenceService:
             if sae is None or not sae.is_monitoring_enabled:
                 return
 
-            activations = sae.get_last_feature_activations()
-            monitoring_service = deps._monitoring_service
-
-            if activations is None:
+            batch_size = sae.get_last_batch_size()
+            if batch_size == 0:
                 logger.warning(
                     "monitoring_no_activations",
                     sae_id=sae_state.attached_sae_id,
@@ -424,6 +491,7 @@ class InferenceService:
                 )
                 return
 
+            monitoring_service = deps._monitoring_service
             if monitoring_service is None:
                 # Lazily initialize monitoring service if not yet created
                 # (normally created by FastAPI DI on first monitoring API call)
@@ -443,9 +511,31 @@ class InferenceService:
                 deps._monitoring_service = monitoring_service
                 logger.info("monitoring_service_initialized_from_inference")
 
-            monitoring_service.on_activation(
-                activations, request_id=request_id
-            )
+            if batch_size == 1:
+                # Serial path: single request — accurate attribution
+                activations = sae.get_feature_activations_for_item(0)
+                if activations is not None:
+                    monitoring_service.on_activation(activations, request_id=request_id)
+            else:
+                # CBM batch: emit each item with a position-tagged request_id.
+                # Batch position ≠ request_id; set CBM_FORCE_SERIAL_MONITORING=true
+                # for accurate per-request attribution.
+                logger.debug(
+                    "monitoring_cbm_batch_attribution_approximate",
+                    batch_size=batch_size,
+                    request_id=request_id,
+                )
+                for item_idx in range(batch_size):
+                    activations = sae.get_feature_activations_for_item(item_idx)
+                    if activations is not None:
+                        item_request_id = (
+                            f"{request_id}:batch_{item_idx}"
+                            if request_id
+                            else f"batch_{item_idx}"
+                        )
+                        monitoring_service.on_activation(
+                            activations, request_id=item_request_id
+                        )
         except Exception as e:
             # Never let monitoring errors affect inference
             logger.warning("monitoring_notification_failed", error=str(e))
@@ -528,8 +618,11 @@ class InferenceService:
         Raises:
             RuntimeError: If no model is loaded
         """
-        # Delegate to CBM if active
-        if self._use_cbm():
+        # Delegate to CBM if active and sampling params are compatible
+        if self._use_cbm_for_request(
+            temperature=getattr(request, "temperature", None),
+            top_p=getattr(request, "top_p", None),
+        ):
             return await self._cbm_chat_completion(request)
 
         completion_id = f"chatcmpl-{uuid.uuid4().hex[:24]}"
@@ -658,8 +751,11 @@ class InferenceService:
         Yields:
             SSE-formatted strings for streaming
         """
-        # Delegate to CBM if active
-        if self._use_cbm():
+        # Delegate to CBM if active and sampling params are compatible
+        if self._use_cbm_for_request(
+            temperature=getattr(request, "temperature", None),
+            top_p=getattr(request, "top_p", None),
+        ):
             async for chunk in self._cbm_stream_chat_completion(request):
                 yield chunk
             return
@@ -855,8 +951,11 @@ class InferenceService:
         Returns:
             TextCompletionResponse with generated text
         """
-        # Delegate to CBM if active
-        if self._use_cbm():
+        # Delegate to CBM if active and sampling params are compatible
+        if self._use_cbm_for_request(
+            temperature=getattr(request, "temperature", None),
+            top_p=getattr(request, "top_p", None),
+        ):
             return await self._cbm_text_completion(request)
 
         completion_id = f"cmpl-{uuid.uuid4().hex[:24]}"

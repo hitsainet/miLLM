@@ -185,6 +185,43 @@ class TestCBMBackendStart:
 
 
 # =============================================================================
+# Tests: sampling_params_match
+# =============================================================================
+
+
+class TestSamplingParamsMatch:
+    """Tests for sampling_params_match method."""
+
+    def test_none_params_always_match(self, backend):
+        """None temperature/top_p are treated as matching (use server default)."""
+        assert backend.sampling_params_match(None, None) is True
+
+    def test_exact_match(self, backend):
+        """Exact same temperature and top_p match."""
+        assert backend.sampling_params_match(0.7, 0.9) is True
+
+    def test_within_tolerance(self, backend):
+        """Values within floating-point tolerance match."""
+        assert backend.sampling_params_match(0.7001, 0.9001) is True
+
+    def test_temperature_mismatch(self, backend):
+        """Different temperature does not match."""
+        assert backend.sampling_params_match(0.3, 0.9) is False
+
+    def test_top_p_mismatch(self, backend):
+        """Different top_p does not match."""
+        assert backend.sampling_params_match(0.7, 0.5) is False
+
+    def test_none_temperature_any_top_p_match(self, backend):
+        """None temperature matches; top_p=0.9 (default) also matches."""
+        assert backend.sampling_params_match(None, 0.9) is True
+
+    def test_none_temperature_mismatched_top_p(self, backend):
+        """None temperature matches; mismatched top_p does not."""
+        assert backend.sampling_params_match(None, 0.1) is False
+
+
+# =============================================================================
 # Tests: stop
 # =============================================================================
 

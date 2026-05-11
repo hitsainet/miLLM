@@ -283,3 +283,98 @@ class TestModelServiceShutdown:
         # Executor should be shut down
         # This is a basic test - in practice we'd verify behavior
         assert True
+
+
+class TestTorchCompileAutoDetect:
+    """Tests for TORCH_COMPILE=None auto-detection in _load_worker."""
+
+    def _make_svc(self):
+        """Create a ModelService with a mock loader."""
+        mock_loader = MagicMock()
+        mock_loaded = MagicMock()
+        mock_loaded.memory_used_mb = 1024
+        mock_loader.load.return_value = mock_loaded
+
+        svc = ModelService(
+            repository=MagicMock(),
+            downloader=MagicMock(),
+            loader=mock_loader,
+            emitter=MagicMock(),
+        )
+        # Stub the async-from-thread bridge (not under test here)
+        svc._run_async_from_thread = MagicMock()
+        return svc, mock_loader
+
+    def _call_load_worker(self, svc, quantization: str, torch_compile_setting):
+        """Call _load_worker directly with patched settings and return loader call args."""
+        # _load_worker imports settings locally, so patch at the config module level
+        with patch("millm.core.config.settings") as mock_settings:
+            mock_settings.TORCH_COMPILE = torch_compile_setting
+            mock_settings.TORCH_COMPILE_MODE = "reduce-overhead"
+            mock_settings.MODEL_CACHE_DIR = "/tmp"
+            with patch("millm.api.dependencies.get_inference_service"):
+                svc._load_worker(
+                    model_id=1,
+                    model_name="test-model",
+                    cache_path="/tmp/model",
+                    quantization=quantization,
+                    estimated_memory_mb=1024,
+                    trust_remote_code=False,
+                )
+        return svc.loader.load.call_args
+
+    def test_auto_enables_compile_for_fp16_with_cuda(self):
+        """Auto (None): FP16 + CUDA → torch_compile=True."""
+        svc, _ = self._make_svc()
+        with patch("torch.cuda.is_available", return_value=True):
+            call_args = self._call_load_worker(svc, "FP16", torch_compile_setting=None)
+        assert call_args.kwargs["torch_compile"] is True
+
+    def test_auto_enables_compile_for_fp32_with_cuda(self):
+        """Auto (None): FP32 + CUDA → torch_compile=True."""
+        svc, _ = self._make_svc()
+        with patch("torch.cuda.is_available", return_value=True):
+            call_args = self._call_load_worker(svc, "FP32", torch_compile_setting=None)
+        assert call_args.kwargs["torch_compile"] is True
+
+    def test_auto_disables_compile_for_q4(self):
+        """Auto (None): Q4 (bitsandbytes) → torch_compile=False."""
+        svc, _ = self._make_svc()
+        with patch("torch.cuda.is_available", return_value=True):
+            call_args = self._call_load_worker(svc, "Q4", torch_compile_setting=None)
+        assert call_args.kwargs["torch_compile"] is False
+
+    def test_auto_disables_compile_for_q8(self):
+        """Auto (None): Q8 (bitsandbytes) → torch_compile=False."""
+        svc, _ = self._make_svc()
+        with patch("torch.cuda.is_available", return_value=True):
+            call_args = self._call_load_worker(svc, "Q8", torch_compile_setting=None)
+        assert call_args.kwargs["torch_compile"] is False
+
+    def test_auto_disables_compile_for_q2(self):
+        """Auto (None): Q2 (bitsandbytes) → torch_compile=False."""
+        svc, _ = self._make_svc()
+        with patch("torch.cuda.is_available", return_value=True):
+            call_args = self._call_load_worker(svc, "Q2", torch_compile_setting=None)
+        assert call_args.kwargs["torch_compile"] is False
+
+    def test_auto_disables_compile_without_cuda(self):
+        """Auto (None): no CUDA → torch_compile=False regardless of quantization."""
+        svc, _ = self._make_svc()
+        with patch("torch.cuda.is_available", return_value=False):
+            call_args = self._call_load_worker(svc, "FP16", torch_compile_setting=None)
+        assert call_args.kwargs["torch_compile"] is False
+
+    def test_explicit_true_passes_through(self):
+        """Explicit True: always passed to loader as True."""
+        svc, _ = self._make_svc()
+        with patch("torch.cuda.is_available", return_value=True):
+            call_args = self._call_load_worker(svc, "FP16", torch_compile_setting=True)
+        assert call_args.kwargs["torch_compile"] is True
+
+    def test_explicit_false_passes_through(self):
+        """Explicit False: always passed to loader as False (even for FP16+CUDA)."""
+        svc, _ = self._make_svc()
+        with patch("torch.cuda.is_available", return_value=True):
+            call_args = self._call_load_worker(svc, "FP16", torch_compile_setting=False)
+        assert call_args.kwargs["torch_compile"] is False

@@ -99,11 +99,10 @@ class TestProfileServiceCreate:
     @pytest.mark.asyncio
     async def test_create_profile(self, profile_service, mock_repository):
         """Create profile creates a new profile."""
-        mock_profile = MagicMock(
-            id="prof_new",
-            name="New Profile",
-            steering={"0": 1.5},
-        )
+        mock_profile = MagicMock()
+        mock_profile.id = "prof_new"
+        mock_profile.name = "New Profile"
+        mock_profile.steering = {"0": 1.5}
         mock_repository.create.return_value = mock_profile
 
         result = await profile_service.create_profile(
@@ -163,8 +162,12 @@ class TestProfileServiceUpdate:
     @pytest.mark.asyncio
     async def test_update_profile(self, profile_service, mock_repository):
         """Update profile updates existing profile."""
-        mock_profile = MagicMock(id="prof_123", name="Old Name")
-        updated_profile = MagicMock(id="prof_123", name="New Name")
+        mock_profile = MagicMock()
+        mock_profile.id = "prof_123"
+        mock_profile.name = "Old Name"
+        updated_profile = MagicMock()
+        updated_profile.id = "prof_123"
+        updated_profile.name = "New Name"
         mock_repository.get.return_value = mock_profile
         mock_repository.update.return_value = updated_profile
 

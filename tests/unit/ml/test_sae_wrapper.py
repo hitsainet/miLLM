@@ -62,17 +62,17 @@ class TestLoadedSAESteering:
     """Tests for steering functionality."""
 
     def test_steering_modifies_output(self, small_sae):
-        """Steering changes the output."""
+        """apply_steering changes hidden states when steering is enabled."""
         x = torch.randn(1, 5, 64)
 
-        # Without steering
+        # Baseline: steering disabled — apply_steering returns input unchanged
         small_sae.enable_steering(False)
-        out_baseline = small_sae.forward(x.clone())
+        out_baseline = small_sae.apply_steering(x.clone())
 
-        # With steering
-        small_sae.enable_steering(True)
+        # Steered: set a non-zero steering vector and enable
         small_sae.set_steering(0, 10.0)
-        out_steered = small_sae.forward(x.clone())
+        small_sae.enable_steering(True)
+        out_steered = small_sae.apply_steering(x.clone())
 
         assert not torch.allclose(out_baseline, out_steered)
 
@@ -124,7 +124,7 @@ class TestLoadedSAEMonitoring:
     """Tests for monitoring functionality."""
 
     def test_monitoring_captures_activations(self, small_sae):
-        """Monitoring captures feature activations."""
+        """Monitoring captures feature activations as per-item tensors."""
         x = torch.randn(1, 5, 64)
 
         small_sae.enable_monitoring(True)
@@ -132,7 +132,8 @@ class TestLoadedSAEMonitoring:
 
         acts = small_sae.get_last_feature_activations()
         assert acts is not None
-        assert acts.shape == (1, 5, 128)  # d_sae=128
+        # Item 0: shape (seq_len, d_sae) — batch dim is stripped per-item
+        assert acts.shape == (5, 128)
 
     def test_monitoring_specific_features(self, small_sae):
         """Can monitor only specific features."""
@@ -142,7 +143,7 @@ class TestLoadedSAEMonitoring:
         small_sae.forward(x)
 
         acts = small_sae.get_last_feature_activations()
-        assert acts.shape == (1, 5, 3)  # Only 3 features
+        assert acts.shape == (5, 3)  # Only 3 features, batch dim stripped
 
     def test_monitoring_disabled_returns_none(self, small_sae):
         """When disabled, get_last_feature_activations returns None."""
@@ -157,6 +158,62 @@ class TestLoadedSAEMonitoring:
     def test_monitoring_disabled_by_default(self, small_sae):
         """Monitoring is disabled by default."""
         assert not small_sae.is_monitoring_enabled
+
+    def test_get_last_batch_size_no_capture(self, small_sae):
+        """Batch size is 0 before any forward pass with monitoring."""
+        assert small_sae.get_last_batch_size() == 0
+
+    def test_get_last_batch_size_serial(self, small_sae):
+        """Serial path (batch=1) produces a batch size of 1."""
+        x = torch.randn(1, 5, 64)
+        small_sae.enable_monitoring(True)
+        small_sae.forward(x)
+        assert small_sae.get_last_batch_size() == 1
+
+    def test_get_last_batch_size_batched(self, small_sae):
+        """Batched input (batch=3) produces a batch size of 3."""
+        x = torch.randn(3, 5, 64)
+        small_sae.enable_monitoring(True)
+        small_sae.forward(x)
+        assert small_sae.get_last_batch_size() == 3
+
+    def test_get_feature_activations_for_item_serial(self, small_sae):
+        """Serial path: item 0 matches get_last_feature_activations()."""
+        x = torch.randn(1, 5, 64)
+        small_sae.enable_monitoring(True)
+        small_sae.forward(x)
+        assert torch.equal(
+            small_sae.get_last_feature_activations(),
+            small_sae.get_feature_activations_for_item(0),
+        )
+
+    def test_get_feature_activations_for_item_batched(self, small_sae):
+        """Batched input: each item is stored independently."""
+        x = torch.randn(3, 5, 64)
+        small_sae.enable_monitoring(True)
+        small_sae.forward(x)
+        for idx in range(3):
+            item_acts = small_sae.get_feature_activations_for_item(idx)
+            assert item_acts is not None
+            assert item_acts.shape == (5, 128)
+
+    def test_get_feature_activations_for_item_out_of_range(self, small_sae):
+        """Out-of-range item index returns None."""
+        x = torch.randn(1, 5, 64)
+        small_sae.enable_monitoring(True)
+        small_sae.forward(x)
+        assert small_sae.get_feature_activations_for_item(5) is None
+
+    def test_enable_monitoring_false_clears_capture(self, small_sae):
+        """Disabling monitoring clears the captured per-item buffer."""
+        x = torch.randn(1, 5, 64)
+        small_sae.enable_monitoring(True)
+        small_sae.forward(x)
+        assert small_sae.get_last_batch_size() == 1
+
+        small_sae.enable_monitoring(False)
+        assert small_sae.get_last_batch_size() == 0
+        assert small_sae.get_last_feature_activations() is None
 
 
 class TestLoadedSAEMemory:

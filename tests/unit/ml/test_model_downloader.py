@@ -18,6 +18,20 @@ from millm.core.errors import (
 from millm.ml.model_downloader import ModelDownloader
 
 
+@pytest.fixture(autouse=True)
+def reset_hf_circuit():
+    """Reset the shared HuggingFace circuit breaker before each test.
+
+    CircuitBreaker._states is class-level, so failures in one test (e.g.
+    test_download_cleans_up_on_failure) would otherwise open the circuit and
+    cause unrelated get_model_info tests to fail with DownloadFailedError.
+    """
+    from millm.core.resilience import huggingface_circuit
+    huggingface_circuit.reset()
+    yield
+    huggingface_circuit.reset()
+
+
 @pytest.fixture
 def temp_cache_dir(tmp_path):
     """Create a temporary cache directory."""
@@ -134,7 +148,9 @@ class TestModelDownloaderDownload:
     @patch("millm.ml.model_downloader.snapshot_download")
     def test_download_raises_repo_not_found(self, mock_snapshot, downloader):
         """Test that RepoNotFoundError is raised for missing repos."""
-        mock_snapshot.side_effect = RepositoryNotFoundError("Not found")
+        mock_snapshot.side_effect = RepositoryNotFoundError(
+            "Not found", response=MagicMock()
+        )
 
         with pytest.raises(RepoNotFoundError) as exc_info:
             downloader.download("nonexistent/model", "Q4")
@@ -145,7 +161,7 @@ class TestModelDownloaderDownload:
     @patch("millm.ml.model_downloader.snapshot_download")
     def test_download_raises_gated_model_error(self, mock_snapshot, downloader):
         """Test that GatedModelError is raised for gated repos."""
-        mock_snapshot.side_effect = GatedRepoError("Gated")
+        mock_snapshot.side_effect = GatedRepoError("Gated", response=MagicMock())
 
         with pytest.raises(GatedModelError) as exc_info:
             downloader.download("meta-llama/Llama-2-7b", "Q4")
@@ -198,7 +214,9 @@ class TestModelDownloaderGetModelInfo:
     def test_get_model_info_raises_repo_not_found(self, downloader):
         """Test that RepoNotFoundError is raised for missing repos."""
         with patch.object(downloader.hf_api, "model_info") as mock_info:
-            mock_info.side_effect = RepositoryNotFoundError("Not found")
+            mock_info.side_effect = RepositoryNotFoundError(
+                "Not found", response=MagicMock()
+            )
 
             with pytest.raises(RepoNotFoundError):
                 downloader.get_model_info("nonexistent/model")
@@ -206,7 +224,7 @@ class TestModelDownloaderGetModelInfo:
     def test_get_model_info_raises_gated_error(self, downloader):
         """Test that GatedModelError is raised for gated repos without token."""
         with patch.object(downloader.hf_api, "model_info") as mock_info:
-            mock_info.side_effect = GatedRepoError("Gated")
+            mock_info.side_effect = GatedRepoError("Gated", response=MagicMock())
 
             with pytest.raises(GatedModelError):
                 downloader.get_model_info("meta-llama/Llama-2-7b")

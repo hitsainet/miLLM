@@ -90,7 +90,9 @@ class TestSAEDownloaderDownload:
     @pytest.mark.asyncio
     async def test_download_handles_repository_not_found(self, downloader):
         """Test that download raises ValueError for missing repositories."""
-        downloader._api.repo_info.side_effect = RepositoryNotFoundError("Not found")
+        downloader._api.repo_info.side_effect = RepositoryNotFoundError(
+            "Not found", response=MagicMock()
+        )
 
         with pytest.raises(ValueError) as exc_info:
             await downloader.download("nonexistent/sae-repo")

@@ -6,6 +6,8 @@ Tests the full endpoint behavior including:
 - GET /v1/models/{id} returns 404 when model not found
 """
 
+from unittest.mock import AsyncMock, MagicMock
+
 import pytest
 from fastapi.testclient import TestClient
 
@@ -14,8 +16,16 @@ from millm.main import create_app
 
 @pytest.fixture
 def client():
-    """Create test client."""
+    """Create test client with mocked ModelService (no real DB needed)."""
+    from millm.api.dependencies import get_model_service
+
+    mock_service = MagicMock()
+    mock_service.get_locked_model = AsyncMock(return_value=None)
+    mock_service.get_available_models = AsyncMock(return_value=[])
+    mock_service.find_model_by_name = AsyncMock(return_value=None)
+
     app = create_app()
+    app.dependency_overrides[get_model_service] = lambda: mock_service
     return TestClient(app)
 
 

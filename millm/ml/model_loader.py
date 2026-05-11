@@ -11,6 +11,23 @@ from datetime import datetime
 from typing import Any, Optional
 
 import structlog
+import torch
+
+# Module-level imports allow @patch("millm.ml.model_loader.AutoTokenizer") etc.
+# in tests. The actual load path also imports these inside the function body
+# to preserve the informative ImportError message when transformers is absent.
+try:
+    from transformers import (  # noqa: F401  (re-exported for patching)
+        AutoConfig,
+        AutoModelForCausalLM,
+        AutoTokenizer,
+        BitsAndBytesConfig,
+    )
+except ImportError:
+    AutoConfig = None  # type: ignore[assignment]
+    AutoModelForCausalLM = None  # type: ignore[assignment]
+    AutoTokenizer = None  # type: ignore[assignment]
+    BitsAndBytesConfig = None  # type: ignore[assignment]
 
 from millm.core.errors import InsufficientMemoryError, ModelLoadError
 from millm.ml.memory_utils import get_available_cpu_memory_mb, get_available_memory_mb
@@ -95,8 +112,6 @@ class LoadedModelState:
                     self._loaded = None
 
             try:
-                import torch
-
                 if torch.cuda.is_available():
                     # Log memory before cleanup
                     free_before, total = torch.cuda.mem_get_info()
@@ -244,8 +259,6 @@ class ModelLoadContext:
                 del self.tokenizer
 
             try:
-                import torch
-
                 if torch.cuda.is_available():
                     torch.cuda.synchronize()
                     gc.collect()
@@ -253,7 +266,7 @@ class ModelLoadContext:
                     torch.cuda.empty_cache()
                     torch.cuda.ipc_collect()
                     gc.collect()
-            except ImportError:
+            except Exception:
                 gc.collect()
 
         return False  # Don't suppress exception
@@ -279,13 +292,13 @@ class ModelLoadContext:
         Returns:
             LoadedModel instance
         """
-        try:
-            import torch
-            from transformers import AutoConfig, AutoModelForCausalLM, AutoTokenizer, BitsAndBytesConfig
-        except ImportError as e:
+        # AutoConfig, AutoModelForCausalLM, AutoTokenizer, BitsAndBytesConfig are
+        # imported at module level so test patches on 'millm.ml.model_loader.*'
+        # apply correctly. If transformers is absent the module itself fails to load.
+        if AutoTokenizer is None:
             raise ModelLoadError(
                 "Required packages not installed. Install torch and transformers.",
-                details={"missing_package": str(e)},
+                details={"missing_package": "transformers"},
             )
 
         logger.info(
@@ -591,14 +604,22 @@ class ModelLoadContext:
         except Exception:
             pass
 
-        # Apply torch.compile for faster decoding (skip for bitsandbytes which is incompatible)
-        if torch_compile and quant_method != "bitsandbytes":
+        # Apply torch.compile for faster decoding.
+        # bitsandbytes quantization is incompatible with torch.compile (CUDA kernel
+        # registration conflicts). The model_service auto-detection already avoids
+        # passing torch_compile=True for bitsandbytes, but we guard here too.
+        if torch_compile and quant_method == "bitsandbytes":
+            logger.warning(
+                "torch_compile_skipped_bitsandbytes_incompatible",
+                quantization=quantization,
+            )
+        elif torch_compile:
             try:
                 logger.info("torch_compile_starting", mode=torch_compile_mode)
                 self.model.forward = torch.compile(
                     self.model.forward,
                     mode=torch_compile_mode,
-                    fullgraph=False,  # Allow hooks and dynamic control flow
+                    fullgraph=False,  # Allow hooks and dynamic control flow (SAE hooks)
                 )
                 logger.info("torch_compile_complete", mode=torch_compile_mode)
             except Exception as e:
@@ -694,8 +715,6 @@ class ModelLoader:
         """
         # Check if CUDA is available
         try:
-            import torch
-
             if not torch.cuda.is_available():
                 # Quantized models absolutely require CUDA
                 if quantization.upper() in ("Q4", "Q8", "Q2"):

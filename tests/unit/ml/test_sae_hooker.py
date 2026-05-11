@@ -68,7 +68,10 @@ def _make_gpt2_model(num_layers=4):
     transformer.h = h
     model = nn.Module()
     model.transformer = transformer
-    config = MagicMock()
+    # Use spec so hasattr only returns True for listed attributes.
+    # Without spec, MagicMock advertises every attribute, causing get_layer_count
+    # to find 'num_hidden_layers' before it reaches 'n_layer'.
+    config = MagicMock(spec=["n_layer", "n_layers", "num_layers"])
     config.n_layer = num_layers
     model.config = config
     return model

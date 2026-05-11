@@ -30,6 +30,11 @@ def mock_model():
     model.created_at = "2024-01-01T00:00:00"
     model.updated_at = "2024-01-01T00:00:00"
     model.loaded_at = None
+    # Required string fields in ModelResponse (previously defaulted to MagicMock)
+    model.device = "cpu"
+    model.dtype = "float16"
+    model.attn_implementation = "sdpa"
+    model.quantization_method = "none"
     return model
 
 

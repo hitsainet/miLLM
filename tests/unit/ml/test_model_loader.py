@@ -35,6 +35,7 @@ def loaded_model(mock_model, mock_tokenizer):
     """Create a LoadedModel instance."""
     return LoadedModel(
         model_id=1,
+        model_name="test-model",
         model=mock_model,
         tokenizer=mock_tokenizer,
         loaded_at=datetime.utcnow(),
@@ -49,6 +50,7 @@ class TestLoadedModel:
         """Test that LoadedModel is created correctly."""
         loaded = LoadedModel(
             model_id=1,
+            model_name="test-model",
             model=mock_model,
             tokenizer=mock_tokenizer,
             loaded_at=datetime.utcnow(),
@@ -96,6 +98,7 @@ class TestLoadedModelState:
 
         with patch("millm.ml.model_loader.torch") as mock_torch:
             mock_torch.cuda.is_available.return_value = True
+            mock_torch.cuda.mem_get_info.return_value = (8 * 1024**3, 16 * 1024**3)
             state.clear()
 
         assert state.is_loaded is False
@@ -107,7 +110,7 @@ class TestModelLoadContext:
 
     def test_enters_and_exits_cleanly(self):
         """Test that context manager works without errors."""
-        with ModelLoadContext(model_id=1) as ctx:
+        with ModelLoadContext(model_id=1, model_name="test-model") as ctx:
             assert ctx.model_id == 1
             assert ctx.model is None
             assert ctx.tokenizer is None
@@ -118,7 +121,7 @@ class TestModelLoadContext:
             mock_torch.cuda.is_available.return_value = True
 
             with pytest.raises(ValueError):
-                with ModelLoadContext(model_id=1) as ctx:
+                with ModelLoadContext(model_id=1, model_name="test-model") as ctx:
                     ctx.model = MagicMock()
                     ctx.tokenizer = MagicMock()
                     raise ValueError("Test error")
@@ -144,7 +147,7 @@ class TestModelLoadContext:
         mock_model = MagicMock()
         mock_auto_model.from_pretrained.return_value = mock_model
 
-        with ModelLoadContext(model_id=1) as ctx:
+        with ModelLoadContext(model_id=1, model_name="test-model") as ctx:
             loaded = ctx.load(
                 cache_path="/data/models/test",
                 quantization="FP16",
@@ -180,6 +183,7 @@ class TestModelLoader:
         with pytest.raises(InsufficientMemoryError) as exc_info:
             loader.load(
                 model_id=1,
+                model_name="test-model",
                 cache_path="/data/models/test",
                 quantization="FP16",
                 estimated_memory_mb=8000,  # Need 8 GB
@@ -196,6 +200,7 @@ class TestModelLoader:
         with pytest.raises(ModelLoadError) as exc_info:
             loader.load(
                 model_id=1,
+                model_name="test-model",
                 cache_path="/data/models/test",
                 quantization="FP16",
                 estimated_memory_mb=4000,
@@ -215,6 +220,7 @@ class TestModelLoader:
 
         with patch("millm.ml.model_loader.torch") as mock_torch:
             mock_torch.cuda.is_available.return_value = True
+            mock_torch.cuda.mem_get_info.return_value = (8 * 1024**3, 16 * 1024**3)
             result = loader.unload()
 
         assert result is True

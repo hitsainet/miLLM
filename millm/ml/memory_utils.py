@@ -9,6 +9,7 @@ import re
 from typing import Optional
 
 import structlog
+import torch
 
 logger = structlog.get_logger()
 
@@ -151,8 +152,6 @@ def get_available_memory_mb(device: int = 0) -> int:
         Available GPU memory in MB, or 0 if CUDA is not available.
     """
     try:
-        import torch
-
         if not torch.cuda.is_available():
             return 0
 
@@ -175,8 +174,6 @@ def get_total_memory_mb(device: int = 0) -> int:
         Total GPU memory in MB, or 0 if CUDA is not available.
     """
     try:
-        import torch
-
         if not torch.cuda.is_available():
             return 0
 
@@ -199,8 +196,6 @@ def get_used_memory_mb(device: int = 0) -> int:
         Used GPU memory in MB, or 0 if CUDA is not available.
     """
     try:
-        import torch
-
         if not torch.cuda.is_available():
             return 0
 
@@ -234,8 +229,6 @@ def is_cuda_available() -> bool:
         True if CUDA is available, False otherwise.
     """
     try:
-        import torch
-
         return torch.cuda.is_available()
     except Exception:
         return False
@@ -249,8 +242,6 @@ def get_device_count() -> int:
         Number of CUDA devices, or 0 if CUDA is not available.
     """
     try:
-        import torch
-
         if not torch.cuda.is_available():
             return 0
         return torch.cuda.device_count()
@@ -269,8 +260,6 @@ def get_device_name(device: int = 0) -> str:
         Device name string, or "Unknown" if not available.
     """
     try:
-        import torch
-
         if not torch.cuda.is_available():
             return "No GPU"
         return torch.cuda.get_device_name(device)

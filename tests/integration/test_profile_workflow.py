@@ -22,10 +22,12 @@ def mock_profile():
     profile.id = "profile-123"
     profile.name = "test-profile"
     profile.description = "Test steering profile"
-    profile.steering = {1234: 5.0, 5678: -2.5}
-    profile.model_id = 1
+    # ProfileResponse.steering is dict[str, Any] and model_id is str | None
+    profile.steering = {"1234": 5.0, "5678": -2.5}
+    profile.model_id = "model-1"
     profile.sae_id = "sae-123"
     profile.layer = 12
+    profile.is_active = False
     profile.created_at = datetime.now(timezone.utc)
     profile.updated_at = datetime.now(timezone.utc)
     return profile
@@ -137,7 +139,7 @@ class TestCreateProfile:
                 "name": "test-profile",
                 "description": "Test steering profile",
                 "steering": {1234: 5.0},
-                "model_id": 1,
+                "model_id": "model-1",
                 "sae_id": "sae-123",
                 "layer": 12,
             },
@@ -194,7 +196,7 @@ class TestUpdateProfile:
 
     def test_updates_steering_values(self, client, mock_profile_service, mock_profile):
         """Test updating steering configuration."""
-        mock_profile.steering = {9999: 3.0}
+        mock_profile.steering = {"9999": 3.0}
         mock_profile_service.update_profile.return_value = mock_profile
 
         response = client.patch(

@@ -36,15 +36,27 @@ def mock_activation_records():
             "timestamp": "2024-01-15T12:00:01Z",
             "request_id": "req-001",
             "token_position": 0,
-            "activations": {1234: 0.82, 5678: 0.45},
-            "top_k": [(1234, 0.82), (5678, 0.45)],
+            "activations": [
+                {"feature_index": 1234, "activation": 0.82},
+                {"feature_index": 5678, "activation": 0.45},
+            ],
+            "top_k": [
+                {"feature_index": 1234, "activation": 0.82},
+                {"feature_index": 5678, "activation": 0.45},
+            ],
         },
         {
             "timestamp": "2024-01-15T12:00:02Z",
             "request_id": "req-001",
             "token_position": 1,
-            "activations": {1234: 0.91, 5678: 0.52},
-            "top_k": [(1234, 0.91), (5678, 0.52)],
+            "activations": [
+                {"feature_index": 1234, "activation": 0.91},
+                {"feature_index": 5678, "activation": 0.52},
+            ],
+            "top_k": [
+                {"feature_index": 1234, "activation": 0.91},
+                {"feature_index": 5678, "activation": 0.52},
+            ],
         },
     ]
 
@@ -231,8 +243,8 @@ class TestGetActivationHistory:
                 "timestamp": "2024-01-15T12:00:01Z",
                 "request_id": "req-001",
                 "token_position": 0,
-                "activations": {1234: 0.82},
-                "top_k": [(1234, 0.82)],
+                "activations": [{"feature_index": 1234, "activation": 0.82}],
+                "top_k": [{"feature_index": 1234, "activation": 0.82}],
             }
         ]
 

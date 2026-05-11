@@ -102,7 +102,8 @@ class TestGetSteeringStatus:
         data = response.json()
         assert data["success"] is True
         assert data["data"]["enabled"] is True
-        assert data["data"]["values"] == {1234: 5.0, 5678: -2.5}
+        # JSON serialization converts integer dict keys to strings
+        assert data["data"]["values"] == {"1234": 5.0, "5678": -2.5}
 
 
 class TestSetSteering:
@@ -202,16 +203,14 @@ class TestToggleSteering:
         mock_attachment_status.steering_enabled = False
         mock_sae_service.get_steering_values.return_value = {1234: 5.0}
 
-        response = client.post(
-            "/api/saes/steering/enable",
-            params={"enabled": False}
-        )
+        # /steering/disable is the dedicated disable endpoint; /steering/enable always enables
+        response = client.post("/api/saes/steering/disable")
 
         assert response.status_code == 200
         data = response.json()
         assert data["data"]["enabled"] is False
-        # Values should be preserved
-        assert data["data"]["values"] == {1234: 5.0}
+        # Values should be preserved; JSON converts int keys to strings
+        assert data["data"]["values"] == {"1234": 5.0}
 
 
 class TestClearSteering:

@@ -118,55 +118,57 @@ class TestRequestQueueOverflow:
 
     @pytest.mark.asyncio
     async def test_raises_queue_full_error(self, small_queue):
-        """Test that QueueFullError is raised when max_pending exceeded."""
-        # Fill up the queue
-        holders = []
-        events = []
-        for _ in range(small_queue.max_pending):
-            event = asyncio.Event()
-            events.append(event)
+        """Test that QueueFullError is raised when max_pending exceeded.
 
-            async def hold(evt=event):
-                async with small_queue.acquire():
-                    evt.set()
-                    await asyncio.sleep(1.0)
+        Strategy: use a release_gate to keep holders running while we
+        verify that a third acquire raises QueueFullError. With
+        max_concurrent=1 and max_pending=2 we need task1 holding the
+        semaphore AND task2 waiting for it simultaneously so that a
+        third attempt sees pending_count >= max_pending.
+        """
+        release_gate = asyncio.Event()
+        task1_acquired = asyncio.Event()
 
-            holders.append(asyncio.create_task(hold()))
+        async def hold():
+            async with small_queue.acquire():
+                task1_acquired.set()
+                await release_gate.wait()
 
-        # Wait for all holders to acquire
-        for event in events:
-            await event.wait()
+        # Task1 fills the single concurrent slot
+        task1 = asyncio.create_task(hold())
+        await task1_acquired.wait()
 
-        # Now the queue should be full
+        # Task2 queues behind task1 (pending=2)
+        task2 = asyncio.create_task(hold())
+        await asyncio.sleep(0)  # Let task2 increment pending_count
+
+        # Third acquire must overflow: pending_count >= max_pending
         with pytest.raises(QueueFullError) as exc_info:
             async with small_queue.acquire():
                 pass
 
         assert "full" in str(exc_info.value).lower()
 
-        # Cleanup
-        for task in holders:
-            task.cancel()
-        await asyncio.gather(*holders, return_exceptions=True)
+        # Unblock holders so they can finish cleanly
+        release_gate.set()
+        await asyncio.gather(task1, task2, return_exceptions=True)
 
     @pytest.mark.asyncio
     async def test_queue_full_error_message_includes_count(self, small_queue):
         """Test that QueueFullError message includes pending count."""
-        holders = []
-        events = []
-        for _ in range(small_queue.max_pending):
-            event = asyncio.Event()
-            events.append(event)
+        release_gate = asyncio.Event()
+        task1_acquired = asyncio.Event()
 
-            async def hold(evt=event):
-                async with small_queue.acquire():
-                    evt.set()
-                    await asyncio.sleep(1.0)
+        async def hold():
+            async with small_queue.acquire():
+                task1_acquired.set()
+                await release_gate.wait()
 
-            holders.append(asyncio.create_task(hold()))
+        task1 = asyncio.create_task(hold())
+        await task1_acquired.wait()
 
-        for event in events:
-            await event.wait()
+        task2 = asyncio.create_task(hold())
+        await asyncio.sleep(0)
 
         with pytest.raises(QueueFullError) as exc_info:
             async with small_queue.acquire():
@@ -174,9 +176,8 @@ class TestRequestQueueOverflow:
 
         assert str(small_queue.max_pending) in str(exc_info.value)
 
-        for task in holders:
-            task.cancel()
-        await asyncio.gather(*holders, return_exceptions=True)
+        release_gate.set()
+        await asyncio.gather(task1, task2, return_exceptions=True)
 
 
 class TestRequestQueueProperties:

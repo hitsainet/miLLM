@@ -259,10 +259,26 @@ class SocketClient {
     });
 
     // Monitoring events
+    // The backend emits the top-K activations for each forward pass.
+    // We use two store paths:
+    //   1. setLatestActivations  → populates the "Latest Activations" live panel
+    //   2. addActivationRecord   → kept for backward compat (REST polling owns history)
     this.socket.on('monitoring:activation', (data: ActivationEvent) => {
       const uiState = useUIStore.getState();
       if (!uiState.monitoringPaused) {
-        serverStore.addActivationRecord(data);
+        // Update the real-time "Latest Activations" panel
+        serverStore.setLatestActivations(data.activations);
+
+        // Also push into the history ring buffer for immediate feedback
+        // (the REST poll will reconcile within 5 s; duplicates are harmless
+        //  because history items are keyed by timestamp in the display)
+        serverStore.addActivationRecord({
+          timestamp: data.timestamp,
+          request_id: data.request_id ?? '',
+          token_position: data.position,
+          activations: data.activations,
+          top_k: data.activations, // socket already delivers top-K only
+        });
       }
     });
 

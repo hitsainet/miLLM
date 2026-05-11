@@ -25,6 +25,12 @@ class ConfigureMonitoringRequest(BaseModel):
         le=1000,
         description="Max entries in history buffer",
     )
+    top_k: int = Field(
+        default=10,
+        ge=1,
+        le=1000,
+        description="Number of top activated features to capture and emit per forward pass",
+    )
 
     @field_validator("features")
     @classmethod
@@ -70,6 +76,7 @@ class MonitoringState(BaseModel):
     )
     history_size: int = Field(..., description="Max history entries")
     history_count: int = Field(..., description="Current history count")
+    top_k: int = Field(default=10, description="Current top-K setting")
 
 
 class FeatureActivation(BaseModel):

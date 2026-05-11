@@ -132,6 +132,9 @@ class MonitoringService:
         # Monitored features (None = all)
         self._monitored_features: Optional[list[int]] = None
 
+        # Top-K: number of highest-activated features to capture per forward pass
+        self._top_k: int = 10
+
         logger.debug(f"MonitoringService initialized with history_size={history_size}")
 
     # ==========================================================================
@@ -172,6 +175,7 @@ class MonitoringService:
         enabled: bool = True,
         features: Optional[list[int]] = None,
         history_size: Optional[int] = None,
+        top_k: Optional[int] = None,
     ) -> None:
         """
         Configure monitoring parameters.
@@ -180,7 +184,12 @@ class MonitoringService:
             enabled: Whether to enable monitoring on SAE.
             features: Specific features to monitor (None = all).
             history_size: New history buffer size.
+            top_k: Number of top-activated features to capture per forward pass.
         """
+        # Update top_k if provided
+        if top_k is not None and top_k > 0:
+            self._top_k = top_k
+
         # Update history size if changed
         if history_size is not None and history_size != self._history_size:
             self._history_size = history_size
@@ -202,7 +211,7 @@ class MonitoringService:
         logger.info(
             f"Monitoring configured: enabled={enabled}, "
             f"features={'all' if features is None else len(features)}, "
-            f"history_size={self._history_size}"
+            f"history_size={self._history_size}, top_k={self._top_k}"
         )
 
     def set_enabled(self, enabled: bool) -> None:
@@ -234,6 +243,7 @@ class MonitoringService:
             "monitored_features": self._monitored_features,
             "history_size": self._history_size,
             "history_count": len(self._history),
+            "top_k": self._top_k,
         }
 
     # ==========================================================================
@@ -245,7 +255,7 @@ class MonitoringService:
         activations: Tensor,
         request_id: Optional[str] = None,
         token_position: int = 0,
-        top_k: int = 10,
+        top_k: Optional[int] = None,
     ) -> None:
         """
         Record activation from forward pass.
@@ -256,8 +266,11 @@ class MonitoringService:
             activations: Feature activations tensor (seq_len, d_sae) or (d_sae,).
             request_id: Associated inference request ID.
             token_position: Token position in sequence.
-            top_k: Number of top features to capture.
+            top_k: Number of top features to capture (None = use service-level _top_k).
         """
+        # Use service-level top_k unless overridden per-call
+        effective_top_k = top_k if top_k is not None else self._top_k
+
         # Flatten to 1D (take last position along each leading dimension)
         # Handles (batch, seq_len, d_sae), (seq_len, d_sae), or (d_sae,)
         while activations.dim() > 1:
@@ -281,10 +294,10 @@ class MonitoringService:
                 value = activations[idx_int].item()
                 acts_dict[idx_int] = value
 
-        # Compute top-k
+        # Compute top-k using the effective value
         if len(acts_dict) > 0:
             sorted_acts = sorted(acts_dict.items(), key=lambda x: x[1], reverse=True)
-            top_features = sorted_acts[:top_k]
+            top_features = sorted_acts[:effective_top_k]
 
         # Create entry
         entry = ActivationEntry(

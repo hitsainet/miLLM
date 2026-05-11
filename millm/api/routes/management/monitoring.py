@@ -54,6 +54,7 @@ async def get_monitoring_state(
         monitored_features=state["monitored_features"],
         history_size=state["history_size"],
         history_count=state["history_count"],
+        top_k=state["top_k"],
     ))
 
 
@@ -77,6 +78,7 @@ async def configure_monitoring(
         enabled=request.enabled,
         features=request.features,
         history_size=request.history_size,
+        top_k=request.top_k,
     )
 
     state = service.get_state()
@@ -87,6 +89,7 @@ async def configure_monitoring(
         monitored_features=state["monitored_features"],
         history_size=state["history_size"],
         history_count=state["history_count"],
+        top_k=state["top_k"],
     ))
 
 
@@ -115,6 +118,7 @@ async def toggle_monitoring(
         monitored_features=state["monitored_features"],
         history_size=state["history_size"],
         history_count=state["history_count"],
+        top_k=state["top_k"],
     ))
 
 

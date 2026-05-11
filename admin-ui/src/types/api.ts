@@ -169,11 +169,19 @@ export interface BatchSteeringRequest {
 }
 
 // Monitoring types
+
+/**
+ * Monitoring configuration state returned by GET /api/monitoring and all configure calls.
+ * Mirrors backend MonitoringState schema.
+ */
 export interface MonitoringConfig {
   enabled: boolean;
-  sae_id: number | null;
+  sae_attached: boolean;
+  sae_id: string | null;
+  monitored_features: number[] | null;
+  history_size: number;
+  history_count: number;
   top_k: number;
-  feature_indices: number[] | null;
 }
 
 export interface FeatureActivation {
@@ -182,30 +190,69 @@ export interface FeatureActivation {
   label?: string;
 }
 
+/**
+ * A single captured activation record from history.
+ * activations: all non-zero features for this forward pass (could be large).
+ * top_k: the top-K features by activation strength (use this for display).
+ */
 export interface ActivationRecord {
   timestamp: string;
-  request_id: string;
+  request_id: string | null;
+  token_position: number;
   activations: FeatureActivation[];
+  top_k: FeatureActivation[];
 }
 
+/**
+ * Per-feature running statistics from GET /api/monitoring/statistics.
+ * Mirrors backend FeatureStatistics schema (uses feature_idx not feature_index).
+ */
 export interface FeatureStatistics {
-  feature_index: number;
+  feature_idx: number;
   label?: string;
   min: number;
   max: number;
   mean: number;
   std: number;
   count: number;
+  active_ratio: number;
 }
 
+/** Response from GET /api/monitoring/history */
 export interface MonitoringHistory {
   records: ActivationRecord[];
-  statistics: FeatureStatistics[];
+  total: number;
 }
 
+/** Response from GET /api/monitoring/statistics */
+export interface StatisticsResponse {
+  features: FeatureStatistics[];
+  total_activations: number;
+  since: string | null;
+}
+
+/**
+ * Request to POST /api/monitoring/configure.
+ * Field names match backend ConfigureMonitoringRequest schema.
+ */
 export interface ConfigureMonitoringRequest {
+  enabled?: boolean;
+  features?: number[];        // backend field name: "features" (not feature_indices)
+  history_size?: number;
   top_k?: number;
-  feature_indices?: number[];
+}
+
+/** Request to POST /api/monitoring/statistics/top */
+export interface TopFeaturesRequest {
+  k?: number;
+  metric?: 'mean' | 'max' | 'active_ratio' | 'count';
+}
+
+/** Response from POST /api/monitoring/statistics/top */
+export interface TopFeaturesResponse {
+  features: FeatureStatistics[];
+  metric: string;
+  k: number;
 }
 
 // Profile types
@@ -282,10 +329,16 @@ export interface LoadProgressEvent {
   progress: number;
 }
 
+/**
+ * WebSocket monitoring:activation event payload.
+ * Mirrors the data dict in progress.py emit_activation_update.
+ * Contains only the top-K features (pre-filtered by the backend).
+ */
 export interface ActivationEvent {
   timestamp: string;
-  request_id: string;
-  activations: FeatureActivation[];
+  request_id: string | null;
+  position: number;
+  activations: FeatureActivation[];  // top-K features only
 }
 
 export interface SystemMetricsEvent {

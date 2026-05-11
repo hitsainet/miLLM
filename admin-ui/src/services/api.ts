@@ -31,6 +31,8 @@ import type {
   MonitoringConfig,
   ConfigureMonitoringRequest,
   MonitoringHistory,
+  StatisticsResponse,
+  TopFeaturesResponse,
   Profile,
   CreateProfileRequest,
   UpdateProfileRequest,
@@ -553,39 +555,36 @@ export const steeringApi = {
  * ```
  */
 export const monitoringApi = {
-  /**
-   * Gets the current monitoring configuration.
-   * @returns Promise resolving to monitoring configuration
-   */
+  /** GET /api/monitoring — current state (enabled, top_k, sae_attached, …) */
   getConfig: () => request<MonitoringConfig>('/monitoring'),
 
   /**
-   * Configures monitoring settings.
-   * Specify which features to monitor and sampling rate.
-   * @param req - Configuration with feature indices and options
-   * @returns Promise resolving to updated monitoring configuration
+   * POST /api/monitoring/configure
+   * Maps frontend ConfigureMonitoringRequest fields to the backend schema:
+   *   top_k          → top_k
+   *   features       → features   (backend field name; frontend may also pass feature_indices)
+   *   history_size   → history_size
+   *   enabled        → enabled
    */
   configure: (req: ConfigureMonitoringRequest) =>
     request<MonitoringConfig>('/monitoring/configure', {
       method: 'POST',
-      body: JSON.stringify(req),
+      body: JSON.stringify({
+        enabled: req.enabled ?? true,
+        features: req.features ?? null,
+        history_size: req.history_size ?? 100,
+        top_k: req.top_k ?? 10,
+      }),
     }),
 
-  /**
-   * Enables monitoring to start capturing activations.
-   * Activations are sent via WebSocket to connected clients.
-   * @returns Promise resolving to updated monitoring configuration
-   */
+  /** POST /api/monitoring/enable with enabled:true */
   enable: () =>
     request<MonitoringConfig>('/monitoring/enable', {
       method: 'POST',
       body: JSON.stringify({ enabled: true }),
     }),
 
-  /**
-   * Disables monitoring without clearing configuration.
-   * @returns Promise resolving to updated monitoring configuration
-   */
+  /** POST /api/monitoring/enable with enabled:false */
   disable: () =>
     request<MonitoringConfig>('/monitoring/enable', {
       method: 'POST',
@@ -593,22 +592,52 @@ export const monitoringApi = {
     }),
 
   /**
-   * Gets historical activation data.
-   * @param limit - Optional maximum number of records to return
-   * @returns Promise resolving to activation history
+   * GET /api/monitoring/history
+   * @param limit   Max records (default 50)
+   * @param requestId  Filter to a specific inference request
    */
-  getHistory: (limit?: number) =>
-    request<MonitoringHistory>(
-      `/monitoring/history${limit ? `?limit=${limit}` : ''}`
-    ),
+  getHistory: (limit?: number, requestId?: string) => {
+    const params = new URLSearchParams();
+    if (limit) params.set('limit', String(limit));
+    if (requestId) params.set('request_id', requestId);
+    const qs = params.toString();
+    return request<MonitoringHistory>(`/monitoring/history${qs ? `?${qs}` : ''}`);
+  },
+
+  /** DELETE /api/monitoring/history */
+  clearHistory: () =>
+    request<{ cleared: number; message: string }>('/monitoring/history', {
+      method: 'DELETE',
+    }),
 
   /**
-   * Clears all stored activation history.
-   * @returns Promise resolving when history is cleared
+   * GET /api/monitoring/statistics
+   * Per-feature running stats (mean, std, min, max, active_ratio, count).
+   * @param featureIndices  Comma-separated indices to filter; omit for all.
    */
-  clearHistory: () =>
-    request<void>('/monitoring/history', {
+  getStatistics: (featureIndices?: number[]) => {
+    const qs = featureIndices?.length
+      ? `?features=${featureIndices.join(',')}`
+      : '';
+    return request<StatisticsResponse>(`/monitoring/statistics${qs}`);
+  },
+
+  /** DELETE /api/monitoring/statistics — reset all running stats */
+  resetStatistics: () =>
+    request<{ cleared: number; message: string }>('/monitoring/statistics', {
       method: 'DELETE',
+    }),
+
+  /**
+   * POST /api/monitoring/statistics/top
+   * Get top-K features ranked by a metric.
+   * @param k       Number of features (1–100, default 10)
+   * @param metric  mean | max | active_ratio | count (default mean)
+   */
+  getTopFeatures: (k = 10, metric: 'mean' | 'max' | 'active_ratio' | 'count' = 'mean') =>
+    request<TopFeaturesResponse>('/monitoring/statistics/top', {
+      method: 'POST',
+      body: JSON.stringify({ k, metric }),
     }),
 };
 

@@ -38,14 +38,14 @@ export function StatisticsPanel({
       <div className="space-y-3">
         {statistics.map((stat) => (
           <div
-            key={stat.feature_index}
+            key={stat.feature_idx}
             className="p-3 bg-slate-800/30 rounded-lg border border-slate-700/50"
           >
             <div className="flex items-center justify-between mb-3">
               <div className="flex items-center gap-2">
                 <Hash className="w-4 h-4 text-primary-400" />
                 <span className="font-mono text-sm font-semibold text-primary-400">
-                  {stat.feature_index}
+                  {stat.feature_idx}
                 </span>
               </div>
               <span className="text-xs text-slate-500">

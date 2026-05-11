@@ -134,9 +134,12 @@ const initialState: ServerState = {
   steeringLoading: false,
   monitoring: {
     enabled: false,
+    sae_attached: false,
     sae_id: null,
+    monitored_features: null,
+    history_size: 100,
+    history_count: 0,
     top_k: 10,
-    feature_indices: null,
   },
   activationHistory: [],
   featureStatistics: [],

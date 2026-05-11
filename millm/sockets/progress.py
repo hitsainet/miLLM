@@ -516,8 +516,12 @@ class ProgressEmitter:
 
         data = {
             "timestamp": timestamp,
-            "features": [{"idx": idx, "value": val} for idx, val in features],
-            "requestId": request_id,
+            # Field names match the frontend ActivationEvent TypeScript type:
+            # activations: FeatureActivation[] where each item is {feature_index, activation}
+            "activations": [
+                {"feature_index": idx, "activation": val} for idx, val in features
+            ],
+            "request_id": request_id,
             "position": position,
         }
 

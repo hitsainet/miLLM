@@ -122,8 +122,22 @@ class AttachedSAEState:
         layer: int,
         hook_handle: Any,
     ) -> None:
-        """Set the attached SAE state."""
+        """Set the attached SAE state.
+
+        Removes any existing hook before overwriting so that a programming error
+        (or a race that bypasses the is_attached guard) never leaves an orphaned
+        hook firing on every forward pass.
+        """
         with self._lock:
+            if self._hook_handle is not None:
+                try:
+                    self._hook_handle.remove()
+                    logger.warning(
+                        "orphaned_hook_removed_before_overwrite",
+                        previous_sae_id=self._attached_sae_id,
+                    )
+                except Exception as e:
+                    logger.warning("error_removing_orphaned_hook", error=str(e))
             self._attached_sae = sae
             self._attached_sae_id = sae_id
             self._attached_layer = layer
@@ -839,7 +853,11 @@ class SAEService:
                 details={"attached_sae_id": self._sae_state.attached_sae_id},
             )
 
-        # Wait for any in-flight inference requests to complete
+        # Drain in-flight inference requests before removing the hook.
+        # If a generation is running when the hook is removed, the PyTorch
+        # forward-hook machinery may call a deallocated closure, causing a crash
+        # or silently applying stale steering.  We wait up to 30 s (300 × 0.1 s)
+        # for the queue to drain, then proceed with a visible error log.
         try:
             inference_svc = self._inference_service
             if inference_svc is None:
@@ -847,11 +865,18 @@ class SAEService:
                 inference_svc = get_inference_service()
             queue = inference_svc.request_queue
             if queue.pending_count > 0:
-                logger.info("waiting_for_pending_requests", pending=queue.pending_count)
-                for _ in range(30):  # Wait up to 3 seconds
+                logger.info("detach_waiting_for_pending_requests", pending=queue.pending_count)
+                for _ in range(300):  # Wait up to 30 seconds
                     if queue.pending_count == 0:
                         break
                     await asyncio.sleep(0.1)
+                if queue.pending_count > 0:
+                    logger.error(
+                        "detach_timeout_with_active_requests",
+                        pending=queue.pending_count,
+                        hint="Detaching anyway — hook removed while generation may be in progress. "
+                             "Restart the server if inference behaves unexpectedly.",
+                    )
         except Exception:
             pass  # Don't block detach if queue check fails
 
@@ -864,8 +889,13 @@ class SAEService:
         if hook_handle:
             self._hooker.remove(hook_handle)
 
-        # Move to CPU and cleanup
+        # Clear steering values before moving to CPU.  If the same SAE is
+        # re-attached later (from the local cache), it must start with a clean
+        # steering state rather than silently applying values from the previous
+        # session.
         if attached_sae:
+            attached_sae.clear_steering()
+            attached_sae.enable_monitoring(False)
             attached_sae.to_cpu()
 
         # Clear CUDA cache
@@ -912,21 +942,37 @@ class SAEService:
     # Steering Methods
     # =========================================================================
 
+    def _check_feature_idx(self, feature_idx: int, sae: Any) -> None:
+        """Validate a feature index against the attached SAE's dimension.
+
+        Raises InvalidFeatureIndexError (400) instead of ValueError (500) so the
+        client gets a meaningful error response rather than an internal server error.
+        """
+        from millm.core.errors import InvalidFeatureIndexError
+        if not 0 <= feature_idx < sae.d_sae:
+            raise InvalidFeatureIndexError(
+                f"Feature index {feature_idx} is out of range [0, {sae.d_sae}) "
+                f"for the attached SAE.",
+                details={"feature_idx": feature_idx, "d_sae": sae.d_sae},
+            )
+
     def set_steering(self, feature_idx: int, value: float) -> None:
         """
         Set steering value for a feature.
 
         Args:
-            feature_idx: Feature index.
+            feature_idx: Feature index (validated against attached SAE's d_sae).
             value: Steering strength.
 
         Raises:
             SAENotAttachedError: If no SAE is attached.
-            ValueError: If feature index is invalid.
+            InvalidFeatureIndexError: If feature index is out of range (returns 400).
         """
         if not self._sae_state.is_attached:
             raise SAENotAttachedError("No SAE attached")
-        self._sae_state.attached_sae.set_steering(feature_idx, value)
+        sae = self._sae_state.attached_sae
+        self._check_feature_idx(feature_idx, sae)
+        sae.set_steering(feature_idx, value)
 
     def set_steering_batch(self, steering: dict[int, float]) -> None:
         """
@@ -937,10 +983,14 @@ class SAEService:
 
         Raises:
             SAENotAttachedError: If no SAE is attached.
+            InvalidFeatureIndexError: If any feature index is out of range (returns 400).
         """
         if not self._sae_state.is_attached:
             raise SAENotAttachedError("No SAE attached")
-        self._sae_state.attached_sae.set_steering_batch(steering)
+        sae = self._sae_state.attached_sae
+        for idx in steering:
+            self._check_feature_idx(idx, sae)
+        sae.set_steering_batch(steering)
 
     def clear_steering(self, feature_idx: Optional[int] = None) -> None:
         """

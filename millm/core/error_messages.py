@@ -44,6 +44,7 @@ ERROR_MESSAGES: dict[str, str] = {
 
     # Validation errors
     "VALIDATION_ERROR": "The request contains invalid data. Please check your input and try again.",
+    "INVALID_FEATURE_INDEX": "The feature index is outside the valid range for the attached SAE.",
 
     # Generic error
     "INTERNAL_ERROR": "An unexpected error occurred. Please try again or contact support if the problem persists.",

@@ -58,6 +58,7 @@ def mock_emitter():
 def mock_loaded_sae():
     """Create a mock LoadedSAE instance."""
     sae = MagicMock()
+    sae.d_sae = 16384  # integer, needed by _check_feature_idx
     sae.estimate_memory_mb.return_value = 256.0
     sae.is_steering_enabled = False
     sae.is_monitoring_enabled = False
@@ -748,3 +749,100 @@ class TestSAEServiceParsePathMetadata:
 
         assert width is None
         assert average_l0 is None
+
+
+# =============================================================================
+# Tests: orphaned hook prevention (Fix 2)
+# =============================================================================
+
+
+class TestAttachedSAEStateDoubleAttachProtection:
+    """Verify AttachedSAEState.set() removes the old hook before overwriting."""
+
+    def test_set_removes_existing_hook(self, reset_sae_state):
+        """A second set() call removes the first hook before installing the new one."""
+        from millm.services.sae_service import AttachedSAEState
+        from unittest.mock import MagicMock
+
+        state = AttachedSAEState()
+        old_handle = MagicMock()
+        new_handle = MagicMock()
+        sae = MagicMock()
+
+        state.set(sae, "sae-1", 5, old_handle)
+        assert state._hook_handle is old_handle
+
+        state.set(sae, "sae-2", 5, new_handle)
+        # Old hook must have been removed
+        old_handle.remove.assert_called_once()
+        assert state._hook_handle is new_handle
+
+    def test_set_on_empty_state_does_not_crash(self, reset_sae_state):
+        """First set() with no existing hook runs cleanly."""
+        from millm.services.sae_service import AttachedSAEState
+        from unittest.mock import MagicMock
+
+        state = AttachedSAEState()
+        handle = MagicMock()
+        sae = MagicMock()
+
+        state.set(sae, "sae-1", 3, handle)  # must not raise
+        assert state.is_attached
+
+
+# =============================================================================
+# Tests: feature index validated against d_sae (Fix 4)
+# =============================================================================
+
+
+class TestSteeringFeatureIndexValidation:
+    """Verify out-of-range feature indices return 400, not 500."""
+
+    @pytest.fixture
+    def service_with_sae(self, service, reset_sae_state):
+        """Service with a mock SAE attached (d_sae=128)."""
+        from millm.services.sae_service import AttachedSAEState
+        from unittest.mock import MagicMock
+        import torch
+
+        mock_sae = MagicMock()
+        mock_sae.d_sae = 128
+        mock_sae.set_steering = MagicMock(side_effect=ValueError("out of range"))
+        mock_sae.set_steering_batch = MagicMock()
+
+        state = AttachedSAEState()
+        state.set(mock_sae, "test-sae", 5, MagicMock())
+        return service
+
+    def test_out_of_range_index_raises_invalid_feature_index_error(
+        self, service_with_sae
+    ):
+        """Feature index >= d_sae raises InvalidFeatureIndexError (400)."""
+        from millm.core.errors import InvalidFeatureIndexError
+
+        with pytest.raises(InvalidFeatureIndexError):
+            service_with_sae.set_steering(9999, 1.0)
+
+    def test_batch_out_of_range_raises_invalid_feature_index_error(
+        self, service_with_sae
+    ):
+        """Batch with any out-of-range index raises InvalidFeatureIndexError."""
+        from millm.core.errors import InvalidFeatureIndexError
+
+        with pytest.raises(InvalidFeatureIndexError):
+            service_with_sae.set_steering_batch({0: 1.0, 9999: 2.0})
+
+    def test_valid_index_does_not_raise(self, service_with_sae):
+        """Index within [0, d_sae) does not raise InvalidFeatureIndexError."""
+        from millm.core.errors import InvalidFeatureIndexError
+        from unittest.mock import MagicMock
+
+        # Patch set_steering to not raise
+        from millm.services.sae_service import AttachedSAEState
+        sae = AttachedSAEState().attached_sae
+        sae.set_steering = MagicMock()
+
+        try:
+            service_with_sae.set_steering(0, 1.0)
+        except InvalidFeatureIndexError:
+            pytest.fail("Valid index raised InvalidFeatureIndexError")

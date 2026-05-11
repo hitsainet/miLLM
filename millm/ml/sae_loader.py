@@ -131,8 +131,10 @@ class SAELoader:
         W_dec = W_dec.to(target_dtype)
         b_dec = b_dec.to(target_dtype)
 
-        # Validate shapes
-        self._validate_shapes(W_enc, b_enc, W_dec, b_dec, config)
+        # Validate and, if necessary, auto-transpose weights
+        W_enc, b_enc, W_dec, b_dec = self._validate_shapes(
+            W_enc, b_enc, W_dec, b_dec, config
+        )
 
         # Create wrapper
         loaded_sae = LoadedSAE(
@@ -271,20 +273,30 @@ class SAELoader:
         W_dec: torch.Tensor,
         b_dec: torch.Tensor,
         config: SAEConfig,
-    ) -> None:
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
         """
-        Validate weight tensor shapes against config.
+        Validate weight tensor shapes against config and auto-correct transposed weights.
+
+        Some SAE checkpoints store weights in the transposed orientation.  Rather
+        than logging a warning and proceeding with wrong-shaped tensors (which
+        silently corrupts every matrix multiply), we transpose automatically and
+        log an INFO message so the correction is visible in the logs.
+
+        Returns:
+            Tuple of (W_enc, b_enc, W_dec, b_dec) with any transpositions applied.
 
         Raises:
-            ValueError: If shapes don't match config.
+            ValueError: If shapes are irrecoverably wrong.
         """
         # W_enc should be (d_in, d_sae)
         if W_enc.shape != (config.d_in, config.d_sae):
-            # Some SAEs have transposed weights
             if W_enc.shape == (config.d_sae, config.d_in):
-                logger.warning(
-                    "W_enc appears transposed, shape will be validated after transpose"
+                logger.info(
+                    "sae_loader_transposed_W_enc_auto_corrected",
+                    original_shape=tuple(W_enc.shape),
+                    corrected_shape=(config.d_in, config.d_sae),
                 )
+                W_enc = W_enc.T.contiguous()
             else:
                 raise ValueError(
                     f"W_enc shape mismatch: expected ({config.d_in}, {config.d_sae}), "
@@ -292,7 +304,7 @@ class SAELoader:
                 )
 
         # b_enc should be (d_sae,)
-        if b_enc.shape[0] != config.d_sae:
+        if b_enc.shape[0] != config.d_sae or b_enc.dim() != 1:
             raise ValueError(
                 f"b_enc shape mismatch: expected ({config.d_sae},), "
                 f"got {tuple(b_enc.shape)}"
@@ -301,9 +313,12 @@ class SAELoader:
         # W_dec should be (d_sae, d_in)
         if W_dec.shape != (config.d_sae, config.d_in):
             if W_dec.shape == (config.d_in, config.d_sae):
-                logger.warning(
-                    "W_dec appears transposed, shape will be validated after transpose"
+                logger.info(
+                    "sae_loader_transposed_W_dec_auto_corrected",
+                    original_shape=tuple(W_dec.shape),
+                    corrected_shape=(config.d_sae, config.d_in),
                 )
+                W_dec = W_dec.T.contiguous()
             else:
                 raise ValueError(
                     f"W_dec shape mismatch: expected ({config.d_sae}, {config.d_in}), "
@@ -311,11 +326,13 @@ class SAELoader:
                 )
 
         # b_dec should be (d_in,)
-        if b_dec.shape[0] != config.d_in:
+        if b_dec.shape[0] != config.d_in or b_dec.dim() != 1:
             raise ValueError(
                 f"b_dec shape mismatch: expected ({config.d_in},), "
                 f"got {tuple(b_dec.shape)}"
             )
+
+        return W_enc, b_enc, W_dec, b_dec
 
     def _str_to_dtype(self, dtype_str: str) -> torch.dtype:
         """

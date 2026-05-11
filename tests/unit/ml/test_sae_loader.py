@@ -183,3 +183,74 @@ class TestSAELoaderFindWeightsFile:
             loader._find_weights_file(empty_dir)
 
         assert "No weights file found" in str(exc_info.value)
+
+
+# =============================================================================
+# Tests: transposed weight auto-correction (Fix 1)
+# =============================================================================
+
+
+class TestTransposedWeightCorrection:
+    """Verify that transposed W_enc / W_dec are automatically corrected."""
+
+    def _make_transposed_sae_dir(self, tmp_path, d_in=64, d_sae=128):
+        """Create a SAE dir with intentionally transposed weights."""
+        import json
+        from safetensors.torch import save_file
+
+        sae_dir = tmp_path / "transposed_sae"
+        sae_dir.mkdir()
+        (sae_dir / "cfg.json").write_text(json.dumps({
+            "d_in": d_in, "d_sae": d_sae,
+            "model_name": "test/model",
+            "hook_name": "blocks.0.hook_resid_post",
+            "hook_layer": 0, "dtype": "float32",
+        }))
+        # Save weights TRANSPOSED (wrong orientation)
+        save_file({
+            "W_enc": torch.randn(d_sae, d_in),   # should be (d_in, d_sae)
+            "b_enc": torch.randn(d_sae),
+            "W_dec": torch.randn(d_in, d_sae),   # should be (d_sae, d_in)
+            "b_dec": torch.randn(d_in),
+        }, str(sae_dir / "sae_weights.safetensors"))
+        return sae_dir
+
+    def test_transposed_W_enc_is_auto_corrected(self, loader, tmp_path):
+        """Transposed W_enc is silently corrected; loaded SAE has right shape."""
+        sae_dir = self._make_transposed_sae_dir(tmp_path)
+        sae = loader.load(sae_dir)
+        assert sae.W_enc.shape == (64, 128), f"Expected (64,128), got {sae.W_enc.shape}"
+
+    def test_transposed_W_dec_is_auto_corrected(self, loader, tmp_path):
+        """Transposed W_dec is silently corrected; loaded SAE has right shape."""
+        sae_dir = self._make_transposed_sae_dir(tmp_path)
+        sae = loader.load(sae_dir)
+        assert sae.W_dec.shape == (128, 64), f"Expected (128,64), got {sae.W_dec.shape}"
+
+    def test_wrong_shape_raises_value_error(self, loader, tmp_path):
+        """Genuinely wrong shape (not a simple transpose) raises ValueError."""
+        import json
+        from safetensors.torch import save_file
+
+        sae_dir = tmp_path / "bad_sae"
+        sae_dir.mkdir()
+        (sae_dir / "cfg.json").write_text(json.dumps({
+            "d_in": 64, "d_sae": 128, "model_name": "t", "hook_name": "h",
+            "hook_layer": 0, "dtype": "float32",
+        }))
+        # Shape that is neither (d_in, d_sae) nor (d_sae, d_in)
+        save_file({
+            "W_enc": torch.randn(32, 256),
+            "b_enc": torch.randn(128),
+            "W_dec": torch.randn(128, 64),
+            "b_dec": torch.randn(64),
+        }, str(sae_dir / "sae_weights.safetensors"))
+
+        with pytest.raises(ValueError, match="W_enc shape mismatch"):
+            loader.load(sae_dir)
+
+    def test_correct_orientation_loads_without_warning(self, loader, sae_dir_safetensors):
+        """Correctly oriented weights load without any correction."""
+        sae = loader.load(sae_dir_safetensors)
+        assert sae.W_enc.shape == (64, 128)
+        assert sae.W_dec.shape == (128, 64)

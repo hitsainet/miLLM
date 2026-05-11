@@ -322,6 +322,17 @@ class ProfileService:
                 applied_steering = True
                 feature_count = 0
 
+        # Warn when the caller explicitly requested steering but nothing was applied
+        # (profile has no features AND no SAE is attached).  This is not an error —
+        # the profile's empty-steering state is correct — but silence here surprises
+        # operators who forget to attach an SAE first.
+        if apply_steering and not applied_steering and not attachment.is_attached:
+            logger.info(
+                "profile_activation_apply_steering_no_op",
+                profile_id=profile_id,
+                reason="no_sae_attached_and_profile_has_no_steering_values",
+            )
+
         # Invalidate the prefix cache whenever steering state changes on activation.
         # Cached KV states encode the old steering delta; they must be recomputed.
         if apply_steering:

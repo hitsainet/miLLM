@@ -192,7 +192,11 @@ class SAELoadError(MiLLMError):
     status_code = 500
 
 
-# Steering validation uses ValueError/Pydantic directly — no custom error classes needed.
+class InvalidFeatureIndexError(MiLLMError):
+    """Raised when a feature index is outside the SAE's valid range [0, d_sae)."""
+
+    code = "INVALID_FEATURE_INDEX"
+    status_code = 400
 
 
 # =============================================================================
@@ -265,6 +269,7 @@ ERROR_CLASSES: dict[str, type[MiLLMError]] = {
     "SAE_ALREADY_ATTACHED": SAEAlreadyAttachedError,
     "SAE_INCOMPATIBLE": SAEIncompatibleError,
     "SAE_LOAD_FAILED": SAELoadError,
+    "INVALID_FEATURE_INDEX": InvalidFeatureIndexError,
 
     "PROFILE_NOT_FOUND": ProfileNotFoundError,
     "PROFILE_ALREADY_EXISTS": ProfileAlreadyExistsError,

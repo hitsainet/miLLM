@@ -241,3 +241,90 @@ class TestSAEHookerHookFunction:
         assert acts.shape[-1] == 3
 
         handle.remove()
+
+
+# =============================================================================
+# Tests: dataclass model output (Fix 3)
+# =============================================================================
+
+
+class TestSAEHookerDataclassOutput:
+    """Verify the hook handles HF ModelOutput dataclasses correctly."""
+
+    def test_hook_handles_plain_tensor_output(self, hooker, loaded_sae):
+        """Hook works when the layer returns a plain tensor."""
+        loaded_sae.enable_steering(False)
+        layer = torch.nn.Linear(64, 64)
+        handle = layer.register_forward_hook(hooker._create_hook_fn(loaded_sae))
+        x = torch.randn(1, 5, 64)
+        out = layer(x)
+        assert isinstance(out, torch.Tensor)
+        handle.remove()
+
+    def test_hook_handles_tuple_output(self, hooker, loaded_sae):
+        """Hook returns a tuple when the layer output was a tuple."""
+        loaded_sae.enable_steering(False)
+
+        class TupleLayer(torch.nn.Module):
+            def forward(self, x):
+                return (x * 2, torch.tensor([1.0]))  # tuple output
+
+        layer = TupleLayer()
+        handle = layer.register_forward_hook(hooker._create_hook_fn(loaded_sae))
+        x = torch.randn(1, 5, 64)
+        out = layer(x)
+        assert isinstance(out, tuple)
+        assert out[0].shape == (1, 5, 64)
+        handle.remove()
+
+    def test_hook_handles_indexable_non_tuple_output(self, hooker, loaded_sae):
+        """Hook handles objects that support index access (like HF ModelOutput)."""
+        loaded_sae.enable_steering(False)
+
+        # Simulate a minimal ModelOutput-like dataclass
+        class FakeModelOutput:
+            def __init__(self, hidden_states, extra):
+                self._data = {"hidden_states": hidden_states, "extra": extra}
+
+            def __getitem__(self, idx):
+                return list(self._data.values())[idx]
+
+            def __iter__(self):
+                return iter(self._data.values())
+
+            def values(self):
+                return self._data.values()
+
+        hidden = torch.randn(1, 5, 64)
+        output = FakeModelOutput(hidden_states=hidden, extra=torch.tensor([1.0]))
+        hook_fn = hooker._create_hook_fn(loaded_sae)
+        result = hook_fn(None, None, output)
+        # Should return without crashing; first element should be a tensor
+        assert result is not None
+
+    def test_hook_returns_unmodified_on_unknown_output(self, hooker, loaded_sae):
+        """Hook passes through completely unknown output types without crashing."""
+        loaded_sae.enable_steering(False)
+
+        class Unindexable:
+            pass
+
+        output = Unindexable()
+        hook_fn = hooker._create_hook_fn(loaded_sae)
+        result = hook_fn(None, None, output)
+        assert result is output  # passed through unmodified
+
+    def test_hook_applies_steering_and_returns_modified_output(self, hooker, loaded_sae):
+        """Hook actually modifies the output when steering is enabled."""
+        loaded_sae.set_steering(0, 10.0)
+        loaded_sae.enable_steering(True)
+
+        x = torch.randn(1, 4, 64)
+        baseline = x.clone()
+
+        hook_fn = hooker._create_hook_fn(loaded_sae)
+        result = hook_fn(None, None, x)
+
+        assert not torch.allclose(result, baseline), (
+            "Steering was enabled but hook output is identical to input"
+        )

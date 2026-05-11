@@ -103,35 +103,63 @@ class SAEHooker:
             """
             Forward hook that applies direct residual stream steering.
 
-            Handles different output formats:
-            - Tuple (hidden_states, ...) - common in transformers
-            - Single tensor
+            Handles the three output formats produced by HuggingFace transformers:
+            - Single Tensor            — older/simple architectures
+            - tuple[Tensor, ...]      — most common transformer layers
+            - ModelOutput (dataclass) — e.g. CausalLMOutputWithPast, which is an
+              OrderedDict subclass that also supports index access like a tuple
             """
-            # Extract hidden states based on output format
-            if isinstance(output, tuple):
+            # ── Extract hidden states ──────────────────────────────────────────
+            if isinstance(output, Tensor):
+                hidden_states = output
+            elif isinstance(output, tuple):
                 hidden_states = output[0]
             else:
-                hidden_states = output
+                # HF ModelOutput dataclasses (OrderedDict subclasses) support
+                # index access: output[0] returns the first non-None value which
+                # is always the hidden states for transformer layer outputs.
+                try:
+                    hidden_states = output[0]
+                except (TypeError, KeyError, IndexError):
+                    logger.warning(
+                        "sae_hook_unsupported_output_type: %s",
+                        type(output).__name__,
+                    )
+                    return output  # pass through unmodified
 
-            # Capture activations for monitoring (if enabled)
-            # This uses SAE encoding to get feature activations
+            if not isinstance(hidden_states, Tensor):
+                # First element is not a tensor (None, metadata, etc.) — skip
+                return output
+
+            # ── Monitoring ────────────────────────────────────────────────────
             if sae.is_monitoring_enabled:
                 with torch.no_grad():
-                    # Cast to SAE dtype for encoding
                     x = hidden_states
                     if x.dtype != sae.W_enc.dtype:
                         x = x.to(sae.W_enc.dtype)
                     sae._capture_activations(sae.encode(x))
 
-            # Apply direct steering (miStudio/Neuronpedia compatible)
-            # This adds the pre-computed steering delta to hidden states
+            # ── Steering ──────────────────────────────────────────────────────
             modified = sae.apply_steering(hidden_states)
 
-            # Return with same structure as input
-            if isinstance(output, tuple):
+            # ── Reconstruct output with same type ────────────────────────────
+            if isinstance(output, Tensor):
+                return modified
+            elif isinstance(output, tuple):
                 return (modified,) + output[1:]
             else:
-                return modified
+                # HF ModelOutput: reconstruct from its own dict representation so
+                # downstream code that pattern-matches on the type still works.
+                try:
+                    output_dict = dict(output)
+                    first_key = next(iter(output_dict))
+                    output_dict[first_key] = modified
+                    return type(output)(**output_dict)
+                except Exception:
+                    # Last resort: return as a plain tuple (HF code handles this)
+                    items = list(output)
+                    items[0] = modified
+                    return tuple(items)
 
         return hook_fn
 

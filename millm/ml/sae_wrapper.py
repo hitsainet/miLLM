@@ -171,10 +171,17 @@ class LoadedSAE:
         if not self._steering_enabled or self._steering_delta is None:
             return hidden_states
 
-        # Ensure steering delta matches hidden states dtype/device
+        # Ensure steering delta matches hidden states dtype/device.
+        # On the first call with a new dtype/device (e.g. after the SAE weights
+        # were cast to bfloat16 at attach time), update the cached delta in place
+        # so that every subsequent call is a no-op cast — one cast total instead
+        # of one cast per token.
         delta = self._steering_delta
         if delta.device != hidden_states.device or delta.dtype != hidden_states.dtype:
-            delta = delta.to(device=hidden_states.device, dtype=hidden_states.dtype)
+            self._steering_delta = delta.to(
+                device=hidden_states.device, dtype=hidden_states.dtype
+            )
+            delta = self._steering_delta
 
         # Broadcast delta to all tokens: [d_in] -> [1, 1, d_in] -> [batch, seq_len, d_in]
         # Use in-place add for Gemma-2 compatibility (some architectures require this)
@@ -456,6 +463,11 @@ class LoadedSAE:
         """
         Move all tensors to device.
 
+        Rebuilds the steering delta on the new device if steering is active.
+        This is important when to_device() is called after steering values have
+        already been set: the delta must live on the same device as the weights
+        so that apply_steering() does not incur a cross-device transfer.
+
         Args:
             device: Target device (e.g., "cuda", "cpu", "cuda:0").
         """
@@ -464,10 +476,16 @@ class LoadedSAE:
         self.W_dec = self.W_dec.to(device)
         self.b_dec = self.b_dec.to(device)
 
-        if self._steering_delta is not None:
-            self._steering_delta = self._steering_delta.to(device)
-
         self.device = device
+
+        # Rebuild delta on the new device so apply_steering() is zero-copy.
+        # This handles both the common case (delta is None, nothing to do) and
+        # the edge case where to_device() is called after set_steering().
+        if self._steering_values:
+            self._rebuild_steering_delta()
+        else:
+            self._steering_delta = None
+
         logger.debug(f"LoadedSAE moved to {device}")
 
     def to_cpu(self) -> None:

@@ -236,3 +236,119 @@ class TestLoadedSAEMemory:
         assert small_sae.d_sae == 128
         assert small_sae.d_in == small_sae.config.d_in
         assert small_sae.d_sae == small_sae.config.d_sae
+
+
+# =============================================================================
+# Tests: delta dtype caching and to_device (Fix 6+7)
+# =============================================================================
+
+
+class TestDeltaDtypeAndDevice:
+    """Verify delta dtype is cached after first cast and to_device keeps it in sync."""
+
+    def test_apply_steering_caches_cast_delta(self, small_sae):
+        """After first apply_steering with a different dtype, delta is cached."""
+        small_sae.set_steering(0, 5.0)
+        small_sae.enable_steering(True)
+
+        # Simulate bfloat16 hidden states (common with modern models)
+        hidden = torch.randn(1, 4, 64, dtype=torch.bfloat16)
+        small_sae.apply_steering(hidden)
+
+        # The cached delta should now be bfloat16
+        assert small_sae._steering_delta is not None
+        assert small_sae._steering_delta.dtype == torch.bfloat16
+
+    def test_apply_steering_subsequent_calls_use_cached_delta(self, small_sae):
+        """After the first call, the delta is not re-cast on subsequent calls."""
+        small_sae.set_steering(0, 5.0)
+        small_sae.enable_steering(True)
+
+        hidden = torch.randn(1, 4, 64, dtype=torch.bfloat16)
+        small_sae.apply_steering(hidden)
+        delta_after_first = small_sae._steering_delta
+
+        # Second call — delta object should be the same (no new allocation)
+        small_sae.apply_steering(hidden)
+        delta_after_second = small_sae._steering_delta
+        assert delta_after_first is delta_after_second
+
+    def test_to_device_rebuilds_delta_when_steering_active(self, small_sae):
+        """to_device() rebuilds the delta on the new device when steering is set."""
+        small_sae.set_steering(0, 3.0)
+        small_sae.enable_steering(True)
+        assert small_sae._steering_delta is not None
+
+        # Move to CPU (already there, but exercises the rebuild path)
+        small_sae.to_device("cpu")
+        assert small_sae._steering_delta is not None
+        assert str(small_sae._steering_delta.device) == "cpu"
+
+    def test_to_device_clears_delta_when_no_steering(self, small_sae):
+        """to_device() leaves delta as None when no steering values are set."""
+        assert not small_sae._steering_values
+        small_sae.to_device("cpu")
+        assert small_sae._steering_delta is None
+
+    def test_steering_output_matches_expected_dtype(self, small_sae):
+        """apply_steering output preserves the hidden_states dtype."""
+        small_sae.set_steering(0, 5.0)
+        small_sae.enable_steering(True)
+
+        for dtype in [torch.float32, torch.bfloat16, torch.float16]:
+            hidden = torch.randn(1, 4, 64, dtype=dtype)
+            result = small_sae.apply_steering(hidden)
+            assert result.dtype == dtype, f"Expected {dtype}, got {result.dtype}"
+
+
+# =============================================================================
+# Tests: stale steering cleared on detach path (Fix 8)
+# =============================================================================
+
+
+class TestSteeringClearedOnDetach:
+    """Verify clear_steering() removes state so a re-attached SAE starts clean."""
+
+    def test_clear_steering_resets_all_values(self, small_sae):
+        """After clear_steering, no values and delta is None."""
+        small_sae.set_steering(0, 10.0)
+        small_sae.set_steering(1, -5.0)
+        small_sae.enable_steering(True)
+
+        small_sae.clear_steering()
+
+        assert small_sae.get_steering_values() == {}
+        assert small_sae._steering_delta is None
+        # Enabled flag is NOT cleared by clear_steering — that's enable_steering's job
+        # The detach path calls both clear_steering() and enable_monitoring(False)
+
+    def test_enable_monitoring_false_clears_activations(self, small_sae):
+        """enable_monitoring(False) clears any captured activations."""
+        x = torch.randn(1, 5, 64)
+        small_sae.enable_monitoring(True)
+        small_sae.forward(x)
+        assert small_sae.get_last_batch_size() > 0
+
+        small_sae.enable_monitoring(False)
+        assert small_sae.get_last_batch_size() == 0
+        assert small_sae.get_last_feature_activations() is None
+
+    def test_reattach_starts_with_clean_state(self, small_sae):
+        """After clear+disable sequence (what detach does), SAE is pristine."""
+        # Simulate a session: set steering, capture activations
+        small_sae.set_steering(0, 10.0)
+        small_sae.enable_steering(True)
+        small_sae.enable_monitoring(True)
+        small_sae.forward(torch.randn(1, 4, 64))
+
+        # Simulate detach sequence
+        small_sae.clear_steering()
+        small_sae.enable_steering(False)
+        small_sae.enable_monitoring(False)
+
+        # State should be clean
+        assert small_sae.get_steering_values() == {}
+        assert small_sae._steering_delta is None
+        assert not small_sae.is_steering_enabled
+        assert not small_sae.is_monitoring_enabled
+        assert small_sae.get_last_batch_size() == 0

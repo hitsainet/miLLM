@@ -32,7 +32,7 @@ export function ActivationChart({
       />
 
       {activations.length > 0 ? (
-        <div className="space-y-2">
+        <div className="space-y-2 max-h-80 overflow-y-auto pr-1">
           {activations.map((item, index) => {
             const widthPercent = (Math.abs(item.activation) / maxActivation) * 100;
 

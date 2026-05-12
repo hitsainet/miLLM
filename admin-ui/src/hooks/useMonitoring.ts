@@ -34,12 +34,14 @@ export function useMonitoring() {
   });
 
   // ── Feature statistics (REST poll every 10 s while enabled) ────────────────
-  // Uses the dedicated /api/monitoring/statistics endpoint rather than
-  // reading a non-existent `statistics` field on the history response.
+  // Uses POST /api/monitoring/statistics/top so the panel always shows the
+  // top-K features by mean activation, matching the top_k setting.
+  // The query key includes top_k so it re-fetches immediately on change.
+  const currentTopK = configQuery.data?.top_k ?? 10;
   const statisticsQuery = useQuery({
-    queryKey: ['monitoring', 'statistics'],
+    queryKey: ['monitoring', 'statistics', currentTopK],
     queryFn: async () => {
-      const resp = await monitoringApi.getStatistics();
+      const resp = await monitoringApi.getTopFeatures(currentTopK, 'mean');
       setFeatureStatistics(resp.features);
       return resp;
     },
@@ -122,10 +124,11 @@ export function useMonitoring() {
   return {
     // State
     config: configQuery.data,
+    topK: currentTopK,
     history: historyQuery.data?.records ?? [],
     statistics: statisticsQuery.data?.features ?? [],
-    totalActivations: statisticsQuery.data?.total_activations ?? 0,
-    statisticsSince: statisticsQuery.data?.since ?? null,
+    totalActivations: (statisticsQuery.data as { total_activations?: number })?.total_activations ?? 0,
+    statisticsSince: (statisticsQuery.data as { since?: string | null })?.since ?? null,
 
     // Loading states
     isLoading: configQuery.isLoading,

@@ -130,7 +130,7 @@ export function MonitoringPage() {
             </div>
           </Card>
         ) : (
-          <StatisticsPanel statistics={statistics || []} />
+          <StatisticsPanel statistics={statistics || []} topK={topK} />
         )}
       </div>
 

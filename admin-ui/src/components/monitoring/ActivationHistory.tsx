@@ -50,8 +50,18 @@ export function ActivationHistory({
       />
 
       {displayHistory.length > 0 ? (
-        <div className="space-y-2 max-h-96 overflow-y-auto">
-          {displayHistory.map((record, index) => (
+        <div className="space-y-2 max-h-80 overflow-y-auto pr-1">
+          {displayHistory.map((record, index) => {
+            // Prefer record.top_k (pre-filtered by backend) for display so the
+            // feature count always matches the configured Top-K setting.
+            // Fall back to record.activations if top_k is empty (older records).
+            const displayFeatures =
+              record.top_k && record.top_k.length > 0
+                ? record.top_k
+                : record.activations;
+            const totalFeatures = record.activations.length;
+
+            return (
             <div
               key={`${record.timestamp}-${index}`}
               className="p-3 bg-slate-800/30 rounded-lg border border-slate-700/50"
@@ -61,12 +71,12 @@ export function ActivationHistory({
                   {formatTime(record.timestamp)}
                 </span>
                 <span className="text-xs text-slate-500">
-                  {record.activations.length} features
+                  top {displayFeatures.length} of {totalFeatures} active features
                 </span>
               </div>
 
               <div className="flex flex-wrap gap-2">
-                {record.activations.slice(0, 5).map((activation) => (
+                {displayFeatures.map((activation) => (
                   <div
                     key={activation.feature_index}
                     className="flex items-center gap-1 px-2 py-1 bg-slate-700/50 rounded text-xs"
@@ -81,14 +91,10 @@ export function ActivationHistory({
                     </span>
                   </div>
                 ))}
-                {record.activations.length > 5 && (
-                  <span className="text-xs text-slate-500 self-center">
-                    +{record.activations.length - 5} more
-                  </span>
-                )}
               </div>
             </div>
-          ))}
+            );
+          })}
 
           {history.length > maxItems && (
             <p className="text-xs text-slate-500 text-center pt-2">

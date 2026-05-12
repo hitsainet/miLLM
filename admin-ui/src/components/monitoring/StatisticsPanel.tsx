@@ -5,11 +5,13 @@ import type { FeatureStatistics } from '@/types';
 interface StatisticsPanelProps {
   statistics: FeatureStatistics[];
   title?: string;
+  topK?: number;
 }
 
 export function StatisticsPanel({
   statistics,
   title = 'Feature Statistics',
+  topK,
 }: StatisticsPanelProps) {
   if (statistics.length === 0) {
     return (
@@ -31,11 +33,15 @@ export function StatisticsPanel({
     <Card>
       <CardHeader
         title={title}
-        subtitle={`${statistics.length} feature${statistics.length !== 1 ? 's' : ''} tracked`}
+        subtitle={
+          topK
+            ? `Top ${statistics.length} by mean activation`
+            : `${statistics.length} feature${statistics.length !== 1 ? 's' : ''} tracked`
+        }
         icon={<Activity className="w-5 h-5 text-slate-400" />}
       />
 
-      <div className="space-y-3">
+      <div className="space-y-3 max-h-80 overflow-y-auto pr-1">
         {statistics.map((stat) => (
           <div
             key={stat.feature_idx}

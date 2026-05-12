@@ -94,9 +94,12 @@ describe('serverStore', () => {
       const { monitoring } = useServerStore.getState();
       expect(monitoring).toEqual({
         enabled: false,
+        sae_attached: false,
         sae_id: null,
+        monitored_features: null,
+        history_size: 100,
+        history_count: 0,
         top_k: 10,
-        feature_indices: null,
       });
     });
 
@@ -362,9 +365,12 @@ describe('serverStore', () => {
     it('setMonitoring updates the full monitoring config', () => {
       const config: MonitoringConfig = {
         enabled: true,
-        sae_id: 1,
+        sae_attached: true,
+        sae_id: 'test-sae-123',
+        monitored_features: [100, 200, 300],
+        history_size: 100,
+        history_count: 5,
         top_k: 20,
-        feature_indices: [100, 200, 300],
       };
       useServerStore.getState().setMonitoring(config);
 
@@ -374,9 +380,12 @@ describe('serverStore', () => {
     it('setMonitoringEnabled toggles only the enabled flag', () => {
       useServerStore.getState().setMonitoring({
         enabled: false,
-        sae_id: 1,
+        sae_attached: true,
+        sae_id: 'test-sae-123',
+        monitored_features: [100],
+        history_size: 100,
+        history_count: 0,
         top_k: 10,
-        feature_indices: [100],
       });
 
       useServerStore.getState().setMonitoringEnabled(true);
@@ -384,14 +393,16 @@ describe('serverStore', () => {
       const { monitoring } = useServerStore.getState();
       expect(monitoring.enabled).toBe(true);
       expect(monitoring.top_k).toBe(10);
-      expect(monitoring.feature_indices).toEqual([100]);
+      expect(monitoring.monitored_features).toEqual([100]);
     });
 
     it('addActivationRecord appends a record and caps at 100', () => {
       const record: ActivationRecord = {
         timestamp: '2026-01-30T12:00:00Z',
         request_id: 'req-1',
+        token_position: 0,
         activations: [{ feature_index: 100, activation: 0.85 }],
+        top_k: [{ feature_index: 100, activation: 0.85 }],
       };
 
       useServerStore.getState().addActivationRecord(record);
@@ -406,7 +417,9 @@ describe('serverStore', () => {
         useServerStore.getState().addActivationRecord({
           timestamp: `2026-01-30T12:00:${String(i).padStart(2, '0')}Z`,
           request_id: `req-${i}`,
+          token_position: 0,
           activations: [],
+          top_k: [],
         });
       }
 
@@ -563,9 +576,12 @@ describe('serverStore', () => {
       });
       useServerStore.getState().setMonitoring({
         enabled: true,
-        sae_id: 1,
+        sae_attached: true,
+        sae_id: 'test-sae-123',
+        monitored_features: [100],
+        history_size: 100,
+        history_count: 1,
         top_k: 20,
-        feature_indices: [100],
       });
       useServerStore.getState().setConnectionStatus('connected');
       useServerStore.getState().setSystemMetrics({

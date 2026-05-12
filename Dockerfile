@@ -15,12 +15,16 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 WORKDIR /app
 
 # Install minimal system deps and upgrade packages with known CVEs.
-# gcc is required by triton's JIT kernel compiler, which torch.compile's
-# reduce-overhead mode uses to compile CUDA kernels at first inference.
+# gcc + libc6-dev are required by triton's JIT kernel compiler, which
+# torch.compile's reduce-overhead mode uses to compile CUDA kernels at
+# first inference. libc6-dev provides stdlib.h and friends that triton
+# includes when building cuda_utils.c; without it gcc is present but
+# cannot find standard headers.
 RUN apt-get update && apt-get install -y --no-install-recommends \
     libpq5 \
     curl \
     gcc \
+    libc6-dev \
     && apt-get upgrade -y openssl \
     && rm -rf /var/lib/apt/lists/*
 

@@ -7,7 +7,12 @@ import type { ConfigureMonitoringRequest } from '@/types';
 export function useMonitoring() {
   const queryClient = useQueryClient();
   const toast = useToast();
-  const { setMonitoring, setActivationHistory, setFeatureStatistics } = useServerStore();
+  const {
+    setMonitoring,
+    setActivationHistory,
+    setFeatureStatistics,
+    setLatestActivations,
+  } = useServerStore();
 
   // ── Config / state ─────────────────────────────────────────────────────────
   const configQuery = useQuery({
@@ -27,6 +32,16 @@ export function useMonitoring() {
     queryFn: async () => {
       const history = await monitoringApi.getHistory(100);
       setActivationHistory(history.records);
+      // Seed Latest Activations from the most recent record so the panel
+      // isn't blank after a page refresh (socket events only go forward).
+      if (history.records.length > 0) {
+        const latest = history.records[0]; // newest first
+        const features =
+          latest.top_k && latest.top_k.length > 0
+            ? latest.top_k
+            : latest.activations.slice(0, currentTopK);
+        setLatestActivations(features);
+      }
       return history;
     },
     enabled: isEnabled,

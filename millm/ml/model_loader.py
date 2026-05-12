@@ -622,6 +622,52 @@ class ModelLoadContext:
                     fullgraph=False,  # Allow hooks and dynamic control flow (SAE hooks)
                 )
                 logger.info("torch_compile_complete", mode=torch_compile_mode)
+
+                # Eagerly trigger JIT compilation with a dummy decode-shaped
+                # forward pass so the first real inference request doesn't pay
+                # the ~20 s warmup cost.  seq_len=1 covers the hot decode path
+                # (one new token per step).  Failure never blocks model loading.
+                try:
+                    import time as _time
+                    logger.info("torch_compile_warmup_starting")
+                    _t0 = _time.monotonic()
+
+                    # Resolve the device where input embeddings live.
+                    # device_map="auto" may spread layers across devices; we
+                    # need the device that owns the embedding table.
+                    _input_device = device
+                    try:
+                        _dm = getattr(self.model, "hf_device_map", None)
+                        if _dm:
+                            for _key in ("", "model.embed_tokens",
+                                         "transformer.wte", "model.embedding"):
+                                if _key in _dm:
+                                    _d = str(_dm[_key])
+                                    if _d not in ("cpu", "disk"):
+                                        _input_device = f"cuda:{_d}" if _d.isdigit() else _d
+                                    break
+                        else:
+                            _input_device = str(next(self.model.parameters()).device)
+                    except Exception:
+                        pass
+
+                    with torch.no_grad():
+                        _dummy = torch.zeros(
+                            1, 1, dtype=torch.long, device=_input_device
+                        )
+                        self.model(
+                            input_ids=_dummy,
+                            attention_mask=torch.ones_like(_dummy),
+                            use_cache=False,
+                        )
+
+                    logger.info(
+                        "torch_compile_warmup_complete",
+                        elapsed_s=round(_time.monotonic() - _t0, 1),
+                    )
+                except Exception as e:
+                    logger.warning("torch_compile_warmup_failed", error=str(e))
+
             except Exception as e:
                 logger.warning("torch_compile_failed_continuing_without", error=str(e))
 

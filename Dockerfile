@@ -14,10 +14,13 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 
 WORKDIR /app
 
-# Install minimal system deps and upgrade packages with known CVEs
+# Install minimal system deps and upgrade packages with known CVEs.
+# gcc is required by triton's JIT kernel compiler, which torch.compile's
+# reduce-overhead mode uses to compile CUDA kernels at first inference.
 RUN apt-get update && apt-get install -y --no-install-recommends \
     libpq5 \
     curl \
+    gcc \
     && apt-get upgrade -y openssl \
     && rm -rf /var/lib/apt/lists/*
 

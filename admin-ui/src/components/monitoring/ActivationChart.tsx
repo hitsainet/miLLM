@@ -7,6 +7,8 @@ interface ActivationChartProps {
   maxValue?: number;
   title?: string;
   subtitle?: string;
+  /** Base URL for Neuronpedia feature links, e.g. "https://neuronpedia.hitsai.net/" */
+  neuronpediaBaseUrl?: string;
 }
 
 export function ActivationChart({
@@ -14,6 +16,7 @@ export function ActivationChart({
   maxValue,
   title = 'Top Feature Activations',
   subtitle,
+  neuronpediaBaseUrl = 'https://neuronpedia.hitsai.net/',
 }: ActivationChartProps) {
   const maxActivation = maxValue || Math.max(...activations.map((a) => Math.abs(a.activation)), 1);
 
@@ -53,7 +56,7 @@ export function ActivationChart({
                     {item.feature_index}
                   </span>
                   <a
-                    href={`https://www.neuronpedia.org/gemma-2-2b/${item.feature_index}`}
+                    href={`${neuronpediaBaseUrl.replace(/\/$/, '')}/${item.feature_index}`}
                     target="_blank"
                     rel="noopener noreferrer"
                     className="opacity-0 group-hover:opacity-100 transition-opacity"

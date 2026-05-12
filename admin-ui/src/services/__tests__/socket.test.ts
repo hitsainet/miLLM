@@ -33,6 +33,7 @@ const { mockSocket, mockIo, mockServerStore, mockUIStore } = vi.hoisted(() => {
     setAttachedSAE: vi.fn(),
     setSteering: vi.fn(),
     addActivationRecord: vi.fn(),
+    setLatestActivations: vi.fn(),
     setSystemMetrics: vi.fn(),
     attachedSAE: null as { id: string; name: string } | null,
     monitoring: { enabled: false },

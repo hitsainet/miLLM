@@ -10,7 +10,7 @@ const config: Config = {
   url: 'https://docs-millm.hitsai.net',
   baseUrl: '/',
 
-  organizationName: 'Onegaishimas',
+  organizationName: 'hitsainet',
   projectName: 'miLLM',
   deploymentBranch: 'gh-pages',
   trailingSlash: false,
@@ -30,7 +30,7 @@ const config: Config = {
         docs: {
           routeBasePath: '/',
           sidebarPath: './sidebars.ts',
-          editUrl: 'https://github.com/Onegaishimas/miLLM/tree/main/manual/',
+          editUrl: 'https://github.com/hitsainet/miLLM/tree/main/manual/',
         },
         blog: false,
         theme: {
@@ -51,7 +51,7 @@ const config: Config = {
           label: 'Manual',
         },
         {
-          href: 'https://github.com/Onegaishimas/miLLM',
+          href: 'https://github.com/hitsainet/miLLM',
           label: 'GitHub',
           position: 'right',
         },
@@ -71,7 +71,7 @@ const config: Config = {
         {
           title: 'Resources',
           items: [
-            {label: 'GitHub', href: 'https://github.com/Onegaishimas/miLLM'},
+            {label: 'GitHub', href: 'https://github.com/hitsainet/miLLM'},
             {label: 'Neuronpedia', href: 'https://neuronpedia.org'},
           ],
         },

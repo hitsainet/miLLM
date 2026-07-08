@@ -7,8 +7,8 @@ const config: Config = {
   tagline: 'Mechanistic Interpretability LLM Server — Feature Steering & Real-Time Probing',
   favicon: 'img/favicon.svg',
 
-  url: 'https://onegaishimas.github.io',
-  baseUrl: '/miLLM/',
+  url: 'https://docs-millm.hitsai.net',
+  baseUrl: '/',
 
   organizationName: 'Onegaishimas',
   projectName: 'miLLM',

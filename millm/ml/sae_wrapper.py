@@ -104,6 +104,12 @@ class LoadedSAE:
         # Pre-computed steering delta in residual stream space (d_in,)
         self._steering_delta: Optional[Tensor] = None
 
+        # Observability: counts how many times apply_steering actually applied a
+        # non-trivial steering delta.  Used to verify that the forward hook is
+        # firing (e.g. that torch.compile did not silently bypass it).  Not
+        # thread-locked — it is a best-effort diagnostic counter.
+        self._steering_apply_count: int = 0
+
         # Monitoring state
         self._monitoring_enabled: bool = False
         self._monitored_features: Optional[list[int]] = None
@@ -188,8 +194,12 @@ class LoadedSAE:
         batch_size, seq_len, _ = hidden_states.shape
         delta_expanded = delta.unsqueeze(0).unsqueeze(0).expand(batch_size, seq_len, -1)
 
-        # Apply steering in-place
+        # Add the steering delta to every token's residual stream.  This is an
+        # out-of-place add (a new tensor is returned); the hook substitutes it
+        # for the layer's original output.
         hidden_states = hidden_states + delta_expanded
+
+        self._steering_apply_count += 1
 
         return hidden_states
 
@@ -308,6 +318,15 @@ class LoadedSAE:
     def is_steering_enabled(self) -> bool:
         """Check if steering is enabled."""
         return self._steering_enabled
+
+    @property
+    def steering_apply_count(self) -> int:
+        """Number of forward passes in which the steering delta was applied.
+
+        Zero while steering is enabled and requests have been served indicates
+        the hook is not firing (e.g. bypassed by a compiled graph).
+        """
+        return self._steering_apply_count
 
     @property
     def steering_delta(self) -> Optional[Tensor]:

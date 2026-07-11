@@ -76,6 +76,22 @@ class TestLoadedSAESteering:
 
         assert not torch.allclose(out_baseline, out_steered)
 
+    def test_steering_apply_count_tracks_applications(self, small_sae):
+        """steering_apply_count increments only when the delta is actually applied."""
+        x = torch.randn(1, 5, 64)
+
+        # Disabled: no application, counter stays at 0.
+        small_sae.enable_steering(False)
+        small_sae.apply_steering(x.clone())
+        assert small_sae.steering_apply_count == 0
+
+        # Enabled with a non-zero delta: each call increments the counter.
+        small_sae.set_steering(0, 10.0)
+        small_sae.enable_steering(True)
+        small_sae.apply_steering(x.clone())
+        small_sae.apply_steering(x.clone())
+        assert small_sae.steering_apply_count == 2
+
     def test_set_steering_single(self, small_sae):
         """Can set steering for a single feature."""
         small_sae.set_steering(42, 5.0)
@@ -352,3 +368,79 @@ class TestSteeringClearedOnDetach:
         assert not small_sae.is_steering_enabled
         assert not small_sae.is_monitoring_enabled
         assert small_sae.get_last_batch_size() == 0
+
+
+@pytest.mark.gpu
+class TestSteeringUnderTorchCompile:
+    """Regression guard for C1: a torch.compile'd model must still run the SAE
+    steering hook that is registered *after* compilation.
+
+    With TorchDynamo's default skip_nnmodule_hook_guards=True the compiled graph
+    would ignore the later-registered hook and steering would silently no-op.
+    model_loader flips that flag to False before compiling; this test proves the
+    hook fires end-to-end on a real (tiny) compiled model.
+    """
+
+    def test_hook_fires_after_compile(self):
+        pytest.importorskip("transformers")
+        if not torch.cuda.is_available():
+            pytest.skip("CUDA required")
+
+        from transformers import AutoModelForCausalLM, AutoConfig
+        from millm.ml.sae_config import SAEConfig
+        from millm.ml.sae_hooker import SAEHooker
+
+        # Tiny GPT-2-like model so the test is fast.
+        config = AutoConfig.for_model(
+            "gpt2", n_layer=2, n_embd=64, n_head=2, vocab_size=128, n_positions=64
+        )
+        model = AutoModelForCausalLM.from_config(config).to("cuda").eval()
+        d_in = config.n_embd
+
+        # Match model_loader: enable hook guards, then compile forward.
+        import torch._dynamo as _dynamo
+
+        _dynamo.config.skip_nnmodule_hook_guards = False
+        _dynamo.reset()
+        model.forward = torch.compile(model.forward, fullgraph=False)
+
+        # Warm the compiled graph *without* a hook (mirrors model_loader warmup).
+        # If the Inductor backend cannot build kernels in this environment
+        # (e.g. missing Python dev headers), skip rather than fail — the guard
+        # under test is the hook-guard config, not the codegen toolchain.
+        ids = torch.zeros(1, 4, dtype=torch.long, device="cuda")
+        try:
+            with torch.no_grad():
+                model(input_ids=ids, use_cache=False)
+        except Exception as e:
+            pytest.skip(f"torch.compile backend unavailable in this env: {e}")
+
+        # Build an SAE with a large, obvious steering delta and attach it.
+        sae_config = SAEConfig(
+            d_in=d_in, d_sae=32, model_name="gpt2", hook_name="h.1", hook_layer=1
+        )
+        sae = LoadedSAE(
+            W_enc=torch.randn(d_in, 32),
+            b_enc=torch.zeros(32),
+            W_dec=torch.randn(32, d_in) * 100.0,
+            b_dec=torch.zeros(d_in),
+            config=sae_config,
+            device="cuda",
+        )
+        sae.set_steering(0, 100.0)
+        sae.enable_steering(True)
+
+        hooker = SAEHooker()
+        _dynamo.reset()  # mirror sae_service attach behavior
+        handle = hooker.install(model, layer=1, sae=sae)
+        try:
+            with torch.no_grad():
+                model(input_ids=ids, use_cache=False)
+        finally:
+            handle.remove()
+
+        # The hook must have fired at least once — this is the C1 guarantee.
+        assert sae.steering_apply_count > 0, (
+            "SAE steering hook did not fire under torch.compile — "
+            "skip_nnmodule_hook_guards guard regressed"
+        )

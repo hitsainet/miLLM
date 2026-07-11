@@ -67,6 +67,7 @@ async def list_saes(
             memory_usage_mb=attachment.memory_usage_mb,
             steering_enabled=attachment.steering_enabled,
             monitoring_enabled=attachment.monitoring_enabled,
+            steering_apply_count=attachment.steering_apply_count,
         ),
     )
     return ApiResponse.ok(response)
@@ -194,6 +195,7 @@ async def get_attachment_status(
         memory_usage_mb=status.memory_usage_mb,
         steering_enabled=status.steering_enabled,
         monitoring_enabled=status.monitoring_enabled,
+        steering_apply_count=status.steering_apply_count,
     ))
 
 

@@ -46,6 +46,9 @@ class AttachmentStatus:
     memory_usage_mb: Optional[int] = None
     steering_enabled: bool = False
     monitoring_enabled: bool = False
+    # Diagnostic: number of forward passes in which the steering delta was
+    # applied.  Stays 0 if the hook never fires (e.g. compiled graph bypass).
+    steering_apply_count: int = 0
 
 
 @dataclass
@@ -257,6 +260,7 @@ class SAEService:
             memory_usage_mb=int(sae.estimate_memory_mb()) if sae else None,
             steering_enabled=sae.is_steering_enabled if sae else False,
             monitoring_enabled=sae.is_monitoring_enabled if sae else False,
+            steering_apply_count=sae.steering_apply_count if sae else 0,
         )
 
     async def preview_repository(
@@ -790,6 +794,14 @@ class SAEService:
         model = model_state.current.model
         handle = self._hooker.install(model, layer, loaded_sae)
 
+        # Defense-in-depth against torch.compile bypassing the freshly-installed
+        # hook.  model_loader sets skip_nnmodule_hook_guards=False before
+        # compiling, which should already invalidate the cached graph on hook
+        # registration; resetting Dynamo here guarantees the next forward pass
+        # re-traces with the hook present even if that config was not applied
+        # (e.g. compile disabled, or a future torch version changes semantics).
+        self._reset_dynamo_for_hook_change()
+
         # Update state in singleton
         self._sae_state.set(loaded_sae, sae_id, layer, handle)
 
@@ -889,6 +901,11 @@ class SAEService:
         if hook_handle:
             self._hooker.remove(hook_handle)
 
+        # Reset Dynamo so any compiled graph that captured the hooked path is
+        # invalidated — otherwise a stale cached graph could keep applying the
+        # (now removed) steering after detach.
+        self._reset_dynamo_for_hook_change()
+
         # Clear steering values before moving to CPU.  If the same SAE is
         # re-attached later (from the local cache), it must start with a clean
         # steering state rather than silently applying values from the previous
@@ -937,6 +954,24 @@ class SAEService:
             "sae_id": sae_id,
             "memory_freed_mb": memory_freed_mb,
         }
+
+    @staticmethod
+    def _reset_dynamo_for_hook_change() -> None:
+        """Reset TorchDynamo so compiled graphs re-trace after a hook change.
+
+        SAE steering/monitoring works by a forward hook on an inner decoder
+        layer.  When the model was compiled with torch.compile, a cached graph
+        may not reflect a hook that is added or removed afterwards.  Clearing
+        Dynamo's cache forces the next forward pass to re-trace with the current
+        hook set.  Best-effort: never raises.
+        """
+        try:
+            import torch._dynamo as _dynamo
+
+            _dynamo.reset()
+            logger.debug("dynamo_reset_after_hook_change")
+        except Exception as e:
+            logger.debug("dynamo_reset_skipped", error=str(e))
 
     # =========================================================================
     # Steering Methods

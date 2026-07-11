@@ -126,6 +126,7 @@ markers = [
     "integration: Integration tests (requires database)",
     "e2e: End-to-end tests (requires full stack)",
     "slow: Slow tests (skipped by default)",
+    "gpu: Tests that require a CUDA GPU (skipped when unavailable)",
 ]
 filterwarnings = [
     "ignore::DeprecationWarning",

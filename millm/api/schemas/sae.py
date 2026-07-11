@@ -219,6 +219,14 @@ class AttachmentStatus(BaseModel):
         default=False,
         description="Whether monitoring is enabled",
     )
+    steering_apply_count: int = Field(
+        default=0,
+        description=(
+            "Number of forward passes in which the steering delta was applied. "
+            "Stays 0 if the steering hook never fired (diagnostic for verifying "
+            "steering is active under torch.compile)."
+        ),
+    )
 
 
 class CompatibilityResult(BaseModel):

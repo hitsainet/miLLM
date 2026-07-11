@@ -147,7 +147,6 @@ class MonitoringService:
             return self._sae_service.get_attachment_status()
         from millm.services.sae_service import AttachedSAEState
         state = AttachedSAEState()
-        from dataclasses import make_dataclass
         # Build a lightweight status object matching the real AttachmentStatus shape
         sae = state.attached_sae
         class _Status:
@@ -260,12 +259,25 @@ class MonitoringService:
         """
         Record activation from forward pass.
 
-        Called by inference service after each forward pass.
+        Called by the inference service once after a generation completes.
+
+        Scope note (important): the SAE hook overwrites its captured activations
+        on every forward pass and the inference service reads them only once,
+        after generation.  What survives is therefore the activations of the
+        *final* forward pass — i.e. the last generated token's residual stream,
+        not the whole sequence.  This method reduces the captured tensor to that
+        last position accordingly.  Prompt-token and intermediate-decode-step
+        activations are not currently captured.  ``token_position`` reflects the
+        caller's best estimate (0 when unknown) and should be read as "last
+        token", not an absolute sequence index.
 
         Args:
             activations: Feature activations tensor (seq_len, d_sae) or (d_sae,).
+                When monitoring a subset of features it is positionally compacted
+                to (seq_len, len(monitored_features)); this method maps positions
+                back to real feature indices via self._monitored_features.
             request_id: Associated inference request ID.
-            token_position: Token position in sequence.
+            token_position: Position label for the recorded activation (see note).
             top_k: Number of top features to capture (None = use service-level _top_k).
         """
         # Use service-level top_k unless overridden per-call
@@ -280,9 +292,16 @@ class MonitoringService:
         acts_dict: dict[int, float] = {}
         top_features: list[tuple[int, float]] = []
 
-        # Handle monitored features
+        # Handle monitored features.  The captured tensor is positionally
+        # compacted to the monitored-feature list, so position i corresponds to
+        # real feature index self._monitored_features[i].  Guard against a
+        # length mismatch (e.g. monitoring reconfigured mid-flight) rather than
+        # IndexError-ing inside the post-generation path.
         if self._monitored_features is not None:
+            width = activations.shape[0] if activations.dim() >= 1 else 0
             for i, idx in enumerate(self._monitored_features):
+                if i >= width:
+                    break
                 value = activations[i].item()
                 acts_dict[idx] = value
         else:

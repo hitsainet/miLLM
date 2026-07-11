@@ -144,6 +144,34 @@ class TestMonitoringServiceHistory:
         assert len(history) == 1
         assert history[0]["request_id"] == "req-123"
 
+    def test_monitored_features_map_to_real_indices(self, monitoring_service):
+        """When monitoring a subset, positions map back to real feature ids (H2).
+
+        The SAE compacts captured activations to (seq, len(features)); the
+        recorded activations must be keyed by the real feature index, not the
+        compact position 0..N-1.
+        """
+        monitoring_service._monitored_features = [1234, 5678, 9012]
+        # Positionally-compacted activations for those three features.
+        compacted = torch.tensor([[0.5, 1.0, 2.0]])  # (seq=1, 3)
+
+        monitoring_service.on_activation(activations=compacted, request_id="req-x")
+
+        history = monitoring_service.get_history()
+        recorded = {a["feature_index"]: a["activation"] for a in history[0]["activations"]}
+        assert recorded == {1234: 0.5, 5678: 1.0, 9012: 2.0}
+
+    def test_monitored_features_length_mismatch_is_safe(self, monitoring_service):
+        """A shorter captured tensor than the feature list does not IndexError."""
+        monitoring_service._monitored_features = [1234, 5678, 9012]
+        compacted = torch.tensor([[0.5, 1.0]])  # only two positions captured
+
+        # Should not raise.
+        monitoring_service.on_activation(activations=compacted, request_id="req-y")
+        history = monitoring_service.get_history()
+        recorded = {a["feature_index"]: a["activation"] for a in history[0]["activations"]}
+        assert recorded == {1234: 0.5, 5678: 1.0}
+
     def test_history_ring_buffer(self, monitoring_service):
         """History respects max size (ring buffer)."""
         # Add more entries than history_size (10)

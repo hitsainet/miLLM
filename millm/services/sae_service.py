@@ -1083,14 +1083,24 @@ class SAEService:
 
         Args:
             enabled: Whether to capture activations.
-            features: Specific features to monitor (None = all).
+            features: Specific features to monitor (None = all). Each index is
+                validated against the attached SAE's d_sae.
 
         Raises:
             SAENotAttachedError: If no SAE is attached.
+            InvalidFeatureIndexError: If any feature index is out of range (400).
         """
         if not self._sae_state.is_attached:
             raise SAENotAttachedError("No SAE attached")
-        self._sae_state.attached_sae.enable_monitoring(enabled, features)
+        sae = self._sae_state.attached_sae
+        # Validate indices before enabling: an out-of-range index would raise
+        # inside the forward hook on *every* forward pass (feature_acts[..., idx]),
+        # breaking all inference until monitoring is reconfigured.  Reject up
+        # front with a 400 instead.
+        if enabled and features is not None:
+            for idx in features:
+                self._check_feature_idx(idx, sae)
+        sae.enable_monitoring(enabled, features)
 
     def get_last_activations(self) -> Optional[Any]:
         """

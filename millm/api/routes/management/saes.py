@@ -8,7 +8,7 @@ from typing import Annotated
 
 from fastapi import APIRouter, Path
 
-from millm.api.dependencies import SAEServiceDep
+from millm.api.dependencies import MonitoringServiceDep, SAEServiceDep
 from millm.sockets.progress import progress_emitter
 from millm.api.schemas.common import ApiResponse
 from millm.api.schemas.sae import (
@@ -404,15 +404,22 @@ async def clear_steering(
 )
 async def configure_monitoring(
     request: MonitoringRequest,
-    service: SAEServiceDep,
+    monitoring: MonitoringServiceDep,
 ) -> ApiResponse[None]:
     """
     Configure feature monitoring.
 
     When enabled, feature activations are captured during forward passes.
     Optionally specify specific features to monitor for efficiency.
+
+    Delegates to MonitoringService.configure so the monitored-feature list is
+    set in a single place — both on the SAE (which positionally compacts the
+    captured activations) and on the MonitoringService (which maps those
+    positions back to real feature indices).  Setting only the SAE side here
+    (as this endpoint previously did) desynced the two and made the history and
+    statistics report positions 0..N-1 as if they were feature indices.
     """
-    service.enable_monitoring(request.enabled, request.features)
+    monitoring.configure(enabled=request.enabled, features=request.features)
     return ApiResponse.ok(None)
 
 

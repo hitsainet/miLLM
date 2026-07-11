@@ -71,10 +71,6 @@ class Settings(BaseSettings):
     # Performance: KV cache
     KV_CACHE_MODE: str = "dynamic"  # "static" (requires C compiler for triton) or "dynamic"
 
-    # Performance: Prefix caching
-    ENABLE_PREFIX_CACHE: bool = True
-    PREFIX_CACHE_MAX_ENTRIES: int = 5
-
     # Performance: Speculative decoding
     SPECULATIVE_MODEL: Optional[str] = None  # HF model ID for draft model
     SPECULATIVE_NUM_TOKENS: int = 5

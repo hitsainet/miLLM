@@ -38,7 +38,6 @@ from millm.api.schemas.openai import (
 from millm.core.logging import get_logger
 from millm.ml.generation_config import GenerationConfig
 from millm.ml.model_loader import LoadedModelState
-from millm.ml.prefix_cache import PrefixCache
 from millm.services.request_queue import RequestQueue
 
 if TYPE_CHECKING:
@@ -73,12 +72,9 @@ class InferenceService:
     def __init__(
         self,
         model_service: Optional["ModelService"] = None,
-        steering_service: Any = None,
         max_concurrent: int = 1,
         max_pending: int = 5,
         kv_cache_mode: str = "dynamic",
-        enable_prefix_cache: bool = True,
-        prefix_cache_max_entries: int = 5,
         speculative_model: Optional[str] = None,
         speculative_num_tokens: int = 5,
         enable_cbm: bool = False,
@@ -90,12 +86,9 @@ class InferenceService:
 
         Args:
             model_service: Reference to ModelService for model info
-            steering_service: Optional SteeringService for feature steering
             max_concurrent: Maximum concurrent GPU operations
             max_pending: Maximum pending requests in queue
             kv_cache_mode: KV cache mode ("static" or "dynamic")
-            enable_prefix_cache: Whether to enable prefix caching
-            prefix_cache_max_entries: Maximum prefix cache entries
             speculative_model: HF model ID for draft model (speculative decoding)
             speculative_num_tokens: Number of tokens for draft model to propose
             enable_cbm: Whether to enable continuous batching backend
@@ -105,15 +98,10 @@ class InferenceService:
                 per-request activation attribution instead of CBM batching.
         """
         self._model_service = model_service
-        self._steering_service = steering_service
         self._request_queue = RequestQueue(max_concurrent, max_pending)
         self._device = "cuda" if torch.cuda.is_available() else "cpu"
         self._model_state = LoadedModelState()
         self._kv_cache_mode = kv_cache_mode
-        self._prefix_cache = PrefixCache(
-            max_entries=prefix_cache_max_entries,
-            enabled=enable_prefix_cache,
-        )
         self._speculative_model_id = speculative_model
         self._speculative_num_tokens = speculative_num_tokens
         # Lazy-loaded on first use. Thread-safety note: with max_concurrent=1
@@ -232,11 +220,6 @@ class InferenceService:
         except Exception:
             return self._device
 
-    @property
-    def prefix_cache(self) -> PrefixCache:
-        """Get the prefix cache."""
-        return self._prefix_cache
-
     def _use_cbm(self) -> bool:
         """Whether to use continuous batching for generation."""
         return self._cbm_backend is not None and self._cbm_backend.is_running
@@ -259,7 +242,6 @@ class InferenceService:
                 "description": "ContinuousBatchingManager (high-throughput batching)",
                 "capabilities": {
                     "streaming": True,
-                    "prefix_cache": False,
                     "per_request_sampling_params": False,
                     "per_request_profile_override": False,
                     "speculative_decoding": False,
@@ -278,8 +260,7 @@ class InferenceService:
                 "limitations": [
                     "temperature and top_p are fixed at manager creation; "
                     "requests with different values fall back to the serial path",
-                    "prefix cache is not consulted — no KV-state reuse across requests",
-                    "request.profile steering overrides are not applied in CBM mode",
+                    "requests with a profile override fall back to the serial path",
                     "CBM_FORCE_SERIAL_MONITORING=true routes monitored requests "
                     "to the serial path for accurate activation attribution",
                 ],
@@ -290,7 +271,6 @@ class InferenceService:
                 "description": "Serial request queue (one generation at a time)",
                 "capabilities": {
                     "streaming": True,
-                    "prefix_cache": self._prefix_cache.enabled,
                     "per_request_sampling_params": True,
                     "per_request_profile_override": True,
                     "speculative_decoding": self._speculative_model_id is not None,
@@ -310,6 +290,7 @@ class InferenceService:
         self,
         temperature: Optional[float] = None,
         top_p: Optional[float] = None,
+        has_profile: bool = False,
     ) -> bool:
         """
         Whether to route this specific request through the CBM backend.
@@ -317,6 +298,13 @@ class InferenceService:
         ContinuousBatchingManager uses a fixed GenerationConfig (temperature, top_p
         are baked in at manager creation). Requests with different sampling params
         must fall back to the serial path to preserve correctness.
+
+        Requests carrying a per-request ``profile`` steering override must also
+        fall back to serial: CBM does not run the per-request profile
+        apply/restore logic (that lives in the serial path inside the request
+        queue), so serving such a request via CBM would silently use the global
+        steering state instead of the requested profile — the wrong causal
+        influence with no client-visible signal.
 
         When cbm_force_serial_monitoring is True and SAE monitoring is active,
         requests are also routed to the serial path so that captured activations
@@ -336,6 +324,12 @@ class InferenceService:
                 request_top_p=top_p,
                 cbm_temperature=getattr(self._cbm_backend, "_default_temperature", None),
                 cbm_top_p=getattr(self._cbm_backend, "_default_top_p", None),
+            )
+            return False
+        if has_profile:
+            logger.info(
+                "cbm_routing_fallback_to_serial",
+                reason="per_request_profile_override",
             )
             return False
         if self._cbm_force_serial_monitoring and self._is_monitoring_enabled():
@@ -378,53 +372,87 @@ class InferenceService:
         current steering state and returns it so _restore_request_profile can
         undo the override after generation completes.
 
-        Returns None if the profile couldn't be applied (not found, no SAE
-        attached, or any error) — in that case no restore is needed.
+        Returns None when there is nothing to override (no SAE attached, or the
+        profile exists but carries no steering) — in that case no restore is
+        needed and generation proceeds under the current global steering.
+
+        Raises a MiLLMError subclass when the requested profile genuinely cannot
+        be applied (profile not found, out-of-range feature index, invalid
+        steering value).  Raising rather than silently falling through is
+        deliberate: the client explicitly asked for this profile's causal
+        influence, so serving a response under the *wrong* steering would be a
+        silent correctness failure.  The error propagates to the API layer and
+        becomes a 4xx response.
         """
-        try:
-            from millm.services.sae_service import AttachedSAEState
-            from millm.db.base import async_session_factory
-            from millm.db.repositories.profile_repository import ProfileRepository
+        from millm.services.sae_service import AttachedSAEState
+        from millm.db.base import async_session_factory
+        from millm.db.repositories.profile_repository import ProfileRepository
+        from millm.core.errors import (
+            InvalidFeatureIndexError,
+            ProfileNotFoundError,
+        )
 
-            sae = AttachedSAEState().attached_sae
-            if sae is None:
-                return None
-
-            async with async_session_factory() as session:
-                repo = ProfileRepository(session)
-                profile = await repo.get_by_name(profile_name)
-
-            if not profile or not profile.steering:
-                return None
-
-            # Save the state we are about to overwrite
-            saved: dict = {
-                "values": sae.get_steering_values(),
-                "enabled": sae.is_steering_enabled,
-            }
-
-            # Apply the profile's steering values
-            steering = {int(k): float(v) for k, v in profile.steering.items()}
-            sae.set_steering_batch(steering)
-            sae.enable_steering(True)
-
-            # Prefix cache was built under old steering — flush it
-            self._prefix_cache.clear()
-
+        sae = AttachedSAEState().attached_sae
+        if sae is None:
+            # No SAE attached — a profile cannot steer anything.  This is not an
+            # error (the base model still answers); log and proceed unsteered.
             logger.info(
-                "request_profile_applied",
+                "request_profile_no_sae_attached",
                 profile=profile_name,
-                features=len(steering),
-            )
-            return saved
-
-        except Exception as e:
-            logger.warning(
-                "request_profile_apply_failed",
-                profile=profile_name,
-                error=str(e),
             )
             return None
+
+        async with async_session_factory() as session:
+            repo = ProfileRepository(session)
+            profile = await repo.get_by_name(profile_name)
+
+        if not profile:
+            raise ProfileNotFoundError(
+                f"Profile '{profile_name}' not found",
+                details={"profile": profile_name},
+            )
+
+        if not profile.steering:
+            # Profile exists but has no steering values — nothing to override.
+            return None
+
+        # Parse and validate the profile's steering before mutating any state,
+        # so a bad value fails cleanly without leaving partial steering applied.
+        steering: dict[int, float] = {}
+        for k, v in profile.steering.items():
+            idx = int(k)
+            val = float(v)
+            if not 0 <= idx < sae.d_sae:
+                raise InvalidFeatureIndexError(
+                    f"Profile '{profile_name}' references feature {idx}, "
+                    f"out of range [0, {sae.d_sae}) for the attached SAE.",
+                    details={"profile": profile_name, "feature_idx": idx,
+                             "d_sae": sae.d_sae},
+                )
+            if not -200.0 <= val <= 200.0:
+                raise InvalidFeatureIndexError(
+                    f"Profile '{profile_name}' steering value {val} for feature "
+                    f"{idx} is out of range [-200, 200].",
+                    details={"profile": profile_name, "feature_idx": idx,
+                             "value": val},
+                )
+            steering[idx] = val
+
+        # Save the state we are about to overwrite
+        saved: dict = {
+            "values": sae.get_steering_values(),
+            "enabled": sae.is_steering_enabled,
+        }
+
+        sae.set_steering_batch(steering)
+        sae.enable_steering(True)
+
+        logger.info(
+            "request_profile_applied",
+            profile=profile_name,
+            features=len(steering),
+        )
+        return saved
 
     def _restore_request_profile(self, saved: Optional[dict]) -> None:
         """
@@ -447,9 +475,6 @@ class InferenceService:
             if saved["values"]:
                 sae.set_steering_batch(saved["values"])
             sae.enable_steering(saved["enabled"])
-
-            # Flush again so the restored state's new hash takes effect cleanly
-            self._prefix_cache.clear()
 
             logger.debug("request_profile_steering_restored")
         except Exception as e:
@@ -510,65 +535,6 @@ class InferenceService:
     # =========================================================================
     # Generation Helpers
     # =========================================================================
-
-    def _get_system_prompt(self, messages: list) -> Optional[str]:
-        """Extract the system prompt from messages if present."""
-        for msg in messages:
-            if msg.role == "system":
-                return msg.content
-        return None
-
-    def _is_hybrid_or_mamba_model(self) -> bool:
-        """True if the loaded model requires a hybrid cache (DynamicCache is incompatible)."""
-        model_type = getattr(getattr(self._model, "config", None), "model_type", "")
-        return "hybrid" in model_type.lower() or "mamba" in model_type.lower()
-
-    def _try_prefix_cache(
-        self, system_prompt: str, gen_config: GenerationConfig
-    ) -> Optional[tuple[Any, int]]:
-        """
-        Try to get cached KV states for a system prompt.
-
-        Returns (past_key_values, token_count) or None if not cached.
-        """
-        if not self._prefix_cache.enabled:
-            return None
-        # Hybrid/mamba models require a HybridCache (with mamba layer slots). The cached
-        # past_key_values is a DynamicCache (attention-only), so reusing it raises
-        # `has_previous_state can only be called on LinearAttention layers`.
-        if self._is_hybrid_or_mamba_model():
-            return None
-
-        steering_hash = PrefixCache.get_steering_hash()
-        entry = self._prefix_cache.get(system_prompt, steering_hash)
-        if entry is not None:
-            # Defense-in-depth: verify steering hasn't changed between the lookup
-            # and now.  With max_concurrent=1 and profile overrides applied inside
-            # the semaphore (after Fix #1) this check should always pass, but it
-            # guards against future concurrency increases.
-            current_hash = PrefixCache.get_steering_hash()
-            if current_hash != steering_hash:
-                logger.debug(
-                    "prefix_cache_stale_steering_hash_skipping",
-                    stored=steering_hash,
-                    current=current_hash,
-                )
-                return None
-            return entry.past_key_values, entry.prompt_token_count
-        return None
-
-    def _cache_prefix(
-        self, system_prompt: str, past_key_values: Any, token_count: int
-    ) -> None:
-        """Store prefix KV states in cache."""
-        if not self._prefix_cache.enabled:
-            return
-        # See _try_prefix_cache — never cache for hybrid/mamba models.
-        if self._is_hybrid_or_mamba_model():
-            return
-
-        steering_hash = PrefixCache.get_steering_hash()
-        self._prefix_cache.put(system_prompt, steering_hash, past_key_values, token_count)
 
     def _build_generate_kwargs(
         self, gen_config: GenerationConfig, inputs: dict
@@ -814,6 +780,7 @@ class InferenceService:
         if self._use_cbm_for_request(
             temperature=getattr(request, "temperature", None),
             top_p=getattr(request, "top_p", None),
+            has_profile=bool(getattr(request, "profile", None)),
         ):
             return await self._cbm_chat_completion(request)
 
@@ -845,46 +812,13 @@ class InferenceService:
                 gen_config = GenerationConfig.from_request(request)
                 self._check_context_length(prompt_tokens, gen_config.max_new_tokens)
 
-                # Try prefix caching for system prompts
-                system_prompt = self._get_system_prompt(request.messages)
-                cached_prefix = None
-                prefix_token_count = 0
-                if system_prompt:
-                    cached_prefix_result = self._try_prefix_cache(system_prompt, gen_config)
-                    if cached_prefix_result:
-                        cached_prefix, prefix_token_count = cached_prefix_result
-
                 for i in range(n):
                     # Generate - offload to thread to avoid blocking the event loop
                     generate_kwargs = self._build_generate_kwargs(gen_config, inputs)
 
-                    # Use cached prefix KV states if available
-                    if cached_prefix is not None and prefix_token_count > 0:
-                        generate_kwargs["past_key_values"] = cached_prefix
-                        # Only pass continuation tokens (after the cached prefix)
-                        generate_kwargs["input_ids"] = inputs.input_ids[:, prefix_token_count:]
-                        # Attention mask must cover ALL tokens (cached + continuation)
-                        generate_kwargs["attention_mask"] = inputs.attention_mask
-
                     outputs = await asyncio.to_thread(
                         self._generate_sync, generate_kwargs
                     )
-
-                    # Cache system prompt prefix on first miss
-                    if (
-                        system_prompt
-                        and cached_prefix is None
-                        and self._prefix_cache.enabled
-                        and hasattr(outputs, "past_key_values")
-                    ):
-                        try:
-                            self._cache_prefix(
-                                system_prompt,
-                                outputs.past_key_values,
-                                prefix_token_count,
-                            )
-                        except Exception:
-                            pass  # Cache failure should never affect generation
 
                     # Notify monitoring after generation
                     self._notify_monitoring(request_id=completion_id)
@@ -967,6 +901,7 @@ class InferenceService:
         if self._use_cbm_for_request(
             temperature=getattr(request, "temperature", None),
             top_p=getattr(request, "top_p", None),
+            has_profile=bool(getattr(request, "profile", None)),
         ):
             async for chunk in self._cbm_stream_chat_completion(request):
                 yield chunk
@@ -1207,6 +1142,7 @@ class InferenceService:
         if self._use_cbm_for_request(
             temperature=getattr(request, "temperature", None),
             top_p=getattr(request, "top_p", None),
+            has_profile=bool(getattr(request, "profile", None)),
         ):
             return await self._cbm_text_completion(request)
 

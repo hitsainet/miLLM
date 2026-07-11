@@ -68,14 +68,39 @@ class SAEHooker:
         # Get target layer
         target_layer = self._get_layer(model, layer)
 
+        # Resolve the module's qualified name so operators can verify the hook
+        # landed on the intended decoder layer (the accessor/ModuleList fallback
+        # can pick a wrong module on exotic or multimodal architectures).
+        self.last_resolved_module_path = self._resolve_module_path(
+            model, target_layer, layer
+        )
+
         # Create hook function
         hook_fn = self._create_hook_fn(sae)
 
         # Register hook
         handle = target_layer.register_forward_hook(hook_fn)
 
-        logger.info(f"Installed SAE hook at layer {layer} (direct steering mode)")
+        logger.info(
+            "sae_hook_installed",
+            layer=layer,
+            module_path=self.last_resolved_module_path,
+            mode="direct_steering",
+        )
         return handle
+
+    @staticmethod
+    def _resolve_module_path(
+        model: nn.Module, target: nn.Module, layer_idx: int
+    ) -> str:
+        """Return the dotted name of `target` within `model`, for observability."""
+        try:
+            for name, module in model.named_modules():
+                if module is target:
+                    return name
+        except Exception:
+            pass
+        return f"<layer {layer_idx}>"
 
     def remove(self, handle: RemovableHandle) -> None:
         """

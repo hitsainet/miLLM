@@ -841,6 +841,9 @@ class SAEService:
             "layer": layer,
             "memory_usage_mb": memory_mb,
             "warnings": compat.warnings,
+            "layer_module_path": getattr(
+                self._hooker, "last_resolved_module_path", None
+            ),
         }
 
     async def detach_sae(self, sae_id: str) -> dict[str, Any]:

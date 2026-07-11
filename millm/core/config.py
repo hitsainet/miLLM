@@ -96,3 +96,13 @@ class Settings(BaseSettings):
 
 # Global settings instance
 settings = Settings()
+
+
+def get_settings() -> Settings:
+    """Return the process-wide Settings instance.
+
+    Most of the codebase imports the module-level ``settings`` singleton
+    directly; this accessor exists for callers (and tests) that prefer a
+    function-style dependency.
+    """
+    return settings

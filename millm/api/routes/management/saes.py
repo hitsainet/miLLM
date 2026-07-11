@@ -354,16 +354,25 @@ async def clear_feature_steering(
     """
     Clear steering for a single feature.
 
-    Removes steering configuration for the specified feature index.
+    Removes steering configuration for the specified feature index.  If that was
+    the last steered feature, steering is disabled so the reported state is not
+    "enabled" with an empty (no-op) delta.
     """
     service.clear_steering(feature_idx)
 
     attachment = service.get_attachment_status()
     values = service.get_steering_values() if attachment.is_attached else {}
 
-    await _emit_steering_update(service, attachment.steering_enabled)
+    # Disable steering if nothing remains steered.
+    if attachment.is_attached and not values:
+        service.enable_steering(False)
+        enabled = False
+    else:
+        enabled = attachment.steering_enabled
+
+    await _emit_steering_update(service, enabled)
     return ApiResponse.ok(SteeringStatus(
-        enabled=attachment.steering_enabled,
+        enabled=enabled,
         values=values,
     ))
 
@@ -380,9 +389,12 @@ async def clear_steering(
     """
     Clear all steering values.
 
-    Removes all feature steering configurations.
+    Removes all feature steering configurations and disables steering so the
+    reported state matches reality (previously the response said enabled=false
+    while steering remained enabled with an empty — hence no-op — delta).
     """
     service.clear_steering()
+    service.enable_steering(False)
 
     await _emit_steering_update(service, False)
     return ApiResponse.ok(SteeringStatus(
@@ -520,6 +532,7 @@ async def attach_sae(
         layer=result["layer"],
         memory_usage_mb=result["memory_usage_mb"],
         warnings=result.get("warnings", []),
+        layer_module_path=result.get("layer_module_path"),
     ))
 
 

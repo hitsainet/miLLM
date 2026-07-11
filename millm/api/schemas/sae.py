@@ -268,6 +268,13 @@ class AttachResponse(BaseModel):
         default_factory=list,
         description="Compatibility warnings",
     )
+    layer_module_path: str | None = Field(
+        default=None,
+        description=(
+            "Dotted path of the model submodule the steering hook was installed "
+            "on (e.g. 'model.layers.12'), for operator verification."
+        ),
+    )
 
 
 class DetachResponse(BaseModel):

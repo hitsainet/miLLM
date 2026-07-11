@@ -48,11 +48,21 @@ class ContinuousBatchingBackend:
         self._default_max_tokens = default_max_tokens
         self._started = False
         self._tokenizer: Any = None
+        # Number of requests currently in-flight through this backend.  Used by
+        # SAE detach to avoid removing the steering/monitoring hook while a CBM
+        # forward pass is running (CBM bypasses the serial RequestQueue, so the
+        # queue's pending_count is 0 during CBM generation).
+        self._inflight = 0
 
     @property
     def is_running(self) -> bool:
         """Check if the CBM is running."""
         return self._started and self._manager is not None
+
+    @property
+    def inflight_count(self) -> int:
+        """Number of requests currently generating through the CBM backend."""
+        return self._inflight
 
     def sampling_params_match(
         self,
@@ -160,31 +170,35 @@ class ContinuousBatchingBackend:
         if not self.is_running:
             raise RuntimeError("ContinuousBatchingManager is not running")
 
-        req_id = self._manager.add_request(
-            input_ids=input_ids,
-            request_id=request_id,
-            max_new_tokens=max_new_tokens,
-        )
-
-        loop = asyncio.get_running_loop()
-        result = await loop.run_in_executor(
-            None, self._manager.get_result, req_id, timeout
-        )
-
-        if result is None:
-            raise RuntimeError(
-                f"Generation timed out after {timeout}s for request {request_id}"
+        self._inflight += 1
+        try:
+            req_id = self._manager.add_request(
+                input_ids=input_ids,
+                request_id=request_id,
+                max_new_tokens=max_new_tokens,
             )
 
-        if result.error:
-            raise RuntimeError(f"Generation failed: {result.error}")
+            loop = asyncio.get_running_loop()
+            result = await loop.run_in_executor(
+                None, self._manager.get_result, req_id, timeout
+            )
 
-        finish_reason = (
-            "length"
-            if len(result.generated_tokens) >= max_new_tokens
-            else "stop"
-        )
-        return result.generated_tokens, finish_reason
+            if result is None:
+                raise RuntimeError(
+                    f"Generation timed out after {timeout}s for request {request_id}"
+                )
+
+            if result.error:
+                raise RuntimeError(f"Generation failed: {result.error}")
+
+            finish_reason = (
+                "length"
+                if len(result.generated_tokens) >= max_new_tokens
+                else "stop"
+            )
+            return result.generated_tokens, finish_reason
+        finally:
+            self._inflight -= 1
 
     async def generate_stream(
         self,
@@ -212,6 +226,8 @@ class ContinuousBatchingBackend:
         """
         if not self.is_running:
             raise RuntimeError("ContinuousBatchingManager is not running")
+
+        self._inflight += 1
 
         req_id = self._manager.add_request(
             input_ids=input_ids,
@@ -262,3 +278,4 @@ class ContinuousBatchingBackend:
         finally:
             # Ensure thread completes
             thread.join(timeout=5.0)
+            self._inflight -= 1

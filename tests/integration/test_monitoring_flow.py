@@ -25,6 +25,7 @@ def mock_monitoring_state():
         "monitored_features": [1234, 5678, 9012],
         "history_size": 1000,
         "history_count": 50,
+        "top_k": 10,
     }
 
 
@@ -155,6 +156,7 @@ class TestGetMonitoringState:
             "monitored_features": [],
             "history_size": 1000,
             "history_count": 0,
+            "top_k": 10,
         }
 
         response = client.get("/api/monitoring")
@@ -184,6 +186,7 @@ class TestConfigureMonitoring:
             enabled=True,
             features=[1234, 5678],
             history_size=500,
+            top_k=10,
         )
 
     def test_configures_with_partial_params(self, client, mock_monitoring_service, mock_monitoring_state):
@@ -413,6 +416,7 @@ class TestMonitoringWorkflow:
             "monitored_features": [],
             "history_size": 1000,
             "history_count": 0,
+            "top_k": 10,
         }
         mock_monitoring_service.get_history.return_value = []
         mock_monitoring_service.get_statistics.return_value = {

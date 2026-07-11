@@ -11,7 +11,8 @@ This applies steering directly to the residual stream, uniformly to all token po
 """
 
 import logging
-from typing import Optional
+from contextlib import contextmanager
+from typing import Iterator, Optional
 
 import torch
 from torch import Tensor
@@ -98,11 +99,23 @@ class LoadedSAE:
             f"d_sae mismatch: weights have {self.d_sae}, config has {config.d_sae}"
         )
 
+        # When True, the forward hook applies neither steering nor monitoring
+        # capture.  Used to run "plain" forward passes (e.g. /v1/embeddings)
+        # through the same hooked model without perturbing their hidden states
+        # or clobbering the last-captured activations.  See suppressed().
+        self._suppressed: bool = False
+
         # Steering state (direct residual stream steering)
         self._steering_values: dict[int, float] = {}
         self._steering_enabled: bool = False
         # Pre-computed steering delta in residual stream space (d_in,)
         self._steering_delta: Optional[Tensor] = None
+
+        # Observability: counts how many times apply_steering actually applied a
+        # non-trivial steering delta.  Used to verify that the forward hook is
+        # firing (e.g. that torch.compile did not silently bypass it).  Not
+        # thread-locked — it is a best-effort diagnostic counter.
+        self._steering_apply_count: int = 0
 
         # Monitoring state
         self._monitoring_enabled: bool = False
@@ -168,7 +181,7 @@ class LoadedSAE:
         Returns:
             Modified activations with steering applied.
         """
-        if not self._steering_enabled or self._steering_delta is None:
+        if self._suppressed or not self._steering_enabled or self._steering_delta is None:
             return hidden_states
 
         # Ensure steering delta matches hidden states dtype/device.
@@ -188,8 +201,12 @@ class LoadedSAE:
         batch_size, seq_len, _ = hidden_states.shape
         delta_expanded = delta.unsqueeze(0).unsqueeze(0).expand(batch_size, seq_len, -1)
 
-        # Apply steering in-place
+        # Add the steering delta to every token's residual stream.  This is an
+        # out-of-place add (a new tensor is returned); the hook substitutes it
+        # for the layer's original output.
         hidden_states = hidden_states + delta_expanded
+
+        self._steering_apply_count += 1
 
         return hidden_states
 
@@ -310,6 +327,15 @@ class LoadedSAE:
         return self._steering_enabled
 
     @property
+    def steering_apply_count(self) -> int:
+        """Number of forward passes in which the steering delta was applied.
+
+        Zero while steering is enabled and requests have been served indicates
+        the hook is not firing (e.g. bypassed by a compiled graph).
+        """
+        return self._steering_apply_count
+
+    @property
     def steering_delta(self) -> Optional[Tensor]:
         """Get the pre-computed steering delta (for hook access)."""
         return self._steering_delta
@@ -417,8 +443,25 @@ class LoadedSAE:
 
     @property
     def is_monitoring_enabled(self) -> bool:
-        """Check if monitoring is enabled."""
-        return self._monitoring_enabled
+        """Check if monitoring is enabled (and not currently suppressed)."""
+        return self._monitoring_enabled and not self._suppressed
+
+    @contextmanager
+    def suppressed(self) -> Iterator[None]:
+        """Temporarily disable steering application and monitoring capture.
+
+        For the duration of the context, the forward hook is effectively inert:
+        apply_steering() returns the hidden states unchanged and monitoring does
+        not capture.  Used to run forward passes that must see the *unsteered*
+        model (e.g. embeddings) through the same hooked model without perturbing
+        their output or overwriting the last-captured activations.
+        """
+        previous = self._suppressed
+        self._suppressed = True
+        try:
+            yield
+        finally:
+            self._suppressed = previous
 
     def _capture_activations(self, feature_acts: Tensor) -> None:
         """

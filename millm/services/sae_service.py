@@ -46,6 +46,9 @@ class AttachmentStatus:
     memory_usage_mb: Optional[int] = None
     steering_enabled: bool = False
     monitoring_enabled: bool = False
+    # Diagnostic: number of forward passes in which the steering delta was
+    # applied.  Stays 0 if the hook never fires (e.g. compiled graph bypass).
+    steering_apply_count: int = 0
 
 
 @dataclass
@@ -257,6 +260,7 @@ class SAEService:
             memory_usage_mb=int(sae.estimate_memory_mb()) if sae else None,
             steering_enabled=sae.is_steering_enabled if sae else False,
             monitoring_enabled=sae.is_monitoring_enabled if sae else False,
+            steering_apply_count=sae.steering_apply_count if sae else 0,
         )
 
     async def preview_repository(
@@ -790,6 +794,14 @@ class SAEService:
         model = model_state.current.model
         handle = self._hooker.install(model, layer, loaded_sae)
 
+        # Defense-in-depth against torch.compile bypassing the freshly-installed
+        # hook.  model_loader sets skip_nnmodule_hook_guards=False before
+        # compiling, which should already invalidate the cached graph on hook
+        # registration; resetting Dynamo here guarantees the next forward pass
+        # re-traces with the hook present even if that config was not applied
+        # (e.g. compile disabled, or a future torch version changes semantics).
+        self._reset_dynamo_for_hook_change()
+
         # Update state in singleton
         self._sae_state.set(loaded_sae, sae_id, layer, handle)
 
@@ -829,6 +841,9 @@ class SAEService:
             "layer": layer,
             "memory_usage_mb": memory_mb,
             "warnings": compat.warnings,
+            "layer_module_path": getattr(
+                self._hooker, "last_resolved_module_path", None
+            ),
         }
 
     async def detach_sae(self, sae_id: str) -> dict[str, Any]:
@@ -863,17 +878,29 @@ class SAEService:
             if inference_svc is None:
                 from millm.api.dependencies import get_inference_service
                 inference_svc = get_inference_service()
-            queue = inference_svc.request_queue
-            if queue.pending_count > 0:
-                logger.info("detach_waiting_for_pending_requests", pending=queue.pending_count)
+
+            def _active_count() -> int:
+                # Serial path requests wait in the RequestQueue; CBM requests
+                # bypass it entirely, so pending_count is 0 during CBM
+                # generation.  Sum both so detach drains either backend.
+                count = inference_svc.request_queue.pending_count
+                cbm = getattr(inference_svc, "_cbm_backend", None)
+                if cbm is not None:
+                    count += getattr(cbm, "inflight_count", 0)
+                return count
+
+            active = _active_count()
+            if active > 0:
+                logger.info("detach_waiting_for_pending_requests", pending=active)
                 for _ in range(300):  # Wait up to 30 seconds
-                    if queue.pending_count == 0:
+                    if _active_count() == 0:
                         break
                     await asyncio.sleep(0.1)
-                if queue.pending_count > 0:
+                remaining = _active_count()
+                if remaining > 0:
                     logger.error(
                         "detach_timeout_with_active_requests",
-                        pending=queue.pending_count,
+                        pending=remaining,
                         hint="Detaching anyway — hook removed while generation may be in progress. "
                              "Restart the server if inference behaves unexpectedly.",
                     )
@@ -888,6 +915,11 @@ class SAEService:
         hook_handle = self._sae_state.hook_handle
         if hook_handle:
             self._hooker.remove(hook_handle)
+
+        # Reset Dynamo so any compiled graph that captured the hooked path is
+        # invalidated — otherwise a stale cached graph could keep applying the
+        # (now removed) steering after detach.
+        self._reset_dynamo_for_hook_change()
 
         # Clear steering values before moving to CPU.  If the same SAE is
         # re-attached later (from the local cache), it must start with a clean
@@ -937,6 +969,24 @@ class SAEService:
             "sae_id": sae_id,
             "memory_freed_mb": memory_freed_mb,
         }
+
+    @staticmethod
+    def _reset_dynamo_for_hook_change() -> None:
+        """Reset TorchDynamo so compiled graphs re-trace after a hook change.
+
+        SAE steering/monitoring works by a forward hook on an inner decoder
+        layer.  When the model was compiled with torch.compile, a cached graph
+        may not reflect a hook that is added or removed afterwards.  Clearing
+        Dynamo's cache forces the next forward pass to re-trace with the current
+        hook set.  Best-effort: never raises.
+        """
+        try:
+            import torch._dynamo as _dynamo
+
+            _dynamo.reset()
+            logger.debug("dynamo_reset_after_hook_change")
+        except Exception as e:
+            logger.debug("dynamo_reset_skipped", error=str(e))
 
     # =========================================================================
     # Steering Methods
@@ -1048,14 +1098,24 @@ class SAEService:
 
         Args:
             enabled: Whether to capture activations.
-            features: Specific features to monitor (None = all).
+            features: Specific features to monitor (None = all). Each index is
+                validated against the attached SAE's d_sae.
 
         Raises:
             SAENotAttachedError: If no SAE is attached.
+            InvalidFeatureIndexError: If any feature index is out of range (400).
         """
         if not self._sae_state.is_attached:
             raise SAENotAttachedError("No SAE attached")
-        self._sae_state.attached_sae.enable_monitoring(enabled, features)
+        sae = self._sae_state.attached_sae
+        # Validate indices before enabling: an out-of-range index would raise
+        # inside the forward hook on *every* forward pass (feature_acts[..., idx]),
+        # breaking all inference until monitoring is reconfigured.  Reject up
+        # front with a 400 instead.
+        if enabled and features is not None:
+            for idx in features:
+                self._check_feature_idx(idx, sae)
+        sae.enable_monitoring(enabled, features)
 
     def get_last_activations(self) -> Optional[Any]:
         """

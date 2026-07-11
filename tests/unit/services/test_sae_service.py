@@ -696,6 +696,22 @@ class TestSAEServiceMonitoring:
         with pytest.raises(SAENotAttachedError):
             service.enable_monitoring(True)
 
+    def test_enable_monitoring_out_of_range_feature_raises(self, service, mock_loaded_sae):
+        """Monitoring an out-of-range feature is rejected up front (H3).
+
+        Without this, feature_acts[..., idx] would raise inside the forward
+        hook on every forward pass, breaking all inference.
+        """
+        from millm.core.errors import InvalidFeatureIndexError
+
+        state = AttachedSAEState()
+        state.set(mock_loaded_sae, "sae-id", 12, MagicMock())
+
+        # mock_loaded_sae.d_sae == 16384; 99999 is out of range.
+        with pytest.raises(InvalidFeatureIndexError):
+            service.enable_monitoring(True, [10, 99999])
+        mock_loaded_sae.enable_monitoring.assert_not_called()
+
 
 # =============================================================================
 # Attachment Status Tests

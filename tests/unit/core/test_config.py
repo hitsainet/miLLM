@@ -42,12 +42,6 @@ class TestSettingsDefaults:
         # None means auto-detect (not False — we changed this)
         assert Settings().TORCH_COMPILE is None
 
-    def test_enable_prefix_cache_default_true(self):
-        assert Settings().ENABLE_PREFIX_CACHE is True
-
-    def test_prefix_cache_max_entries_default(self):
-        assert Settings().PREFIX_CACHE_MAX_ENTRIES == 5
-
     def test_cbm_disabled_by_default(self):
         assert Settings().ENABLE_CONTINUOUS_BATCHING is False
 

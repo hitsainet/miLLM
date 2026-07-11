@@ -107,7 +107,7 @@ def service(loaded_model_state):
         mock_torch.no_grad.return_value = MagicMock(
             __enter__=MagicMock(), __exit__=MagicMock()
         )
-        svc = InferenceService(model_service=None, steering_service=None)
+        svc = InferenceService(model_service=None)
     svc._device = "cpu"
     return svc
 
@@ -117,7 +117,7 @@ def service_no_model():
     """Create an InferenceService without a loaded model."""
     with patch("millm.services.inference_service.torch") as mock_torch:
         mock_torch.cuda.is_available.return_value = False
-        svc = InferenceService(model_service=None, steering_service=None)
+        svc = InferenceService(model_service=None)
     svc._device = "cpu"
     return svc
 
@@ -756,6 +756,48 @@ class TestCreateEmbeddings:
         assert response.data[1].index == 1
 
     @pytest.mark.asyncio
+    async def test_embeddings_suppress_attached_sae(
+        self, service, embedding_request, mock_model_for_embeddings
+    ):
+        """Embeddings run inside the SAE's suppressed() context (M4).
+
+        An attached steering hook must not perturb the hidden states the
+        embeddings are pooled from.
+        """
+        from contextlib import contextmanager
+
+        entered = {"count": 0, "active_during_forward": False}
+        mock_sae = MagicMock()
+
+        @contextmanager
+        def fake_suppressed():
+            entered["count"] += 1
+            entered["active_during_forward"] = True
+            try:
+                yield
+            finally:
+                entered["active_during_forward"] = False
+
+        mock_sae.suppressed = fake_suppressed
+
+        # Record whether suppression was active at the moment of the forward pass.
+        forward_state = {}
+
+        def record_forward(*args, **kwargs):
+            forward_state["suppressed"] = entered["active_during_forward"]
+            out = MagicMock()
+            out.hidden_states = [torch.randn(1, 5, 64)]
+            return out
+
+        mock_model_for_embeddings.side_effect = record_forward
+
+        with patch.object(service, "_get_attached_sae", return_value=mock_sae):
+            await service.create_embeddings(embedding_request)
+
+        assert entered["count"] == 1
+        assert forward_state.get("suppressed") is True
+
+    @pytest.mark.asyncio
     async def test_base64_encoding_format(
         self, service, mock_model_for_embeddings
     ):
@@ -1354,88 +1396,6 @@ class TestStreamThreadErrorPropagation:
 
 
 # =============================================================================
-# Tests: prefix cache integration within create_chat_completion (previously untested)
-# =============================================================================
-
-
-class TestPrefixCacheIntegration:
-    """Verify that prefix cache hits / misses are correctly integrated."""
-
-    @pytest.mark.asyncio
-    async def test_cache_miss_stores_prefix_on_first_request(
-        self, service, chat_request, mock_model
-    ):
-        """First request with a system prompt populates the prefix cache."""
-        request = ChatCompletionRequest(
-            model="test-model",
-            messages=[
-                ChatMessage(role="system", content="You are helpful."),
-                ChatMessage(role="user", content="Hi"),
-            ],
-        )
-
-        # Fake past_key_values on the generate output
-        mock_output = MagicMock()
-        mock_output.__getitem__ = lambda self, idx: torch.tensor([[1, 2, 3, 4, 5, 10, 11, 12]])
-        mock_output.past_key_values = MagicMock()  # non-None
-        mock_model.generate.return_value = mock_output
-
-        assert service.prefix_cache.size == 0
-
-        # PrefixCache.enabled is a read-only property backed by _enabled.
-        service.prefix_cache._enabled = True
-
-        with patch.object(service, "_generate_sync", return_value=mock_output):
-            with patch.object(service, "_cache_prefix") as mock_cache_put:
-                await service.create_chat_completion(request)
-            # Cache was called once (first miss → store)
-            mock_cache_put.assert_called_once()
-
-    @pytest.mark.asyncio
-    async def test_cache_hit_skips_recalculation(self, service, chat_request):
-        """When prefix cache hits, past_key_values are injected into generate kwargs."""
-        request = ChatCompletionRequest(
-            model="test-model",
-            messages=[
-                ChatMessage(role="system", content="You are helpful."),
-                ChatMessage(role="user", content="Hi"),
-            ],
-        )
-
-        fake_kv = MagicMock()
-        # Simulate a cache hit
-        with patch.object(service, "_try_prefix_cache", return_value=(fake_kv, 5)):
-            with patch.object(service, "_generate_sync") as mock_gen:
-                mock_gen.return_value = MagicMock(
-                    __getitem__=lambda self, i: torch.tensor([[1, 2, 3, 4, 5, 10, 11, 12]])
-                )
-                await service.create_chat_completion(request)
-
-            # The cached KV must appear in the generate call
-            call_kwargs = mock_gen.call_args[0][0]
-            assert call_kwargs.get("past_key_values") is fake_kv
-
-    @pytest.mark.asyncio
-    async def test_cache_disabled_skips_lookup(self, service, chat_request):
-        """When prefix cache is disabled, _try_prefix_cache returns None."""
-        service.prefix_cache._enabled = False
-        request = ChatCompletionRequest(
-            model="test-model",
-            messages=[
-                ChatMessage(role="system", content="System prompt."),
-                ChatMessage(role="user", content="Hi"),
-            ],
-        )
-        with patch.object(service, "_generate_sync") as mock_gen:
-            mock_gen.return_value = MagicMock(
-                __getitem__=lambda self, i: torch.tensor([[1, 2, 3, 4, 5, 10, 11, 12]])
-            )
-            await service.create_chat_completion(request)
-        call_kwargs = mock_gen.call_args[0][0]
-        assert "past_key_values" not in call_kwargs
-
-
-# =============================================================================
 # Tests: per-request profile override inside semaphore (previously untested)
 # =============================================================================
 
@@ -1447,6 +1407,7 @@ class TestRequestProfileOverride:
     async def test_apply_profile_saves_and_applies_steering(self, service):
         """_apply_request_profile saves old steering, applies profile steering."""
         mock_sae = MagicMock()
+        mock_sae.d_sae = 16384
         mock_sae.get_steering_values.return_value = {10: 1.0}
         mock_sae.is_steering_enabled = True
         mock_sae.set_steering_batch = MagicMock()
@@ -1809,7 +1770,7 @@ class TestBackendVisibility:
         info = service.get_backend_info()
         assert info["backend"] == "cbm"
         assert info["capabilities"]["per_request_sampling_params"] is False
-        assert info["capabilities"]["prefix_cache"] is False
+        assert info["capabilities"]["per_request_profile_override"] is False
         assert "cbm_config" in info
         assert len(info["limitations"]) >= 1
 
@@ -1840,3 +1801,110 @@ class TestBackendVisibility:
         mock_logger.info.assert_called_once()
         call_args = mock_logger.info.call_args
         assert "serial" in call_args[0][0] or "serial" in str(call_args)
+
+
+# =============================================================================
+# Tests: CBM profile routing + profile validation (steering remediation M1/M5)
+# =============================================================================
+
+
+class TestCBMProfileRouting:
+    """A request carrying a profile override must fall back to the serial path."""
+
+    def test_profile_request_falls_back_to_serial(self, service):
+        mock_backend = MagicMock()
+        mock_backend.is_running = True
+        mock_backend.sampling_params_match = MagicMock(return_value=True)
+        service._cbm_backend = mock_backend
+
+        # Compatible sampling params but a profile is present → serial.
+        result = service._use_cbm_for_request(
+            temperature=None, top_p=None, has_profile=True
+        )
+        assert result is False
+
+    def test_no_profile_uses_cbm(self, service):
+        mock_backend = MagicMock()
+        mock_backend.is_running = True
+        mock_backend.sampling_params_match = MagicMock(return_value=True)
+        service._cbm_backend = mock_backend
+        service._cbm_force_serial_monitoring = False
+
+        result = service._use_cbm_for_request(
+            temperature=None, top_p=None, has_profile=False
+        )
+        assert result is True
+
+
+class TestApplyProfileValidation:
+    """_apply_request_profile validates profile steering and fails loudly."""
+
+    @pytest.mark.asyncio
+    async def test_missing_profile_raises_not_found(self, service):
+        from millm.core.errors import ProfileNotFoundError
+
+        mock_sae = MagicMock()
+        mock_sae.d_sae = 16384
+
+        with patch("millm.services.sae_service.AttachedSAEState") as MockState:
+            MockState.return_value.attached_sae = mock_sae
+            with patch("millm.db.base.async_session_factory"):
+                with patch(
+                    "millm.db.repositories.profile_repository.ProfileRepository"
+                ) as MockRepo:
+                    MockRepo.return_value.get_by_name = AsyncMock(return_value=None)
+                    with pytest.raises(ProfileNotFoundError):
+                        await service._apply_request_profile("does-not-exist")
+
+    @pytest.mark.asyncio
+    async def test_out_of_range_feature_raises(self, service):
+        from millm.core.errors import InvalidFeatureIndexError
+
+        mock_sae = MagicMock()
+        mock_sae.d_sae = 100
+        mock_sae.get_steering_values.return_value = {}
+        mock_sae.is_steering_enabled = False
+
+        mock_profile = MagicMock()
+        mock_profile.steering = {"999": 5.0}  # 999 >= d_sae=100
+
+        with patch("millm.services.sae_service.AttachedSAEState") as MockState:
+            MockState.return_value.attached_sae = mock_sae
+            with patch("millm.db.base.async_session_factory"):
+                with patch(
+                    "millm.db.repositories.profile_repository.ProfileRepository"
+                ) as MockRepo:
+                    MockRepo.return_value.get_by_name = AsyncMock(return_value=mock_profile)
+                    with pytest.raises(InvalidFeatureIndexError):
+                        await service._apply_request_profile("bad-profile")
+        # No partial steering should have been applied.
+        mock_sae.set_steering_batch.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_out_of_range_value_raises(self, service):
+        from millm.core.errors import InvalidFeatureIndexError
+
+        mock_sae = MagicMock()
+        mock_sae.d_sae = 16384
+        mock_sae.get_steering_values.return_value = {}
+        mock_sae.is_steering_enabled = False
+
+        mock_profile = MagicMock()
+        mock_profile.steering = {"10": 5000.0}  # value out of [-200, 200]
+
+        with patch("millm.services.sae_service.AttachedSAEState") as MockState:
+            MockState.return_value.attached_sae = mock_sae
+            with patch("millm.db.base.async_session_factory"):
+                with patch(
+                    "millm.db.repositories.profile_repository.ProfileRepository"
+                ) as MockRepo:
+                    MockRepo.return_value.get_by_name = AsyncMock(return_value=mock_profile)
+                    with pytest.raises(InvalidFeatureIndexError):
+                        await service._apply_request_profile("bad-value-profile")
+
+    @pytest.mark.asyncio
+    async def test_no_sae_returns_none(self, service):
+        with patch("millm.services.sae_service.AttachedSAEState") as MockState:
+            MockState.return_value.attached_sae = None
+            result = await service._apply_request_profile("any")
+        assert result is None

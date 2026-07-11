@@ -71,10 +71,6 @@ class Settings(BaseSettings):
     # Performance: KV cache
     KV_CACHE_MODE: str = "dynamic"  # "static" (requires C compiler for triton) or "dynamic"
 
-    # Performance: Prefix caching
-    ENABLE_PREFIX_CACHE: bool = True
-    PREFIX_CACHE_MAX_ENTRIES: int = 5
-
     # Performance: Speculative decoding
     SPECULATIVE_MODEL: Optional[str] = None  # HF model ID for draft model
     SPECULATIVE_NUM_TOKENS: int = 5
@@ -100,3 +96,13 @@ class Settings(BaseSettings):
 
 # Global settings instance
 settings = Settings()
+
+
+def get_settings() -> Settings:
+    """Return the process-wide Settings instance.
+
+    Most of the codebase imports the module-level ``settings`` singleton
+    directly; this accessor exists for callers (and tests) that prefer a
+    function-style dependency.
+    """
+    return settings

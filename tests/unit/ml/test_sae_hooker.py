@@ -109,6 +109,16 @@ class TestSAEHookerInstall:
         # Should be removable without error
         handle.remove()
 
+    def test_install_records_resolved_module_path(self, hooker, loaded_sae):
+        """install() records the dotted path of the hooked module (L4)."""
+        model = _make_gemma_model(num_layers=4)
+
+        handle = hooker.install(model, layer=2, sae=loaded_sae)
+        try:
+            assert hooker.last_resolved_module_path == "model.layers.2"
+        finally:
+            handle.remove()
+
 
 class TestSAEHookerRemove:
     """Tests for remove method."""

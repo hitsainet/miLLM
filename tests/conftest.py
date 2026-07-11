@@ -8,9 +8,22 @@ from typing import Generator
 
 import pytest
 import pytest_asyncio
+from sqlalchemy.dialects.postgresql import JSONB
+from sqlalchemy.ext.compiler import compiles
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
 from millm.db.base import Base
+
+
+# Tests run against in-memory SQLite, which has no JSONB type.  Several models
+# (models.config_json, profiles.steering) use PostgreSQL JSONB; without this
+# compiler override, Base.metadata.create_all() fails on SQLite with
+# "SQLiteTypeCompiler has no attribute visit_JSONB".  Render JSONB as plain
+# JSON when compiling for SQLite — production (PostgreSQL) still uses native
+# JSONB.  Registered once at import time; harmless if already registered.
+@compiles(JSONB, "sqlite")
+def _compile_jsonb_as_json_on_sqlite(element, compiler, **kw):  # noqa: ANN001
+    return "JSON"
 
 
 @pytest.fixture(scope="session")

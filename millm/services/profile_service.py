@@ -333,15 +333,6 @@ class ProfileService:
                 reason="no_sae_attached_and_profile_has_no_steering_values",
             )
 
-        # Invalidate the prefix cache whenever steering state changes on activation.
-        # Cached KV states encode the old steering delta; they must be recomputed.
-        if apply_steering:
-            try:
-                from millm.api.dependencies import get_inference_service
-                get_inference_service().prefix_cache.clear()
-            except Exception:
-                pass
-
         # Set profile as active
         await self.repository.set_active(profile_id)
 
@@ -386,12 +377,6 @@ class ProfileService:
             if attachment.is_attached:
                 self.sae_service.clear_steering()
                 cleared_steering = True
-                # Steering changed — flush prefix cache
-                try:
-                    from millm.api.dependencies import get_inference_service
-                    get_inference_service().prefix_cache.clear()
-                except Exception:
-                    pass
 
         # Deactivate profile
         await self.repository.deactivate(profile_id)

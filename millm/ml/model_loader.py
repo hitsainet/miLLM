@@ -615,6 +615,28 @@ class ModelLoadContext:
             )
         elif torch_compile:
             try:
+                # CRITICAL for SAE steering: TorchDynamo's default
+                # skip_nnmodule_hook_guards=True means the compiled graph is NOT
+                # re-guarded when a forward hook is later registered on a
+                # submodule.  miLLM registers the SAE steering/monitoring hook on
+                # an inner decoder layer *after* the model is compiled (at SAE
+                # attach time), so with the default the cached graph would keep
+                # running the un-hooked path and steering would silently no-op.
+                # Setting this to False makes hook registration invalidate the
+                # relevant cached graph (one-time ~recompile on the first forward
+                # after attach/detach), guaranteeing the hook actually fires.
+                try:
+                    import torch._dynamo as _dynamo
+
+                    _dynamo.config.skip_nnmodule_hook_guards = False
+                    logger.info("dynamo_hook_guards_enabled_for_sae_steering")
+                except Exception as _e:  # pragma: no cover - version drift
+                    logger.warning(
+                        "dynamo_hook_guard_config_failed",
+                        error=str(_e),
+                        hint="SAE steering may not take effect under torch.compile",
+                    )
+
                 logger.info("torch_compile_starting", mode=torch_compile_mode)
                 self.model.forward = torch.compile(
                     self.model.forward,

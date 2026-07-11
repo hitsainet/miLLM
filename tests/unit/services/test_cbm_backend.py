@@ -112,6 +112,10 @@ class TestCBMBackendIsRunning:
         backend._manager = None
         assert backend.is_running is False
 
+    def test_inflight_count_starts_zero(self, backend):
+        """inflight_count is 0 before any generation (M2 detach drain support)."""
+        assert backend.inflight_count == 0
+
     def test_not_running_when_started_is_false(self, backend):
         """Backend is not running when started is False even if manager exists."""
         backend._started = False

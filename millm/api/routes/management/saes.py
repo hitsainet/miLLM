@@ -8,7 +8,7 @@ from typing import Annotated
 
 from fastapi import APIRouter, Path
 
-from millm.api.dependencies import SAEServiceDep
+from millm.api.dependencies import MonitoringServiceDep, SAEServiceDep
 from millm.sockets.progress import progress_emitter
 from millm.api.schemas.common import ApiResponse
 from millm.api.schemas.sae import (
@@ -67,6 +67,7 @@ async def list_saes(
             memory_usage_mb=attachment.memory_usage_mb,
             steering_enabled=attachment.steering_enabled,
             monitoring_enabled=attachment.monitoring_enabled,
+            steering_apply_count=attachment.steering_apply_count,
         ),
     )
     return ApiResponse.ok(response)
@@ -194,6 +195,7 @@ async def get_attachment_status(
         memory_usage_mb=status.memory_usage_mb,
         steering_enabled=status.steering_enabled,
         monitoring_enabled=status.monitoring_enabled,
+        steering_apply_count=status.steering_apply_count,
     ))
 
 
@@ -352,16 +354,25 @@ async def clear_feature_steering(
     """
     Clear steering for a single feature.
 
-    Removes steering configuration for the specified feature index.
+    Removes steering configuration for the specified feature index.  If that was
+    the last steered feature, steering is disabled so the reported state is not
+    "enabled" with an empty (no-op) delta.
     """
     service.clear_steering(feature_idx)
 
     attachment = service.get_attachment_status()
     values = service.get_steering_values() if attachment.is_attached else {}
 
-    await _emit_steering_update(service, attachment.steering_enabled)
+    # Disable steering if nothing remains steered.
+    if attachment.is_attached and not values:
+        service.enable_steering(False)
+        enabled = False
+    else:
+        enabled = attachment.steering_enabled
+
+    await _emit_steering_update(service, enabled)
     return ApiResponse.ok(SteeringStatus(
-        enabled=attachment.steering_enabled,
+        enabled=enabled,
         values=values,
     ))
 
@@ -378,9 +389,12 @@ async def clear_steering(
     """
     Clear all steering values.
 
-    Removes all feature steering configurations.
+    Removes all feature steering configurations and disables steering so the
+    reported state matches reality (previously the response said enabled=false
+    while steering remained enabled with an empty — hence no-op — delta).
     """
     service.clear_steering()
+    service.enable_steering(False)
 
     await _emit_steering_update(service, False)
     return ApiResponse.ok(SteeringStatus(
@@ -402,15 +416,22 @@ async def clear_steering(
 )
 async def configure_monitoring(
     request: MonitoringRequest,
-    service: SAEServiceDep,
+    monitoring: MonitoringServiceDep,
 ) -> ApiResponse[None]:
     """
     Configure feature monitoring.
 
     When enabled, feature activations are captured during forward passes.
     Optionally specify specific features to monitor for efficiency.
+
+    Delegates to MonitoringService.configure so the monitored-feature list is
+    set in a single place — both on the SAE (which positionally compacts the
+    captured activations) and on the MonitoringService (which maps those
+    positions back to real feature indices).  Setting only the SAE side here
+    (as this endpoint previously did) desynced the two and made the history and
+    statistics report positions 0..N-1 as if they were feature indices.
     """
-    service.enable_monitoring(request.enabled, request.features)
+    monitoring.configure(enabled=request.enabled, features=request.features)
     return ApiResponse.ok(None)
 
 
@@ -511,6 +532,7 @@ async def attach_sae(
         layer=result["layer"],
         memory_usage_mb=result["memory_usage_mb"],
         warnings=result.get("warnings", []),
+        layer_module_path=result.get("layer_module_path"),
     ))
 
 

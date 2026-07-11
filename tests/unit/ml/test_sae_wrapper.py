@@ -92,6 +92,25 @@ class TestLoadedSAESteering:
         small_sae.apply_steering(x.clone())
         assert small_sae.steering_apply_count == 2
 
+    def test_suppressed_disables_steering_and_monitoring(self, small_sae):
+        """Inside suppressed(), steering is not applied and monitoring reads False."""
+        x = torch.randn(1, 5, 64)
+        small_sae.set_steering(0, 10.0)
+        small_sae.enable_steering(True)
+        small_sae.enable_monitoring(True)
+
+        with small_sae.suppressed():
+            out = small_sae.apply_steering(x.clone())
+            # Steering is a no-op while suppressed.
+            assert torch.allclose(out, x)
+            # Hook consults is_monitoring_enabled — it must report False here.
+            assert small_sae.is_monitoring_enabled is False
+
+        # State is restored after the context exits.
+        assert small_sae.is_monitoring_enabled is True
+        out2 = small_sae.apply_steering(x.clone())
+        assert not torch.allclose(out2, x)
+
     def test_set_steering_single(self, small_sae):
         """Can set steering for a single feature."""
         small_sae.set_steering(42, 5.0)

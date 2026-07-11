@@ -14,7 +14,7 @@ Implementation notes:
 import asyncio
 import uuid
 from datetime import datetime
-from threading import Thread
+from threading import Event, Thread
 from typing import TYPE_CHECKING, Any, AsyncGenerator, Optional
 
 import torch
@@ -54,6 +54,31 @@ class LoadedModelInfo:
         self.name = name
         self.model_id = model_id
         self.loaded_at = loaded_at
+
+
+def _make_event_stopping_criteria(event: "Event"):
+    """Build a transformers StoppingCriteria that halts generate() when `event`
+    is set.
+
+    Used by the streaming path so that when the consumer stops early (a stop
+    sequence matched, or the client disconnected) the background generate()
+    thread ends promptly instead of running to max_new_tokens while holding the
+    GPU and the request-queue slot.  Returns None if transformers' stopping
+    criteria API is unavailable.
+    """
+    try:
+        from transformers import StoppingCriteria, StoppingCriteriaList
+    except Exception:
+        return None
+
+    class _EventStoppingCriteria(StoppingCriteria):
+        def __init__(self, ev: "Event") -> None:
+            self._ev = ev
+
+        def __call__(self, input_ids, scores, **kwargs) -> bool:
+            return self._ev.is_set()
+
+    return StoppingCriteriaList([_EventStoppingCriteria(event)])
 
 
 class InferenceService:
@@ -362,6 +387,14 @@ class InferenceService:
             return AttachedSAEState().is_attached
         except Exception:
             return False
+
+    def _get_attached_sae(self) -> Any:
+        """Return the currently attached LoadedSAE, or None."""
+        try:
+            from millm.services.sae_service import AttachedSAEState
+            return AttachedSAEState().attached_sae
+        except Exception:
+            return None
 
     async def _apply_request_profile(self, profile_name: str) -> Optional[dict]:
         """
@@ -940,6 +973,15 @@ class InferenceService:
             generation_kwargs = self._build_generate_kwargs(gen_config, inputs)
             generation_kwargs["streamer"] = streamer
 
+            # Early-stop signal: set when the consumer stops reading (stop
+            # sequence matched or client disconnected) so generate() halts
+            # promptly instead of running to max_new_tokens while holding the
+            # GPU and the queue slot.
+            stop_event = Event()
+            stopping_criteria = _make_event_stopping_criteria(stop_event)
+            if stopping_criteria is not None:
+                generation_kwargs["stopping_criteria"] = stopping_criteria
+
             # Start generation thread with error capture
             thread_error: list[Exception] = []
             thread = Thread(
@@ -1006,6 +1048,9 @@ class InferenceService:
                                 )
                                 yield f"data: {chunk.model_dump_json(exclude_none=True)}\n\n"
                             stopped_by_sequence = True
+                            # Signal the generate() thread to stop instead of
+                            # running to max_new_tokens after we stop reading.
+                            stop_event.set()
                             break
 
                     chunk = ChatCompletionChunk(
@@ -1099,6 +1144,13 @@ class InferenceService:
                 except Exception:
                     pass
             finally:
+                # Always signal the generate() thread to stop — whether we
+                # exited on a stop sequence, EOS, an exception, or a client
+                # disconnect.  Without this an early exit would leave generate()
+                # running to max_new_tokens, holding the GPU and the queue slot
+                # (and delaying the steering restore below into the next
+                # request's window).
+                stop_event.set()
                 thread.join(timeout=5.0)
                 if thread.is_alive():
                     # The generation thread did not finish within 5 seconds.  This
@@ -1266,6 +1318,15 @@ class InferenceService:
         embeddings_data: list[EmbeddingData] = []
         total_tokens = 0
 
+        # Embeddings must reflect the *unsteered* model: an attached SAE hook
+        # would otherwise perturb the hidden states these embeddings are pooled
+        # from, and the pass would clobber the last-captured monitoring
+        # activations.  Suppress the hook for the duration of the embedding
+        # forward passes.
+        import contextlib
+
+        attached_sae = self._get_attached_sae()
+
         async with self._request_queue.acquire():
             for i, text in enumerate(inputs):
                 # Tokenize
@@ -1275,7 +1336,12 @@ class InferenceService:
                 total_tokens += encoded.input_ids.shape[1]
 
                 # Get embeddings from last hidden layer
-                with torch.no_grad():
+                suppress_ctx = (
+                    attached_sae.suppressed()
+                    if attached_sae is not None
+                    else contextlib.nullcontext()
+                )
+                with torch.no_grad(), suppress_ctx:
                     outputs = self._model(
                         **encoded, output_hidden_states=True
                     )

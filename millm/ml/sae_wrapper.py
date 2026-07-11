@@ -11,7 +11,8 @@ This applies steering directly to the residual stream, uniformly to all token po
 """
 
 import logging
-from typing import Optional
+from contextlib import contextmanager
+from typing import Iterator, Optional
 
 import torch
 from torch import Tensor
@@ -98,6 +99,12 @@ class LoadedSAE:
             f"d_sae mismatch: weights have {self.d_sae}, config has {config.d_sae}"
         )
 
+        # When True, the forward hook applies neither steering nor monitoring
+        # capture.  Used to run "plain" forward passes (e.g. /v1/embeddings)
+        # through the same hooked model without perturbing their hidden states
+        # or clobbering the last-captured activations.  See suppressed().
+        self._suppressed: bool = False
+
         # Steering state (direct residual stream steering)
         self._steering_values: dict[int, float] = {}
         self._steering_enabled: bool = False
@@ -174,7 +181,7 @@ class LoadedSAE:
         Returns:
             Modified activations with steering applied.
         """
-        if not self._steering_enabled or self._steering_delta is None:
+        if self._suppressed or not self._steering_enabled or self._steering_delta is None:
             return hidden_states
 
         # Ensure steering delta matches hidden states dtype/device.
@@ -436,8 +443,25 @@ class LoadedSAE:
 
     @property
     def is_monitoring_enabled(self) -> bool:
-        """Check if monitoring is enabled."""
-        return self._monitoring_enabled
+        """Check if monitoring is enabled (and not currently suppressed)."""
+        return self._monitoring_enabled and not self._suppressed
+
+    @contextmanager
+    def suppressed(self) -> Iterator[None]:
+        """Temporarily disable steering application and monitoring capture.
+
+        For the duration of the context, the forward hook is effectively inert:
+        apply_steering() returns the hidden states unchanged and monitoring does
+        not capture.  Used to run forward passes that must see the *unsteered*
+        model (e.g. embeddings) through the same hooked model without perturbing
+        their output or overwriting the last-captured activations.
+        """
+        previous = self._suppressed
+        self._suppressed = True
+        try:
+            yield
+        finally:
+            self._suppressed = previous
 
     def _capture_activations(self, feature_acts: Tensor) -> None:
         """

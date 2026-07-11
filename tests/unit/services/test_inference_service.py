@@ -756,6 +756,48 @@ class TestCreateEmbeddings:
         assert response.data[1].index == 1
 
     @pytest.mark.asyncio
+    async def test_embeddings_suppress_attached_sae(
+        self, service, embedding_request, mock_model_for_embeddings
+    ):
+        """Embeddings run inside the SAE's suppressed() context (M4).
+
+        An attached steering hook must not perturb the hidden states the
+        embeddings are pooled from.
+        """
+        from contextlib import contextmanager
+
+        entered = {"count": 0, "active_during_forward": False}
+        mock_sae = MagicMock()
+
+        @contextmanager
+        def fake_suppressed():
+            entered["count"] += 1
+            entered["active_during_forward"] = True
+            try:
+                yield
+            finally:
+                entered["active_during_forward"] = False
+
+        mock_sae.suppressed = fake_suppressed
+
+        # Record whether suppression was active at the moment of the forward pass.
+        forward_state = {}
+
+        def record_forward(*args, **kwargs):
+            forward_state["suppressed"] = entered["active_during_forward"]
+            out = MagicMock()
+            out.hidden_states = [torch.randn(1, 5, 64)]
+            return out
+
+        mock_model_for_embeddings.side_effect = record_forward
+
+        with patch.object(service, "_get_attached_sae", return_value=mock_sae):
+            await service.create_embeddings(embedding_request)
+
+        assert entered["count"] == 1
+        assert forward_state.get("suppressed") is True
+
+    @pytest.mark.asyncio
     async def test_base64_encoding_format(
         self, service, mock_model_for_embeddings
     ):

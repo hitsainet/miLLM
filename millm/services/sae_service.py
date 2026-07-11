@@ -875,17 +875,29 @@ class SAEService:
             if inference_svc is None:
                 from millm.api.dependencies import get_inference_service
                 inference_svc = get_inference_service()
-            queue = inference_svc.request_queue
-            if queue.pending_count > 0:
-                logger.info("detach_waiting_for_pending_requests", pending=queue.pending_count)
+
+            def _active_count() -> int:
+                # Serial path requests wait in the RequestQueue; CBM requests
+                # bypass it entirely, so pending_count is 0 during CBM
+                # generation.  Sum both so detach drains either backend.
+                count = inference_svc.request_queue.pending_count
+                cbm = getattr(inference_svc, "_cbm_backend", None)
+                if cbm is not None:
+                    count += getattr(cbm, "inflight_count", 0)
+                return count
+
+            active = _active_count()
+            if active > 0:
+                logger.info("detach_waiting_for_pending_requests", pending=active)
                 for _ in range(300):  # Wait up to 30 seconds
-                    if queue.pending_count == 0:
+                    if _active_count() == 0:
                         break
                     await asyncio.sleep(0.1)
-                if queue.pending_count > 0:
+                remaining = _active_count()
+                if remaining > 0:
                     logger.error(
                         "detach_timeout_with_active_requests",
-                        pending=queue.pending_count,
+                        pending=remaining,
                         hint="Detaching anyway — hook removed while generation may be in progress. "
                              "Restart the server if inference behaves unexpectedly.",
                     )

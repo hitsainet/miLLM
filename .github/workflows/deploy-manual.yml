@@ -19,6 +19,10 @@ concurrency:
 
 jobs:
   build:
+    # HARD STOP: only deploy from hitsainet/miLLM — that repo's GitHub Pages
+    # carries the docs-millm.hitsai.net custom domain. Running this in the
+    # private source repo would publish a broken duplicate.
+    if: github.repository == 'hitsainet/miLLM' || github.repository == 'hitsainet/millm'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4

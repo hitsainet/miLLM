@@ -1,40 +1,45 @@
 ---
-sidebar_position: 2
-title: Management API
+sidebar_position: 8
+title: Endpoint Index
 ---
 
-# Management API
+# Management API — Endpoint Index
 
-The management API at `/api` provides endpoints for model, SAE, steering, monitoring, and profile operations.
+A single-page index of every `/api` endpoint. Each area has a dedicated page with request/response examples — follow the section links.
 
-## Models (`/api/models`)
+All endpoints return the [management envelope](/api/overview#the-management-envelope): `{success, data, error}`.
+
+## Models (`/api/models`) — [full reference](/api/models)
 
 | Endpoint | Method | Description |
 |----------|--------|-------------|
 | `/api/models` | GET | List all models |
-| `/api/models` | POST | Download a model |
+| `/api/models` | POST | Download a model (HF or local path) |
+| `/api/models/preview` | POST | Preview model metadata & memory estimates |
 | `/api/models/{id}` | GET | Get model details |
+| `/api/models/{id}` | DELETE | Delete model from disk |
 | `/api/models/{id}/load` | POST | Load model to GPU |
 | `/api/models/{id}/unload` | POST | Unload model from GPU |
 | `/api/models/{id}/lock` | POST | Lock model (prevent unload) |
 | `/api/models/{id}/unlock` | POST | Unlock model |
-| `/api/models/{id}` | DELETE | Delete model from cache |
-| `/api/models/preview` | POST | Preview model metadata from HuggingFace |
+| `/api/models/{id}/cancel` | POST | Cancel in-progress download |
 
-## SAEs (`/api/saes`)
+## SAEs (`/api/saes`) — [full reference](/api/saes)
 
 | Endpoint | Method | Description |
 |----------|--------|-------------|
-| `/api/saes` | GET | List all SAEs with attachment status |
+| `/api/saes` | GET | List SAEs + attachment status |
 | `/api/saes/download` | POST | Download SAE from HuggingFace |
 | `/api/saes/preview` | POST | Preview SAE repository files |
-| `/api/saes/{id}/attach` | POST | Attach SAE to loaded model |
-| `/api/saes/{id}/detach` | POST | Detach SAE |
+| `/api/saes/attachment` | GET | Attachment status (incl. `steering_apply_count`) |
+| `/api/saes/{id}` | GET / DELETE | Get / delete an SAE |
+| `/api/saes/{id}/compatibility` | GET | Dry-run compatibility check |
+| `/api/saes/{id}/attach` | POST | Attach to loaded model |
+| `/api/saes/{id}/detach` | POST | Detach |
 | `/api/saes/{id}/cancel` | POST | Cancel in-progress download |
-| `/api/saes/{id}` | DELETE | Delete SAE from cache |
-| `/api/saes/attachment` | GET | Get current attachment status |
+| `/api/saes/monitoring` | POST | Configure monitoring (alias of `/api/monitoring/configure`) |
 
-## Steering (`/api/saes/steering`)
+## Steering (`/api/saes/steering`) — [full reference](/api/saes#steering)
 
 | Endpoint | Method | Description |
 |----------|--------|-------------|
@@ -42,29 +47,44 @@ The management API at `/api` provides endpoints for model, SAE, steering, monito
 | `/api/saes/steering` | POST | Set single feature value |
 | `/api/saes/steering/batch` | POST | Set multiple feature values |
 | `/api/saes/steering/enable` | POST | Enable steering |
-| `/api/saes/steering/disable` | POST | Disable steering |
+| `/api/saes/steering/disable` | POST | Disable steering (keep values) |
 | `/api/saes/steering/{idx}` | DELETE | Remove single feature |
+| `/api/saes/steering` | DELETE | Clear all values & disable |
 
-## Monitoring (`/api/monitoring`)
+## Monitoring (`/api/monitoring`) — [full reference](/api/monitoring)
 
 | Endpoint | Method | Description |
 |----------|--------|-------------|
 | `/api/monitoring` | GET | Get monitoring state |
-| `/api/monitoring/configure` | POST | Configure monitoring parameters |
-| `/api/monitoring/enable` | POST | Enable/disable monitoring |
-| `/api/monitoring/history` | GET | Get activation history |
-| `/api/monitoring/statistics` | GET | Get feature statistics |
-| `/api/monitoring/statistics/top` | POST | Get top features by metric |
+| `/api/monitoring/configure` | POST | Configure (features, history size, top-k) |
+| `/api/monitoring/enable` | POST | Toggle without reconfiguring |
+| `/api/monitoring/history` | GET / DELETE | Activation history / clear |
+| `/api/monitoring/statistics` | GET / DELETE | Feature statistics / reset |
+| `/api/monitoring/statistics/top` | POST | Top features by metric |
 
-## Profiles (`/api/profiles`)
+## Profiles (`/api/profiles`) — [full reference](/api/profiles)
 
 | Endpoint | Method | Description |
 |----------|--------|-------------|
-| `/api/profiles` | GET | List all profiles |
-| `/api/profiles` | POST | Create profile |
-| `/api/profiles/save-current` | POST | Save current steering as profile |
+| `/api/profiles` | GET / POST | List / create |
+| `/api/profiles/save-current` | POST | Save live steering as a profile |
 | `/api/profiles/active` | GET | Get active profile |
-| `/api/profiles/{id}/activate` | POST | Activate profile |
-| `/api/profiles/{id}/deactivate` | POST | Deactivate profile |
+| `/api/profiles/{id}` | GET / PUT / DELETE | Get / update / delete |
+| `/api/profiles/{id}/activate` | POST | Activate (replaces current steering) |
+| `/api/profiles/{id}/deactivate` | POST | Deactivate |
 | `/api/profiles/{id}/export` | GET | Export as JSON |
 | `/api/profiles/import` | POST | Import from JSON |
+
+## Health & operations (`/api/health`) — [full reference](/api/overview#health--operations-endpoints)
+
+| Endpoint | Method | Description |
+|----------|--------|-------------|
+| `/api/health` | GET | Liveness |
+| `/api/health/ready` | GET | Readiness |
+| `/api/health/detailed` | GET | Component breakdown |
+| `/api/health/inference` | GET | Active backend & capabilities |
+| `/api/health/metrics` | GET | App metrics |
+| `/api/health/metrics/prometheus` | GET | Prometheus format |
+| `/api/health/circuits` | GET | Circuit breakers |
+| `/api/health/circuits/{name}/reset` | POST | Reset a breaker |
+| `/api/health/version` | GET | Version |

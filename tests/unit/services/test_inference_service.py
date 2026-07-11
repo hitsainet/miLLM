@@ -1565,18 +1565,17 @@ class TestSpeculativeDecoding:
         assert kwargs.get("assistant_model") is mock_draft
         assert kwargs.get("num_assistant_tokens") == 3
 
-    def test_streaming_usage_in_final_chunk(self, service, chat_request):
+    @pytest.mark.asyncio
+    async def test_streaming_usage_in_final_chunk(self, service, chat_request):
         """Final streaming chunk includes usage with prompt and completion tokens."""
-        import asyncio
-
         streamer = MagicMock()
         streamer.__iter__ = MagicMock(return_value=iter(["Hi", "!"]))
 
-        async def collect():
-            with patch("transformers.TextIteratorStreamer", return_value=streamer):
-                return [c async for c in service.stream_chat_completion(chat_request)]
-
-        chunks = asyncio.get_event_loop().run_until_complete(collect())
+        # Run on the test's own event loop instead of asyncio.get_event_loop()
+        # .run_until_complete(), which raises "no current event loop" on
+        # Python 3.12+ when no loop is set (flaky under CI test ordering).
+        with patch("transformers.TextIteratorStreamer", return_value=streamer):
+            chunks = [c async for c in service.stream_chat_completion(chat_request)]
 
         # Find the final data chunk before [DONE]
         data_chunks = [c for c in chunks if c != "data: [DONE]\n\n" and c.startswith("data: ")]

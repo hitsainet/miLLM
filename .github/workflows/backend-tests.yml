@@ -47,15 +47,16 @@ jobs:
       - name: Run unit tests
         run: |
           # integration/ and e2e/ require a real database and full stack.
-          # The following test files have pre-existing failures where the code
+          # The following test files had pre-existing failures where the code
           # was updated but tests were not. Excluded until fixed.
-          # Tracked: db/test_model_repository (JSONB/SQLite incompatibility),
-          #          ml/test_memory_utils, ml/test_model_loader, ml/test_model_downloader,
-          #          ml/test_sae_downloader, ml/test_sae_hooker, ml/test_sae_wrapper,
+          # db/test_model_repository was un-ignored after the JSONB-on-SQLite
+          # conftest fix (steering remediation) resolved its root cause.
+          # Tracked (still excluded): ml/test_memory_utils, ml/test_model_loader,
+          #          ml/test_model_downloader, ml/test_sae_downloader,
+          #          ml/test_sae_hooker, ml/test_sae_wrapper,
           #          services/test_profile_service, services/test_request_queue,
           #          api/test_exception_handlers
           python -m pytest tests/unit/ \
-            --ignore=tests/unit/db/test_model_repository.py \
             --ignore=tests/unit/ml/test_memory_utils.py \
             --ignore=tests/unit/ml/test_model_loader.py \
             --ignore=tests/unit/ml/test_model_downloader.py \

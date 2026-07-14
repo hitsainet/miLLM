@@ -1,0 +1,92 @@
+# miLLM backend — GPU inference server.
+# The image tag/digest is managed by ArgoCD Image Updater (kustomize images
+# transform + .argocd-source-millm.yaml pin file); do not hand-edit tags here.
+#
+# DATABASE_URL comes from the `millm-secrets` Secret (see postgres.yaml header).
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: millm-backend
+  namespace: millm
+spec:
+  replicas: 1
+  # Recreate: only one GPU — the old pod must release VRAM before the new one
+  # loads the model.
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: millm-backend
+  template:
+    metadata:
+      labels:
+        app: millm-backend
+    spec:
+      # Pin to the GPU node.
+      nodeSelector:
+        kubernetes.io/hostname: mcs-lnxgpu01
+      # Cluster nodes cannot resolve the .local ingress hostname via DNS.
+      hostAliases:
+        - ip: "192.168.244.61"
+          hostnames:
+            - "k8s-millm.hitsai.local"
+      initContainers:
+        - name: fix-permissions
+          image: busybox:latest
+          command: ["sh", "-c", "mkdir -p /data/model_cache /data/sae_cache /data/hf_cache && chown -R 1000:1000 /data"]
+          volumeMounts:
+            - name: millm-data
+              mountPath: /data
+      containers:
+        - name: backend
+          image: hitsai/millm-backend:latest
+          imagePullPolicy: Always
+          ports:
+            - containerPort: 8000
+          env:
+            - name: DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: millm-secrets
+                  key: DATABASE_URL
+            - name: REDIS_URL
+              value: "redis://redis:6379/0"
+            - name: MODEL_CACHE_DIR
+              value: "/data/model_cache"
+            - name: SAE_CACHE_DIR
+              value: "/data/sae_cache"
+            - name: HF_HOME
+              value: "/data/hf_cache"
+            - name: CORS_ORIGINS
+              value: "https://millm.hitsai.net,http://k8s-millm.hitsai.local,http://k8s-millm.hitsai.net,http://localhost:3000"
+            - name: LOG_LEVEL
+              value: "INFO"
+            - name: LOG_FORMAT
+              value: "json"
+            - name: DEBUG
+              value: "false"
+            - name: TORCH_COMPILE
+              value: "false"
+          volumeMounts:
+            - name: millm-data
+              mountPath: /data
+          resources:
+            limits:
+              nvidia.com/gpu: 1
+      volumes:
+        - name: millm-data
+          hostPath:
+            path: /data/millm/data
+            type: DirectoryOrCreate
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: millm-backend
+  namespace: millm
+spec:
+  selector:
+    app: millm-backend
+  ports:
+    - port: 8000
+      targetPort: 8000

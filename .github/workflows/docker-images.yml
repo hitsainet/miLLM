@@ -8,10 +8,78 @@ on:
       - 'v*'
 
 jobs:
-  build:
-    # HARD STOP: only run in hitsainet/millm (public/clean repo)
-    if: github.repository == 'hitsainet/millm'
+  # ── Change detection ─────────────────────────────────────────────────────
+  # Build ONLY the images whose code changed in this push (same strategy as
+  # the WASAT monorepo). Conservative by design: tag pushes, unknown diff
+  # bases (first push / force-push), and Dockerfile/dependency changes
+  # rebuild the affected image; docs/tests/manual-only changes build nothing.
+  detect:
+    # HARD STOP: only run in hitsainet/miLLM (public/clean repo)
+    if: github.repository == 'hitsainet/millm' || github.repository == 'hitsainet/miLLM'
+    runs-on: ubuntu-latest
+    outputs:
+      images: ${{ steps.detect.outputs.images }}
+    steps:
+      - name: Checkout source
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0   # need history to diff the push range
 
+      - name: Detect changed images
+        id: detect
+        env:
+          BEFORE: ${{ github.event.before }}
+          REF: ${{ github.ref }}
+        run: |
+          set -euo pipefail
+          ALL=(backend admin-ui)
+          emit_all() { printf '%s\n' "${ALL[@]}" | jq -R . | jq -cs .; }
+
+          # Tag push (release) → full rebuild.
+          if [[ "$REF" == refs/tags/* ]]; then
+            echo "images=$(emit_all)" >> "$GITHUB_OUTPUT"; echo "tag push → all"; exit 0
+          fi
+
+          # Resolve a valid diff base; fall back to a full rebuild if unknown
+          # (first push, force-push, shallow history) — never silently skip.
+          # NOTE: the sync from the source repo force-pushes main, so BEFORE
+          # is usually still a valid ancestor; when it isn't, we build all.
+          BASE="$BEFORE"
+          if [ -z "$BASE" ] || [ "$BASE" = "0000000000000000000000000000000000000000" ] \
+             || ! git cat-file -e "${BASE}^{commit}" 2>/dev/null; then
+            BASE="$(git rev-parse HEAD~1 2>/dev/null || true)"
+          fi
+          if [ -z "$BASE" ]; then
+            echo "images=$(emit_all)" >> "$GITHUB_OUTPUT"; echo "no diff base → all"; exit 0
+          fi
+
+          CHANGED="$(git diff --name-only "$BASE" "$GITHUB_SHA")"
+          echo "--- changed files ---"; echo "$CHANGED"
+
+          declare -A pick=()
+          # Backend image content: application code, Dockerfile, entrypoint,
+          # Python dependency manifest, DB migrations.
+          if echo "$CHANGED" | grep -qE '^(millm/|Dockerfile|docker-entrypoint\.sh|pyproject\.toml|alembic)'; then
+            pick[backend]=1
+          fi
+          # Admin UI image content: everything under admin-ui/ (its own
+          # Dockerfile, package.json, and source live there).
+          if echo "$CHANGED" | grep -qE '^admin-ui/'; then
+            pick[admin-ui]=1
+          fi
+
+          OUT=()
+          for img in "${ALL[@]}"; do [ "${pick[$img]:-}" = "1" ] && OUT+=("$img"); done
+          if [ ${#OUT[@]} -eq 0 ]; then
+            echo "images=[]" >> "$GITHUB_OUTPUT"; echo "no image-affecting changes → nothing to build"
+          else
+            JSON="$(printf '%s\n' "${OUT[@]}" | jq -R . | jq -cs .)"
+            echo "images=$JSON" >> "$GITHUB_OUTPUT"; echo "building: $JSON"
+          fi
+
+  build:
+    needs: detect
+    if: (github.repository == 'hitsainet/millm' || github.repository == 'hitsainet/miLLM') && needs.detect.outputs.images != '[]' && needs.detect.outputs.images != ''
     runs-on: ubuntu-latest
 
     permissions:
@@ -20,24 +88,38 @@ jobs:
       attestations: write
 
     strategy:
+      fail-fast: false
       matrix:
-        image:
-          - name: backend
-            context: .
-            dockerfile: ./Dockerfile
-            repo: hitsai/millm-backend
-            target: runtime
-          - name: admin-ui
-            context: ./admin-ui
-            dockerfile: ./admin-ui/Dockerfile
-            repo: hitsai/millm-admin-ui
+        name: ${{ fromJson(needs.detect.outputs.images) }}
 
     steps:
       - name: Checkout source
         uses: actions/checkout@v4
 
+      - name: Resolve image build parameters
+        id: img
+        run: |
+          case "${{ matrix.name }}" in
+            backend)
+              echo "repo=hitsai/millm-backend"  >> "$GITHUB_OUTPUT"
+              echo "context=."                  >> "$GITHUB_OUTPUT"
+              echo "dockerfile=./Dockerfile"    >> "$GITHUB_OUTPUT"
+              echo "target=runtime"             >> "$GITHUB_OUTPUT"
+              ;;
+            admin-ui)
+              echo "repo=hitsai/millm-admin-ui"       >> "$GITHUB_OUTPUT"
+              echo "context=./admin-ui"               >> "$GITHUB_OUTPUT"
+              echo "dockerfile=./admin-ui/Dockerfile" >> "$GITHUB_OUTPUT"
+              echo "target="                          >> "$GITHUB_OUTPUT"
+              ;;
+            *)
+              echo "ERROR: unknown image ${{ matrix.name }}"; exit 1
+              ;;
+          esac
+
+      # The torch-based backend image is large; reclaim runner disk first.
       - name: Free disk space
-        if: matrix.image.name == 'backend'
+        if: matrix.name == 'backend'
         run: |
           sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache
           sudo docker system prune -af
@@ -56,38 +138,30 @@ jobs:
         id: version
         run: |
           if [[ "${GITHUB_REF}" == refs/tags/v* ]]; then
-            echo "tags=${{ matrix.image.repo }}:latest,${{ matrix.image.repo }}:${GITHUB_REF#refs/tags/}" >> $GITHUB_OUTPUT
+            VERSION="${GITHUB_REF#refs/tags/}"
+            echo "tags=${{ steps.img.outputs.repo }}:latest,${{ steps.img.outputs.repo }}:${VERSION}" >> "$GITHUB_OUTPUT"
           else
-            echo "tags=${{ matrix.image.repo }}:latest" >> $GITHUB_OUTPUT
+            SHA="${GITHUB_SHA::8}"
+            echo "tags=${{ steps.img.outputs.repo }}:latest,${{ steps.img.outputs.repo }}:${SHA}" >> "$GITHUB_OUTPUT"
           fi
 
-      - name: Extract metadata for Docker
-        id: meta
-        uses: docker/metadata-action@v5
-        with:
-          images: ${{ matrix.image.repo }}
-          tags: |
-            type=raw,value=latest
-            type=sha,prefix=
-
-      - name: Build and push ${{ matrix.image.name }} image
+      - name: Build and push ${{ matrix.name }} image
         id: build
         uses: docker/build-push-action@v5
         with:
-          context: ${{ matrix.image.context }}
-          file: ${{ matrix.image.dockerfile }}
-          target: ${{ matrix.image.target || '' }}
+          context: ${{ steps.img.outputs.context }}
+          file: ${{ steps.img.outputs.dockerfile }}
+          target: ${{ steps.img.outputs.target }}
           push: true
           tags: ${{ steps.version.outputs.tags }}
-          labels: ${{ steps.meta.outputs.labels }}
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
+          cache-from: type=gha,scope=${{ matrix.name }}
+          cache-to: type=gha,mode=max,scope=${{ matrix.name }}
           provenance: true
           sbom: true
 
       - name: Attest build provenance
         uses: actions/attest-build-provenance@v2
         with:
-          subject-name: index.docker.io/${{ matrix.image.repo }}
+          subject-name: index.docker.io/${{ steps.img.outputs.repo }}
           subject-digest: ${{ steps.build.outputs.digest }}
           push-to-registry: true

@@ -1,0 +1,96 @@
+name: Sync main → gitops/pilot
+
+# Auto-syncs main into gitops/pilot on every push to main.
+#
+# Why this exists: gitops/pilot is the deploy branch ArgoCD reads from
+# (k8s/argocd/millm-app.yaml). ArgoCD Image Updater is the only thing that
+# auto-writes there (it commits image digest pins to
+# k8s/base/.argocd-source-millm.yaml). Without this workflow, manifest
+# changes on main would never reach the cluster.
+#
+# Strategy (same as the WASAT monorepo): merge main → gitops/pilot with
+# -X theirs, then hard-converge every tracked file to main's content EXCEPT
+# the Image-Updater-owned pin file, with push-retry against Image Updater
+# commit races.
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch: {}
+
+concurrency:
+  group: sync-main-to-gitops-pilot
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+
+jobs:
+  sync:
+    # HARD STOP: only run in Onegaishimas/miLLM (source repo)
+    if: github.repository == 'Onegaishimas/miLLM'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout gitops/pilot
+        uses: actions/checkout@v4
+        with:
+          ref: gitops/pilot
+          fetch-depth: 0
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Configure git
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+      - name: Skip if gitops/pilot already contains main
+        id: skip_check
+        run: |
+          git fetch origin main
+          if git merge-base --is-ancestor origin/main HEAD; then
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+            echo "gitops/pilot already up-to-date with main — no merge needed"
+          else
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Merge main with -X theirs (main is canonical for non-pin files)
+        if: steps.skip_check.outputs.skip != 'true'
+        run: |
+          git merge --no-ff --no-edit -X theirs origin/main || {
+            echo "::error::Merge failed despite -X theirs strategy"
+            git status
+            exit 1
+          }
+
+      - name: Converge non-pin files to main (kill gitops/pilot-only drift)
+        if: steps.skip_check.outputs.skip != 'true'
+        run: |
+          # main is the single source of truth for everything except the
+          # Image-Updater-owned digest pin file. Hard-reset all tracked paths
+          # to main's exact content, excluding only that file.
+          git checkout origin/main -- . ':(exclude)k8s/base/.argocd-source-millm.yaml'
+          if git diff --cached --quiet; then
+            echo "Already converged with main (no drift to drop)."
+          else
+            git --no-pager diff --cached --stat
+            git commit --no-edit -m "sync: converge non-pin files to main (drop gitops/pilot drift)"
+          fi
+
+      - name: Push with retry on race with Image Updater
+        if: steps.skip_check.outputs.skip != 'true'
+        run: |
+          for attempt in 1 2 3; do
+            if git push origin gitops/pilot; then
+              echo "Pushed successfully on attempt $attempt"
+              exit 0
+            fi
+            echo "Push attempt $attempt failed; fetching + rebasing"
+            git pull --rebase -X theirs origin gitops/pilot || {
+              echo "::error::Rebase failed during retry — needs operator attention"
+              exit 1
+            }
+          done
+          echo "::error::Push failed after 3 retries — needs operator attention"
+          exit 1

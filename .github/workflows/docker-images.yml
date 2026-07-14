@@ -6,6 +6,8 @@ on:
       - main
     tags:
       - 'v*'
+  # Manual full rebuild (detect treats a dispatch as "no diff base" → all).
+  workflow_dispatch: {}
 
 jobs:
   # ── Change detection ─────────────────────────────────────────────────────
@@ -40,17 +42,25 @@ jobs:
             echo "images=$(emit_all)" >> "$GITHUB_OUTPUT"; echo "tag push → all"; exit 0
           fi
 
-          # Resolve a valid diff base; fall back to a full rebuild if unknown
-          # (first push, force-push, shallow history) — never silently skip.
-          # NOTE: the sync from the source repo force-pushes main, so BEFORE
-          # is usually still a valid ancestor; when it isn't, we build all.
+          # Resolve a valid diff base — this repo's main is FORCE-PUSHED by the
+          # sync-to-clean workflow (source main + one filter commit), so:
+          #  - BEFORE (the previous filter tip) becomes an orphaned commit that
+          #    a normal fetch doesn't retrieve → fetch it explicitly by SHA
+          #    (GitHub serves unadvertised objects). Diffing old filter tip →
+          #    new filter tip yields exactly what changed between syncs.
+          #  - A HEAD~1 fallback would be WRONG here: HEAD~1 is the unfiltered
+          #    source tip, so the diff would show only the filter commit's file
+          #    removals and silently skip real code changes. When BEFORE cannot
+          #    be resolved, build everything instead — never silently skip.
           BASE="$BEFORE"
+          if [ -n "$BASE" ] && [ "$BASE" != "0000000000000000000000000000000000000000" ]; then
+            git cat-file -e "${BASE}^{commit}" 2>/dev/null \
+              || git fetch --no-tags origin "$BASE" 2>/dev/null \
+              || true
+          fi
           if [ -z "$BASE" ] || [ "$BASE" = "0000000000000000000000000000000000000000" ] \
              || ! git cat-file -e "${BASE}^{commit}" 2>/dev/null; then
-            BASE="$(git rev-parse HEAD~1 2>/dev/null || true)"
-          fi
-          if [ -z "$BASE" ]; then
-            echo "images=$(emit_all)" >> "$GITHUB_OUTPUT"; echo "no diff base → all"; exit 0
+            echo "images=$(emit_all)" >> "$GITHUB_OUTPUT"; echo "no usable diff base → all"; exit 0
           fi
 
           CHANGED="$(git diff --name-only "$BASE" "$GITHUB_SHA")"

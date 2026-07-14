@@ -1,6 +1,6 @@
 [project]
 name = "millm"
-version = "0.5.0"
+version = "0.5.1"
 description = "Mechanistic Interpretability LLM Server with SAE support"
 readme = "README.md"
 requires-python = ">=3.11"

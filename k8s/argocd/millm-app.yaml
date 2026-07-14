@@ -87,3 +87,27 @@ spec:
       kind: Deployment
       jsonPointers:
         - /spec/template/metadata/annotations/kubectl.kubernetes.io~1restartedAt
+---
+# This cluster runs the CRD-based Image Updater: applications are reconciled
+# only when selected by an ImageUpdater resource (see wasat-pilot-images for
+# the WASAT services). useAnnotations pulls the per-image configuration from
+# the Application annotations above.
+apiVersion: argocd-image-updater.argoproj.io/v1alpha1
+kind: ImageUpdater
+metadata:
+  name: millm-images
+  namespace: argocd
+spec:
+  applicationRefs:
+    - namePattern: millm
+      useAnnotations: true
+  commonUpdateSettings:
+    forceUpdate: false
+    pullSecret: pullsecret:argocd/regcred
+    updateStrategy: digest
+  writeBackConfig:
+    method: git
+    gitConfig:
+      branch: gitops/pilot
+      # No writeBackTarget: the default parameter-override file
+      # (k8s/base/.argocd-source-millm.yaml) is used for this Kustomize app.

@@ -1,0 +1,89 @@
+# ArgoCD GitOps definition for miLLM.
+#
+# Apply once by hand (kubectl apply -f k8s/argocd/millm-app.yaml); ArgoCD
+# manages the workloads from then on.
+#
+# Flow (mirrors the WASAT services):
+#   push to Onegaishimas/miLLM main
+#     → sync-main-to-gitops-pilot.yml merges main → gitops/pilot
+#     → sync-to-clean.yml mirrors main → hitsainet/miLLM
+#     → docker-images.yml (hitsainet) builds ONLY the changed images
+#     → ArgoCD Image Updater sees the new :latest digest on Docker Hub,
+#       commits a pin to gitops/pilot (.argocd-source-millm.yaml)
+#     → ArgoCD syncs k8s/base from gitops/pilot and rolls the deployment
+#
+# One-time prerequisites (not in git):
+#   1. millm-secrets Secret in the millm namespace
+#      (POSTGRES_PASSWORD, DATABASE_URL — see k8s/base/postgres.yaml header)
+#   2. Repo credential Secret in the argocd namespace for
+#      https://github.com/Onegaishimas/miLLM.git with a PAT that has
+#      contents:write (Image Updater pushes pins through it), labeled
+#      argocd.argoproj.io/secret-type: repository
+#   3. gitops/pilot branch created from main
+---
+apiVersion: argoproj.io/v1alpha1
+kind: AppProject
+metadata:
+  name: millm
+  namespace: argocd
+spec:
+  description: miLLM — mechanistic interpretability LLM server
+  sourceRepos:
+    - https://github.com/Onegaishimas/miLLM.git
+  destinations:
+    - namespace: millm
+      server: https://kubernetes.default.svc
+  clusterResourceWhitelist:
+    # Namespace object is part of k8s/base.
+    - group: '*'
+      kind: '*'
+  namespaceResourceWhitelist:
+    - group: '*'
+      kind: '*'
+---
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: millm
+  namespace: argocd
+  labels:
+    app.kubernetes.io/part-of: millm
+  annotations:
+    # ── ArgoCD Image Updater ────────────────────────────────────────────
+    # Track :latest by digest (same strategy as the WASAT apps): every new
+    # push of hitsai/millm-*:latest to Docker Hub gets pinned by digest and
+    # committed to gitops/pilot, which ArgoCD then syncs.
+    argocd-image-updater.argoproj.io/image-list: backend=docker.io/hitsai/millm-backend:latest, admin-ui=docker.io/hitsai/millm-admin-ui:latest
+    argocd-image-updater.argoproj.io/backend.update-strategy: digest
+    argocd-image-updater.argoproj.io/backend.kustomize.image-name: hitsai/millm-backend
+    argocd-image-updater.argoproj.io/admin-ui.update-strategy: digest
+    argocd-image-updater.argoproj.io/admin-ui.kustomize.image-name: hitsai/millm-admin-ui
+    argocd-image-updater.argoproj.io/write-back-method: git
+    argocd-image-updater.argoproj.io/git-branch: gitops/pilot
+    # Default write-back target: parameter-override file
+    # k8s/base/.argocd-source-millm.yaml (kept off main; the
+    # sync-main-to-gitops-pilot workflow preserves it during merges).
+spec:
+  project: millm
+  source:
+    repoURL: https://github.com/Onegaishimas/miLLM.git
+    targetRevision: gitops/pilot
+    path: k8s/base
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: millm
+  revisionHistoryLimit: 10
+  syncPolicy:
+    automated:
+      selfHeal: true
+      # prune intentionally NOT enabled yet — enable after a burn-in period
+      # once adoption of the pre-existing resources is proven stable.
+    syncOptions:
+      - ServerSideApply=true
+  ignoreDifferences:
+    # Tolerate kubectl rollout restart / set env during incident response
+    # without a self-heal fight over the restartedAt annotation.
+    - group: apps
+      kind: Deployment
+      jsonPointers:
+        - /spec/template/metadata/annotations/kubectl.kubernetes.io~1restartedAt

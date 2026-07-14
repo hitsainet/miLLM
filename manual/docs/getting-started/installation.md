@@ -39,7 +39,7 @@ Access the admin UI at `http://localhost` or your configured domain.
 
 ## Kubernetes
 
-Kubernetes is the recommended deployment method for lab and production environments. The manifest at `k8s/millm-deployment.yaml` deploys the full miLLM stack into a dedicated `millm` namespace.
+Kubernetes is the recommended deployment method for lab and production environments. The Kustomize base at `k8s/base/` deploys the full miLLM stack into a dedicated `millm` namespace.
 
 ### Architecture
 
@@ -111,17 +111,17 @@ The init container (`fix-permissions`) also creates and permissions the cache di
 `model_cache` holds downloaded model weights — plan for 5–30 GB per model depending on quantization. `sae_cache` holds SAE weights — wide SAEs (131k features) can be 4–6 GB each. Provision 500 GB+ for active use.
 :::
 
-### Step 2: Configure the Manifest
+### Step 2: Configure the Manifests
 
-Open `k8s/millm-deployment.yaml` and update the following before applying:
+The manifests live in `k8s/base/`, one file per component. Update these before applying:
 
-**Node selector** — pin the GPU pod to your GPU node:
+**Node selector** (`k8s/base/backend.yaml`) — pin the GPU pod to your GPU node:
 ```yaml
 nodeSelector:
   kubernetes.io/hostname: your-gpu-node-name   # replace mcs-lnxgpu01
 ```
 
-**Domain names** — update ingress hosts and hostAlias:
+**Domain names** — update the ingress hosts (`k8s/base/ingress.yaml`) and the backend's `hostAliases` (`k8s/base/backend.yaml`):
 ```yaml
 # In hostAliases:
 - ip: "192.168.x.x"           # Your GPU node IP
@@ -132,17 +132,15 @@ nodeSelector:
 - host: k8s-millm.yourdomain.com
 ```
 
-**Secrets** — change default credentials before deploying to a shared environment:
-```yaml
-# PostgreSQL (also update DATABASE_URL to match)
-- name: POSTGRES_PASSWORD
-  value: "change-me"
-
-- name: DATABASE_URL
-  value: "postgresql+asyncpg://millm:change-me@postgres:5432/millm"
+**Secrets** — credentials are not stored in the manifests. Create the `millm-secrets` Secret the deployments reference:
+```bash
+kubectl create namespace millm --dry-run=client -o yaml | kubectl apply -f -
+kubectl create secret generic millm-secrets -n millm \
+  --from-literal=POSTGRES_PASSWORD="your-strong-password" \
+  --from-literal=DATABASE_URL="postgresql+asyncpg://millm:your-strong-password@postgres:5432/millm"
 ```
 
-**CORS** — add any additional origins that will access the API:
+**CORS** (`k8s/base/backend.yaml`) — add any additional origins that will access the API:
 ```yaml
 - name: CORS_ORIGINS
   value: "http://k8s-millm.yourdomain.com,http://your-open-webui.yourdomain.com"
@@ -151,12 +149,16 @@ nodeSelector:
 ### Step 3: Deploy
 
 ```bash
-# Apply the full manifest
-kubectl apply -f k8s/millm-deployment.yaml
+# Apply the Kustomize base
+kubectl apply -k k8s/base
 
 # Watch pods come up
 kubectl get pods -n millm -w
 ```
+
+:::info GitOps alternative
+The reference cluster is managed by ArgoCD instead of manual applies: `k8s/argocd/millm-app.yaml` defines an Application that watches the `gitops/pilot` branch, and ArgoCD Image Updater rolls new image digests automatically as CI publishes them. See the comments in that file for the one-time setup (repo credential + secret).
+:::
 
 Expected output once healthy:
 ```

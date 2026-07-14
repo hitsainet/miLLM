@@ -1,0 +1,120 @@
+# Main ingress: API paths → backend, everything else → Admin UI.
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: millm-ingress
+  namespace: millm
+  annotations:
+    nginx.ingress.kubernetes.io/proxy-body-size: "0"
+    nginx.ingress.kubernetes.io/proxy-read-timeout: "3600"
+    nginx.ingress.kubernetes.io/proxy-send-timeout: "3600"
+    nginx.ingress.kubernetes.io/proxy-connect-timeout: "3600"
+spec:
+  ingressClassName: public
+  rules:
+    - host: k8s-millm.hitsai.local
+      http:
+        paths:
+          - path: /api
+            pathType: Prefix
+            backend:
+              service:
+                name: millm-backend
+                port:
+                  number: 8000
+          - path: /v1
+            pathType: Prefix
+            backend:
+              service:
+                name: millm-backend
+                port:
+                  number: 8000
+          - path: /docs
+            pathType: Prefix
+            backend:
+              service:
+                name: millm-backend
+                port:
+                  number: 8000
+          - path: /redoc
+            pathType: Prefix
+            backend:
+              service:
+                name: millm-backend
+                port:
+                  number: 8000
+          - path: /openapi.json
+            pathType: Prefix
+            backend:
+              service:
+                name: millm-backend
+                port:
+                  number: 8000
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: millm-frontend
+                port:
+                  number: 80
+    - host: k8s-millm.hitsai.net
+      http:
+        paths:
+          - path: /api
+            pathType: Prefix
+            backend:
+              service:
+                name: millm-backend
+                port:
+                  number: 8000
+          - path: /v1
+            pathType: Prefix
+            backend:
+              service:
+                name: millm-backend
+                port:
+                  number: 8000
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: millm-frontend
+                port:
+                  number: 80
+---
+# WebSocket ingress (separate for proper upgrade handling).
+# Do NOT add configuration-snippet with Upgrade headers — it causes header duplication.
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: millm-websocket-ingress
+  namespace: millm
+  annotations:
+    nginx.ingress.kubernetes.io/websocket-services: "millm-backend"
+    nginx.ingress.kubernetes.io/proxy-http-version: "1.1"
+    nginx.ingress.kubernetes.io/proxy-read-timeout: "86400"
+    nginx.ingress.kubernetes.io/proxy-send-timeout: "86400"
+    nginx.ingress.kubernetes.io/proxy-connect-timeout: "3600"
+spec:
+  ingressClassName: public
+  rules:
+    - host: k8s-millm.hitsai.local
+      http:
+        paths:
+          - path: /socket.io
+            pathType: Prefix
+            backend:
+              service:
+                name: millm-backend
+                port:
+                  number: 8000
+    - host: k8s-millm.hitsai.net
+      http:
+        paths:
+          - path: /socket.io
+            pathType: Prefix
+            backend:
+              service:
+                name: millm-backend
+                port:
+                  number: 8000

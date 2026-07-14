@@ -1,0 +1,67 @@
+# PostgreSQL — metadata store (models/SAEs registry, profiles).
+# Data lives on a hostPath, NOT a PVC; ArgoCD prune can never delete it, but
+# the deployment is still annotated Prune=false as a second guard.
+#
+# Credentials come from the `millm-secrets` Secret, which is created
+# out-of-band (never committed — this repo syncs to a public mirror):
+#   kubectl create secret generic millm-secrets -n millm \
+#     --from-literal=POSTGRES_PASSWORD=... \
+#     --from-literal=DATABASE_URL=postgresql+asyncpg://millm:...@postgres:5432/millm
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: postgres
+  namespace: millm
+  annotations:
+    argocd.argoproj.io/sync-options: Prune=false,Delete=false
+spec:
+  replicas: 1
+  # Recreate: two postgres pods must never share the hostPath PGDATA during a
+  # rolling update (lock conflict / corruption risk on single-node storage).
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: postgres
+  template:
+    metadata:
+      labels:
+        app: postgres
+    spec:
+      containers:
+        - name: postgres
+          image: postgres:16
+          env:
+            - name: POSTGRES_DB
+              value: millm
+            - name: POSTGRES_USER
+              value: millm
+            - name: POSTGRES_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: millm-secrets
+                  key: POSTGRES_PASSWORD
+            - name: PGDATA
+              value: /var/lib/postgresql/data/pgdata
+          ports:
+            - containerPort: 5432
+          volumeMounts:
+            - name: postgres-data
+              mountPath: /var/lib/postgresql/data
+      volumes:
+        - name: postgres-data
+          hostPath:
+            path: /data/millm/postgres
+            type: DirectoryOrCreate
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: postgres
+  namespace: millm
+spec:
+  selector:
+    app: postgres
+  ports:
+    - port: 5432
+      targetPort: 5432

@@ -1,0 +1,22 @@
+# miLLM GitOps base — deployed by the `millm` ArgoCD Application
+# (k8s/argocd/millm-app.yaml) from the gitops/pilot branch.
+#
+# Image tags below are the *defaults*; ArgoCD Image Updater overrides them
+# with digest pins via the parameter-override file `.argocd-source-millm.yaml`
+# it commits to gitops/pilot. Never hand-edit that file on main.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+resources:
+  - namespace.yaml
+  - postgres.yaml
+  - redis.yaml
+  - backend.yaml
+  - frontend.yaml
+  - ingress.yaml
+
+images:
+  - name: hitsai/millm-backend
+    newTag: latest
+  - name: hitsai/millm-admin-ui
+    newTag: latest

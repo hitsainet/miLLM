@@ -220,63 +220,61 @@ Record as `HF_TOKEN`. Default: empty.
 
 ---
 
-## Prepare the Manifest
+## Prepare the Manifests
+
+The manifests live in `k8s/base/` as a Kustomize base (one file per component:
+`postgres.yaml`, `redis.yaml`, `backend.yaml`, `frontend.yaml`, `ingress.yaml`).
 
 Clone the repository from the machine with kubectl access:
 ```bash
-git clone https://github.com/Onegaishimas/miLLM.git
+git clone https://github.com/hitsainet/miLLM.git
 cd miLLM
-cp k8s/millm-deployment.yaml k8s/millm-deployment.local.yaml
+cp -r k8s/base k8s/local
 ```
 
-Apply all substitutions to `millm-deployment.local.yaml`:
+Apply substitutions to the copies in `k8s/local/`:
 
-**Node selector:**
+**Node selector and host IP** (in `backend.yaml`):
 ```bash
-sed -i "s/mcs-lnxgpu01/$GPU_NODE/g" k8s/millm-deployment.local.yaml
+sed -i "s/mcs-lnxgpu01/$GPU_NODE/g" k8s/local/backend.yaml
+sed -i "s/192\.168\.244\.61/$GPU_NODE_IP/g" k8s/local/backend.yaml
 ```
 
-**Host IP and domain:**
+**Domains** (in `backend.yaml` CORS and `ingress.yaml` hosts):
 ```bash
-sed -i "s/192\.168\.244\.61/$GPU_NODE_IP/g" k8s/millm-deployment.local.yaml
-sed -i "s/k8s-millm\.mcslab\.io/$DOMAIN/g" k8s/millm-deployment.local.yaml
-sed -i "s/k8s-millm\.hitsai\.net/$DOMAIN/g" k8s/millm-deployment.local.yaml
+sed -i "s/k8s-millm\.hitsai\.\(local\|net\)/$DOMAIN/g" k8s/local/backend.yaml k8s/local/ingress.yaml
 ```
 
-**PostgreSQL password** (update POSTGRES_PASSWORD value and DATABASE_URL):
+**Secrets** — credentials are not in the manifests; create the Secret they
+reference:
 ```bash
-sed -i "s/value: millm$/value: $POSTGRES_PASSWORD/" k8s/millm-deployment.local.yaml
-sed -i "s|millm:millm@postgres|millm:$POSTGRES_PASSWORD@postgres|g" k8s/millm-deployment.local.yaml
+kubectl create namespace millm --dry-run=client -o yaml | kubectl apply -f -
+kubectl create secret generic millm-secrets -n millm \
+  --from-literal=POSTGRES_PASSWORD="$POSTGRES_PASSWORD" \
+  --from-literal=DATABASE_URL="postgresql+asyncpg://millm:$POSTGRES_PASSWORD@postgres:5432/millm"
 ```
 
-**CORS origins:**
-```bash
-sed -i "s|http://k8s-millm.hitsai.local,http://k8s-millm.hitsai.net,http://localhost:3000|$CORS_ORIGINS|g" k8s/millm-deployment.local.yaml
-```
-
-**HuggingFace token** (if provided):
-```bash
-# Add HF_TOKEN env var to the backend container spec if provided
-# Only do this if HF_TOKEN is non-empty
-if [ -n "$HF_TOKEN" ]; then
-  sed -i "/name: LOG_FORMAT/a\\            - name: HF_TOKEN\\n              value: \"$HF_TOKEN\"" k8s/millm-deployment.local.yaml
-fi
-```
-
-Verify substitutions before applying:
-```bash
-grep -E "hostname|POSTGRES_PASSWORD|DATABASE_URL|CORS_ORIGINS|host:" k8s/millm-deployment.local.yaml
-```
+**HuggingFace token** (optional): add an `HF_TOKEN` env var to the backend
+container in `k8s/local/backend.yaml`, or supply tokens per-request via the API.
 
 ---
 
 ## Deployment
 
-### Step 1 — Apply the manifest
+### Step 1 — Apply the manifests
 
 ```bash
-kubectl apply -f k8s/millm-deployment.local.yaml
+kubectl apply -k k8s/local
 ```
+
+:::info GitOps deployment (reference cluster)
+The reference deployment does not use `kubectl apply` for updates: an ArgoCD
+Application (`k8s/argocd/millm-app.yaml`) watches the `gitops/pilot` branch and
+**ArgoCD Image Updater** rolls new image digests automatically as CI publishes
+them — no manual `kubectl rollout restart`. If you run your own ArgoCD, apply
+that file once (after creating the repo credential and `millm-secrets` — see
+the comments in it) and skip manual applies from then on.
+:::
 
 Expected output:
 ```

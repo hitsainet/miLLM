@@ -236,7 +236,8 @@ class TestIntensityAndExport:
         with patched_state():
             item = await service.import_definition(original)
             exported = await service.export_definition(item.profile_id)
-        assert exported.model_dump(mode="json") == original.model_dump(mode="json")
+        # export returns the RAW stored dict (no pydantic strip)
+        assert exported == original.model_dump(mode="json")
 
     async def test_list_clusters_excludes_manual(self, service):
         await service.repository.create(

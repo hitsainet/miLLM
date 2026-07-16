@@ -32,7 +32,9 @@ export function ActivationChart({
         <div className="space-y-2 max-h-80 overflow-y-auto pr-1">
           {activations.map((item, index) => {
             const widthPercent = (Math.abs(item.activation) / maxActivation) * 100;
-            const c = featureColor(index);
+            // Key color to the FEATURE, not its rank — top-K reorders every
+            // emission and rank-keyed colors flicker/misidentify (review find).
+            const c = featureColor(item.feature_index);
 
             return (
               <div

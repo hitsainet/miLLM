@@ -447,6 +447,22 @@ class InferenceService:
                 details={"profile": profile_name},
             )
 
+        # Cluster gate parity (round-2 find): the per-request path must apply
+        # the same declared-feature-space check as every other activation
+        # path — index bounds alone can pass by coincidence on a mismatched
+        # SAE, silently applying meaningless steering.
+        if getattr(profile, "source_kind", None) == "cluster":
+            declared = ((profile.cluster_meta or {}).get("sae") or {}).get("n_features")
+            if declared is not None and int(declared) != sae.d_sae:
+                raise InvalidFeatureIndexError(
+                    f"Profile '{profile_name}' is a cluster authored for an SAE "
+                    f"with {declared} features; the attached SAE has "
+                    f"{sae.d_sae} — steering would be meaningless.",
+                    details={"profile": profile_name,
+                             "declared_n_features": declared,
+                             "d_sae": sae.d_sae},
+                )
+
         if not profile.steering:
             # Profile exists but has no steering values — nothing to override.
             return None

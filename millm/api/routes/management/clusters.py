@@ -65,10 +65,11 @@ async def import_clusters(
     `mistudio.cluster-bundle/v1` (per-item isolated). Kind-keyed; strict
     validation against the frozen v1 contract.
     """
-    # Size gates. Content-Length is the true pre-parse defense (FastAPI has
-    # already deserialized `payload` by the time this handler runs); the
-    # re-serialization check below bounds downstream work (Pydantic, DB row)
-    # for chunked bodies without a declared length.
+    # Size gates — honest scope: FastAPI has ALREADY read+parsed the body by
+    # the time any handler code runs, so neither check is pre-parse (a true
+    # stream-level limit belongs in middleware/ingress). These bound the
+    # DOWNSTREAM work (Pydantic validation, DB row size) and give hostile
+    # payloads a structured refusal instead of a stored megarow.
     declared = request.headers.get("content-length")
     if declared and declared.isdigit() and int(declared) > MAX_IMPORT_BYTES:
         return ApiResponse.fail(
@@ -235,12 +236,13 @@ async def set_intensity(
 
 @router.get(
     "/{cluster_id}/export",
-    response_model=ClusterDefinitionV1,
     summary="Re-export the lossless original definition",
 )
 async def export_cluster(
     cluster_id: ClusterId, service: ClusterServiceDep
-) -> ClusterDefinitionV1:
+) -> dict[str, Any]:
     """Returns the raw `mistudio.cluster-definition/v1` document (no envelope —
-    the response IS the portable artifact)."""
+    the response IS the portable artifact). Deliberately NO response_model:
+    the mirror's extra="ignore" would strip unknown additive fields from
+    newer producers (round-2 find)."""
     return await service.export_definition(cluster_id)

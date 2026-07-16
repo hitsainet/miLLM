@@ -178,6 +178,11 @@ class TestLosslessAndWarnings:
         row = await cluster_service.repository.get(item.profile_id)
         assert row.cluster_meta["future_field"] == {"from": "a newer producer"}
         assert row.cluster_meta["members"][0]["future_member_field"] == 42
+        # Round 2: the FULL round-trip — export must re-emit the unknown
+        # fields too (re-validating through the mirror used to strip them).
+        exported = await cluster_service.export_definition(item.profile_id)
+        assert exported["future_field"] == {"from": "a newer producer"}
+        assert exported["members"][0]["future_member_field"] == 42
 
     async def test_activation_failure_warning_is_persisted(self, cluster_service):
         d = make_definition(

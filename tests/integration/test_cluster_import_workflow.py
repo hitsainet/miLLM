@@ -90,10 +90,12 @@ class TestRealFixtureWorkflow:
             assert applied[idx] == pytest.approx(effective), f"member {idx}"
 
     async def test_reexport_equals_original(self, service, real_definition):
+        raw = json.loads(FIXTURE.read_text())
         with patched_state():
-            item = await service.import_definition(real_definition)
+            item = await service.import_definition(real_definition, raw_payload=raw)
             exported = await service.export_definition(item.profile_id)
-        assert exported.model_dump(mode="json") == real_definition.model_dump(mode="json")
+        # export re-emits the RAW document byte-semantically
+        assert exported == raw
 
     async def test_single_active_invariant_across_manual_and_cluster(
         self, service, real_definition

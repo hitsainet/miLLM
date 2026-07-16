@@ -35,6 +35,10 @@ class CircuitBreakerConfig:
     failure_threshold: int = 3  # Failures before opening circuit
     recovery_timeout: float = 60.0  # Seconds before trying half-open
     success_threshold: int = 1  # Successes in half-open to close circuit
+    # Exception types that propagate WITHOUT counting as circuit failures
+    # (e.g. user-input not-found errors on browse endpoints — a typo is not a
+    # service outage). Empty tuple = every exception counts (old behavior).
+    excluded_exceptions: tuple = ()
 
 
 @dataclass
@@ -179,6 +183,8 @@ class CircuitBreaker:
                 result = func(*args, **kwargs)
                 self._record_success()
                 return result
+            except self.config.excluded_exceptions:
+                raise  # user-input error, not a service failure
             except Exception as e:
                 self._record_failure(e)
                 raise

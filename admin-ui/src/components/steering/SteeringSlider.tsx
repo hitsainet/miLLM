@@ -36,17 +36,19 @@ export function SteeringSlider({
   onRemove,
   disabled,
   label,
-  min = -300,
-  max = 300,
+  min = -200,
+  max = 200,
   step = 0.1,
 }: SteeringSliderProps) {
   const [localStrength, setLocalStrength] = useState(strength);
   const [inputValue, setInputValue] = useState(String(strength));
+  const [committed, setCommitted] = useState(strength);
   const c = featureColor(colorOrder);
 
   useEffect(() => {
     setLocalStrength(strength);
     setInputValue(String(strength));
+    setCommitted(strength);
   }, [strength]);
 
   const roundToStep = (value: number) => Math.round(value * 10) / 10;
@@ -55,7 +57,12 @@ export function SteeringSlider({
     const clamped = roundToStep(Math.max(min, Math.min(max, value)));
     setLocalStrength(clamped);
     setInputValue(String(clamped));
-    onStrengthChange(clamped);
+    // Dirty guard: mouseUp then blur would otherwise commit twice
+    // (two PUTs per adjustment — review find).
+    if (clamped !== committed) {
+      setCommitted(clamped);
+      onStrengthChange(clamped);
+    }
   };
 
   const handleInputBlur = () => {

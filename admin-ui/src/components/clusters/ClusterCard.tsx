@@ -40,7 +40,8 @@ export function ClusterCard({
 
   const intensity = pendingIntensity ?? cluster.intensity;
   // Authored safe envelope (server-enforced); dial-off (0) is always allowed.
-  const [rangeLo, rangeHi] = cluster.intensity_range ?? [0, 2];
+  const [rangeLo, rangeHi] =
+    cluster.intensity_range?.length === 2 ? cluster.intensity_range : [0, 2];
   const sliderMin = Math.min(0, rangeLo);
   const sliderMax = Math.max(rangeHi, 0);
 

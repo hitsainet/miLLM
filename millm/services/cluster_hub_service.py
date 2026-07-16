@@ -31,20 +31,11 @@ from millm.api.schemas.cluster import (
     HubRepoInfo,
 )
 from millm.core.config import settings
-from millm.core.errors import ValidationError
-from millm.core.resilience import CircuitBreaker, CircuitBreakerConfig
-
-# Dedicated breaker: hub BROWSE failures (often user-typed repo ids) must
-# never open the shared huggingface circuit and block model/SAE downloads
-# (review find). Not-found errors are converted to clean ValidationErrors
-# BEFORE the breaker sees them, so typos don't count as service failures.
-cluster_hub_circuit = CircuitBreaker(
-    name="cluster_hub",
-    config=CircuitBreakerConfig(
-        failure_threshold=3,
-        recovery_timeout=60.0,
-        success_threshold=1,
-    ),
+from millm.core.errors import MiLLMError, ValidationError
+from millm.core.resilience import (
+    CircuitBreaker,
+    CircuitBreakerConfig,
+    CircuitOpenError,
 )
 
 _NOT_FOUND_ERRORS = (
@@ -54,7 +45,30 @@ _NOT_FOUND_ERRORS = (
     GatedRepoError,
 )
 
+# Dedicated breaker: hub BROWSE failures must never open the shared
+# huggingface circuit and block model/SAE downloads (review find). Not-found
+# errors are EXCLUDED from failure counting at the breaker itself (round-2
+# find: converting them in the caller was too late — the breaker had already
+# recorded the failure), so typos genuinely don't count as service failures.
+cluster_hub_circuit = CircuitBreaker(
+    name="cluster_hub",
+    config=CircuitBreakerConfig(
+        failure_threshold=3,
+        recovery_timeout=60.0,
+        success_threshold=1,
+        excluded_exceptions=_NOT_FOUND_ERRORS,
+    ),
+)
+
 logger = structlog.get_logger()
+
+
+class HubUnavailableError(MiLLMError):
+    """Hub temporarily unreachable (circuit open or network failure)."""
+
+    code = "HUB_UNAVAILABLE"
+    status_code = 503
+
 
 MAX_SEARCH_LIMIT = 50
 MAX_LISTED_DEFINITIONS = 200
@@ -113,9 +127,15 @@ class ClusterHubService:
         if cached is not None:
             return cached
 
-        models = await asyncio.to_thread(
-            _list_models_sync, settings.CLUSTER_HUB_TAG, query, base_model, limit
-        )
+        try:
+            models = await asyncio.to_thread(
+                _list_models_sync, settings.CLUSTER_HUB_TAG, query, base_model, limit
+            )
+        except CircuitOpenError as e:
+            raise HubUnavailableError(
+                "Hugging Face is temporarily unreachable — retry shortly",
+                details={"circuit": "cluster_hub"},
+            ) from e
         result = [
             HubRepoInfo(
                 repo_id=m.id,
@@ -144,6 +164,11 @@ class ClusterHubService:
 
         try:
             files = await asyncio.to_thread(_list_repo_files_sync, repo_id, revision)
+        except CircuitOpenError as e:
+            raise HubUnavailableError(
+                "Hugging Face is temporarily unreachable — retry shortly",
+                details={"circuit": "cluster_hub"},
+            ) from e
         except _NOT_FOUND_ERRORS as e:
             raise ValidationError(
                 f"Hub repo not found or not accessible: {repo_id}",
@@ -187,6 +212,11 @@ class ClusterHubService:
             path = await asyncio.to_thread(
                 _download_file_sync, repo_id, filename, revision, self._cache_dir
             )
+        except CircuitOpenError as e:
+            raise HubUnavailableError(
+                "Hugging Face is temporarily unreachable — retry shortly",
+                details={"circuit": "cluster_hub"},
+            ) from e
         except _NOT_FOUND_ERRORS as e:
             raise ValidationError(
                 f"Definition not found on the Hub: {repo_id}/{filename}",

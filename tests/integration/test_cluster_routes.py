@@ -67,9 +67,7 @@ def mock_service():
                                              "cleared_steering": True})
     svc.set_intensity = AsyncMock(return_value={"profile_id": "prof_c1",
                                                 "intensity": 0.5, "reapplied": True})
-    svc.export_definition = AsyncMock(return_value=ClusterDefinitionV1.model_validate(
-        make_definition_payload()
-    ))
+    svc.export_definition = AsyncMock(return_value=make_definition_payload())
     return svc
 
 

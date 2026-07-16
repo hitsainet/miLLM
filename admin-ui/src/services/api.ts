@@ -140,8 +140,23 @@ async function request<T>(
     throw new ApiError('PARSE_ERROR', `Invalid response from server (status ${response.status})`);
   }
 
-  // Handle FastAPI validation errors (422) which use { detail: [...] } format
+  // 422s come in two shapes: the management envelope ({success:false,
+  // error:{...}} — e.g. the cluster activation gate, intensity-range
+  // rejections) and FastAPI's request-validation {detail:[...]}. Check the
+  // envelope FIRST — assuming the FastAPI shape used to reduce every server
+  // gate message to a bare "Validation error" (review find).
   if (response.status === 422) {
+    const envelope = data as unknown as {
+      success?: boolean;
+      error?: { code?: string; message?: string; details?: unknown };
+    };
+    if (envelope?.error?.message) {
+      throw new ApiError(
+        envelope.error.code ?? 'VALIDATION_ERROR',
+        envelope.error.message,
+        envelope.error.details as Record<string, unknown> | undefined
+      );
+    }
     const detail = (data as unknown as { detail: Array<{ msg: string }> | string })?.detail;
     const message = Array.isArray(detail)
       ? detail.map((d) => d.msg).join('; ')

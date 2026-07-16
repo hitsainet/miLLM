@@ -43,8 +43,8 @@ export function StatisticsPanel({
       />
 
       <div className="space-y-3 max-h-80 overflow-y-auto pr-1">
-        {statistics.map((stat, order) => {
-          const c = featureColor(order);
+        {statistics.map((stat) => {
+          const c = featureColor(stat.feature_idx);
           return (
           <div
             key={stat.feature_idx}

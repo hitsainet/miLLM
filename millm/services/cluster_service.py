@@ -99,6 +99,10 @@ class ClusterService:
             intensity=definition.budget.intensity if definition.budget else 1.0,
         )
 
+        # NOTE: the 'blocked' status in ClusterImportItem exists for contract
+        # parity with miStudio's import matrix; miLLM maps feature-space
+        # mismatches to 'imported_unbound' (the hard block happens at
+        # activation), so 'blocked' is never produced here by design.
         status = "imported" if sae_id else "imported_unbound"
         logger.info(
             "cluster_imported",
@@ -219,8 +223,17 @@ class ClusterService:
                 await self.activate(profile_id)
                 reapplied = True
             except Exception:
-                # Roll back: live steering still runs at the old lambda.
-                await self.repository.update(profile_id, intensity=previous)
+                # Roll back: live steering still runs at the old lambda. The
+                # rollback itself is guarded so a failing session cannot mask
+                # the original error (round-2 find).
+                try:
+                    await self.repository.update(profile_id, intensity=previous)
+                except Exception:
+                    logger.exception(
+                        "intensity_rollback_failed",
+                        profile_id=profile_id,
+                        previous=previous,
+                    )
                 raise
         return {"profile_id": profile_id, "intensity": float(intensity),
                 "reapplied": reapplied}
@@ -237,13 +250,20 @@ class ClusterService:
             lo, hi = settings.CLUSTER_INTENSITY_MIN, settings.CLUSTER_INTENSITY_MAX
         return min(0.0, lo), max(hi, 0.0)
 
-    async def export_definition(self, profile_id: str) -> ClusterDefinitionV1:
-        """Re-emit the lossless original definition from cluster_meta."""
+    async def export_definition(self, profile_id: str) -> dict[str, Any]:
+        """
+        Re-emit the lossless original definition from cluster_meta.
+
+        Returns the RAW stored dict (minus miLLM-local keys) — running it back
+        through the pydantic mirror would strip unknown additive fields from
+        newer producers (round-2 find: extra="ignore" made the "lossless"
+        export lossy at the boundary).
+        """
         profile = await self._get_cluster(profile_id)
         meta = dict(profile.cluster_meta or {})
         meta.pop("warnings", None)
         meta.pop("hub_ref", None)
-        return ClusterDefinitionV1.model_validate(meta)
+        return meta
 
     # ── Internals ────────────────────────────────────────────────────────
 
@@ -342,9 +362,11 @@ class ClusterService:
             bound=profile.sae_id is not None,
             warnings=list(meta.get("warnings", [])),
             hub_ref=meta.get("hub_ref"),
-            intensity_range=(budget.get("intensity_range")
-                             if isinstance(budget.get("intensity_range"), list)
-                             else None),
+            # EFFECTIVE bounds (authored range when valid, config fallback
+            # otherwise, dial-off floor applied) — the UI renders exactly what
+            # the server will enforce, so the two can never disagree
+            # (round-2 find: three different fallback envelopes existed).
+            intensity_range=list(self._intensity_bounds(profile)),
             created_at=profile.created_at,
             updated_at=profile.updated_at,
         )

@@ -354,18 +354,18 @@ class ProfileService:
         # Apply steering if requested
         if apply_steering:
             attachment = self.sae_service.get_attachment_status()
+            # Validate EVERYTHING before touching live steering: this is the
+            # single choke point every activation path goes through (Profiles
+            # route, Clusters route, MCP). Runs even for empty-steering rows —
+            # a poisoned cluster_meta must not activate+late-bind unchecked
+            # (round-2 find).
+            self._validate_activation(profile)
             if profile.steering:
                 # Profile has steering values — require SAE to be attached
                 if not attachment.is_attached:
                     raise SAENotAttachedError(
                         "Cannot apply steering: no SAE is attached",
                     )
-                # Validate EVERYTHING before touching live steering: this is
-                # the single choke point every activation path goes through
-                # (Profiles route, Clusters route, MCP), and clearing before a
-                # failed set_steering_batch would wipe the active profile's
-                # live steering with no record (review find).
-                self._validate_activation(profile)
                 # Convert string keys back to int and apply. Steering values are
                 # stored at lambda=1 basis (Feature 8): scale by the profile's
                 # intensity dial and clamp to the supported range — imported

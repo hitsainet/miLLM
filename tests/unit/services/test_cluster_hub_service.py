@@ -108,10 +108,11 @@ class TestFetchDefinition:
             "millm.services.cluster_hub_service._download_file_sync",
             return_value=str(f),
         ):
-            definition, hub_ref = await service.fetch_definition(
+            definition, raw, hub_ref = await service.fetch_definition(
                 "org/pack", "fear.cluster.json", revision="abc123"
             )
         assert definition.name == "fear cluster"
+        assert raw["name"] == "fear cluster"   # raw payload travels to storage
         assert hub_ref == {"repo_id": "org/pack", "revision": "abc123",
                            "path": "fear.cluster.json"}
 

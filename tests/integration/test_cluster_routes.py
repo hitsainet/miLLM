@@ -80,6 +80,7 @@ def mock_hub():
     hub.list_definitions = AsyncMock(return_value=[HubDefinitionRef(file="a.cluster.json")])
     hub.fetch_definition = AsyncMock(return_value=(
         ClusterDefinitionV1.model_validate(make_definition_payload()),
+        make_definition_payload(),   # raw payload (lossless storage)
         {"repo_id": "org/pack", "revision": "main", "path": "a.cluster.json"},
     ))
     return hub

@@ -157,11 +157,12 @@ async def hub_import(
     service: ClusterServiceDep,
 ) -> ApiResponse[ClusterImportItem]:
     """Fetch, validate, and import a single `.cluster.json` (anonymous)."""
-    definition, hub_ref = await hub.fetch_definition(
+    definition, raw_payload, hub_ref = await hub.fetch_definition(
         request.repo_id, request.filename, revision=request.revision
     )
     item = await service.import_definition(
-        definition, hub_ref=hub_ref, activate=request.activate
+        definition, raw_payload=raw_payload,
+        hub_ref=hub_ref, activate=request.activate,
     )
     return ApiResponse.ok(item)
 

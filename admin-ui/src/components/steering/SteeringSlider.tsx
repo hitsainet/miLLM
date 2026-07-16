@@ -129,14 +129,23 @@ export function SteeringSlider({
         </span>
       </div>
 
-      {/* Warning-zone gradient slider (red extremes, feature color mid-band) */}
+      {/* Warning-zone gradient slider (red extremes, feature color mid-band).
+          Drag updates only local state; the API commit happens on release —
+          committing per change-tick would flood PUT /saes/steering. */}
       <input
         type="range"
         min={min}
         max={max}
         step={step}
         value={localStrength}
-        onChange={(e) => commit(parseFloat(e.target.value))}
+        onChange={(e) => {
+          const v = roundToStep(parseFloat(e.target.value));
+          setLocalStrength(v);
+          setInputValue(String(v));
+        }}
+        onMouseUp={() => commit(localStrength)}
+        onTouchEnd={() => commit(localStrength)}
+        onBlur={() => commit(localStrength)}
         disabled={disabled}
         aria-label={`Strength slider for feature ${featureIndex}`}
         className="mt-1.5 w-full h-1.5 rounded-full appearance-none cursor-pointer disabled:cursor-not-allowed"

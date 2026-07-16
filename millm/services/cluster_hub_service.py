@@ -165,12 +165,13 @@ class ClusterHubService:
 
     async def fetch_definition(
         self, repo_id: str, filename: str, revision: str | None = None
-    ) -> tuple[ClusterDefinitionV1, dict[str, Any]]:
+    ) -> tuple[ClusterDefinitionV1, dict[str, Any], dict[str, Any]]:
         """
         Download and validate ONE definition file.
 
-        Returns the validated definition plus a hub_ref provenance dict
-        {repo_id, revision, path}.
+        Returns (definition, raw_payload, hub_ref). The raw payload travels to
+        storage so unknown additive fields survive re-export (lossless
+        contract), exactly like file imports.
         """
         if not filename.endswith(DEFINITION_SUFFIX):
             raise ValidationError(
@@ -204,7 +205,7 @@ class ClusterHubService:
         hub_ref = {"repo_id": repo_id, "revision": revision or "main",
                    "path": filename}
         logger.info("cluster_hub_fetched", repo_id=repo_id, filename=filename)
-        return definition, hub_ref
+        return definition, payload, hub_ref
 
     # ── Internals ────────────────────────────────────────────────────────
 

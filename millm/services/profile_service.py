@@ -15,6 +15,7 @@ from millm.core.errors import (
     ProfileNotFoundError,
     SAENotAttachedError,
 )
+from millm.core.steering_range import clamp_steering, would_clamp
 from millm.db.models.profile import Profile
 from millm.db.repositories.profile_repository import ProfileRepository
 from millm.services.sae_service import SAEService
@@ -307,8 +308,27 @@ class ProfileService:
                     raise SAENotAttachedError(
                         "Cannot apply steering: no SAE is attached",
                     )
-                # Convert string keys back to int and apply
-                steering = {int(k): v for k, v in profile.steering.items()}
+                # Convert string keys back to int and apply. Steering values are
+                # stored at lambda=1 basis (Feature 8): scale by the profile's
+                # intensity dial and clamp to the supported range — imported
+                # cluster strengths (contract allows ±300) times lambda (≤2)
+                # can exceed miLLM's ±200 steering range.
+                lam = profile.intensity if profile.intensity is not None else 1.0
+                steering = {
+                    int(k): clamp_steering(float(v) * lam)
+                    for k, v in profile.steering.items()
+                }
+                clamped = [
+                    int(k) for k, v in profile.steering.items()
+                    if would_clamp(float(v) * lam)
+                ]
+                if clamped:
+                    logger.warning(
+                        "profile_activation_values_clamped",
+                        profile_id=profile_id,
+                        intensity=lam,
+                        clamped_features=clamped,
+                    )
                 self.sae_service.clear_steering()
                 self.sae_service.set_steering_batch(steering)
                 self.sae_service.enable_steering(True)

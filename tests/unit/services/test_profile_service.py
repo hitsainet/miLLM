@@ -215,6 +215,7 @@ class TestProfileServiceActivation:
             id="prof_123",
             name="Test Profile",
             steering={"0": 1.5, "5": -0.5},
+            intensity=1.0,
         )
         mock_repository.get.return_value = mock_profile
         mock_repository.set_active.return_value = mock_profile
@@ -227,7 +228,8 @@ class TestProfileServiceActivation:
         assert result["applied_steering"] is True
         assert result["feature_count"] == 2
         mock_sae_service.clear_steering.assert_called_once()
-        mock_sae_service.set_steering_batch.assert_called_once()
+        # Values are stored at lambda=1; intensity 1.0 applies them unchanged
+        mock_sae_service.set_steering_batch.assert_called_once_with({0: 1.5, 5: -0.5})
         mock_sae_service.enable_steering.assert_called_with(True)
 
     @pytest.mark.asyncio

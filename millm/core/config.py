@@ -57,6 +57,14 @@ class Settings(BaseSettings):
     # Auto-load model on startup (model ID or name, empty to disable)
     AUTO_LOAD_MODEL: Optional[str] = None
 
+    # ── Cluster import (Feature 8) ──────────────────────────────────────
+    CLUSTER_HUB_TAG: str = "mistudio-cluster-definition"
+    CLUSTER_HUB_CACHE_TTL_S: int = 300
+    # Fallback lambda bounds when a definition lacks budget.intensity_range
+    # (also used by the per-request dial, Feature 10).
+    CLUSTER_INTENSITY_MIN: float = 0.5
+    CLUSTER_INTENSITY_MAX: float = 1.5
+
     # Performance: Inference concurrency
     MAX_CONCURRENT_REQUESTS: int = 2
     MAX_PENDING_REQUESTS: int = 10

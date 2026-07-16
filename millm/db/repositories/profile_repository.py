@@ -43,6 +43,9 @@ class ProfileRepository:
         sae_id: str | None = None,
         layer: int | None = None,
         steering: dict[str, Any] | None = None,
+        source_kind: str = "manual",
+        cluster_meta: dict[str, Any] | None = None,
+        intensity: float = 1.0,
     ) -> Profile:
         """
         Create a new Profile record.
@@ -55,6 +58,9 @@ class ProfileRepository:
             sae_id: Optional SAE ID the steering is for.
             layer: Optional layer the SAE targets.
             steering: Dict mapping feature index to steering value.
+            source_kind: 'manual' or 'cluster' (imported definition, Feature 8).
+            cluster_meta: Full original cluster definition (cluster rows only).
+            intensity: Lambda dial; steering values are stored at lambda=1 basis.
 
         Returns:
             The created Profile instance.
@@ -67,6 +73,9 @@ class ProfileRepository:
             sae_id=sae_id,
             layer=layer,
             steering=steering or {},
+            source_kind=source_kind,
+            cluster_meta=cluster_meta,
+            intensity=intensity,
         )
         self.session.add(profile)
         await self.session.commit()

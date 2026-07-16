@@ -451,10 +451,19 @@ class InferenceService:
 
         # Parse and validate the profile's steering before mutating any state,
         # so a bad value fails cleanly without leaving partial steering applied.
+        # Values are stored at lambda=1 basis (Feature 8): scale by the
+        # profile's intensity and CLAMP to the steering range rather than
+        # reject — imported cluster strengths (contract ±300) times lambda
+        # (≤2) legitimately exceed ±200, and the documented semantics are
+        # clamp-at-apply (PADR v1.1). Out-of-range indices still reject: they
+        # are meaningless for the attached SAE.
+        from millm.core.steering_range import clamp_steering
+
+        lam = profile.intensity if profile.intensity is not None else 1.0
         steering: dict[int, float] = {}
         for k, v in profile.steering.items():
             idx = int(k)
-            val = float(v)
+            val = float(v) * lam
             if not 0 <= idx < sae.d_sae:
                 raise InvalidFeatureIndexError(
                     f"Profile '{profile_name}' references feature {idx}, "
@@ -462,14 +471,7 @@ class InferenceService:
                     details={"profile": profile_name, "feature_idx": idx,
                              "d_sae": sae.d_sae},
                 )
-            if not -200.0 <= val <= 200.0:
-                raise InvalidFeatureIndexError(
-                    f"Profile '{profile_name}' steering value {val} for feature "
-                    f"{idx} is out of range [-200, 200].",
-                    details={"profile": profile_name, "feature_idx": idx,
-                             "value": val},
-                )
-            steering[idx] = val
+            steering[idx] = clamp_steering(val)
 
         # Save the state we are about to overwrite
         saved: dict = {

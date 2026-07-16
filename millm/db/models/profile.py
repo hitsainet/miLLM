@@ -120,6 +120,10 @@ class Profile(Base):
             "is_active",
             unique=True,
             postgresql_where=(is_active == True),  # noqa: E712
+            # SQLite (tests) supports partial indexes too; without this the
+            # index degrades to a FULL unique index on is_active and any two
+            # inactive rows collide.
+            sqlite_where=(is_active == True),  # noqa: E712
         ),
     )
 

@@ -1415,6 +1415,7 @@ class TestRequestProfileOverride:
 
         mock_profile = MagicMock()
         mock_profile.steering = {"20": 5.0, "30": -3.0}
+        mock_profile.intensity = 1.0
 
         with patch("millm.services.sae_service.AttachedSAEState") as MockState:
             MockState.return_value.attached_sae = mock_sae
@@ -1465,6 +1466,7 @@ class TestRequestProfileOverride:
 
         mock_profile = MagicMock()
         mock_profile.steering = {"100": 3.0}
+        mock_profile.intensity = 1.0
         mock_sae = MagicMock()
         mock_sae.get_steering_values.return_value = {42: 1.0}
         mock_sae.is_steering_enabled = False
@@ -1866,6 +1868,7 @@ class TestApplyProfileValidation:
 
         mock_profile = MagicMock()
         mock_profile.steering = {"999": 5.0}  # 999 >= d_sae=100
+        mock_profile.intensity = 1.0
 
         with patch("millm.services.sae_service.AttachedSAEState") as MockState:
             MockState.return_value.attached_sae = mock_sae
@@ -1880,16 +1883,20 @@ class TestApplyProfileValidation:
         mock_sae.set_steering_batch.assert_not_called()
 
     @pytest.mark.asyncio
-    async def test_out_of_range_value_raises(self, service):
-        from millm.core.errors import InvalidFeatureIndexError
-
+    async def test_out_of_range_value_clamps(self, service):
+        """Since Feature 8 (PADR v1.1), out-of-range VALUES clamp to +-200 at
+        apply time instead of rejecting — imported cluster strengths (contract
+        allows +-300) times lambda can legitimately exceed the steering range.
+        Out-of-range INDICES still reject (separate test)."""
         mock_sae = MagicMock()
         mock_sae.d_sae = 16384
         mock_sae.get_steering_values.return_value = {}
         mock_sae.is_steering_enabled = False
+        mock_sae.set_steering_batch = MagicMock()
 
         mock_profile = MagicMock()
-        mock_profile.steering = {"10": 5000.0}  # value out of [-200, 200]
+        mock_profile.steering = {"10": 5000.0}  # far out of [-200, 200]
+        mock_profile.intensity = 1.0
 
         with patch("millm.services.sae_service.AttachedSAEState") as MockState:
             MockState.return_value.attached_sae = mock_sae
@@ -1898,8 +1905,10 @@ class TestApplyProfileValidation:
                     "millm.db.repositories.profile_repository.ProfileRepository"
                 ) as MockRepo:
                     MockRepo.return_value.get_by_name = AsyncMock(return_value=mock_profile)
-                    with pytest.raises(InvalidFeatureIndexError):
-                        await service._apply_request_profile("bad-value-profile")
+                    saved = await service._apply_request_profile("clamped-profile")
+
+        assert saved is not None
+        mock_sae.set_steering_batch.assert_called_once_with({10: 200.0})
 
     @pytest.mark.asyncio
     async def test_no_sae_returns_none(self, service):

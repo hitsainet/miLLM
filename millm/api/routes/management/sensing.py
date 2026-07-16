@@ -18,7 +18,11 @@ from millm.api.schemas.sensing import (
     SensingStatusResponse,
     SensingToggleResult,
 )
-from millm.core.errors import ProfileNotFoundError, ValidationError
+from millm.core.errors import (
+    ProfileNotFoundError,
+    SensingEventNotFoundError,
+    ValidationError,
+)
 from millm.core.logging import get_logger
 
 router = APIRouter(prefix="/api/sensing", tags=["sensing"])
@@ -39,9 +43,26 @@ def _sensing_service():
     summary="Sensing runtime status",
 )
 async def sensing_status() -> ApiResponse[SensingStatusResponse]:
-    """Armed state, threshold mode, overhead accumulator, retention limits."""
+    """Armed state, threshold mode, overhead, retention — PLUS the
+    persistent per-cluster intent (sensing_enabled columns), reported
+    distinctly from the runtime armed state (FTID pitfall 8): enabled but
+    not armed answers 'why no events?' from this one endpoint."""
+    from millm.db.base import async_session_factory
+    from millm.db.models.profile import Profile
+    from sqlalchemy import select
+
     service = _sensing_service()
-    return ApiResponse.ok(SensingStatusResponse(**service.status()))
+    status = service.status()
+    async with async_session_factory() as session:
+        result = await session.execute(
+            select(Profile.id, Profile.name, Profile.is_active)
+            .where(Profile.sensing_enabled == True)  # noqa: E712
+        )
+        status["enabled_clusters"] = [
+            {"id": row.id, "name": row.name, "is_active": row.is_active}
+            for row in result
+        ]
+    return ApiResponse.ok(SensingStatusResponse(**status))
 
 
 @router.get(
@@ -57,8 +78,16 @@ async def list_events(
     from millm.db.base import async_session_factory
     from millm.db.repositories.sensing_repository import SensingRepository
 
+    from millm.core.config import settings
+
     async with async_session_factory() as session:
         repo = SensingRepository(session)
+        # Retention on READ as well as on flush (FPRD SEN-P2): the age cap
+        # is the documented privacy control and must hold for idle clusters
+        # that never flush again.
+        pruned = await repo.prune_aged(settings.SENSING_MAX_AGE_DAYS)
+        if pruned:
+            await session.commit()
         events = await repo.list_events(
             profile_id=profile_id, limit=limit, since=since
         )
@@ -82,7 +111,9 @@ async def get_event(event_id: int) -> ApiResponse[SensingEventResponse]:
         repo = SensingRepository(session)
         event = await repo.get(event_id)
     if event is None:
-        raise ValidationError(
+        # 404, not 422: a pruned event is EXPECTED under retention — clients
+        # must be able to branch on not-found (011 R1).
+        raise SensingEventNotFoundError(
             f"Sensing event {event_id} not found",
             details={"event_id": event_id},
         )
@@ -136,7 +167,16 @@ async def _toggle(profile_id: str, enabled: bool) -> SensingToggleResult:
     sae = AttachedSAEState().attached_sae
     if is_active:
         if enabled and sae is not None:
-            service.arm_for_profile(profile, sae)
+            try:
+                service.arm_for_profile(profile, sae)
+            except ValueError as exc:
+                # Column stays enabled (persistent intent) but arming
+                # refused — tell the caller exactly why (mismatched SAE,
+                # unusable thresholds) instead of a silent no-arm.
+                raise ValidationError(
+                    f"Sensing enabled but could not arm: {exc}",
+                    details={"profile_id": profile_id},
+                ) from exc
         else:
             service.disarm(sae)
 

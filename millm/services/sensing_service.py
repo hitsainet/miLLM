@@ -34,6 +34,11 @@ class SensingService:
         self._member_labels: dict[int, str] = {}
         self._last_request_overhead_ms: float = 0.0
         self._events_recorded: int = 0
+        self._last_ws_emit_ts: float = 0.0
+        self._ws_dropped: int = 0
+
+    _WS_MAX_PER_FLUSH = 5
+    _WS_MIN_INTERVAL_S = 0.1
 
     # ==========================================================================
     # Config build + lifecycle
@@ -74,12 +79,25 @@ class SensingService:
                 max_act = None
             if max_act is None:
                 missing += 1
-                thetas.append(floor)
+                # No activation scale for this member: with a positive
+                # configured floor it fires above the floor; with the
+                # default floor of 0 it would fire on ANY positive
+                # activation (011 R1: degenerate — every token co-'fires'
+                # and inflates min_k), so it gets an infinite threshold
+                # and simply never contributes.
+                thetas.append(floor if floor > 0 else float("inf"))
             else:
                 thetas.append(max(floor, eps * max_act))
 
         if not indices:
             raise ValueError("cluster has no members to sense")
+        if all(theta == float("inf") for theta in thetas):
+            raise ValueError(
+                "no member has max_activation data and no positive "
+                "theta_floor is configured — sensing has no usable "
+                "thresholds (set sensing.theta_floor in the definition, or "
+                "re-export from miStudio with activation statistics)"
+            )
 
         mode = "floor_only" if missing == len(indices) else "epsilon_max"
         min_k = int(_override("min_k", max(2, math.ceil(0.3 * len(indices)))))
@@ -99,8 +117,26 @@ class SensingService:
         )
 
     def arm_for_profile(self, profile: Any, sae: LoadedSAE) -> None:
-        """Arm sensing for an active cluster profile (idempotent)."""
+        """Arm sensing for an active cluster profile (idempotent).
+
+        Applies the same declared-feature-space gate as steering activation
+        (011 R1): arming must never index_select out of range — on CUDA
+        that's a device-side assert that poisons the context for the whole
+        process, not just an exception.
+        """
+        declared = ((profile.cluster_meta or {}).get("sae") or {}).get("n_features")
+        if declared is not None and int(declared) != sae.d_sae:
+            raise ValueError(
+                f"cluster declares an SAE with {declared} features; the "
+                f"attached SAE has {sae.d_sae} — refusing to arm sensing"
+            )
         config = self.build_config(profile)
+        bad = [i for i in config.member_indices if not 0 <= i < sae.d_sae]
+        if bad:
+            raise ValueError(
+                f"member feature indices {bad} out of range "
+                f"[0, {sae.d_sae}) for the attached SAE"
+            )
         sae.arm_sensing(config)
         self._armed_profile_id = profile.id
         self._armed_profile_name = profile.name
@@ -143,17 +179,21 @@ class SensingService:
         full_ids: Optional[torch.Tensor],
         tokenizer: Any,
         ambient_counts: Optional[dict[int, int]] = None,
+        profile_id: Optional[str] = None,
     ) -> list[dict[str, Any]]:
         """
         Decode context windows, persist bounded events, emit WS updates.
 
         ambient_counts maps event index -> full-SAE fired count (best-effort,
         filled by the caller only when un-compacted monitoring co-ran).
+        profile_id is the BEGIN-time snapshot from the inference path — a
+        mid-request re-arm must not attribute these hits to the newly armed
+        cluster (011 R1). Falls back to the currently armed id.
         Returns the persisted events as API-shaped dicts.
         """
-        if not hits or self._armed_profile_id is None:
+        profile_id = profile_id or self._armed_profile_id
+        if not hits or profile_id is None:
             return []
-        profile_id = self._armed_profile_id
         config = self._armed_config
         k = config.context_tokens if config else 0
 
@@ -174,7 +214,10 @@ class SensingService:
                 "context_text": context_text,
                 "context_token_ids": context_ids,
                 "summary": self._summary(hit),
-                "truncated": truncated,
+                # Only the LAST event marks truncation — that's where the
+                # per-request cap actually cut (011 R1: stamping every row
+                # made the cut point unrecoverable).
+                "truncated": truncated and i == len(hits) - 1,
             })
 
         from millm.db.base import async_session_factory
@@ -231,7 +274,21 @@ class SensingService:
 
     def _emit_events(self, payloads: list[dict[str, Any]]) -> None:
         """Fire-and-forget WS emission (payload excludes context — user
-        content and size; the UI fetches detail via REST)."""
+        content and size; the UI fetches detail via REST).
+
+        Throttled like monitoring (SEN-P4): at most _WS_MAX_PER_FLUSH
+        emissions per flush and a minimum interval between flushes — the DB
+        rows are complete regardless, and the UI reconciles on refetch."""
+        import time as _time
+
+        now = _time.monotonic()
+        if now - self._last_ws_emit_ts < self._WS_MIN_INTERVAL_S:
+            self._ws_dropped += len(payloads)
+            return
+        self._last_ws_emit_ts = now
+        if len(payloads) > self._WS_MAX_PER_FLUSH:
+            self._ws_dropped += len(payloads) - self._WS_MAX_PER_FLUSH
+            payloads = payloads[: self._WS_MAX_PER_FLUSH]
         try:
             from millm.sockets.progress import progress_emitter as emitter
 

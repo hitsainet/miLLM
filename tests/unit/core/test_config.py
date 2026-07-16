@@ -33,7 +33,12 @@ class TestSettingsDefaults:
         assert Settings().cors_origins_list == ["*"]
 
     def test_max_concurrent_requests_default(self):
-        assert Settings().MAX_CONCURRENT_REQUESTS == 2
+        """Serial by default: per-request steering overrides, monitoring
+        attribution, and sensing all assume exactly one generation mutates
+        the global SAE state at a time (011 R1 — the old default of 2 let
+        two generations interleave). CBM is the concurrency path."""
+        settings = Settings()
+        assert settings.MAX_CONCURRENT_REQUESTS == 1
 
     def test_max_pending_requests_default(self):
         assert Settings().MAX_PENDING_REQUESTS == 10

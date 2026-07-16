@@ -70,6 +70,15 @@ class SensingRepository:
         result = await self.session.execute(stmt)
         return int(result.rowcount or 0)
 
+    async def prune_aged(self, max_age_days: int) -> int:
+        """Age-window prune across ALL profiles (read-path retention)."""
+        cutoff = datetime.now(timezone.utc) - timedelta(days=max_age_days)
+        result = await self.session.execute(
+            delete(SensingEvent).where(SensingEvent.created_at < cutoff),
+            execution_options={"synchronize_session": False},
+        )
+        return int(result.rowcount or 0)
+
     async def prune(
         self, profile_id: str, cap: int, max_age_days: int
     ) -> int:

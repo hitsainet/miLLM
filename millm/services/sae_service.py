@@ -828,6 +828,27 @@ class SAEService:
         except Exception as e:
             logger.warning("model_auto_lock_failed", error=str(e))
 
+        # Sensing lifecycle (011 R1): re-arm when the ACTIVE profile has
+        # sensing enabled — activate-then-attach (and detach/re-attach
+        # cycles) previously left sensing silently dark while the UI toggle
+        # showed it on. Best-effort: never fails the attach.
+        try:
+            import millm.api.dependencies as deps
+            from millm.db.base import async_session_factory
+            from millm.db.repositories.profile_repository import ProfileRepository
+
+            async with async_session_factory() as session:
+                active = await ProfileRepository(session).get_active()
+            if (active is not None
+                    and getattr(active, "source_kind", None) == "cluster"
+                    and bool(getattr(active, "sensing_enabled", False))):
+                deps.get_sensing_service().arm_for_profile(
+                    active, self._sae_state.attached_sae
+                )
+                logger.info("sensing_rearmed_on_attach", profile_id=active.id)
+        except Exception as e:
+            logger.warning("sensing_rearm_on_attach_failed", error=str(e))
+
         logger.info(
             "sae_attached",
             sae_id=sae_id,

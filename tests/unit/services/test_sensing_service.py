@@ -48,20 +48,28 @@ def service():
 
 
 class TestConfigBuild:
-    def test_thresholds_epsilon_max_with_floor_fallback(self, service):
+    def test_thresholds_epsilon_max_with_inf_fallback(self, service):
         config = service.build_config(make_profile())
         assert config.member_indices == [7, 9, 12]
-        # theta = max(floor=0, 0.1 * max_act); member 12 missing -> floor
-        assert config.thresholds.tolist() == pytest.approx([4.0, 2.0, 0.0])
+        # theta = max(floor, 0.1 * max_act); member 12 missing + zero floor
+        # -> INFINITE threshold (R1 fix: floor 0 fired on any positive act)
+        assert config.thresholds.tolist()[:2] == pytest.approx([4.0, 2.0])
+        assert config.thresholds.tolist()[2] == float("inf")
         assert config.threshold_mode == "epsilon_max"
         assert config.min_k == 2  # max(2, ceil(0.3*3)) = 2
 
-    def test_floor_only_mode_when_all_missing(self, service):
+    def test_floor_only_mode_needs_positive_floor(self, service):
         members = [{"feature_idx": 1, "strength": 1.0},
                    {"feature_idx": 2, "strength": 1.0}]
-        config = service.build_config(make_profile(members=members))
+        # All members missing max_activation + default zero floor: refuse
+        # to arm rather than fire on every positive activation (R1 fix).
+        with pytest.raises(ValueError, match="no usable"):
+            service.build_config(make_profile(members=members))
+        # With a positive authored floor, floor_only mode works.
+        config = service.build_config(make_profile(
+            members=members, sensing={"theta_floor": 0.5}))
         assert config.threshold_mode == "floor_only"
-        assert config.thresholds.tolist() == [settings.SENSING_THETA_FLOOR] * 2
+        assert config.thresholds.tolist() == [0.5, 0.5]
 
     def test_document_overrides(self, service):
         config = service.build_config(make_profile(
@@ -136,6 +144,7 @@ class TestContextSlicing:
 class TestSummary:
     def test_format_and_label(self, service):
         sae = MagicMock()
+        sae.d_sae = 16384
         service.arm_for_profile(make_profile(), sae)
         summary = service._summary(make_hit())
         assert summary.startswith("fear: 2/3 members fired")
@@ -143,18 +152,19 @@ class TestSummary:
         assert "during decode @ 5–6" in summary
 
     def test_single_position_span(self, service):
-        service.arm_for_profile(make_profile(), MagicMock())
+        service.arm_for_profile(make_profile(), MagicMock(d_sae=16384))
         assert "@ 5" in service._summary(make_hit(pos_end=5))
 
     def test_hard_cap_300(self, service):
         profile = make_profile(display_token="x" * 400)
-        service.arm_for_profile(profile, MagicMock())
+        service.arm_for_profile(profile, MagicMock(d_sae=16384))
         assert len(service._summary(make_hit())) <= 300
 
 
 class TestLifecycle:
     def test_arm_and_disarm_track_state(self, service):
         sae = MagicMock()
+        sae.d_sae = 16384
         service.arm_for_profile(make_profile(), sae)
         assert service.is_armed and service.armed_profile_id == "prof_s1"
         sae.arm_sensing.assert_called_once()
@@ -163,7 +173,7 @@ class TestLifecycle:
         sae.disarm_sensing.assert_called_once()
 
     def test_disarm_with_detached_sae(self, service):
-        service.arm_for_profile(make_profile(), MagicMock())
+        service.arm_for_profile(make_profile(), MagicMock(d_sae=16384))
         service.disarm(None)  # SAE already gone — must not raise
         assert not service.is_armed
 
@@ -176,7 +186,7 @@ class TestLifecycle:
     def test_status_shape(self, service):
         status = service.status()
         assert status["armed"] is False
-        service.arm_for_profile(make_profile(), MagicMock())
+        service.arm_for_profile(make_profile(), MagicMock(d_sae=16384))
         status = service.status()
         assert status["member_count"] == 3
         assert status["threshold_mode"] == "epsilon_max"
@@ -193,7 +203,7 @@ class TestRecord:
         test_session.add(row)
         await test_session.flush()
 
-        service.arm_for_profile(make_profile(), MagicMock())
+        service.arm_for_profile(make_profile(), MagicMock(d_sae=16384))
         tokenizer = MagicMock()
         tokenizer.decode.side_effect = lambda ids, **kw: "ctx"
 

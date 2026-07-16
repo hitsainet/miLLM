@@ -148,6 +148,18 @@ class InferenceService:
         """
         self._model_service = model_service
         self._request_queue = RequestQueue(max_concurrent, max_pending)
+        if max_concurrent > 1:
+            # The serial queue is a correctness boundary, not just a perf
+            # knob: per-request steering overrides, monitoring attribution,
+            # and sensing all assume exactly one generation mutates the
+            # global SAE state at a time (011 R1). CBM is the supported
+            # concurrency path.
+            logger.warning(
+                "max_concurrent_above_one_breaks_request_isolation",
+                max_concurrent=max_concurrent,
+                detail="per-request steering/monitoring/sensing require 1; "
+                       "use the CBM backend for batching",
+            )
         self._device = "cuda" if torch.cuda.is_available() else "cpu"
         self._model_state = LoadedModelState()
         self._kv_cache_mode = kv_cache_mode
@@ -984,24 +996,49 @@ class InferenceService:
         return kwargs
 
     def _sensing_begin(self, request_id: str):
-        """Open a sensing request boundary (serial paths only). Returns the
-        armed SAE, or None when sensing is not armed."""
+        """Open a sensing request boundary (serial paths only). Returns
+        (sae, profile_id) for the armed SAE, or None when the request will
+        not be sensed.
+
+        The profile_id is SNAPSHOTTED here (011 R1): a re-arm to a different
+        cluster while this request generates must not let the flush persist
+        these hits under the new profile.
+
+        Speculative decoding is excluded: verification passes advance the
+        offset by the whole candidate block and rejected tokens re-run, so
+        absolute positions diverge from real token indices — such requests
+        go unsensed rather than mis-attributed (documented v1 limitation).
+        """
         try:
             from millm.services.sae_service import AttachedSAEState
 
             sae = AttachedSAEState().attached_sae
-            if sae is not None and sae.is_sensing_armed:
-                sae.begin_sensing_request(request_id)
-                return sae
+            if sae is None or not sae.is_sensing_armed:
+                return None
+            if self._speculative_model_id:
+                logger.info(
+                    "sensing_skipped",
+                    reason="speculative_decoding_active",
+                    request_id=request_id,
+                )
+                return None
+            sae.begin_sensing_request(request_id)
+            profile_id = sae._sensing.profile_id if sae._sensing else None
+            return (sae, profile_id)
         except Exception:
             logger.warning("sensing_begin_failed", exc_info=False)
         return None
 
-    async def _notify_sensing(self, sensing_sae, full_ids) -> None:
+    async def _notify_sensing(self, sensing_ctx, full_ids) -> None:
         """Collect + record this request's sensing hits (post-generation,
-        off the hot path). Sibling of _notify_monitoring; never raises."""
-        if sensing_sae is None:
+        off the hot path). Sibling of _notify_monitoring; never raises.
+
+        sensing_ctx is the (sae, profile_id) pair from _sensing_begin — the
+        profile id was snapshotted at begin time so a mid-request re-arm
+        cannot mis-attribute the flush (011 R1)."""
+        if sensing_ctx is None:
             return
+        sensing_sae, profile_id = sensing_ctx
         try:
             import millm.api.dependencies as deps
 
@@ -1020,6 +1057,7 @@ class InferenceService:
                 full_ids,
                 self._tokenizer if self.is_model_loaded() else None,
                 ambient_counts=ambient,
+                profile_id=profile_id,
             )
         except Exception:
             logger.exception("sensing_flush_failed")
@@ -1262,6 +1300,15 @@ class InferenceService:
             # generations (documented v1 limitation; such requests go
             # unsensed rather than mis-attributed).
             _sensing_sae = self._sensing_begin(completion_id) if n == 1 else None
+            if n > 1:
+                from millm.services.sae_service import AttachedSAEState as _S
+
+                _armed_sae = _S().attached_sae
+                if _armed_sae is not None and _armed_sae.is_sensing_armed:
+                    logger.info(
+                        "sensing_skipped", reason="n_gt_1", n=n,
+                        request_id=completion_id,
+                    )
             _sensing_full_ids = None
 
             try:
@@ -1467,6 +1514,11 @@ class InferenceService:
                 thread.start()
             except BaseException:
                 self._restore_request_profile(_saved_steering)
+                # Close the sensing boundary too — a stale open boundary
+                # would let later non-begin passes sense with garbage
+                # offsets (011 R1).
+                if _sensing_sae is not None:
+                    _sensing_sae[0].collect_sensing_hits()
                 raise
 
             try:
@@ -1650,6 +1702,17 @@ class InferenceService:
                         completion_id=completion_id,
                         hint="GPU may be stuck. Restart the server if this recurs.",
                     )
+                    # A hung generate thread can wake up later and keep
+                    # calling _sense into the NEXT request's freshly-begun
+                    # buffer (011 R1). Disarm: better to lose sensing until
+                    # the cluster is re-activated than to mis-attribute.
+                    if _sensing_sae is not None:
+                        try:
+                            import millm.api.dependencies as _deps
+
+                            _deps.get_sensing_service().disarm(_sensing_sae[0])
+                        except Exception:
+                            logger.warning("sensing_disarm_after_hang_failed")
                 # Restore steering to its pre-request state (Fix #1: steering race)
                 self._restore_request_profile(_saved_steering)
                 # Flush sensing hits: captured ids when any step ran, else

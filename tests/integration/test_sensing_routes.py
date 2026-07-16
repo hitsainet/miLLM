@@ -23,12 +23,47 @@ def client():
 
 
 class TestStatusRoute:
+    def _ctx(self, rows=()):
+        session = MagicMock()
+
+        async def _execute(*a, **kw):
+            result = MagicMock()
+            result.__iter__ = lambda self: iter(rows)
+            return result
+
+        session.execute = _execute
+
+        class _Ctx:
+            async def __aenter__(self_inner):
+                return session
+
+            async def __aexit__(self_inner, *a):
+                return False
+
+        return _Ctx()
+
     def test_status_envelope_unarmed(self, client):
-        response = client.get("/api/sensing/status")
+        with patch("millm.db.base.async_session_factory",
+                   return_value=self._ctx()):
+            response = client.get("/api/sensing/status")
         body = response.json()
         assert body["success"] is True
         assert body["data"]["armed"] is False
         assert body["data"]["retention"]["max_events_per_cluster"] > 0
+        assert body["data"]["enabled_clusters"] == []
+
+    def test_status_reports_enabled_but_unarmed_cluster(self, client):
+        """FTID pitfall 8: persistent intent visible distinctly from armed."""
+        row = MagicMock(id="prof_s1", is_active=False)
+        row.name = "fear cluster"  # name= is a reserved MagicMock kwarg
+        with patch("millm.db.base.async_session_factory",
+                   return_value=self._ctx(rows=(row,))):
+            response = client.get("/api/sensing/status")
+        data = response.json()["data"]
+        assert data["armed"] is False
+        assert data["enabled_clusters"] == [
+            {"id": "prof_s1", "name": "fear cluster", "is_active": False}
+        ]
 
 
 class TestEventRoutes:
@@ -63,6 +98,7 @@ class TestEventRoutes:
             instance = MockRepo.return_value
             instance.list_events = _async_return([event])
             instance.count = _async_return(1)
+            instance.prune_aged = _async_return(0)
             response = client.get("/api/sensing/events?profile_id=prof_s1&limit=10")
         body = response.json()
         assert body["success"] is True
@@ -155,6 +191,7 @@ class TestToggleRoutes:
     def test_enable_on_active_cluster_live_arms(self, client):
         profile = self._profile(is_active=True)
         sae = MagicMock()
+        sae.d_sae = 16384
         with patch("millm.db.repositories.profile_repository.ProfileRepository") as MockRepo, \
              patch("millm.db.base.async_session_factory",
                    return_value=self._ctx()), \

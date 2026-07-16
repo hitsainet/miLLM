@@ -160,6 +160,7 @@ class LoadedSAE:
         # deliberately independent of monitoring (which compacts columns
         # positionally and keeps only the last pass).
         self._sensing: Optional[SensingConfig] = None
+        self._sensing_thresholds_cpu: list[float] = []
         self._W_enc_m: Optional[Tensor] = None
         self._b_enc_m: Optional[Tensor] = None
         self._sensed_hits: list[SensedHit] = []
@@ -169,6 +170,7 @@ class LoadedSAE:
         self._sensing_truncated: bool = False
         self._sensing_began: bool = False
         self._sensing_request_id: str = ""
+        self._sensing_batch_warned: bool = False
         # Cumulative per-request overhead accumulator (ms) — read by the
         # sensing status endpoint (SEN-S2); reset at begin.
         self._sensing_overhead_ms: float = 0.0
@@ -521,6 +523,11 @@ class LoadedSAE:
         self._b_enc_m = self.b_enc.index_select(0, idx).contiguous()
         config.thresholds = config.thresholds.to(
             device=self.W_enc.device, dtype=self.W_enc.dtype)
+        # CPU copy for score math off the hot path (one sync at arm, none
+        # per token). float32 cast first: inf survives, fp16 would overflow.
+        self._sensing_thresholds_cpu = [
+            float(v) for v in config.thresholds.to("cpu", torch.float32)
+        ]
         self._sensing = config
         self._reset_sensing_buffer()
         self._sensing_began = False
@@ -536,6 +543,7 @@ class LoadedSAE:
             logger.info("sensing_disarmed: profile=%s",
                         self._sensing.profile_id)
         self._sensing = None
+        self._sensing_thresholds_cpu = []
         self._W_enc_m = None
         self._b_enc_m = None
         self._reset_sensing_buffer()
@@ -594,6 +602,18 @@ class LoadedSAE:
 
         started = _time.perf_counter()
         config = self._sensing
+        if hidden_states.dim() == 3 and hidden_states.shape[0] > 1:
+            # Batched pass while a boundary is open: positions can't be
+            # attributed to a request (011 R1). Routing should prevent this
+            # (armed forces serial); make the violation observable and skip
+            # rather than silently sensing row 0.
+            if not self._sensing_batch_warned:
+                self._sensing_batch_warned = True
+                logger.warning(
+                    "sensing_skipped_batched_pass: batch=%d — armed sensing "
+                    "expects the serial path", hidden_states.shape[0],
+                )
+            return
         x = hidden_states[0] if hidden_states.dim() == 3 else hidden_states
         seq_len = x.shape[0]
         try:
@@ -606,7 +626,14 @@ class LoadedSAE:
             counts = fired.sum(dim=-1)                             # (seq,)
             hot = (counts >= config.min_k).nonzero(as_tuple=True)[0]
             if hot.numel():
-                self._append_sensing_hits(hot.tolist(), acts, fired)
+                # ONE device->host transfer per pass: the per-element
+                # float()/tolist() pattern cost a CUDA sync per fired
+                # member per hot position (011 R1 — hot prefills could
+                # burn tens of ms inside the forward hook).
+                hot_list = hot.tolist()
+                acts_hot = acts[hot].detach().to("cpu", non_blocking=False)
+                fired_hot = fired[hot].detach().to("cpu", non_blocking=False)
+                self._append_sensing_hits(hot_list, acts_hot, fired_hot)
         except Exception:
             # An observation path must never break generation.
             logger.exception("sensing_pass_failed")
@@ -618,30 +645,32 @@ class LoadedSAE:
                 (_time.perf_counter() - started) * 1000.0)
 
     def _append_sensing_hits(
-        self, hot_positions: list[int], acts: Tensor, fired: Tensor
+        self, hot_positions: list[int], acts_hot: Tensor, fired_hot: Tensor
     ) -> None:
         """Debounce hot positions into spans and merge with the buffer tail.
 
-        Consecutive absolute positions extend one span — including across
-        pass boundaries during decode (position p in one pass, p+1 in the
-        next: FTID pitfall 3). New spans beyond the per-request cap set the
-        truncated flag and stop further sensing for the request.
+        acts_hot/fired_hot are CPU tensors indexed by hot-position ROW (not
+        sequence position). Consecutive absolute positions extend one span —
+        including across pass boundaries during decode (position p in one
+        pass, p+1 in the next: FTID pitfall 3). New spans beyond the
+        per-request cap set the truncated flag and stop further sensing for
+        the request.
         """
         assert self._sensing is not None
         config = self._sensing
-        thresholds = config.thresholds
+        thresholds = self._sensing_thresholds_cpu
 
-        for pos in hot_positions:
+        for row, pos in enumerate(hot_positions):
             abs_pos = self._sensing_token_offset + pos
-            member_mask = fired[pos]
-            member_acts = acts[pos]
+            member_mask = fired_hot[row]
+            member_acts = acts_hot[row].tolist()
             fired_pairs: dict[int, float] = {}
             score = 0.0
             for j in member_mask.nonzero(as_tuple=True)[0].tolist():
                 real_idx = config.member_indices[j]
                 act = float(member_acts[j])
                 fired_pairs[real_idx] = act
-                theta = float(thresholds[j])
+                theta = thresholds[j]
                 score = max(score, act / theta if theta > 0 else act)
 
             tail = self._sensed_hits[-1] if self._sensed_hits else None
@@ -652,7 +681,9 @@ class LoadedSAE:
                     merged[idx] = max(merged.get(idx, 0.0), act)
                 tail.pos_end = abs_pos
                 tail.fired = sorted(merged.items())
-                tail.fired_count = max(tail.fired_count, len(fired_pairs))
+                # Union count — must agree with fired_members (011 R1: the
+                # peak-simultaneous count disagreed with the member list).
+                tail.fired_count = len(merged)
                 tail.score = max(tail.score, score)
                 continue
 

@@ -51,6 +51,8 @@ class SensingStatusResponse(BaseModel):
     overhead_warn_threshold_ms: float = 5.0
     events_recorded_since_start: int = 0
     retention: dict[str, Any] = Field(default_factory=dict)
+    # Persistent intent (the sensing_enabled column), distinct from `armed`
+    enabled_clusters: list[dict[str, Any]] = Field(default_factory=list)
 
 
 class SensingToggleResult(BaseModel):

@@ -452,13 +452,17 @@ class ProfileService:
         """
         profile = await self.get_profile(profile_id)
 
+        # Captured BEFORE repository.deactivate mutates this identity-mapped
+        # row (011 R1: reading profile.is_active afterwards is always False,
+        # which made the disarm condition dead code).
+        was_active = bool(profile.is_active)
         cleared_steering = False
 
         # Clear steering if requested — but ONLY when the row being
         # deactivated is the one whose steering is live. Deactivating an
         # inactive profile must never wipe the active profile's steering
         # (review find: POST /deactivate on any id used to clear globally).
-        if clear_steering and profile.is_active:
+        if clear_steering and was_active:
             attachment = self.sae_service.get_attachment_status()
             if attachment.is_attached:
                 self.sae_service.clear_steering()
@@ -468,8 +472,9 @@ class ProfileService:
         await self.repository.deactivate(profile_id)
 
         # Sensing lifecycle (Feature 11): deactivating the sensed profile
-        # disarms; deactivating another row leaves the armed state alone.
-        if profile.is_active or cleared_steering:
+        # disarms — regardless of the clear_steering flag; deactivating
+        # another row leaves the armed state alone.
+        if was_active:
             self._sync_sensing_arm_state(None)
 
         logger.info(
@@ -506,6 +511,10 @@ class ProfileService:
         # Deactivate first if active
         if was_active:
             await self.repository.deactivate(profile_id)
+            # Sensing lifecycle (011 R1): deleting the armed cluster must
+            # disarm — otherwise the runtime keeps sensing into a dead FK
+            # (an IntegrityError per request, silently swallowed).
+            self._sync_sensing_arm_state(None)
 
         # Delete profile
         deleted = await self.repository.delete(profile_id)

@@ -75,8 +75,14 @@ class Settings(BaseSettings):
     SENSING_FORCE_SERIAL: bool = True         # armed sensing forces serial routing
     SENSING_MAX_OVERHEAD_MS: float = 5.0      # warn threshold per request
 
-    # Performance: Inference concurrency
-    MAX_CONCURRENT_REQUESTS: int = 2
+    # Performance: Inference concurrency.
+    # MUST stay 1 for correctness of everything built on the global SAE
+    # state: per-request steering overrides (Features 8/10), monitoring
+    # attribution, and co-activation sensing (Feature 11) all serialize on
+    # the request queue. Raising it re-introduces cross-request races the
+    # reviews closed (011 R1 top finding: the old default of 2 let two
+    # generations interleave apply/restore and share the sensing buffer).
+    MAX_CONCURRENT_REQUESTS: int = 1
     MAX_PENDING_REQUESTS: int = 10
 
     # Performance: torch.compile

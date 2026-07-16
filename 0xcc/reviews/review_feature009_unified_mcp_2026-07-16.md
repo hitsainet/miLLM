@@ -72,3 +72,46 @@ unit test) cleaned; 8 new pins (59 MCP tests green).
 - The unhealthy-body branch is defensive: today's liveness endpoints hardcode healthy statuses
   (comment + contract note the reserved semantics).
 - miStudio's own tools remain ungated (the gate knows the product; wiring 38 tools is follow-on).
+
+## Round 3 (/review, 4 perspectives) — 14 findings: 9 fixed, 5 assessed/documented
+
+**Headline verification:** the cross-product pipe is verbatim-compatible end-to-end — miStudio's
+export returns the RAW v1 document, both repos' vendored contracts are byte-identical (now
+pinned to EACH OTHER by a cross-repo test, not just to their own mirrors), and
+`millm_import_cluster(definition=…)` posts it unmodified into miLLM's validator.
+
+**Fixed:** `activate=true` on unbound imports was silently dropped (the flagship flow's agent
+believed the cluster live while traffic ran unsteered) → explicit persisted warning; EC-9.3
+mid-TTL outages now return structured unavailable on THIS call and invalidate the stale gate
+entry (`invalidate` was dead API); snapshot background refreshes keep strong task refs with
+exception retrieval + per-product dedup (fire-and-forget tasks were GC-collectable);
+`public_reason` anchored (an 'unhealthy' HOSTNAME miscategorized an HTTP-status reason);
+timeouts labeled as timeouts (a slow hub import read as a connectivity failure); the malformed
+`_locks` annotation (MyPy-strict violation); `__main__` closes backend clients after uvicorn
+stops (the R2 hook had no production caller — the R2 record overstated); the sensing tool
+docstring names `ambient_fired_count` as the alone-vs-within signal (US-9.3 discoverability);
+FPRD amended with shipped tool/route names; both named mutation survivors pinned
+(`request()` non-envelope 4xx, `public_reason` HTTP prefix) + audit-triple-wrap invocation test.
+
+**Assessed sound / documented:** validate-then-gate ordering in `millm_import_cluster`
+(deliberate — argument errors are actionable regardless of backend state); single-loop gate
+affinity (docstring note added); env-property config (matches worker convention; k8s env is
+immutable per pod); split `MILLM_CATEGORY_MODULES` registry (different register arity);
+`definition`+`filename` still silently ignores `filename` (R1-noted; XOR pairs the sources).
+
+## Live E2E (tasks 4.2/5.2 — deployed pair, 2026-07-16)
+
+- **Deployed unified server**: `/health` reports all 10 categories incl. the 3 millm ones and
+  per-product availability (`mistudio: ok, millm: ok`) via non-blocking snapshots.
+- **MCP tool call through the real path** (initialize → `tools/call millm_status` with bearer
+  auth): returned miLLM's detailed health including `active_profile` — US-9.2's one-call status.
+- **Flow**: import (bound — after the live-E2E-caught `sae_id` VARCHAR(50) truncation fix +
+  migration 009) → activate → per-request dial off/min/max produced three observably different
+  outputs with correct `X-miLLM-Steering-Intensity` echoes (0 / 0.5 / 1.5) → sensing enabled →
+  real co-activation event captured (quorum 2/3, prefill span, score 2.5×θ, ±8-token context
+  decoded) → warm sensing overhead 3.9 ms (< 5 ms budget; cold first pass 34.9 ms = kernel
+  warmup) → arm-refusal path verified live with the actionable message → all artifacts cleaned.
+
+## Gate
+**SHIP** — 41 findings across 3 rounds (32 fixed, 9 assessed/documented), live E2E complete on
+the deployed pair. Suites: miStudio MCP 67 green (backend suite pytest exit 0), miLLM 1084+.

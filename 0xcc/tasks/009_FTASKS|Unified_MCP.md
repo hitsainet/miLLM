@@ -4,7 +4,7 @@
 
 **Document Version:** 1.0
 **Created:** July 16, 2026
-**Status:** Implemented 2026-07-16 (miLLM 0020dce + miStudio 40f55f2) — 4.2/5.2 live E2E post-deploy; reviews + acceptance pending
+**Status:** ✅ COMPLETE 2026-07-16 — implemented cross-repo, 3 review rounds (41 findings / 32 fixed), live E2E on the deployed pair, accepted
 **References:** `009_FPRD|Unified_MCP.md` · `009_FTDD|Unified_MCP.md` · `009_FTID|Unified_MCP.md`
 
 ## Relevant Files
@@ -59,17 +59,17 @@
   - [x] 3.5 Tool smoke tests (mocked MiLLMClient) incl. XOR validation
   - [x] 3.6 SERVER_INSTRUCTIONS: cross-product flow paragraph
 
-- [ ] 4.0 [CROSS-REPO] Topology verification (covers FR-9.4)
+- [x] 4.0 [CROSS-REPO] Topology verification (covers FR-9.4)
   - [x] 4.1 Matrix test: both products / miStudio-only (URL unset ⇒ categories absent) / miLLM-down (structured unavailable)
-  - [ ] 4.2 Live E2E: export_cluster_definition → millm_import_cluster → millm_activate_cluster against deployed stacks (US-9.1)
+  - [x] 4.2 Live E2E: export_cluster_definition → millm_import_cluster → millm_activate_cluster against deployed stacks (US-9.1)
 
-- [ ] 5.0 Deployment wiring (covers rollout)
+- [x] 5.0 Deployment wiring (covers rollout)
   - [x] 5.1 [CROSS-REPO] mistudio k8s/base mcp.yaml + compose: MILLM_API_URL + categories env
-  - [ ] 5.2 Verify health-gate behavior on the deployed pair; record in contract doc
+  - [x] 5.2 Verify health-gate behavior on the deployed pair; record in contract doc
 
-- [ ] 6.0 Feature Acceptance (per instruct 008)
-  - [ ] 6.1 Verify FPRD §9 criteria 1–4 one-by-one (topology matrix, live flow, single-call status, contract spot-check)
-  - [ ] 6.2 Full suites green in BOTH repos; update CLAUDE.md Document Inventory + Current Status
+- [x] 6.0 Feature Acceptance (per instruct 008)
+  - [x] 6.1 Verify FPRD §9 criteria 1–4 one-by-one (topology matrix, live flow, single-call status, contract spot-check)
+  - [x] 6.2 Full suites green in BOTH repos; update CLAUDE.md Document Inventory + Current Status
 
 ## Coverage Audit
 - FR-9.1..9.4 covered (2.0/5.0, 3.0, 1.0, 4.0 respectively) ✓
@@ -79,3 +79,21 @@
 - TDD/TID sections all mapped; UI category justified N/A ✓
 - Open questions: none — no spike tasks ✓
 - Final task is Feature Acceptance ✓
+
+## Review rounds (goal: 3 rounds, ≥10 findings each)
+- Round 1: 14 findings — 12 fixed. Critical: millm_activate_profile 422'd on every real call
+  (empirically confirmed); the normative contract was wrong on import-critical error paths.
+- Round 2: 13 findings — 11 fixed. Critical: the R1 /health fix could readiness-outage +
+  restart-loop the MCP pod against k8s' 1s probe timeout; unauthenticated topology leak.
+- Round 3: 14 findings — 9 fixed. Cross-product pipe verified verbatim-compatible; silent
+  activate-skip on unbound imports fixed; EC-9.3 mid-TTL outages structured.
+Full record: `0xcc/reviews/review_feature009_unified_mcp_2026-07-16.md`.
+
+## Acceptance evidence (Task 6.0)
+- FPRD §9: (1) topology matrix — unit-pinned (both/miStudio-only/millm-down) + live /health;
+  (2) live flow — deployed-pair E2E (MCP tools/call, import→activate→dial→sensing, artifacts
+  cleaned); (3) single-call status — millm_status returned active_profile live; (4) contract
+  spot-check — §2/§3/§5 corrected in rounds 1-3, vendored schemas byte-identical cross-repo
+  (pinned). Bonus: the live E2E caught and fixed a production bug (profiles.sae_id VARCHAR(50)
+  truncation → migration 009).
+- Suites: miLLM backend 1084+ / miStudio MCP 67; both repos green.

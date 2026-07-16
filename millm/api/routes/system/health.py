@@ -74,6 +74,18 @@ class CircuitBreakerStatus(BaseModel):
     is_open: bool = Field(..., description="Whether circuit is currently blocking requests")
 
 
+class ActiveProfileInfo(BaseModel):
+    """The active steering profile, surfaced for the unified MCP server
+    (Feature 9): agents answer 'what is steering right now?' from one
+    detailed-health call instead of a second round-trip."""
+
+    id: str = Field(..., description="Profile ID")
+    name: str = Field(..., description="Profile display name")
+    source_kind: str = Field("manual", description="'manual' or 'cluster'")
+    intensity: float = Field(1.0, description="Current lambda dial (clusters)")
+    sensing_enabled: bool = Field(False, description="Sensing intent (Feature 11)")
+
+
 class DetailedHealthResponse(BaseModel):
     """Detailed health response with all system information."""
 
@@ -93,6 +105,9 @@ class DetailedHealthResponse(BaseModel):
     sae_attached: bool = Field(False, description="Whether an SAE is currently attached")
     sae_id: Optional[str] = Field(None, description="ID of attached SAE")
     inference: Optional[dict[str, Any]] = Field(None, description="Inference backend info")
+    active_profile: Optional[ActiveProfileInfo] = Field(
+        None, description="Currently active steering profile (null when none)"
+    )
 
 
 # Track server start time for uptime calculation
@@ -296,6 +311,26 @@ async def detailed_health_check(
         pass
 
     sae_state = AttachedSAEState()
+    # Active steering profile (Feature 9: one-call status for MCP agents).
+    # Best-effort: a DB hiccup must not fail the health endpoint.
+    active_profile: Optional[ActiveProfileInfo] = None
+    try:
+        from millm.db.base import async_session_factory
+        from millm.db.repositories.profile_repository import ProfileRepository
+
+        async with async_session_factory() as session:
+            active = await ProfileRepository(session).get_active()
+        if active is not None:
+            active_profile = ActiveProfileInfo(
+                id=active.id,
+                name=active.name,
+                source_kind=active.source_kind or "manual",
+                intensity=active.intensity if active.intensity is not None else 1.0,
+                sensing_enabled=bool(active.sensing_enabled),
+            )
+    except Exception as e:
+        logger.warning("health_active_profile_lookup_failed", error=str(e))
+
     return DetailedHealthResponse(
         status=overall_status,
         version=__version__,
@@ -307,6 +342,7 @@ async def detailed_health_check(
         sae_attached=sae_state.is_attached,
         sae_id=sae_state.attached_sae_id,
         inference=inference_info or None,
+        active_profile=active_profile,
     )
 
 

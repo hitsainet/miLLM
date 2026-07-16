@@ -1,5 +1,11 @@
 # Feature PRD: Unified MCP
 
+> **[AMENDED 2026-07-16, review R3]** Shipped tool names: `millm_sensing_events` /
+> `millm_sensing_enable` / `millm_sensing_disable` (spec drafts said `millm_get_sensing_events`
+> / `millm_enable_sensing` / `millm_disable_sensing`), and the sensing toggle routes shipped as
+> `/api/sensing/{profile_id}/enable|disable` (drafts said `/api/sensing/clusters/{id}/…`).
+> `docs/mcp-contract.md` is the normative surface.
+
 ## miLLM Feature 9
 
 **Document Version:** 1.0

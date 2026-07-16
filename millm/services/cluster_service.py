@@ -125,6 +125,19 @@ class ClusterService:
                 await self.repository.update(
                     profile.id, cluster_meta={**meta, "warnings": warnings}
                 )
+        elif activate and not sae_id:
+            # 009 R3: activate=true on an UNBOUND import was silently
+            # dropped — the caller (an agent running the cross-product
+            # flow) believed the cluster was live while traffic ran
+            # unsteered. Say so explicitly.
+            warnings.append(
+                "Activation requested but skipped: imported unbound "
+                "(no compatible SAE attached) — activate after attaching "
+                "a matching SAE"
+            )
+            await self.repository.update(
+                profile.id, cluster_meta={**meta, "warnings": warnings}
+            )
 
         return ClusterImportItem(
             name=name, status=status, profile_id=profile.id, warnings=warnings

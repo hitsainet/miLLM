@@ -195,3 +195,19 @@ class TestLosslessAndWarnings:
         row = await cluster_service.repository.get(item.profile_id)
         assert any("activation failed" in w
                    for w in row.cluster_meta.get("warnings", []))
+
+
+class TestUnboundActivateWarning:
+    async def test_activate_on_unbound_import_warns_explicitly(
+        self, cluster_service
+    ):
+        """009 R3: activate=true on an unbound import must not be silent."""
+        d = make_definition(sae={"layer": 12, "n_features": 4096})
+        with patched_state(d_sae=16384):  # mismatched -> unbound
+            item = await cluster_service.import_definition(d, activate=True)
+        assert item.status == "imported_unbound"
+        assert any("Activation requested but skipped" in w
+                   for w in item.warnings)
+        row = await cluster_service.repository.get(item.profile_id)
+        assert any("skipped" in w
+                   for w in row.cluster_meta.get("warnings", []))

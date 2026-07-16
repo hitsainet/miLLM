@@ -9,7 +9,7 @@ from typing import Any
 
 from sqlalchemy import DateTime, Float, Index, Integer, String, Text, func
 from sqlalchemy.dialects.postgresql import JSONB
-from sqlalchemy.orm import Mapped, mapped_column
+from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from millm.db.base import Base
 
@@ -111,6 +111,17 @@ class Profile(Base):
         server_default=func.now(),
         onupdate=func.now(),
         nullable=False,
+    )
+
+    # Feature 11: sensing events cascade with their profile. The ORM loads
+    # and deletes children on session.delete (works on SQLite, where the FK
+    # pragma is off by default); postgres ALSO has the migration's FK
+    # ondelete=CASCADE covering bulk/non-ORM deletes. Bounded load: retention
+    # caps events per cluster.
+    sensing_events = relationship(
+        "SensingEvent",
+        cascade="all, delete-orphan",
+        lazy="select",
     )
 
     # Partial unique index ensures only one profile can be active at a time

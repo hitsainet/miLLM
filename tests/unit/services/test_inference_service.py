@@ -1401,11 +1401,11 @@ class TestStreamThreadErrorPropagation:
 
 
 class TestRequestProfileOverride:
-    """Verify that _apply_request_profile / _restore_request_profile work correctly."""
+    """Verify that _apply_request_steering / _restore_request_profile work correctly."""
 
     @pytest.mark.asyncio
     async def test_apply_profile_saves_and_applies_steering(self, service):
-        """_apply_request_profile saves old steering, applies profile steering."""
+        """_apply_request_steering saves old steering, applies profile steering."""
         mock_sae = MagicMock()
         mock_sae.d_sae = 16384
         mock_sae.get_steering_values.return_value = {10: 1.0}
@@ -1424,7 +1424,7 @@ class TestRequestProfileOverride:
                     "millm.db.repositories.profile_repository.ProfileRepository"
                 ) as MockRepo:
                     MockRepo.return_value.get_by_name = AsyncMock(return_value=mock_profile)
-                    saved = await service._apply_request_profile("test-profile")
+                    saved = await service._apply_request_steering("test-profile")
 
         assert saved is not None
         assert saved["values"] == {10: 1.0}
@@ -1472,7 +1472,7 @@ class TestRequestProfileOverride:
         mock_sae.is_steering_enabled = False
 
         with patch.object(service, "_restore_request_profile", side_effect=capture_restore):
-            with patch.object(service, "_apply_request_profile", return_value={"values": {42: 1.0}, "enabled": False}):
+            with patch.object(service, "_apply_request_steering", return_value={"values": {42: 1.0}, "enabled": False}):
                 request = ChatCompletionRequest(
                     model="test-model",
                     messages=[ChatMessage(role="user", content="Hi")],
@@ -1838,7 +1838,7 @@ class TestCBMProfileRouting:
 
 
 class TestApplyProfileValidation:
-    """_apply_request_profile validates profile steering and fails loudly."""
+    """_apply_request_steering validates profile steering and fails loudly."""
 
     @pytest.mark.asyncio
     async def test_missing_profile_raises_not_found(self, service):
@@ -1855,7 +1855,7 @@ class TestApplyProfileValidation:
                 ) as MockRepo:
                     MockRepo.return_value.get_by_name = AsyncMock(return_value=None)
                     with pytest.raises(ProfileNotFoundError):
-                        await service._apply_request_profile("does-not-exist")
+                        await service._apply_request_steering("does-not-exist")
 
     @pytest.mark.asyncio
     async def test_out_of_range_feature_raises(self, service):
@@ -1878,7 +1878,7 @@ class TestApplyProfileValidation:
                 ) as MockRepo:
                     MockRepo.return_value.get_by_name = AsyncMock(return_value=mock_profile)
                     with pytest.raises(InvalidFeatureIndexError):
-                        await service._apply_request_profile("bad-profile")
+                        await service._apply_request_steering("bad-profile")
         # No partial steering should have been applied.
         mock_sae.set_steering_batch.assert_not_called()
 
@@ -1905,7 +1905,7 @@ class TestApplyProfileValidation:
                     "millm.db.repositories.profile_repository.ProfileRepository"
                 ) as MockRepo:
                     MockRepo.return_value.get_by_name = AsyncMock(return_value=mock_profile)
-                    saved = await service._apply_request_profile("clamped-profile")
+                    saved = await service._apply_request_steering("clamped-profile")
 
         assert saved is not None
         mock_sae.set_steering_batch.assert_called_once_with({10: 200.0})
@@ -1914,5 +1914,5 @@ class TestApplyProfileValidation:
     async def test_no_sae_returns_none(self, service):
         with patch("millm.services.sae_service.AttachedSAEState") as MockState:
             MockState.return_value.attached_sae = None
-            result = await service._apply_request_profile("any")
+            result = await service._apply_request_steering("any")
         assert result is None

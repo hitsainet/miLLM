@@ -14,7 +14,7 @@ Key implementation notes:
 
 from typing import Literal, Optional, Union
 
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, Field, model_validator, field_validator
 
 
 # =============================================================================
@@ -59,6 +59,29 @@ class ChatCompletionRequest(BaseModel):
 
     # miLLM extension - steering profile override
     profile: Optional[str] = None
+
+    # miLLM extension (Feature 10) - per-request cluster intensity dial.
+    # Numeric lambda in [0, 2], or a symbolic position resolved server-side
+    # against the active cluster's declared intensity_range: "off" -> 0,
+    # "min"/"max" -> the range bounds. Applied and restored inside the
+    # request boundary - concurrent requests never see each other's dial.
+    steering_intensity: Optional[Union[float, Literal["off", "min", "max"]]] = None
+
+    @field_validator("steering_intensity", mode="before")
+    @classmethod
+    def _reject_bool_steering_intensity(cls, v):
+        # bool is an int subclass — without this, true silently becomes 1.0.
+        if isinstance(v, bool):
+            raise ValueError("steering_intensity must be a number or off|min|max")
+        return v
+
+    @field_validator("steering_intensity")
+    @classmethod
+    def _validate_steering_intensity(cls, v):
+        # Runs after Union coercion, so numeric strings ("1.5") are floats here.
+        if isinstance(v, float) and not 0.0 <= v <= 2.0:
+            raise ValueError("steering_intensity must be within [0, 2]")
+        return v
 
     model_config = {"extra": "ignore"}
 

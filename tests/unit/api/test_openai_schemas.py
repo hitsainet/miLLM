@@ -423,3 +423,37 @@ class TestErrorSchemas:
         data = response.model_dump()
         assert "error" in data
         assert data["error"]["message"] == "Model not found"
+
+
+class TestSteeringIntensityField:
+    """Feature 10: per-request cluster intensity dial (Task 1.2)."""
+
+    @staticmethod
+    def make(**kwargs):
+        return ChatCompletionRequest(
+            model="m", messages=[{"role": "user", "content": "x"}], **kwargs
+        )
+
+    def test_default_is_none(self):
+        assert self.make().steering_intensity is None
+
+    @pytest.mark.parametrize("value,expected", [
+        (0, 0.0), (2, 2.0), (0.5, 0.5), (1.3, 1.3),
+        ("off", "off"), ("min", "min"), ("max", "max"),
+    ])
+    def test_accepted_values(self, value, expected):
+        assert self.make(steering_intensity=value).steering_intensity == expected
+
+    @pytest.mark.parametrize("value", [2.1, -0.5, "3.5", "loud", True, False, [1.0]])
+    def test_rejected_values(self, value):
+        with pytest.raises(ValidationError):
+            self.make(steering_intensity=value)
+
+    def test_out_of_range_message_names_the_bounds(self):
+        with pytest.raises(ValidationError, match=r"\[0, 2\]"):
+            self.make(steering_intensity=5.0)
+
+    def test_extra_ignore_retained(self):
+        """Unknown fields must still be ignored — rollout safety (FTID §2)."""
+        request = self.make(some_future_field={"nested": True})
+        assert not hasattr(request, "some_future_field")

@@ -396,18 +396,77 @@ class InferenceService:
         except Exception:
             return None
 
-    async def _apply_request_profile(self, profile_name: str) -> Optional[dict]:
+    @staticmethod
+    def _resolve_intensity(raw, profile) -> Optional[float]:
         """
-        Apply per-request profile steering override.
+        Resolve the request's steering_intensity to a numeric lambda.
+
+        Numeric values pass through. Symbolic values resolve against the
+        profile's declared budget.intensity_range (cluster rows), falling back
+        to the configured envelope: "off" -> 0.0, "min" -> low, "max" -> high.
+        None means "field absent - leave steering untouched".
+        """
+        if raw is None:
+            return None
+        if isinstance(raw, (int, float)):
+            return float(raw)
+        from millm.core.config import settings
+
+        rng = None
+        if profile is not None and getattr(profile, "cluster_meta", None):
+            budget = (profile.cluster_meta or {}).get("budget") or {}
+            candidate = budget.get("intensity_range")
+            if isinstance(candidate, list) and len(candidate) == 2:
+                rng = candidate
+        lo, hi = (rng if rng is not None
+                  else (settings.CLUSTER_INTENSITY_MIN, settings.CLUSTER_INTENSITY_MAX))
+        return {"off": 0.0, "min": float(lo), "max": float(hi)}[raw]
+
+    async def resolve_request_intensity(self, request) -> Optional[float]:
+        """
+        Effective lambda for a request (for the X-miLLM-Steering-Intensity
+        echo header). Numeric fast-path avoids the DB read; symbolic values
+        resolve against the named/active profile exactly as apply-time does.
+        """
+        raw = getattr(request, "steering_intensity", None)
+        if raw is None:
+            return None
+        if isinstance(raw, (int, float)):
+            return float(raw)
+        from millm.db.base import async_session_factory
+        from millm.db.repositories.profile_repository import ProfileRepository
+
+        async with async_session_factory() as session:
+            repo = ProfileRepository(session)
+            profile = (await repo.get_by_name(request.profile)
+                       if getattr(request, "profile", None)
+                       else await repo.get_active())
+        return self._resolve_intensity(raw, profile)
+
+    async def _apply_request_steering(
+        self, profile_name: Optional[str], intensity_raw=None
+    ) -> Optional[dict]:
+        """
+        Apply per-request steering override: a named profile, an intensity
+        dial (Feature 10), or both.
 
         Must be called INSIDE the request-queue semaphore so that only one
         request can mutate the global steering state at a time.  Saves the
         current steering state and returns it so _restore_request_profile can
         undo the override after generation completes.
 
-        Returns None when there is nothing to override (no SAE attached, or the
-        profile exists but carries no steering) — in that case no restore is
-        needed and generation proceeds under the current global steering.
+        Semantics (010_FTDD):
+        - profile_name set → that profile's λ=1-basis values are the base.
+        - profile_name None + dial set → the ACTIVE profile is the base; with
+          no active profile, the live steering values are treated as a λ=1
+          base (never enabling steering that wasn't already enabled).
+        - A request λ OVERRIDES the stored intensity (absolute dial, not a
+          multiplier); λ absent (None) falls back to the stored intensity.
+        - Effective λ == 0 disables steering for this request only.
+
+        Returns None when there is nothing to override (no SAE attached, or
+        nothing to scale) — no restore is needed and generation proceeds under
+        the current global steering.
 
         Raises a MiLLMError subclass when the requested profile genuinely cannot
         be applied (profile not found, out-of-range feature index). Out-of-range
@@ -439,70 +498,116 @@ class InferenceService:
 
         async with async_session_factory() as session:
             repo = ProfileRepository(session)
-            profile = await repo.get_by_name(profile_name)
+            if profile_name:
+                profile = await repo.get_by_name(profile_name)
+                if not profile:
+                    raise ProfileNotFoundError(
+                        f"Profile '{profile_name}' not found",
+                        details={"profile": profile_name},
+                    )
+            else:
+                # Dial-only request: the base is the active profile (the
+                # running cluster), or the live steering values if none.
+                profile = await repo.get_active()
 
-        if not profile:
-            raise ProfileNotFoundError(
-                f"Profile '{profile_name}' not found",
-                details={"profile": profile_name},
-            )
+        lam = self._resolve_intensity(intensity_raw, profile)
 
-        # Cluster gate parity (round-2 find): the per-request path must apply
-        # the same declared-feature-space check as every other activation
-        # path — index bounds alone can pass by coincidence on a mismatched
-        # SAE, silently applying meaningless steering.
-        if getattr(profile, "source_kind", None) == "cluster":
-            declared = ((profile.cluster_meta or {}).get("sae") or {}).get("n_features")
-            if declared is not None and int(declared) != sae.d_sae:
-                raise InvalidFeatureIndexError(
-                    f"Profile '{profile_name}' is a cluster authored for an SAE "
-                    f"with {declared} features; the attached SAE has "
-                    f"{sae.d_sae} — steering would be meaningless.",
-                    details={"profile": profile_name,
-                             "declared_n_features": declared,
-                             "d_sae": sae.d_sae},
-                )
-
-        if not profile.steering:
-            # Profile exists but has no steering values — nothing to override.
-            return None
-
-        # Parse and validate the profile's steering before mutating any state,
-        # so a bad value fails cleanly without leaving partial steering applied.
-        # Values are stored at lambda=1 basis (Feature 8): scale by the
-        # profile's intensity and CLAMP to the steering range rather than
-        # reject — imported cluster strengths (contract ±300) times lambda
-        # (≤2) legitimately exceed ±200, and the documented semantics are
-        # clamp-at-apply (PADR v1.1). Out-of-range indices still reject: they
-        # are meaningless for the attached SAE.
         from millm.core.steering_range import clamp_steering
 
-        lam = profile.intensity if profile.intensity is not None else 1.0
-        steering: dict[int, float] = {}
-        for k, v in profile.steering.items():
-            idx = int(k)
-            val = float(v) * lam
-            if not 0 <= idx < sae.d_sae:
-                raise InvalidFeatureIndexError(
-                    f"Profile '{profile_name}' references feature {idx}, "
-                    f"out of range [0, {sae.d_sae}) for the attached SAE.",
-                    details={"profile": profile_name, "feature_idx": idx,
-                             "d_sae": sae.d_sae},
+        if profile is not None and profile.steering:
+            # Cluster gate parity (round-2 find): the per-request path must
+            # apply the same declared-feature-space check as every other
+            # activation path — index bounds alone can pass by coincidence on
+            # a mismatched SAE, silently applying meaningless steering.
+            if getattr(profile, "source_kind", None) == "cluster":
+                declared = ((profile.cluster_meta or {}).get("sae") or {}).get("n_features")
+                if declared is not None and int(declared) != sae.d_sae:
+                    raise InvalidFeatureIndexError(
+                        f"Profile '{profile.name}' is a cluster authored for an SAE "
+                        f"with {declared} features; the attached SAE has "
+                        f"{sae.d_sae} — steering would be meaningless.",
+                        details={"profile": profile.name,
+                                 "declared_n_features": declared,
+                                 "d_sae": sae.d_sae},
+                    )
+
+            # The request dial is ABSOLUTE: it overrides the stored intensity
+            # rather than multiplying it (010 pitfall 1). Field absent falls
+            # back to the profile's stored λ.
+            if lam is None:
+                lam = profile.intensity if profile.intensity is not None else 1.0
+
+            # Parse and validate the profile's steering before mutating any
+            # state, so a bad value fails cleanly without leaving partial
+            # steering applied. Values are stored at lambda=1 basis (Feature
+            # 8): scale by λ and CLAMP to the steering range rather than
+            # reject — imported cluster strengths (contract ±300) times λ (≤2)
+            # legitimately exceed ±200, and the documented semantics are
+            # clamp-at-apply (PADR v1.1). Out-of-range indices still reject:
+            # they are meaningless for the attached SAE.
+            steering: dict[int, float] = {}
+            for k, v in profile.steering.items():
+                idx = int(k)
+                if not 0 <= idx < sae.d_sae:
+                    raise InvalidFeatureIndexError(
+                        f"Profile '{profile.name}' references feature {idx}, "
+                        f"out of range [0, {sae.d_sae}) for the attached SAE.",
+                        details={"profile": profile.name, "feature_idx": idx,
+                                 "d_sae": sae.d_sae},
+                    )
+                steering[idx] = clamp_steering(float(v) * lam)
+        elif profile is not None and profile_name and lam is None:
+            # Named profile with no steering values and no dial — nothing to
+            # override (pre-010 behavior preserved).
+            return None
+        else:
+            # Dial over live steering (no profile carries a base). Never
+            # enable steering that wasn't already configured and enabled
+            # (010 pitfall 3): with steering disabled or empty, a dial has
+            # nothing to scale — except λ=0, which is a no-op there anyway.
+            if lam is None:
+                return None
+            live = sae.get_steering_values()
+            if not live or not sae.is_steering_enabled:
+                if lam == 0.0 and sae.is_steering_enabled:
+                    # Enabled-but-empty: honor the explicit "off".
+                    saved = {"values": live, "enabled": True}
+                    sae.enable_steering(False)
+                    logger.info("request_steering_disabled", intensity=0.0)
+                    return saved
+                logger.info(
+                    "steering_intensity_noop",
+                    reason="no live steering to scale",
+                    intensity=lam,
                 )
-            steering[idx] = clamp_steering(val)
+                return None
+            # Live values are the λ=1 base for this request.
+            steering = {int(i): clamp_steering(float(v) * lam)
+                        for i, v in live.items()}
 
         # Save the state we are about to overwrite
-        saved: dict = {
+        saved = {
             "values": sae.get_steering_values(),
             "enabled": sae.is_steering_enabled,
         }
+
+        if lam == 0.0:
+            # Effective λ 0 disables steering for this request only.
+            sae.enable_steering(False)
+            logger.info(
+                "request_steering_disabled",
+                profile=profile.name if profile else None,
+                intensity=0.0,
+            )
+            return saved
 
         sae.set_steering_batch(steering)
         sae.enable_steering(True)
 
         logger.info(
-            "request_profile_applied",
-            profile=profile_name,
+            "request_steering_applied",
+            profile=profile.name if profile else None,
+            intensity=lam,
             features=len(steering),
         )
         return saved
@@ -833,7 +938,8 @@ class InferenceService:
         if self._use_cbm_for_request(
             temperature=getattr(request, "temperature", None),
             top_p=getattr(request, "top_p", None),
-            has_profile=bool(getattr(request, "profile", None)),
+            has_profile=bool(getattr(request, "profile", None))
+            or getattr(request, "steering_intensity", None) is not None,
         ):
             return await self._cbm_chat_completion(request)
 
@@ -853,8 +959,10 @@ class InferenceService:
             # concurrent requests cannot race on the global steering state.
             # The previous state is restored in the finally block below.
             _saved_steering = None
-            if request.profile:
-                _saved_steering = await self._apply_request_profile(request.profile)
+            if request.profile or request.steering_intensity is not None:
+                _saved_steering = await self._apply_request_steering(
+                    request.profile, request.steering_intensity
+                )
 
             try:
                 # Tokenize input
@@ -954,7 +1062,8 @@ class InferenceService:
         if self._use_cbm_for_request(
             temperature=getattr(request, "temperature", None),
             top_p=getattr(request, "top_p", None),
-            has_profile=bool(getattr(request, "profile", None)),
+            has_profile=bool(getattr(request, "profile", None))
+            or getattr(request, "steering_intensity", None) is not None,
         ):
             async for chunk in self._cbm_stream_chat_completion(request):
                 yield chunk
@@ -974,8 +1083,10 @@ class InferenceService:
         async with self._request_queue.acquire():
             # Per-request profile override (same logic as non-streaming path)
             _saved_steering = None
-            if request.profile:
-                _saved_steering = await self._apply_request_profile(request.profile)
+            if request.profile or request.steering_intensity is not None:
+                _saved_steering = await self._apply_request_steering(
+                    request.profile, request.steering_intensity
+                )
 
             # Tokenize
             inputs = self._tokenizer(prompt, return_tensors="pt").to(self._get_input_device())
@@ -1214,7 +1325,8 @@ class InferenceService:
         if self._use_cbm_for_request(
             temperature=getattr(request, "temperature", None),
             top_p=getattr(request, "top_p", None),
-            has_profile=bool(getattr(request, "profile", None)),
+            has_profile=bool(getattr(request, "profile", None))
+            or getattr(request, "steering_intensity", None) is not None,
         ):
             return await self._cbm_text_completion(request)
 

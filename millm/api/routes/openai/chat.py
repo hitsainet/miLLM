@@ -64,7 +64,7 @@ async def create_chat_completion(
     # Profile override (request.profile) is applied inside the inference service's
     # request-queue semaphore to prevent concurrent requests from racing on the
     # global SAE steering state.  The previous steering is restored after each
-    # generation completes.  See InferenceService._apply_request_profile.
+    # generation completes.  See InferenceService._apply_request_steering.
 
     logger.info(
         "chat_completion_request",
@@ -76,6 +76,17 @@ async def create_chat_completion(
     # X-miLLM-Backend header lets clients distinguish which inference path served
     # the request (serial queue vs continuous batching) for latency debugging.
     backend = inference.backend_name
+
+    # X-miLLM-Steering-Intensity echoes the effective lambda back to dial
+    # clients (Feature 10) — emitted only when the field was present.  Resolved
+    # here (not stashed at apply time) because streaming headers are sent
+    # before the generator body runs; symbolic values resolve against the same
+    # profile the apply path will use, so the echo matches what applies.
+    echo_intensity = None
+    if request.steering_intensity is not None:
+        effective = await inference.resolve_request_intensity(request)
+        if effective is not None:
+            echo_intensity = f"{effective:g}"
 
     # Handle streaming vs non-streaming
     if request.stream:
@@ -90,13 +101,18 @@ async def create_chat_completion(
                 f"Request queue is full ({queue.pending_count}/{queue.max_pending} pending). "
                 "Please retry shortly."
             )
+        stream_headers = {"X-miLLM-Backend": backend}
+        if echo_intensity is not None:
+            stream_headers["X-miLLM-Steering-Intensity"] = echo_intensity
         return StreamingResponse(
             inference.stream_chat_completion(request),
             media_type="text/event-stream",
-            headers={"X-miLLM-Backend": backend},
+            headers=stream_headers,
         )
     else:
         # FastAPI's injected Response lets us set custom headers on the
         # auto-serialised Pydantic response without wrapping it manually.
         response.headers["X-miLLM-Backend"] = backend
+        if echo_intensity is not None:
+            response.headers["X-miLLM-Steering-Intensity"] = echo_intensity
         return await inference.create_chat_completion(request)

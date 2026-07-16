@@ -10,6 +10,7 @@ from millm.api.routes.management.models import router as models_router
 from millm.api.routes.management.monitoring import router as monitoring_router
 from millm.api.routes.management.profiles import router as profiles_router
 from millm.api.routes.management.clusters import router as clusters_router
+from millm.api.routes.management.sensing import router as sensing_router
 from millm.api.routes.management.saes import router as saes_router
 from millm.api.routes.openai import openai_router
 from millm.api.routes.system.health import router as health_router
@@ -31,6 +32,7 @@ def register_routes(app: FastAPI) -> None:
     app.include_router(monitoring_router)
     app.include_router(profiles_router)
     app.include_router(clusters_router)
+    app.include_router(sensing_router)
 
     # OpenAI-compatible API routes (mounted at /v1)
     app.include_router(openai_router, prefix="/v1")

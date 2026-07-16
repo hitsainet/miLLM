@@ -414,6 +414,11 @@ class ProfileService:
         # Set profile as active
         await self.repository.set_active(profile_id)
 
+        # Sensing lifecycle (Feature 11): arm when the newly active cluster
+        # has sensing enabled and an SAE is attached; anything else disarms
+        # (activating profile B must never keep sensing profile A).
+        self._sync_sensing_arm_state(profile)
+
         logger.info(
             "profile_activated",
             profile_id=profile_id,
@@ -461,6 +466,11 @@ class ProfileService:
 
         # Deactivate profile
         await self.repository.deactivate(profile_id)
+
+        # Sensing lifecycle (Feature 11): deactivating the sensed profile
+        # disarms; deactivating another row leaves the armed state alone.
+        if profile.is_active or cleared_steering:
+            self._sync_sensing_arm_state(None)
 
         logger.info(
             "profile_deactivated",
@@ -515,3 +525,28 @@ class ProfileService:
             "profile_id": profile_id,
             "was_active": was_active,
         }
+
+    def _sync_sensing_arm_state(self, active_profile) -> None:
+        """
+        Arm/disarm co-activation sensing to match the active profile
+        (Feature 11). Never raises — sensing is an observation feature and
+        must not break activation.
+        """
+        try:
+            import millm.api.dependencies as deps
+            from millm.services.sae_service import AttachedSAEState
+
+            service = deps.get_sensing_service()
+            sae = AttachedSAEState().attached_sae
+            should_arm = (
+                active_profile is not None
+                and getattr(active_profile, "source_kind", None) == "cluster"
+                and bool(getattr(active_profile, "sensing_enabled", False))
+                and sae is not None
+            )
+            if should_arm:
+                service.arm_for_profile(active_profile, sae)
+            else:
+                service.disarm(sae)
+        except Exception:
+            logger.warning("sensing_arm_sync_failed", exc_info=True)

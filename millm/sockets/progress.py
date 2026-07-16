@@ -548,6 +548,38 @@ class ProgressEmitter:
             # Don't let emission errors affect inference
             logger.warning("monitoring_emit_failed", error=str(e))
 
+    def emit_sensing_event(self, payload: dict) -> None:
+        """
+        Emit a persisted co-activation event (Feature 11).
+
+        Thread-safe fire-and-forget, mirroring emit_activation_update: called
+        from the post-generation flush which may run without a running loop
+        in this thread. Payload EXCLUDES context_text/context_token_ids —
+        user content and size; the UI fetches detail via REST.
+        """
+        if self._sio is None:
+            return
+
+        import asyncio
+
+        try:
+            try:
+                asyncio.get_running_loop()
+                asyncio.create_task(self._sio.emit("sensing:event", payload))
+            except RuntimeError:
+                if hasattr(self, "_main_loop") and self._main_loop:
+                    asyncio.run_coroutine_threadsafe(
+                        self._sio.emit("sensing:event", payload),
+                        self._main_loop,
+                    )
+                else:
+                    logger.warning(
+                        "sensing_emit_no_loop",
+                        msg="No event loop available for WebSocket emission",
+                    )
+        except Exception as e:
+            logger.warning("sensing_emit_failed", error=str(e))
+
     async def emit_monitoring_state_changed(
         self,
         enabled: bool,

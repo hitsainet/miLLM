@@ -240,6 +240,18 @@ SAEServiceDep = Annotated["SAEService", Depends(get_sae_service)]
 
 # Singleton monitoring service (stored in app state)
 _monitoring_service = None
+_sensing_service = None
+
+
+def get_sensing_service() -> "SensingService":
+    """Singleton sensing service (Feature 11)."""
+    global _sensing_service
+
+    if _sensing_service is None:
+        from millm.services.sensing_service import SensingService
+
+        _sensing_service = SensingService()
+    return _sensing_service
 
 
 async def get_monitoring_service() -> "MonitoringService":

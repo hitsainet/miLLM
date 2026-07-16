@@ -928,6 +928,14 @@ class SAEService:
         if attached_sae:
             attached_sae.clear_steering()
             attached_sae.enable_monitoring(False)
+            # Sensing lifecycle (Feature 11): detaching the SAE disarms —
+            # the cached encoder slice is about to move to CPU with the SAE.
+            try:
+                import millm.api.dependencies as deps
+
+                deps.get_sensing_service().disarm(attached_sae)
+            except Exception:
+                logger.warning("sensing_disarm_on_detach_failed", exc_info=False)
             attached_sae.to_cpu()
 
         # Clear CUDA cache

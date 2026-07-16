@@ -82,6 +82,29 @@ def _make_event_stopping_criteria(event: "Event"):
     return StoppingCriteriaList([_EventStoppingCriteria(event)])
 
 
+def _make_id_capture_criteria():
+    """Zero-copy token-id capture for streaming sensing context (Feature 11).
+
+    Stopping criteria run every generation step with the full input_ids
+    tensor; storing the reference survives early stops. Returns None when
+    transformers' stopping-criteria API is unavailable.
+    """
+    try:
+        from transformers import StoppingCriteria
+    except Exception:
+        return None
+
+    class _IdCapture(StoppingCriteria):
+        def __init__(self) -> None:
+            self.latest_ids = None
+
+        def __call__(self, input_ids, scores, **kwargs) -> bool:
+            self.latest_ids = input_ids
+            return False
+
+    return _IdCapture()
+
+
 class InferenceService:
     """
     Handles inference for OpenAI-compatible endpoints.
@@ -372,6 +395,21 @@ class InferenceService:
                 reason="per_request_steering_override",
             )
             return False
+        from millm.core.config import settings as _settings
+
+        if _settings.SENSING_FORCE_SERIAL:
+            # Armed sensing forces serial routing: CBM batch rows cannot be
+            # attributed to requests (Feature 11 / SEN-S1). With forcing
+            # off, CBM requests simply go unsensed (begin is never called).
+            from millm.services.sae_service import AttachedSAEState
+
+            _sae = AttachedSAEState().attached_sae
+            if _sae is not None and _sae.is_sensing_armed:
+                logger.info(
+                    "cbm_routing_fallback_to_serial",
+                    reason="sensing_armed",
+                )
+                return False
         if self._cbm_force_serial_monitoring and self._is_monitoring_enabled():
             logger.info(
                 "cbm_routing_fallback_to_serial",
@@ -945,6 +983,69 @@ class InferenceService:
 
         return kwargs
 
+    def _sensing_begin(self, request_id: str):
+        """Open a sensing request boundary (serial paths only). Returns the
+        armed SAE, or None when sensing is not armed."""
+        try:
+            from millm.services.sae_service import AttachedSAEState
+
+            sae = AttachedSAEState().attached_sae
+            if sae is not None and sae.is_sensing_armed:
+                sae.begin_sensing_request(request_id)
+                return sae
+        except Exception:
+            logger.warning("sensing_begin_failed", exc_info=False)
+        return None
+
+    async def _notify_sensing(self, sensing_sae, full_ids) -> None:
+        """Collect + record this request's sensing hits (post-generation,
+        off the hot path). Sibling of _notify_monitoring; never raises."""
+        if sensing_sae is None:
+            return
+        try:
+            import millm.api.dependencies as deps
+
+            request_id, hits, truncated = sensing_sae.collect_sensing_hits()
+            service = deps._sensing_service
+            if service is None:
+                return
+            service.note_request_overhead(sensing_sae._sensing_overhead_ms)
+            if not hits:
+                return
+            ambient = self._ambient_counts(sensing_sae, hits)
+            await service.record(
+                request_id,
+                hits,
+                truncated,
+                full_ids,
+                self._tokenizer if self.is_model_loaded() else None,
+                ambient_counts=ambient,
+            )
+        except Exception:
+            logger.exception("sensing_flush_failed")
+
+    @staticmethod
+    def _ambient_counts(sae, hits) -> Optional[dict[int, int]]:
+        """Best-effort alone-vs-within signal (FTID pitfall 4): full-SAE
+        fired count, ONLY when un-compacted monitoring co-ran and only for
+        spans that include the last captured position (monitoring keeps the
+        last pass only). Anything else stays None — never estimated."""
+        try:
+            if (not sae.is_monitoring_enabled
+                    or sae._monitored_features is not None):
+                return None
+            acts = sae.get_feature_activations_for_item(0)
+            if acts is None:
+                return None
+            last_abs = sae._sensing_token_offset - 1
+            counts: dict[int, int] = {}
+            for i, hit in enumerate(hits):
+                if hit.pos_end == last_abs:
+                    counts[i] = int((acts[-1] > 0).sum().item())
+            return counts or None
+        except Exception:
+            return None
+
     def _notify_monitoring(self, request_id: Optional[str] = None) -> None:
         """
         Forward captured activations to the monitoring service.
@@ -1156,10 +1257,18 @@ class InferenceService:
                     request.profile, request.steering_intensity
                 )
 
+            # Sensing boundary (Feature 11): n==1 only — with n>1 the
+            # absolute-position accounting would concatenate independent
+            # generations (documented v1 limitation; such requests go
+            # unsensed rather than mis-attributed).
+            _sensing_sae = self._sensing_begin(completion_id) if n == 1 else None
+            _sensing_full_ids = None
+
             try:
                 # Tokenize input
                 inputs = self._tokenizer(prompt, return_tensors="pt").to(self._get_input_device())
                 prompt_tokens = inputs.input_ids.shape[1]
+                _sensing_full_ids = inputs.input_ids  # prefill-only fallback
 
                 # Build generation config
                 gen_config = GenerationConfig.from_request(request)
@@ -1172,6 +1281,7 @@ class InferenceService:
                     outputs = await asyncio.to_thread(
                         self._generate_sync, generate_kwargs
                     )
+                    _sensing_full_ids = outputs[0]
 
                     # Notify monitoring after generation
                     self._notify_monitoring(request_id=completion_id)
@@ -1218,6 +1328,9 @@ class InferenceService:
             finally:
                 # Restore steering to its pre-request state regardless of success/failure.
                 self._restore_request_profile(_saved_steering)
+                # Flush sensing hits (post-generation, inside the semaphore
+                # so the boundary can't interleave with the next request)
+                await self._notify_sensing(_sensing_sae, _sensing_full_ids)
 
         model_info = self.get_loaded_model_info()
         model_name = model_info.name if model_info else "unknown"
@@ -1302,6 +1415,10 @@ class InferenceService:
                     yield "data: [DONE]\n\n"
                     return
 
+            # Sensing boundary (Feature 11) — serial streaming path
+            _sensing_sae = self._sensing_begin(completion_id)
+            _id_capture = None
+
             # Setup runs BEFORE the try/finally below that restores the
             # per-request steering, so any exception in this window
             # (tokenization, the context-length check, thread start) must
@@ -1332,6 +1449,14 @@ class InferenceService:
                 stopping_criteria = _make_event_stopping_criteria(stop_event)
                 if stopping_criteria is not None:
                     generation_kwargs["stopping_criteria"] = stopping_criteria
+
+                # Token-id capture for sensing context (Feature 11): criteria
+                # run every step; storing the reference is zero-copy and
+                # survives early stops (client disconnect, stop sequence).
+                if _sensing_sae is not None and stopping_criteria is not None:
+                    _id_capture = _make_id_capture_criteria()
+                    if _id_capture is not None:
+                        stopping_criteria.append(_id_capture)
 
                 # Start generation thread with error capture
                 thread_error: list[Exception] = []
@@ -1527,6 +1652,13 @@ class InferenceService:
                     )
                 # Restore steering to its pre-request state (Fix #1: steering race)
                 self._restore_request_profile(_saved_steering)
+                # Flush sensing hits: captured ids when any step ran, else
+                # the prompt ids (prefill-only events still get context)
+                _full_ids = (_id_capture.latest_ids
+                             if _id_capture is not None
+                             and _id_capture.latest_ids is not None
+                             else inputs["input_ids"])
+                await self._notify_sensing(_sensing_sae, _full_ids)
 
     # =========================================================================
     # Text Completions

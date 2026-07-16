@@ -65,6 +65,16 @@ class Settings(BaseSettings):
     CLUSTER_INTENSITY_MIN: float = 0.5
     CLUSTER_INTENSITY_MAX: float = 1.5
 
+    # Co-activation sensing (Feature 11)
+    SENSING_EPSILON: float = 0.1              # theta_i = max(floor, eps*max_act_i)
+    SENSING_THETA_FLOOR: float = 0.0
+    SENSING_CONTEXT_TOKENS: int = 16          # +-K context window; hard max 64
+    SENSING_MAX_EVENTS_PER_REQUEST: int = 20
+    SENSING_MAX_EVENTS_PER_CLUSTER: int = 1000
+    SENSING_MAX_AGE_DAYS: int = 7
+    SENSING_FORCE_SERIAL: bool = True         # armed sensing forces serial routing
+    SENSING_MAX_OVERHEAD_MS: float = 5.0      # warn threshold per request
+
     # Performance: Inference concurrency
     MAX_CONCURRENT_REQUESTS: int = 2
     MAX_PENDING_REQUESTS: int = 10

@@ -95,3 +95,66 @@ admin-ui-neutral; filter valve matrix verified; manual anchors resolve).
   documented.
 - 0xcc design docs retain the historical `_apply_request_profile` name in their "generalize
   this" instructions — accurate as specs, left unchanged.
+
+## Round 3 (/review, 4 perspectives) — 16 findings: 12 fixed, 4 documented
+
+**Critical, fixed (all three empirically confirmed by the reviewer):**
+1. **Hostile authored ranges bypassed the [0,2] envelope** — `intensity_range [0.5, 9]` let symbolic
+   `max` apply λ=9; a negative floor let `min` apply SIGN-INVERTED steering; an all-negative range
+   made the cap FORCE a positive dial negative — all on unauthenticated /v1.
+   → `declared_intensity_range` intersects with [0,2] (outside → config fallback); consumer
+   contracts documented in its docstring.
+2. **Apply MERGED onto live steering** (`set_steering_batch` merges; restore clears, apply didn't) —
+   a named profile was superimposed on operator-set values: response steered by BOTH.
+   → `clear_steering()` before `set_steering_batch`; pinned by a stateful-fake test + a
+   dial×named-profile concurrency interleave.
+3. **Stored intensity 0 applied an all-zero-ENABLED batch while the header echoed "0"** — zero
+   tensors still fire apply_steering per token and report steering on; DIAL-A3 violated; a live
+   echo/apply drift. → planner returns 0.0 uniformly for effective-zero; apply branches on
+   `effective`, not raw λ.
+
+**Also fixed:** cap fell back to nothing for clusters WITHOUT an authored range (management rejects
+λ>config-max; /v1 sailed through) → config-envelope fallback for cluster rows (manual profiles keep
+the schema's [0,2] as documented); symbolic resolution + cap were still duplicated at both
+consumers → absorbed INTO `_plan_effective_intensity` (keyword-only params — three bool-ish
+positionals invited transposition); streaming gate/index errors aborted a committed 200 → OpenAI
+error SSE event + `[DONE]` instead; echo failure logged a full traceback per request
+(unauthenticated log-flood lever) → single-line warning; three sequential profile reads on
+streaming dial+profile requests → echo resolution doubles as the pre-commit 404 check
+(`ensure_named_profile` flag); the /v1 400 handler asserts nothing under `python -O` → isinstance
+re-raise, and multi-error requests now say "(and N more validation errors)"; the filter gained a
+`server` valve position (US-10.1: once the operator sets a default, users had no way to say
+"server state governs") + documented replace-semantics for pre-existing body fields; filter test
+file in the suite (17 tests — dict-vs-model valves, precedence, degradation were pinned only by an
+ad-hoc shell run); Troubleshooting row for the six silent dial no-op causes; echo/apply parity
+matrix (12 states), direct planner table tests, at-ceiling/cap-log/noop-log mutation pins,
+string-typed n_features gate pin.
+
+**Documented:**
+- `ensure_profile_exists`/apply-time TOCTOU (profile deleted between pre-check and apply) →
+  mid-stream SSE error event is now the defined behavior for that window.
+- Management vs /v1 post-processing of the shared range parse deliberately differ ([0,hi] dial vs
+  min/max positions) — contract documented in `declared_intensity_range`.
+- InferenceService accumulating repository plumbing (echo/apply each open sessions) — a
+  ProfileResolver service is the right home; deferred as refactor debt (three call sites named).
+- First-error bias in /v1 validation responses matches OpenAI's own API; the count suffix
+  mitigates round-trips.
+
+## Perspective summaries
+- **Product:** FR-10.1..10.4, DIAL-A1..A7 (A3 fixed this round), F1..F4, US/EC verified one-by-one;
+  US-10.1's "default sends no field" restored via the `server` valve; §9 criterion 1 (observable
+  output difference) rides the post-deploy E2E (task 4.3), the rest verified pre-deploy.
+- **QA:** unauthenticated surface now bounded end-to-end: [0,2] envelope ∩ authored range ∩ config
+  fallback; no PII in logs; log-flood lever closed; streaming never aborts silently for steering
+  errors.
+- **Architect:** ONE decision core owns resolution/cap/no-op for both echo and apply (drift now
+  requires editing the planner itself); replace-not-merge asymmetry closed; range parsing has a
+  single home with named consumer contracts.
+- **Test:** 984 backend tests green; guarantees now asserted behaviorally (parity matrix,
+  stateful-fake interleaves, log-event pins, filter suite) — the three R3 criticals each have a
+  regression test that fails on the pre-fix code.
+
+## Gate
+**SHIP** — 46 findings across 3 rounds (35 fixed, 11 documented), acceptance evidence complete.
+Post-deploy E2E (off/min/max on a validated cluster + OWUI walkthrough) rides the increment's
+GitOps rollout (task 4.3).

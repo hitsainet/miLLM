@@ -35,6 +35,7 @@ from millm.api.schemas.openai import (
     TextCompletionResponse,
     Usage,
 )
+from millm.core.errors import MiLLMError
 from millm.core.logging import get_logger
 from millm.ml.generation_config import GenerationConfig
 from millm.ml.model_loader import LoadedModelState
@@ -422,24 +423,46 @@ class InferenceService:
             return None
         return declared_intensity_range(getattr(profile, "cluster_meta", None))
 
-    @staticmethod
+    @classmethod
     def _plan_effective_intensity(
-        explicit: bool,
+        cls,
+        *,
+        raw: "float | str | None",
         profile: Any,
-        lam: Optional[float],
+        explicit: bool,
         steering_enabled: bool,
         has_live_values: bool,
     ) -> Optional[float]:
         """
         Pure decision core shared by _apply_request_steering and the echo
-        header: the effective lambda this request will run under, or None
-        when apply will leave steering untouched (no-op). Keeping both
-        consumers on ONE function is what makes the X-miLLM-Steering-
-        Intensity header honest — echo and apply cannot drift (010 R2).
+        header: resolves the raw dial value, caps it, and returns the
+        effective lambda this request will run under — or None when apply
+        will leave steering untouched (no-op). Symbolic resolution and the
+        ceiling cap live IN here (010 R3: duplicating them at the two
+        consumers was exactly how echo/apply drift survived R2). Keyword-
+        only: three bool-ish params invite silent transposition otherwise.
 
-        lam is the already-resolved, already-ceiling-clamped request lambda
-        (None = field absent).
+        0.0 means "steering will be disabled for this request".
         """
+        lam = cls._resolve_intensity(raw, profile)
+        # Cap a numeric dial at the authored ceiling; cluster rows WITHOUT a
+        # declared range cap at the config envelope the management API
+        # enforces (010 R3: /v1 must never exceed what an authenticated
+        # set_intensity would accept). Manual profiles keep the schema's
+        # [0, 2] as their documented envelope.
+        if lam is not None and profile is not None:
+            rng = cls._intensity_range_of(profile)
+            if rng is not None:
+                hi: Optional[float] = rng[1]
+            elif getattr(profile, "source_kind", None) == "cluster":
+                from millm.core.config import settings
+
+                hi = settings.CLUSTER_INTENSITY_MAX
+            else:
+                hi = None
+            if hi is not None and lam > hi:
+                lam = hi
+
         if profile is None and lam is None:
             return None
         if lam == 0.0:
@@ -448,9 +471,15 @@ class InferenceService:
         if profile is not None and profile.steering:
             if not explicit and not steering_enabled:
                 return None  # dial-only never enables disabled steering
-            if lam is not None:
-                return lam
-            return profile.intensity if profile.intensity is not None else 1.0
+            effective = (lam if lam is not None
+                         else profile.intensity if profile.intensity is not None
+                         else 1.0)
+            if effective == 0.0:
+                # Stored intensity 0 with no dial: uniform disable semantics —
+                # NOT an all-zero-enabled batch (010 R3: zero tensors still
+                # fire apply_steering per token and report steering as on).
+                return 0.0 if steering_enabled else None
+            return effective
         if explicit and profile is not None:
             return None  # named profile with no steering — nothing to override
         if lam is None:
@@ -505,7 +534,10 @@ class InferenceService:
                 )
 
     async def resolve_request_intensity(
-        self, request: ChatCompletionRequest
+        self,
+        request: ChatCompletionRequest,
+        *,
+        ensure_named_profile: bool = False,
     ) -> Optional[float]:
         """
         Effective lambda for a request (for the X-miLLM-Steering-Intensity
@@ -517,6 +549,11 @@ class InferenceService:
         between this pre-queue resolution and apply-time inside the
         semaphore can still skew a symbolic echo; that residual window is
         documented in the API reference.
+
+        ensure_named_profile=True raises ProfileNotFoundError instead of
+        suppressing when the request names a missing profile — the
+        streaming route uses this so the 404 fires BEFORE the 200 commits,
+        without a second profile read.
         """
         raw = getattr(request, "steering_intensity", None)
         if raw is None:
@@ -537,26 +574,35 @@ class InferenceService:
                 profile = (await repo.get_by_name(profile_name)
                            if profile_name else await repo.get_active())
             if profile_name and profile is None:
+                if ensure_named_profile:
+                    from millm.core.errors import ProfileNotFoundError
+
+                    raise ProfileNotFoundError(
+                        f"Profile '{profile_name}' not found",
+                        details={"profile": profile_name},
+                    )
                 return None  # apply will raise ProfileNotFound; don't echo first
 
-            lam = self._resolve_intensity(raw, profile)
-            # Mirror the apply-time ceiling cap so a capped numeric dial
-            # echoes the lambda that actually applies (R2 find).
-            if lam is not None and profile is not None:
-                rng = self._intensity_range_of(profile)
-                if rng is not None and lam > rng[1]:
-                    lam = rng[1]
-            # Same decision core as apply: None here means apply will no-op
-            # (disabled steering, empty base, ...) — emit no header for it.
+            # Same decision core as apply (resolution + cap + no-op rules
+            # all inside): None means apply will no-op — emit no header.
             return self._plan_effective_intensity(
-                bool(profile_name),
-                profile,
-                lam,
-                sae.is_steering_enabled,
-                bool(sae.get_steering_values()),
+                raw=raw,
+                profile=profile,
+                explicit=bool(profile_name),
+                steering_enabled=sae.is_steering_enabled,
+                has_live_values=bool(sae.get_steering_values()),
             )
-        except Exception:
-            logger.warning("intensity_echo_resolution_failed", exc_info=True)
+        except MiLLMError:
+            raise  # ensure_named_profile contract — not an echo failure
+        except Exception as exc:
+            # No exc_info: this fires per dialed request on an
+            # unauthenticated endpoint — a DB outage must not become a
+            # traceback-per-request log flood (010 R3).
+            logger.warning(
+                "intensity_echo_resolution_failed",
+                error_type=type(exc).__name__,
+                error=str(exc),
+            )
             return None
 
     async def _apply_request_steering(
@@ -628,7 +674,6 @@ class InferenceService:
                 # running cluster), or the live steering values if none.
                 profile = await repo.get_active()
 
-        lam = self._resolve_intensity(intensity_raw, profile)
         explicit = bool(profile_name)
 
         from millm.core.steering_range import clamp_steering
@@ -652,46 +697,39 @@ class InferenceService:
                              "d_sae": sae.d_sae},
                 )
 
-        # A numeric dial is capped at the cluster's authored CEILING (the
-        # declared safe maximum the management API already enforces — /v1 is
-        # unauthenticated and must not become the overdrive loophole).
-        # Only the ceiling: set_intensity's authoritative bounds are
-        # [0, hi] — dialing DOWN below the authored floor (toward off) is
-        # always allowed, and clamping a 0.05 request UP to a 0.5 floor
-        # would amplify steering the caller asked to reduce (R2 find).
-        if lam is not None and profile is not None:
-            rng = self._intensity_range_of(profile)
-            if rng is not None and lam > rng[1]:
-                logger.info(
-                    "request_intensity_capped_at_authored_max",
-                    requested=lam,
-                    applied=rng[1],
-                    profile=profile.name,
-                )
-                lam = rng[1]
-
         # ONE decision core for "what will this request run under" — shared
-        # with the echo header so the two can never drift (R2 find). All
-        # no-op decisions live in the planner; the raises (gate above, index
+        # with the echo header so the two can never drift (R2/R3 finds):
+        # symbolic resolution and the ceiling cap happen inside the planner.
+        # All no-op decisions live there too; the raises (gate above, index
         # validation below) stay here.
         effective = self._plan_effective_intensity(
-            explicit,
-            profile,
-            lam,
-            sae.is_steering_enabled,
-            bool(sae.get_steering_values()),
+            raw=intensity_raw,
+            profile=profile,
+            explicit=explicit,
+            steering_enabled=sae.is_steering_enabled,
+            has_live_values=bool(sae.get_steering_values()),
         )
         if effective is None:
             logger.info(
                 "steering_intensity_noop",
                 profile=profile.name if profile else None,
                 explicit=explicit,
-                intensity=lam,
+                intensity=intensity_raw,
                 steering_enabled=sae.is_steering_enabled,
             )
             return None
+        if (isinstance(intensity_raw, (int, float))
+                and 0.0 < effective < float(intensity_raw)):
+            # Numeric dial was capped at the authored/config ceiling —
+            # observable for operators correlating dial requests (EC-10.2).
+            logger.info(
+                "request_intensity_capped_at_authored_max",
+                requested=float(intensity_raw),
+                applied=effective,
+                profile=profile.name if profile else None,
+            )
 
-        if lam == 0.0:
+        if effective == 0.0:
             # Effective λ 0 disables steering for this request only —
             # uniformly, whatever the base would have been. NOTE: this
             # deliberately skips per-feature index validation (nothing is
@@ -750,6 +788,12 @@ class InferenceService:
             "enabled": sae.is_steering_enabled,
         }
 
+        # set_steering_batch MERGES into the live dict (sae_wrapper) — clear
+        # first so the request runs under EXACTLY its base, not the union of
+        # the base and whatever live steering existed (010 R3: a named
+        # profile was silently superimposed on operator-set values; restore
+        # already clears, apply didn't).
+        sae.clear_steering()
         sae.set_steering_batch(steering)
         sae.enable_steering(True)
 
@@ -1231,9 +1275,32 @@ class InferenceService:
             # Per-request profile override (same logic as non-streaming path)
             _saved_steering = None
             if request.profile or request.steering_intensity is not None:
-                _saved_steering = await self._apply_request_steering(
-                    request.profile, request.steering_intensity
-                )
+                try:
+                    _saved_steering = await self._apply_request_steering(
+                        request.profile, request.steering_intensity
+                    )
+                except MiLLMError as exc:
+                    # The 200 + headers are already committed (route-level
+                    # pre-checks catch the 404 case, but gate/index errors
+                    # and pre-check TOCTOUs land here) — emit an OpenAI-style
+                    # error event instead of aborting the stream (010 R3).
+                    logger.info(
+                        "stream_steering_error_event",
+                        code=exc.code,
+                        profile=request.profile,
+                    )
+                    import json as _sse_json
+
+                    error_event = _sse_json.dumps({
+                        "error": {
+                            "message": exc.message,
+                            "type": "invalid_request_error",
+                            "code": exc.code.lower(),
+                        }
+                    })
+                    yield f"data: {error_event}\n\n"
+                    yield "data: [DONE]\n\n"
+                    return
 
             # Setup runs BEFORE the try/finally below that restores the
             # per-request steering, so any exception in this window

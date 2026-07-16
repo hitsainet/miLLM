@@ -41,7 +41,11 @@ async def openai_validation_error_handler(
     from fastapi.exception_handlers import request_validation_exception_handler
     from fastapi.exceptions import RequestValidationError
 
-    assert isinstance(exc, RequestValidationError)
+    if not isinstance(exc, RequestValidationError):
+        # Registered for RequestValidationError only; anything else here is
+        # a mis-registration — don't mask it as a 400 (and don't rely on an
+        # assert that python -O strips).
+        raise exc
     if not _is_openai_route(request):
         return await request_validation_exception_handler(request, exc)  # type: ignore[return-value]
 
@@ -55,6 +59,11 @@ async def openai_validation_error_handler(
         message = message[len("Value error, "):]
     if param:
         message = f"Invalid value for '{param}': {message}"
+    if len(errors) > 1:
+        # First-error bias matches OpenAI's API, but say more exist so
+        # clients don't fix one field per round-trip blindly.
+        message += f" (and {len(errors) - 1} more validation error"
+        message += "s)" if len(errors) > 2 else ")"
 
     return create_openai_error(
         message=message,

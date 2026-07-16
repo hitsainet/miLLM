@@ -498,3 +498,290 @@ class TestDialConcurrency:
                 assert enabled is False
         # And the global state came back exactly as it started.
         assert state == {"values": {3: 10.0}, "enabled": True}
+
+    async def test_dial_interleaved_with_named_profile(self, service):
+        """R3 #12: a dial-only request and a named-profile request must each
+        see ONLY their own base — the merge bug made A observe the union."""
+        import asyncio
+
+        state = {"values": {3: 10.0}, "enabled": True}
+        sae = MagicMock()
+        sae.d_sae = 16384
+        sae.get_steering_values.side_effect = lambda: dict(state["values"])
+        sae.set_steering_batch.side_effect = (
+            lambda v: state["values"].update(v))
+        sae.enable_steering.side_effect = lambda e: state.update(enabled=e)
+        sae.clear_steering.side_effect = lambda: state.update(values={})
+        type(sae).is_steering_enabled = property(lambda self: state["enabled"])
+
+        named = make_profile(steering={"7": 100.0}, name="calm")
+        observed = []
+
+        async def profile_request():
+            async with service._request_queue.acquire():
+                with apply_ctx(sae, by_name=named):
+                    saved = await service._apply_request_steering("calm", None)
+                    observed.append(("profile", dict(state["values"])))
+                    await asyncio.sleep(0)
+                    service._restore_request_profile(saved)
+
+        async def dial_request():
+            async with service._request_queue.acquire():
+                with apply_ctx(sae, active=None):
+                    saved = await service._apply_request_steering(None, 2.0)
+                    observed.append(("dial", dict(state["values"])))
+                    await asyncio.sleep(0)
+                    service._restore_request_profile(saved)
+
+        await asyncio.gather(profile_request(), dial_request())
+
+        for kind, values in observed:
+            if kind == "profile":
+                assert values == {7: 100.0}, values  # ONLY the named base
+            else:
+                assert values == {3: 20.0}, values   # ONLY the live base x2
+        assert state == {"values": {3: 10.0}, "enabled": True}
+
+
+class TestReviewRound3Fixes:
+    """Pins for the R3 findings."""
+
+    async def test_hostile_authored_range_intersected_with_envelope(self):
+        """R3 #1: authored [0.5, 9] must not overdrive; negative floors must
+        never sign-invert the dial."""
+        from millm.core.steering_range import declared_intensity_range
+
+        assert declared_intensity_range(
+            {"budget": {"intensity_range": [0.5, 9.0]}}) == (0.5, 2.0)
+        assert declared_intensity_range(
+            {"budget": {"intensity_range": [-1.0, 1.5]}}) == (0.0, 1.5)
+        # Entirely outside the envelope -> None (config fallback)
+        assert declared_intensity_range(
+            {"budget": {"intensity_range": [-2.0, -1.0]}}) is None
+
+    async def test_apply_replaces_not_merges_live_steering(self, service):
+        """R3 #2: a request base must REPLACE live steering, never be
+        superimposed (set_steering_batch merges)."""
+        state = {"values": {42: 80.0}, "enabled": True}
+        sae = MagicMock()
+        sae.d_sae = 16384
+        sae.get_steering_values.side_effect = lambda: dict(state["values"])
+        sae.set_steering_batch.side_effect = (
+            lambda v: state["values"].update(v))
+        sae.enable_steering.side_effect = (
+            lambda e: state.update(enabled=e))
+        sae.clear_steering.side_effect = lambda: state.update(values={})
+        type(sae).is_steering_enabled = property(lambda self: state["enabled"])
+
+        profile = make_profile(steering={"7": 100.0})
+        with apply_ctx(sae, by_name=profile):
+            await service._apply_request_steering("p", None)
+        assert state["values"] == {7: 100.0}  # NOT {42: 80.0, 7: 100.0}
+
+    async def test_stored_intensity_zero_disables_not_zero_batch(self, service):
+        """R3 #3: stored lambda 0 must disable, not apply all-zero-enabled
+        steering (zero tensors still fire the hook per token)."""
+        sae = make_sae(values={42: 80.0}, enabled=True)
+        profile = make_profile(steering={"7": 100.0}, intensity=0.0)
+        with apply_ctx(sae, by_name=profile):
+            saved = await service._apply_request_steering("p", None)
+        assert saved == {"values": {42: 80.0}, "enabled": True}
+        sae.enable_steering.assert_called_once_with(False)
+        sae.set_steering_batch.assert_not_called()
+
+    async def test_rangeless_cluster_capped_at_config_envelope(self, service):
+        """R3 #4: a cluster WITHOUT an authored range caps at the same
+        config envelope the management API enforces."""
+        from millm.core.config import settings
+
+        sae = make_sae()
+        profile = make_profile(
+            steering={"10": 100.0}, source_kind="cluster",
+            cluster_meta={"sae": {"n_features": 16384}},
+        )
+        with apply_ctx(sae, by_name=profile):
+            await service._apply_request_steering("p", 2.0)
+        expected = 100.0 * settings.CLUSTER_INTENSITY_MAX
+        sae.set_steering_batch.assert_called_once_with({10: expected})
+
+    async def test_manual_profile_keeps_schema_envelope(self, service):
+        """Manual profiles: [0, 2] is the documented envelope — no cap."""
+        sae = make_sae()
+        profile = make_profile(steering={"10": 50.0}, source_kind="manual")
+        with apply_ctx(sae, by_name=profile):
+            await service._apply_request_steering("p", 2.0)
+        sae.set_steering_batch.assert_called_once_with({10: 100.0})
+
+    async def test_at_ceiling_dial_not_capped(self, service):
+        """R3 mutation pin: lam == hi exactly must pass through uncapped."""
+        sae = make_sae()
+        profile = make_profile(
+            steering={"10": 100.0}, source_kind="cluster",
+            cluster_meta={"budget": {"intensity_range": [0.5, 1.2]}},
+        )
+        with apply_ctx(sae, by_name=profile), \
+             patch("millm.services.inference_service.logger") as mock_log:
+            await service._apply_request_steering("p", 1.2)
+        sae.set_steering_batch.assert_called_once_with({10: 120.0})
+        events = [c.args[0] for c in mock_log.info.call_args_list]
+        assert "request_intensity_capped_at_authored_max" not in events
+
+    async def test_capped_dial_logs_observable_event(self, service):
+        """R3 mutation pin: EC-10.2's observable — the cap must log."""
+        sae = make_sae()
+        profile = make_profile(
+            steering={"10": 100.0}, source_kind="cluster",
+            cluster_meta={"budget": {"intensity_range": [0.5, 1.2]}},
+        )
+        with apply_ctx(sae, by_name=profile), \
+             patch("millm.services.inference_service.logger") as mock_log:
+            await service._apply_request_steering("p", 2.0)
+        events = [c.args[0] for c in mock_log.info.call_args_list]
+        assert "request_intensity_capped_at_authored_max" in events
+
+    async def test_noop_logs_notice(self, service):
+        """R3 mutation pin: EC-10.1 requires the no-op be a logged notice."""
+        sae = make_sae(values={}, enabled=False)
+        with apply_ctx(sae, active=None), \
+             patch("millm.services.inference_service.logger") as mock_log:
+            result = await service._apply_request_steering(None, 1.5)
+        assert result is None
+        events = [c.args[0] for c in mock_log.info.call_args_list]
+        assert "steering_intensity_noop" in events
+
+    async def test_string_declared_n_features_still_gates(self, service):
+        """R3 mutation pin: cluster_meta is raw JSON — n_features may arrive
+        as a string; int() coercion keeps the gate correct both ways."""
+        sae = make_sae(d_sae=16384)
+        profile = make_profile(
+            steering={"7": 50.0}, source_kind="cluster",
+            cluster_meta={"sae": {"n_features": "16384"}},
+        )
+        with apply_ctx(sae, by_name=profile):
+            saved = await service._apply_request_steering("p", None)
+        assert saved is not None  # '16384' == 16384 after coercion: no reject
+
+
+class TestEchoApplyParity:
+    """R3 #7: the strongest R2 guarantee, asserted behaviorally — across a
+    state matrix, the echo emits a header iff apply changes steering, and
+    the echoed lambda equals the applied scale."""
+
+    CASES = [
+        # (profile_kwargs|None, named, sae_values, enabled, dial)
+        (dict(steering={"7": 100.0}), True, {}, False, None),
+        (dict(steering={"7": 100.0}), True, {}, False, 1.5),
+        (dict(steering={"7": 100.0}), True, {5: 1.0}, True, 0.0),
+        (dict(steering={"7": 100.0}, intensity=0.0), True, {5: 1.0}, True, None),
+        (dict(steering={"7": 100.0}, intensity=0.5), True, {}, True, None),
+        (dict(steering=None), True, {5: 1.0}, True, 1.5),
+        (dict(steering={"7": 100.0}), False, {5: 1.0}, True, "max"),
+        (dict(steering={"7": 100.0}), False, {5: 1.0}, False, 1.0),
+        (None, False, {3: 10.0}, True, 2.0),
+        (None, False, {3: 10.0}, False, 1.0),
+        (None, False, {}, True, 0.0),
+        (dict(steering={"7": 100.0}, source_kind="cluster",
+              cluster_meta={"budget": {"intensity_range": [0.5, 1.2]}}),
+         True, {}, True, 2.0),
+    ]
+
+    @pytest.mark.parametrize("profile_kwargs,named,values,enabled,dial", CASES)
+    async def test_parity(self, service, profile_kwargs, named, values,
+                          enabled, dial):
+        profile = make_profile(**profile_kwargs) if profile_kwargs else None
+        request = MagicMock(steering_intensity=dial,
+                            profile="p" if named else None)
+
+        def fresh_sae():
+            return make_sae(values=dict(values), enabled=enabled)
+
+        sae = fresh_sae()
+        with apply_ctx(sae, by_name=profile if named else None,
+                       active=None if named else profile):
+            echoed = (await service.resolve_request_intensity(request)
+                      if dial is not None else None)
+            saved = await service._apply_request_steering(
+                "p" if named else None, dial)
+
+        if dial is not None:
+            # Header present <=> apply changed something
+            assert (echoed is not None) == (saved is not None), (
+                f"echo={echoed} saved={saved}")
+        if saved is not None and echoed is not None:
+            if echoed == 0.0:
+                sae.enable_steering.assert_called_with(False)
+            elif sae.set_steering_batch.call_args:
+                applied = sae.set_steering_batch.call_args.args[0]
+                base = ({int(k): float(v)
+                         for k, v in (profile.steering or {}).items()}
+                        if profile and profile.steering else
+                        {int(k): float(v) for k, v in values.items()})
+                for idx, val in applied.items():
+                    assert val == pytest.approx(
+                        max(-200.0, min(200.0, base[idx] * echoed)))
+
+
+class TestPlannerDirect:
+    """R3 #7: direct table test of the pure decision core."""
+
+    def plan(self, **kw):
+        defaults = dict(raw=None, profile=None, explicit=False,
+                        steering_enabled=False, has_live_values=False)
+        defaults.update(kw)
+        return InferenceService._plan_effective_intensity(**defaults)
+
+    def test_nothing_requested(self):
+        assert self.plan() is None
+
+    def test_dial_zero_enabled(self):
+        assert self.plan(raw=0.0, steering_enabled=True) == 0.0
+
+    def test_dial_zero_disabled_noop(self):
+        assert self.plan(raw=0.0, steering_enabled=False) is None
+
+    def test_named_profile_stored_lambda(self):
+        p = make_profile(steering={"7": 1.0}, intensity=0.5)
+        assert self.plan(profile=p, explicit=True) == 0.5
+
+    def test_named_profile_dial_overrides(self):
+        p = make_profile(steering={"7": 1.0}, intensity=0.5)
+        assert self.plan(raw=1.5, profile=p, explicit=True,
+                         steering_enabled=True) == 1.5
+
+    def test_stored_zero_disables(self):
+        p = make_profile(steering={"7": 1.0}, intensity=0.0)
+        assert self.plan(profile=p, explicit=True, steering_enabled=True) == 0.0
+        assert self.plan(profile=p, explicit=True, steering_enabled=False) is None
+
+    def test_dial_only_disabled_never_enables(self):
+        p = make_profile(steering={"7": 1.0})
+        assert self.plan(raw=1.5, profile=p, explicit=False,
+                         steering_enabled=False) is None
+
+    def test_named_empty_noop(self):
+        p = make_profile(steering=None)
+        assert self.plan(raw=1.5, profile=p, explicit=True,
+                         steering_enabled=True) is None
+
+    def test_live_base(self):
+        assert self.plan(raw=1.5, steering_enabled=True,
+                         has_live_values=True) == 1.5
+        assert self.plan(raw=1.5, steering_enabled=True,
+                         has_live_values=False) is None
+
+    def test_symbolic_resolution_inside(self):
+        p = make_profile(steering={"7": 1.0},
+                         cluster_meta={"budget": {"intensity_range": [0.5, 1.4]}})
+        assert self.plan(raw="max", profile=p, explicit=True,
+                         steering_enabled=True) == 1.4
+
+    def test_cap_inside(self):
+        p = make_profile(steering={"7": 1.0}, source_kind="cluster",
+                         cluster_meta={"budget": {"intensity_range": [0.5, 1.2]}})
+        assert self.plan(raw=2.0, profile=p, explicit=True,
+                         steering_enabled=True) == 1.2
+
+    def test_keyword_only(self):
+        with pytest.raises(TypeError):
+            InferenceService._plan_effective_intensity(  # noqa
+                None, None, False, False, False)

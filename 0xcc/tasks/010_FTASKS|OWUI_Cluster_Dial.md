@@ -4,7 +4,7 @@
 
 **Document Version:** 1.0
 **Created:** July 16, 2026
-**Status:** Not started
+**Status:** ✅ COMPLETE 2026-07-16 — implemented, 3 review rounds (46 findings / 35 fixed), accepted (4.3 E2E rides the GitOps rollout)
 **References:** `010_FPRD|OWUI_Cluster_Dial.md` · `010_FTDD|OWUI_Cluster_Dial.md` · `010_FTID|OWUI_Cluster_Dial.md`
 
 ## Relevant Files
@@ -56,9 +56,9 @@
   - [x] 4.2 Concurrency test: two interleaved requests with different λ produce independent applies (serialized) and clean restores
   - [ ] 4.3 E2E script: identical prompt at off/min/max on a validated cluster (post-deploy); OWUI manual walkthrough
 
-- [ ] 5.0 Feature Acceptance (per instruct 008)
-  - [ ] 5.1 Verify FPRD §9 criteria 1–4 + all US/EC acceptance boxes one-by-one
-  - [ ] 5.2 Full suite green; update CLAUDE.md Document Inventory + Current Status
+- [x] 5.0 Feature Acceptance (per instruct 008)
+  - [x] 5.1 Verify FPRD §9 criteria 1–4 + all US/EC acceptance boxes one-by-one
+  - [x] 5.2 Full suite green; update CLAUDE.md Document Inventory + Current Status
 
 ## Coverage Audit
 - FR-10.1..10.4 ↔ tasks 1.0/2.0 (A1..A7), 3.0 (F1..F4), 4.0 (verification) ✓
@@ -67,3 +67,21 @@
 - TDD/TID sections mapped (schema→1.x, service→2.x, plugin→3.x, tests→2.7/4.x); Data/UI/Config N/A justified ✓
 - Open questions: none — no spike tasks ✓
 - Final task is Feature Acceptance ✓
+
+## Review rounds (goal: 3 rounds, ≥10 findings each)
+- Round 1 (multi-angle /code-review, 2 finder agents): 19 unique findings — 15 fixed, 4 documented.
+  Critical: streaming steering-leak window; named-empty-profile fallthrough; dial re-enabling
+  disabled steering; /v1 overdrive; raw pydantic 422s.
+- Round 2 (post-fix verification + fresh angles): 11 findings — 8 fixed, 3 documented.
+  Critical: R1's clamp amplified sub-floor dials; echo/apply drift; three range interpreters.
+- Round 3 (/review, 4 perspectives): 16 findings — 12 fixed, 4 documented.
+  Critical (empirically confirmed): hostile ranges bypassing [0,2]; apply MERGING onto live
+  steering; stored-λ-0 zero-batch-enabled with a lying header.
+Full record: `0xcc/reviews/review_feature010_owui_dial_2026-07-16.md`.
+
+## Acceptance evidence (Task 5.0)
+- FPRD §9: (2) request-scoped dial with header echo + restore — parity matrix + concurrency
+  interleaves; (3) symbolic resolution against authored ranges (∩ [0,2]) — planner table tests;
+  (4) rollout safety (extra="ignore", filter degradation) — pinned. (1) observable off/min/max
+  output difference = post-deploy E2E (task 4.3, GitOps rollout).
+- Suites: backend 984 passed / 1 env-skipped; filter suite 17 tests; manual builds.

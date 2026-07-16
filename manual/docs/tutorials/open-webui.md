@@ -58,6 +58,7 @@ impossible:
 | Dial | Effect on this user's requests |
 |------|-------------------------------|
 | `default` | Use the operator's `default_dial` setting (which itself defaults to leaving steering as-is) |
+| `server` | Always send nothing — the server's stored state governs, even when the operator set a default |
 | `off` | Steering disabled for the request (λ = 0) |
 | `min` / `max` | The steering base's declared `intensity_range` bounds (the active cluster's, or the named profile's when a request also carries `profile`) |
 | `custom` | The exact λ from your `custom_lambda` valve (`0`–`2`, capped at the cluster's declared maximum; dialing below the declared floor is honored) |
@@ -88,3 +89,4 @@ is safe and has no effect.
 | Replies but no steering effect | SAE not attached, steering disabled, or strength too low — check `steering_apply_count` ([verification](/concepts/steering#verifying-steering-is-active)) |
 | `429` errors under load | Serial queue full (`MAX_PENDING_REQUESTS`); Open WebUI parallel title-generation requests can pile up — raise the limit or disable title generation |
 | CORS errors (browser direct) | Set `CORS_ORIGINS` to include your Open WebUI origin — see [Configuration](/reference/configuration) |
+| Dial has no effect | All by-design silent no-ops — check in order: Function enabled on *this model*? master valve on? SAE attached? steering enabled in miLLM (a dial never re-enables disabled steering)? an active cluster or live steering values to scale? miLLM build new enough (older builds ignore the field)? Scripted clients can check for the `X-miLLM-Steering-Intensity` response header — absent means the dial didn't apply |

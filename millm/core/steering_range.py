@@ -31,9 +31,19 @@ def declared_intensity_range(
     Single interpreter for the range document (review 010 R2: three services
     each parsed it differently). cluster_meta stores the RAW imported
     definition (lossless storage), so nothing about the shape, types, or
-    ordering can be assumed: a swapped pair is normalized ascending, and
+    ordering can be assumed: a swapped pair is normalized ascending,
     non-numeric content degrades to None (callers fall back to the config
-    envelope) rather than raising into a 500.
+    envelope) rather than raising into a 500, and the result is INTERSECTED
+    with the [0, 2] dial envelope (010 R3: an authored [0.5, 9] or [-1, 1.5]
+    must never smuggle overdrive or sign-inverted steering past the /v1
+    schema's own bounds). An authored range entirely outside [0, 2]
+    degrades to None.
+
+    Consumer contracts (deliberately different post-processing):
+    - management API (cluster_service._intensity_bounds): dial anywhere in
+      [0, hi] — the floor exists only as the symbolic "min" position;
+    - /v1 dial (inference_service): symbolic "min"/"max" resolve to lo/hi,
+      numeric lambda capped at hi, dial-to-0 always allowed.
     """
     if not cluster_meta:
         return None
@@ -47,4 +57,7 @@ def declared_intensity_range(
         return None
     if lo > hi:
         lo, hi = hi, lo
+    lo, hi = max(lo, 0.0), min(hi, 2.0)
+    if lo > hi:
+        return None
     return (lo, hi)

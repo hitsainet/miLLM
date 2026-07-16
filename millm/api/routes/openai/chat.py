@@ -86,7 +86,11 @@ async def create_chat_completion(
     # queues can still skew a symbolic echo — documented in the API reference.
     echo_intensity = None
     if request.steering_intensity is not None:
-        effective = await inference.resolve_request_intensity(request)
+        # For streaming, the echo resolution doubles as the pre-commit 404
+        # check for a named profile (one profile read, not two).
+        effective = await inference.resolve_request_intensity(
+            request, ensure_named_profile=bool(request.stream)
+        )
         if effective is not None:
             echo_intensity = f"{effective:g}"
 
@@ -100,8 +104,9 @@ async def create_chat_completion(
 
         # Same pre-commit rule for a bad profile name: apply-time validation
         # runs inside the generator (headers already sent), so check the 404
-        # case here while we can still return a proper error response.
-        if request.profile:
+        # case here while we can still return a proper error response. When
+        # a dial is present the echo resolution above already verified it.
+        if request.profile and request.steering_intensity is None:
             await inference.ensure_profile_exists(request.profile)
 
         queue = inference.request_queue

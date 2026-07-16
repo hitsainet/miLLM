@@ -200,3 +200,4 @@ class TestErrorStatusMap:
         status_code, error_type = ERROR_STATUS_MAP["QUEUE_FULL"]
         assert status_code == 503
         assert error_type == "server_error"
+

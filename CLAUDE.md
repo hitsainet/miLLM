@@ -1,14 +1,14 @@
 # Project: miLLM - Mechanistic Interpretability LLM Server
 
 ## Current Status
-- **Phase:** Cluster Runtime increment — documentation COMPLETE, ready for implementation
-- **Last Session:** July 16, 2026 — full XCC doc chain for BRD-MILLM-CLUSTERS-001: PPRD v1.1 (Features 8–11, FR-8.x–11.x, matrix; future stubs renumbered 12–14), PADR v1.1 (6 increment decisions + risks), and 16 feature docs (008–011 × FPRD/FTDD/FTID/FTASKS). All increment design questions RESOLVED: MCP = evolve miStudio server (cross-repo); OWUI dial = Filter Function + per-request `steering_intensity`; sensing = per-event summaries + ±K token context, bounded, serial-only v1; UI = new Clusters page; λ stored raw + clamped ±200 at apply (contract-conflict fix).
-- **Next Steps:** Execute Feature 008 via `0xcc/instruct/008_process-task-list.md` starting with `0xcc/tasks/008_FTASKS|Cluster_Import.md` (sequencing: 008 → 010 → 011 → 009; 009 last, consumes the others' endpoints; its miStudio-repo tasks are flagged [CROSS-REPO]).
-- **Active Document:** 0xcc/tasks/008_FTASKS|Cluster_Import.md (not started)
+- **Phase:** Cluster Runtime increment — Features **008 ✅** and **010 ✅** ACCEPTED; next: 011 Coactivation_Sensing, then 009 Unified_MCP
+- **Last Session:** July 16, 2026 — **Feature 010 OWUI_Cluster_Dial ACCEPTED**: per-request `steering_intensity` (float 0–2 | off/min/max) on /v1 chat completions with X-miLLM-Steering-Intensity echo; single echo/apply decision core (`_plan_effective_intensity`); authored `intensity_range` ∩ [0,2] enforcement + config-envelope cap; clear-before-set (apply no longer merges onto live steering); streaming SSE error events + pre-commit 404; /v1 OpenAI-style 400 validation envelopes; OWUI Filter Function v1.2 (`integrations/openwebui/millm_dial_filter.py`, server/custom valves, dict-shaped valve support, 17-test suite); serial routing for dialed requests. 3 review rounds: 46 findings / 35 fixed — `0xcc/reviews/review_feature010_owui_dial_2026-07-16.md`. (Feature 008 Cluster_Import accepted earlier the same day: 48 findings / 44 fixed.) Also fixed pre-existing: generic exception handler crash under production logging (`is_enabled_for`), PROFILE_NOT_FOUND/INVALID_FEATURE_INDEX missing from the /v1 error map.
+- **Next Steps:** Execute Feature 011 via `0xcc/tasks/011_FTASKS|Coactivation_Sensing.md` (migration 008 `sensing_events`, LoadedSAE member-only `_sense`, sensing service/routes/WS, Clusters-page panel), then 009 Unified_MCP (miLLM contract + [CROSS-REPO] miStudio server work). Post-deploy: 010 task 4.3 E2E (off/min/max on a validated cluster).
+- **Active Document:** 0xcc/tasks/011_FTASKS|Coactivation_Sensing.md (not started)
 - **Backlog:**
   - Copy audit: no UI/docs text may recommend a SPECIFIC model family (dated-info risk — user directive 2026-07-16). UI pages fixed (SAE/Models tips now "latest popular offline models"; SteeringSlider Neuronpedia link now derives from the attached SAE). Remaining: sweep `manual/docs/` for model-family-specific recommendations and genericize.
 - **New Increment (scoped 2026-07-16):** cluster-definition import (mistudio.cluster-definition/v1, file + HF consume-only) → steering profiles; unified MCP server (both products, health-gated categories); Open WebUI live cluster dial; cluster co-activation sensing. Locked: incremental BRD style; HF publishing stays miStudio-side; budgets frozen on import (assumed, confirm pre-PRD).
-- **Baseline:** v1.0 features 001–007 all ✅ (705 tests) + post-v1.0: GitOps/ArgoCD K8s deploy, CBM + speculative decoding + torch.compile, hybrid/Mamba support, Neuronpedia links, security hardening. Version 0.5.1.
+- **Baseline:** v1.0 features 001–007 all ✅; increment suites: backend 984 / frontend 198 (2026-07-16) + post-v1.0: GitOps/ArgoCD K8s deploy, CBM + speculative decoding + torch.compile, hybrid/Mamba support, Neuronpedia links, security hardening. Version 0.5.1.
 
 ## Quick Resume Commands
 ```

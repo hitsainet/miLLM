@@ -404,3 +404,34 @@ class TestSteeringIntensityDial:
             )
         assert response.status_code == 404
         assert response.json()["error"]["type"] == "invalid_request_error"
+
+
+class TestOpenAIValidationHandlerHardening:
+    """010 R3: multi-error and non-/v1 paths of the validation handler."""
+
+    def test_multi_error_names_first_and_counts_rest(self, client):
+        response = client.post(
+            "/v1/chat/completions",
+            json={"model": "m",
+                  "messages": [{"role": "user", "content": "x"}],
+                  "temperature": -5, "steering_intensity": 9.0},
+        )
+        assert response.status_code == 400
+        assert "more validation error" in response.json()["error"]["message"]
+
+    def test_single_error_has_param(self, client):
+        response = client.post(
+            "/v1/chat/completions",
+            json={"model": "m",
+                  "messages": [{"role": "user", "content": "x"}],
+                  "steering_intensity": 9.0},
+        )
+        assert response.status_code == 400
+        assert "steering_intensity" in (response.json()["error"]["param"] or "")
+
+    def test_non_v1_keeps_fastapi_shape(self, client):
+        response = client.put(
+            "/api/clusters/prof_x/intensity", json={"intensity": 99}
+        )
+        assert response.status_code == 422
+        assert "detail" in response.json()

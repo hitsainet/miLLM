@@ -1,7 +1,7 @@
 """
 title: miLLM Cluster Dial
 author: miLLM
-version: 1.1.0
+version: 1.2.0
 description: Per-chat steering-intensity dial for a miLLM backend. Injects the
   miLLM extension field `steering_intensity` (off | min | max, or a numeric
   lambda in [0, 2]) into /v1/chat/completions requests so each user can dial
@@ -31,7 +31,7 @@ from typing import Literal, Optional, Union
 
 from pydantic import BaseModel, Field
 
-DialPosition = Literal["default", "off", "min", "max", "custom"]
+DialPosition = Literal["default", "server", "off", "min", "max", "custom"]
 
 
 class Filter:
@@ -59,7 +59,9 @@ class Filter:
             default="default",
             description=(
                 "Your steering dial: 'default' (use the operator's setting), "
-                "'off', 'min', 'max', or 'custom' (uses custom_lambda)."
+                "'server' (send nothing — the server's stored state governs, "
+                "even when the operator set a default), 'off', 'min', 'max', "
+                "or 'custom' (uses custom_lambda)."
             ),
         )
         custom_lambda: float = Field(
@@ -102,9 +104,18 @@ class Filter:
         if not self.valves.enabled:
             return body
 
+        user_valves = (__user__ or {}).get("valves")
+        # 'server' is the explicit escape hatch: send no field, ignoring the
+        # operator default — without it, once the operator sets default_dial
+        # a user has no position meaning "server state governs" (US-10.1).
+        if str(self._read(user_valves, "dial", "") or "").strip().lower() == "server":
+            return body
+
         # Per-user dial wins; the operator default fills in when the user
-        # leaves theirs at 'default'.
-        dial = self._resolve((__user__ or {}).get("valves"))
+        # leaves theirs at 'default'. When a dial resolves, it REPLACES any
+        # steering_intensity already present in the body (scripted clients
+        # keep their field only when every valve is default/server).
+        dial = self._resolve(user_valves)
         if dial is None:
             dial = self._resolve(
                 {"dial": self.valves.default_dial,

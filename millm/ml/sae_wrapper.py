@@ -12,6 +12,7 @@ This applies steering directly to the residual stream, uniformly to all token po
 
 import logging
 from contextlib import contextmanager
+from dataclasses import dataclass
 from typing import Iterator, Optional
 
 import torch
@@ -20,6 +21,44 @@ from torch import Tensor
 from millm.ml.sae_config import SAEConfig
 
 logger = logging.getLogger(__name__)
+
+
+@dataclass
+class SensingConfig:
+    """Armed co-activation sensing parameters (Feature 11).
+
+    thresholds holds theta_i = max(theta_floor, epsilon * max_activation_i)
+    per member, aligned with member_indices. threshold_mode records whether
+    the epsilon*max rule could be applied ('epsilon_max') or every member
+    lacked max_activation ('floor_only') — surfaced in the status API
+    (EC-11.4) so operators know the thresholds are degraded.
+    """
+
+    profile_id: str
+    member_indices: list[int]              # <= 20 (contract cap)
+    thresholds: Tensor                     # (m,)
+    threshold_mode: str                    # 'epsilon_max' | 'floor_only'
+    min_k: int
+    context_tokens: int
+    max_events_per_request: int = 20
+
+
+@dataclass
+class SensedHit:
+    """A debounced co-activation span within one request.
+
+    Positions are ABSOLUTE token indices from the start of the request's
+    sequence (prompt + generated); the event attaches to the token being
+    READ at each position — the sampled token is unknowable in-pass.
+    fired carries (REAL feature_idx, peak activation) pairs.
+    """
+
+    pos_start: int
+    pos_end: int
+    phase: str                             # 'prefill' | 'decode'
+    fired: list[tuple[int, float]]
+    fired_count: int
+    score: float                           # max(act_i / theta_i) over fired
 
 
 class LoadedSAE:
@@ -116,6 +155,23 @@ class LoadedSAE:
         # firing (e.g. that torch.compile did not silently bypass it).  Not
         # thread-locked — it is a best-effort diagnostic counter.
         self._steering_apply_count: int = 0
+
+        # Sensing state (Feature 11) — armed-only observation path,
+        # deliberately independent of monitoring (which compacts columns
+        # positionally and keeps only the last pass).
+        self._sensing: Optional[SensingConfig] = None
+        self._W_enc_m: Optional[Tensor] = None
+        self._b_enc_m: Optional[Tensor] = None
+        self._sensed_hits: list[SensedHit] = []
+        self._sensing_token_offset: int = 0
+        self._sensing_phase: str = "prefill"
+        self._sensing_done: bool = False
+        self._sensing_truncated: bool = False
+        self._sensing_began: bool = False
+        self._sensing_request_id: str = ""
+        # Cumulative per-request overhead accumulator (ms) — read by the
+        # sensing status endpoint (SEN-S2); reset at begin.
+        self._sensing_overhead_ms: float = 0.0
 
         # Monitoring state
         self._monitoring_enabled: bool = False
@@ -445,6 +501,174 @@ class LoadedSAE:
     def is_monitoring_enabled(self) -> bool:
         """Check if monitoring is enabled (and not currently suppressed)."""
         return self._monitoring_enabled and not self._suppressed
+
+    # ==========================================================================
+    # Co-activation sensing (Feature 11)
+    # ==========================================================================
+
+    def arm_sensing(self, config: SensingConfig) -> None:
+        """
+        Arm the sensing path: cache the member-only encoder slice so the
+        per-pass predicate is a (seq, d_in) @ (d_in, m<=20) matmul.
+
+        Idempotent: re-arming replaces the previous config and clears any
+        buffered state. dtype/device follow the SAE weights exactly as
+        encode() casts inputs.
+        """
+        idx = torch.tensor(config.member_indices, dtype=torch.long,
+                           device=self.W_enc.device)
+        self._W_enc_m = self.W_enc.index_select(1, idx).contiguous()
+        self._b_enc_m = self.b_enc.index_select(0, idx).contiguous()
+        config.thresholds = config.thresholds.to(
+            device=self.W_enc.device, dtype=self.W_enc.dtype)
+        self._sensing = config
+        self._reset_sensing_buffer()
+        self._sensing_began = False
+        logger.info(
+            "sensing_armed: profile=%s members=%d min_k=%d mode=%s",
+            config.profile_id, len(config.member_indices),
+            config.min_k, config.threshold_mode,
+        )
+
+    def disarm_sensing(self) -> None:
+        """Disarm and drop all sensing state (config, caches, buffer)."""
+        if self._sensing is not None:
+            logger.info("sensing_disarmed: profile=%s",
+                        self._sensing.profile_id)
+        self._sensing = None
+        self._W_enc_m = None
+        self._b_enc_m = None
+        self._reset_sensing_buffer()
+        self._sensing_began = False
+
+    @property
+    def is_sensing_armed(self) -> bool:
+        return self._sensing is not None
+
+    def _reset_sensing_buffer(self) -> None:
+        self._sensed_hits = []
+        self._sensing_token_offset = 0
+        self._sensing_phase = "prefill"
+        self._sensing_done = False
+        self._sensing_truncated = False
+        self._sensing_overhead_ms = 0.0
+
+    def begin_sensing_request(self, request_id: str) -> None:
+        """
+        Open a request boundary (called inside the serial queue semaphore).
+
+        MUST reset every piece of per-request state — a missed begin on an
+        unsensed path must yield an empty collect, never stale hits from a
+        prior request (FTID pitfall 1).
+        """
+        self._reset_sensing_buffer()
+        self._sensing_request_id = request_id
+        self._sensing_began = True
+
+    def collect_sensing_hits(self) -> tuple[str, list["SensedHit"], bool]:
+        """
+        Close the request boundary: return (request_id, hits, truncated)
+        and clear the began flag so a stray later pass cannot append to a
+        flushed request. Without a begin, returns an empty result.
+        """
+        if not self._sensing_began:
+            return ("", [], False)
+        hits = self._sensed_hits
+        truncated = self._sensing_truncated
+        request_id = self._sensing_request_id
+        self._sensed_hits = []
+        self._sensing_began = False
+        return (request_id, hits, truncated)
+
+    def _sense(self, hidden_states: Tensor) -> None:
+        """
+        Per-forward-pass co-activation predicate over the armed members.
+
+        Called from the hook BEFORE apply_steering so positions reflect the
+        pre-steer residual read. Never raises into the forward pass.
+        """
+        if (self._suppressed or self._sensing is None
+                or not self._sensing_began or self._W_enc_m is None):
+            return
+        import time as _time
+
+        started = _time.perf_counter()
+        config = self._sensing
+        x = hidden_states[0] if hidden_states.dim() == 3 else hidden_states
+        seq_len = x.shape[0]
+        try:
+            if self._sensing_done:
+                return  # cap hit — still advance the offset in finally
+            if x.dtype != self._W_enc_m.dtype:
+                x = x.to(self._W_enc_m.dtype)
+            acts = torch.relu(x @ self._W_enc_m + self._b_enc_m)  # (seq, m)
+            fired = acts > config.thresholds                       # (seq, m)
+            counts = fired.sum(dim=-1)                             # (seq,)
+            hot = (counts >= config.min_k).nonzero(as_tuple=True)[0]
+            if hot.numel():
+                self._append_sensing_hits(hot.tolist(), acts, fired)
+        except Exception:
+            # An observation path must never break generation.
+            logger.exception("sensing_pass_failed")
+        finally:
+            self._sensing_token_offset += seq_len
+            if self._sensing_phase == "prefill":
+                self._sensing_phase = "decode"
+            self._sensing_overhead_ms += (
+                (_time.perf_counter() - started) * 1000.0)
+
+    def _append_sensing_hits(
+        self, hot_positions: list[int], acts: Tensor, fired: Tensor
+    ) -> None:
+        """Debounce hot positions into spans and merge with the buffer tail.
+
+        Consecutive absolute positions extend one span — including across
+        pass boundaries during decode (position p in one pass, p+1 in the
+        next: FTID pitfall 3). New spans beyond the per-request cap set the
+        truncated flag and stop further sensing for the request.
+        """
+        assert self._sensing is not None
+        config = self._sensing
+        thresholds = config.thresholds
+
+        for pos in hot_positions:
+            abs_pos = self._sensing_token_offset + pos
+            member_mask = fired[pos]
+            member_acts = acts[pos]
+            fired_pairs: dict[int, float] = {}
+            score = 0.0
+            for j in member_mask.nonzero(as_tuple=True)[0].tolist():
+                real_idx = config.member_indices[j]
+                act = float(member_acts[j])
+                fired_pairs[real_idx] = act
+                theta = float(thresholds[j])
+                score = max(score, act / theta if theta > 0 else act)
+
+            tail = self._sensed_hits[-1] if self._sensed_hits else None
+            if tail is not None and abs_pos == tail.pos_end + 1:
+                # Extend the span (peaks and score are running maxima)
+                merged = dict(tail.fired)
+                for idx, act in fired_pairs.items():
+                    merged[idx] = max(merged.get(idx, 0.0), act)
+                tail.pos_end = abs_pos
+                tail.fired = sorted(merged.items())
+                tail.fired_count = max(tail.fired_count, len(fired_pairs))
+                tail.score = max(tail.score, score)
+                continue
+
+            if len(self._sensed_hits) >= config.max_events_per_request:
+                self._sensing_truncated = True
+                self._sensing_done = True
+                return
+
+            self._sensed_hits.append(SensedHit(
+                pos_start=abs_pos,
+                pos_end=abs_pos,
+                phase=self._sensing_phase,
+                fired=sorted(fired_pairs.items()),
+                fired_count=len(fired_pairs),
+                score=score,
+            ))
 
     @contextmanager
     def suppressed(self) -> Iterator[None]:

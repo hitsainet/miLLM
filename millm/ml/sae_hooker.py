@@ -164,6 +164,15 @@ class SAEHooker:
                         x = x.to(sae.W_enc.dtype)
                     sae._capture_activations(sae.encode(x))
 
+            # ── Co-activation sensing (Feature 11) ───────────────────────────
+            # Sibling of monitoring (evaluates even when monitoring is off),
+            # BEFORE apply_steering so positions reflect the pre-steer
+            # residual read. _sense() respects suppressed() internally and
+            # never raises into the forward pass.
+            if sae.is_sensing_armed:
+                with torch.no_grad():
+                    sae._sense(hidden_states)
+
             # ── Steering ──────────────────────────────────────────────────────
             modified = sae.apply_steering(hidden_states)
 

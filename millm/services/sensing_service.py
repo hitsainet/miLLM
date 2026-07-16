@@ -34,7 +34,9 @@ class SensingService:
         self._member_labels: dict[int, str] = {}
         self._last_request_overhead_ms: float = 0.0
         self._events_recorded: int = 0
-        self._last_ws_emit_ts: float = 0.0
+        # -inf: the FIRST flush must always emit — 0.0 would throttle it
+        # on platforms where monotonic() starts near zero (011 R2).
+        self._last_ws_emit_ts: float = float("-inf")
         self._ws_dropped: int = 0
 
     _WS_MAX_PER_FLUSH = 5
@@ -194,6 +196,13 @@ class SensingService:
         profile_id = profile_id or self._armed_profile_id
         if not hits or profile_id is None:
             return []
+        # A re-arm between begin and flush swapped the armed identity: the
+        # summary formatter (display token, member labels) now belongs to a
+        # DIFFERENT cluster than these hits. Persist under the snapshot id
+        # with neutral formatting rather than mis-branding (011 R2).
+        if profile_id != self._armed_profile_id:
+            self._display_token = profile_id
+            self._member_labels = {}
         config = self._armed_config
         k = config.context_tokens if config else 0
 
@@ -326,6 +335,7 @@ class SensingService:
                 self._last_request_overhead_ms, 3),
             "overhead_warn_threshold_ms": settings.SENSING_MAX_OVERHEAD_MS,
             "events_recorded_since_start": self._events_recorded,
+            "ws_events_dropped": self._ws_dropped,
             "retention": {
                 "max_events_per_cluster": settings.SENSING_MAX_EVENTS_PER_CLUSTER,
                 "max_age_days": settings.SENSING_MAX_AGE_DAYS,

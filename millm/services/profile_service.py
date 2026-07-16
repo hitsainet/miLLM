@@ -417,7 +417,7 @@ class ProfileService:
         # Sensing lifecycle (Feature 11): arm when the newly active cluster
         # has sensing enabled and an SAE is attached; anything else disarms
         # (activating profile B must never keep sensing profile A).
-        self._sync_sensing_arm_state(profile)
+        sensing_armed = self._sync_sensing_arm_state(profile)
 
         logger.info(
             "profile_activated",
@@ -430,6 +430,9 @@ class ProfileService:
             "profile_id": profile_id,
             "applied_steering": applied_steering,
             "feature_count": feature_count,
+            # 011 R2: an arm refusal (bad thresholds, mismatched SAE) was a
+            # log-only event — callers now see whether sensing engaged.
+            "sensing_armed": sensing_armed,
         }
 
     async def deactivate_profile(
@@ -535,11 +538,11 @@ class ProfileService:
             "was_active": was_active,
         }
 
-    def _sync_sensing_arm_state(self, active_profile) -> None:
+    def _sync_sensing_arm_state(self, active_profile) -> bool:
         """
         Arm/disarm co-activation sensing to match the active profile
         (Feature 11). Never raises — sensing is an observation feature and
-        must not break activation.
+        must not break activation. Returns True when sensing armed.
         """
         try:
             import millm.api.dependencies as deps
@@ -555,7 +558,8 @@ class ProfileService:
             )
             if should_arm:
                 service.arm_for_profile(active_profile, sae)
-            else:
-                service.disarm(sae)
+                return True
+            service.disarm(sae)
         except Exception:
             logger.warning("sensing_arm_sync_failed", exc_info=True)
+        return False

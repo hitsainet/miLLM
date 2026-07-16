@@ -50,6 +50,7 @@ class SensingStatusResponse(BaseModel):
     last_request_overhead_ms: float = 0.0
     overhead_warn_threshold_ms: float = 5.0
     events_recorded_since_start: int = 0
+    ws_events_dropped: int = 0
     retention: dict[str, Any] = Field(default_factory=dict)
     # Persistent intent (the sensing_enabled column), distinct from `armed`
     enabled_clusters: list[dict[str, Any]] = Field(default_factory=list)

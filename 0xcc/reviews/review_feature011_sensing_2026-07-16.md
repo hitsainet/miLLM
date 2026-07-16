@@ -71,3 +71,25 @@ sweeps the whole package statically.
 Tests added this round: 30+ (wiring both generation paths, ambient rules matrix, force-serial-off
 CBM eligibility, DB-outage resilience, lifecycle sync, logging-convention sweep). Suites: backend
 1067 / frontend 203 / manual builds.
+
+## Round 2 (fix verification + fresh angles — inline; the agent round was cancelled mid-run) — 14 items: 4 fixed, 3 documented, 7 verified
+
+**Verified sound (round-1 fixes):** infinite thresholds survive fp16/bf16 arm-time casts (checked
+empirically); attach re-arm runs AFTER `_sae_state.set` with the hook installed; the hung-thread
+disarm/setup-close/flush paths all handle the (sae, profile_id) tuple consistently across all
+three generation paths; the frontend live-prepend prefix key cannot poison the detail/status
+caches; prune-on-read transaction semantics (commit only when rows deleted); the text-completion
+reindent (structure + full suite).
+
+**Fixed:**
+1. `_ws_dropped` was tracked but surfaced nowhere → `ws_events_dropped` in the status API.
+2. The WS throttle's initial timestamp of 0.0 would drop the FIRST flush on platforms where
+   `monotonic()` starts near zero → initialized to `-inf` (first flush always emits).
+3. Mid-request re-arm branded the snapshot profile's rows with the NEW cluster's display token
+   and member labels → neutral formatting when the flush profile differs from the armed one.
+4. An arm refusal at activation (unusable thresholds, mismatched SAE) was a log-only event —
+   activation now returns `sensing_armed` so callers/UI see whether sensing engaged.
+
+**Documented:** toggle-route arm failure persists the column then errors (intent-vs-runtime split
+is deliberate; the 422 reason tells the user); WS throttle drops reconcile on refetch (stated in
+the WS reference); `_sensing_batch_warned` is once-per-process by design.

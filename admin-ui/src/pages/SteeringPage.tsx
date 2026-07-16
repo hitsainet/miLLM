@@ -3,6 +3,7 @@ import { useNavigate } from 'react-router-dom';
 import { AlertCircle, Sliders, Info, Save } from 'lucide-react';
 import { useSteering } from '@hooks/useSteering';
 import { useSAE } from '@hooks/useSAE';
+import { neuronpediaBaseUrl } from '@/utils/neuronpedia';
 import { useModels } from '@hooks/useModels';
 import { useProfiles } from '@hooks/useProfiles';
 import { useServerStore } from '@stores/serverStore';
@@ -218,6 +219,7 @@ export function SteeringPage() {
                   <SteeringSlider
                     key={feature.index}
                     featureIndex={feature.index}
+                    neuronpediaBase={neuronpediaBaseUrl(attachedSAE)}
                     strength={feature.strength}
                     onStrengthChange={(newStrength) => handleStrengthChange(feature.index, newStrength)}
                     onRemove={() => handleRemove(feature.index)}

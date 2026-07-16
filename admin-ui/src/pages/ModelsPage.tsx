@@ -268,7 +268,7 @@ export function ModelsPage() {
               <strong className="text-slate-300">Supported Models:</strong> Any model compatible with Hugging Face Transformers library.
             </p>
             <p>
-              <strong className="text-slate-300">Recommended:</strong> Google Gemma 2 models work well with Gemma-Scope SAEs for feature steering.
+              <strong className="text-slate-300">Tip:</strong> Any of the latest popular offline models work — pick one that has a published SAE (matched model + SAE pairs give the best steering results).
             </p>
           </div>
         </div>

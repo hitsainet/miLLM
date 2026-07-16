@@ -2,6 +2,7 @@ import { useNavigate } from 'react-router-dom';
 import { AlertCircle, Info } from 'lucide-react';
 import { useMonitoring } from '@hooks/useMonitoring';
 import { useSAE } from '@hooks/useSAE';
+import { neuronpediaBaseUrl } from '@/utils/neuronpedia';
 import { useModels } from '@hooks/useModels';
 import { useServerStore } from '@stores/serverStore';
 import { useUIStore } from '@stores/uiStore';
@@ -38,23 +39,8 @@ export function MonitoringPage() {
   const isEnabled = monitoring?.enabled || false;
   const topK = monitoring?.top_k || 10;
 
-  // Build Neuronpedia feature URL base from the attached SAE's metadata.
-  // URL format: {base}/{model-slug}/{layer}-res-{d_sae_k}k
-  // e.g. https://neuronpedia.hitsai.net/lfm2.5-1.2b-instruct/12-res-8k
-  const neuronpediaBaseUrl = (() => {
-    const base = 'https://neuronpedia.hitsai.net';
-    if (!attachedSAE) return base;
-    // Model slug: "LiquidAI/LFM2.5-1.2B-Instruct" → "lfm2.5-1.2b-instruct"
-    const modelSlug = (attachedSAE.trained_on || '')
-      .split('/')
-      .pop()
-      ?.toLowerCase()
-      .replace(/_/g, '-') || '';
-    const layer = attachedSAE.trained_layer ?? 0;
-    const dSaeK = Math.round((attachedSAE.d_sae || 0) / 1000);
-    const saeDesc = `${layer}-res-${dSaeK}k`;
-    return modelSlug ? `${base}/${modelSlug}/${saeDesc}` : base;
-  })();
+  // Neuronpedia link base derived from the attached SAE (shared util).
+  const npBaseUrl = neuronpediaBaseUrl(attachedSAE);
 
   const handleToggle = async () => {
     if (isEnabled) {
@@ -139,7 +125,7 @@ export function MonitoringPage() {
           activations={latestActivations || []}
           title="Latest Activations"
           subtitle={isMonitoringPaused ? 'Paused' : 'Real-time'}
-          neuronpediaBaseUrl={neuronpediaBaseUrl}
+          neuronpediaBaseUrl={npBaseUrl}
         />
 
         {isLoadingStats ? (

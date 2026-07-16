@@ -4,6 +4,8 @@ import { Button } from '@components/common';
 
 interface SteeringSliderProps {
   featureIndex: number;
+  /** Neuronpedia base derived from the attached SAE (utils/neuronpedia). */
+  neuronpediaBase?: string;
   strength: number;
   onStrengthChange: (strength: number) => void;
   onRemove: () => void;
@@ -16,6 +18,7 @@ interface SteeringSliderProps {
 
 export function SteeringSlider({
   featureIndex,
+  neuronpediaBase,
   strength,
   onStrengthChange,
   onRemove,
@@ -73,7 +76,7 @@ export function SteeringSlider({
             {featureIndex}
           </span>
           <a
-            href={`https://www.neuronpedia.org/gemma-2-2b/${featureIndex}`}
+            href={`${(neuronpediaBase ?? 'https://neuronpedia.hitsai.net').replace(/\/$/, '')}/${featureIndex}`}
             target="_blank"
             rel="noopener noreferrer"
             className="opacity-0 group-hover:opacity-100 transition-opacity"

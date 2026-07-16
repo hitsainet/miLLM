@@ -161,7 +161,7 @@ export function SAEPage() {
               <strong className="text-slate-300">Supported Formats:</strong> SAELens format from Hugging Face.
             </p>
             <p>
-              <strong className="text-slate-300">Recommended:</strong> Use Gemma-Scope SAEs with Gemma 2 models for best results.
+              <strong className="text-slate-300">Tip:</strong> Use an SAE trained for your loaded model — community SAE releases for the latest popular offline models are published on Hugging Face.
               Match the SAE layer to the model architecture.
             </p>
           </div>

@@ -7,7 +7,7 @@ Stores steering configuration profiles for quick recall and sharing.
 from datetime import datetime
 from typing import Any
 
-from sqlalchemy import DateTime, Index, Integer, String, Text, func
+from sqlalchemy import DateTime, Float, Index, Integer, String, Text, func
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -71,6 +71,36 @@ class Profile(Base):
     is_active: Mapped[bool] = mapped_column(
         default=False,
     )
+    # Feature 8 (Cluster Import): 'manual' rows are user-authored steering
+    # configs; 'cluster' rows are imported mistudio.cluster-definition/v1
+    # documents materialized as profiles.
+    source_kind: Mapped[str] = mapped_column(
+        String(20),
+        nullable=False,
+        default="manual",
+        server_default="manual",
+        index=False,  # covered by idx_profiles_source_kind (migration 007)
+    )
+    # Full original definition (members verbatim, budget, narrative, refs,
+    # provenance, import warnings, optional hub_ref) — lossless re-export.
+    cluster_meta: Mapped[dict[str, Any] | None] = mapped_column(
+        JSONB,
+        nullable=True,
+    )
+    # Current lambda dial; steering values are stored at lambda=1 basis and
+    # scaled by this at activation (never baked in).
+    intensity: Mapped[float] = mapped_column(
+        Float,
+        nullable=False,
+        default=1.0,
+        server_default="1.0",
+    )
+    # Feature 11 (Co-Activation Sensing) opt-in.
+    sensing_enabled: Mapped[bool] = mapped_column(
+        nullable=False,
+        default=False,
+        server_default="false",
+    )
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         server_default=func.now(),
@@ -92,6 +122,11 @@ class Profile(Base):
             postgresql_where=(is_active == True),  # noqa: E712
         ),
     )
+
+    @property
+    def is_cluster(self) -> bool:
+        """True when this row is an imported cluster definition (Feature 8)."""
+        return self.source_kind == "cluster"
 
     @property
     def feature_count(self) -> int:

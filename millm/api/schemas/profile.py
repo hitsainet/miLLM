@@ -112,6 +112,16 @@ class ProfileResponse(BaseModel):
         description="Steering values (feature_idx -> value)",
     )
     is_active: bool = Field(..., description="Whether this profile is currently active")
+    # Feature 8 (Cluster Import)
+    source_kind: str = Field(
+        default="manual", description="'manual' or 'cluster' (imported definition)"
+    )
+    intensity: float = Field(
+        default=1.0, description="Current lambda dial (steering stored at lambda=1 basis)"
+    )
+    sensing_enabled: bool = Field(
+        default=False, description="Co-activation sensing opt-in (Feature 11)"
+    )
     created_at: datetime = Field(..., description="When the profile was created")
     updated_at: datetime = Field(..., description="When the profile was last updated")
 

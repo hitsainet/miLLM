@@ -28,6 +28,10 @@ def mock_profile():
     profile.sae_id = "sae-123"
     profile.layer = 12
     profile.is_active = False
+    # Feature 8 columns exposed by ProfileResponse
+    profile.source_kind = "manual"
+    profile.intensity = 1.0
+    profile.sensing_enabled = False
     profile.created_at = datetime.now(timezone.utc)
     profile.updated_at = datetime.now(timezone.utc)
     return profile

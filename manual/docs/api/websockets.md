@@ -61,6 +61,7 @@ sio.wait()
 | `steering:update` | `enabled`, `values` (feature → strength), `active_count` | Emitted on every steering change from any source |
 | `monitoring:state` | monitoring configuration | On configure/toggle |
 | `monitoring:activation` | `timestamp`, `request_id`, `features` (top-k `[index, activation]` pairs), `position` | Throttled (~10/sec max); one per recorded generation |
+| `sensing:event` | One persisted co-activation event: `id`, `profile_id`, `phase`, span, `fired_members`, `score`, `summary` — **context text is never sent over WS** (fetch `/api/sensing/events/{id}`) | Throttled (max 5 per request flush, min 100 ms between flushes); the DB is complete regardless |
 
 ## Patterns
 

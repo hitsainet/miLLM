@@ -9,7 +9,7 @@ import { Boxes, Plus } from 'lucide-react';
 import { useClusters } from '@hooks/useClusters';
 import { ClusterCard, ClusterImportDialog } from '@components/clusters';
 import { SensingPanel } from '@components/clusters/sensing';
-import { useSensing } from '@hooks/useSensing';
+import { useSensingToggle } from '@hooks/useSensing';
 import { Button, Card, EmptyState, Spinner } from '@components/common';
 
 export function ClustersPage() {
@@ -26,7 +26,7 @@ export function ClustersPage() {
     setIntensity,
     exportCluster,
   } = useClusters();
-  const { setEnabled: setSensingEnabled } = useSensing();
+  const { setEnabled: setSensingEnabled } = useSensingToggle();
 
   const [showImport, setShowImport] = useState(false);
 

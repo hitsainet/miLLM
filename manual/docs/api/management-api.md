@@ -75,6 +75,17 @@ All endpoints return the [management envelope](/api/overview#the-management-enve
 | `/api/profiles/{id}/export` | GET | Export as JSON |
 | `/api/profiles/import` | POST | Import from JSON |
 
+## Sensing (`/api/sensing`) — cluster co-activation events ([concepts](/features/clusters#co-activation-sensing))
+
+| Endpoint | Method | Description |
+|----------|--------|-------------|
+| `/api/sensing/status` | GET | Armed state, threshold mode, per-request overhead, retention limits, and `enabled_clusters` (persistent intent, distinct from `armed`) |
+| `/api/sensing/events` | GET | Events newest-first (`?profile_id=`, `?limit=`, `?since=`); age-expired rows are pruned on read |
+| `/api/sensing/events/{id}` | GET | Event detail incl. the ±K context window (404 when pruned/cleared) |
+| `/api/sensing/events` | DELETE | Clear events (`?profile_id=` scopes to one cluster) |
+| `/api/sensing/{profile_id}/enable` | POST | Enable sensing for a cluster (arms live when that cluster is active with an SAE attached) |
+| `/api/sensing/{profile_id}/disable` | POST | Disable sensing (disarms live) |
+
 ## Health & operations (`/api/health`) — [full reference](/api/overview#health--operations-endpoints)
 
 | Endpoint | Method | Description |

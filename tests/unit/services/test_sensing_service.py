@@ -245,3 +245,234 @@ class TestRecord:
                                    "context_text": "SECRET",
                                    "context_token_ids": [1, 2]}])
         assert sent == [{"id": 1, "summary": "s"}]
+
+
+class TestInferenceWiring:
+    """011 R1 (finder B): the actual begin/flush wiring in InferenceService
+    was untested for every generation path."""
+
+    def _service(self):
+        from millm.services.inference_service import InferenceService
+
+        return InferenceService(model_service=MagicMock())
+
+    def _armed_sae(self):
+        sae = MagicMock()
+        sae.is_sensing_armed = True
+        sae._sensing = MagicMock(profile_id="prof_s1")
+        sae._sensing_overhead_ms = 0.5
+        sae.collect_sensing_hits.return_value = ("req-1", [make_hit()], False)
+        return sae
+
+    def test_begin_snapshots_profile_id(self):
+        service = self._service()
+        sae = self._armed_sae()
+        with patch("millm.services.sae_service.AttachedSAEState") as MockState:
+            MockState.return_value.attached_sae = sae
+            ctx = service._sensing_begin("req-1")
+        assert ctx == (sae, "prof_s1")
+        sae.begin_sensing_request.assert_called_once_with("req-1")
+
+    def test_begin_skips_under_speculative_decoding(self):
+        """R1 fix: verification passes break absolute-position accounting."""
+        service = self._service()
+        service._speculative_model_id = "draft-model"
+        sae = self._armed_sae()
+        with patch("millm.services.sae_service.AttachedSAEState") as MockState:
+            MockState.return_value.attached_sae = sae
+            assert service._sensing_begin("req-1") is None
+        sae.begin_sensing_request.assert_not_called()
+
+    def test_begin_none_when_unarmed(self):
+        service = self._service()
+        sae = MagicMock()
+        sae.is_sensing_armed = False
+        with patch("millm.services.sae_service.AttachedSAEState") as MockState:
+            MockState.return_value.attached_sae = sae
+            assert service._sensing_begin("req-1") is None
+
+    async def test_notify_records_with_snapshotted_profile(self):
+        service = self._service()
+        sae = self._armed_sae()
+        sensing_service = MagicMock()
+        sensing_service.record = AsyncMock(return_value=[])
+        ids = torch.arange(10)
+        with patch("millm.api.dependencies._sensing_service", sensing_service), \
+             patch.object(type(service), "is_model_loaded",
+                          lambda self: False):
+            await service._notify_sensing((sae, "prof_SNAPSHOT"), ids)
+        kwargs = sensing_service.record.await_args.kwargs
+        assert kwargs["profile_id"] == "prof_SNAPSHOT"
+        sensing_service.note_request_overhead.assert_called_once_with(0.5)
+
+    async def test_notify_survives_record_failure(self):
+        """A DB outage in the flush must never break generation."""
+        service = self._service()
+        sae = self._armed_sae()
+        sensing_service = MagicMock()
+        sensing_service.record = AsyncMock(side_effect=RuntimeError("db down"))
+        with patch("millm.api.dependencies._sensing_service", sensing_service), \
+             patch.object(type(service), "is_model_loaded",
+                          lambda self: False):
+            await service._notify_sensing((sae, "p"), None)  # no raise
+
+    async def test_notify_noop_without_ctx_or_service(self):
+        service = self._service()
+        await service._notify_sensing(None, None)
+        sae = self._armed_sae()
+        with patch("millm.api.dependencies._sensing_service", None):
+            await service._notify_sensing((sae, "p"), None)
+        sae.collect_sensing_hits.assert_called_once()  # boundary still closed
+
+
+class TestAmbientCounts:
+    """R1 (finder B): _ambient_counts rules were completely untested."""
+
+    def _sae(self, monitoring=True, compacted=False, offset=7, acts=None):
+        sae = MagicMock()
+        sae.is_monitoring_enabled = monitoring
+        sae._monitored_features = [1, 2] if compacted else None
+        sae._sensing_token_offset = offset
+        sae.get_feature_activations_for_item.return_value = acts
+        return sae
+
+    def test_counts_only_last_position_events(self):
+        from millm.services.inference_service import InferenceService
+
+        acts = torch.zeros(3, 16)
+        acts[-1, :5] = 2.0  # 5 ambient features fired at the last position
+        sae = self._sae(acts=acts)
+        hits = [make_hit(pos_start=2, pos_end=6),   # includes last pos (6)
+                make_hit(pos_start=1, pos_end=3)]   # doesn't
+        counts = InferenceService._ambient_counts(sae, hits)
+        assert counts == {0: 5}
+
+    def test_none_when_monitoring_off_or_compacted(self):
+        from millm.services.inference_service import InferenceService
+
+        hits = [make_hit(pos_end=6)]
+        assert InferenceService._ambient_counts(
+            self._sae(monitoring=False), hits) is None
+        assert InferenceService._ambient_counts(
+            self._sae(compacted=True), hits) is None
+
+    def test_none_when_no_capture(self):
+        from millm.services.inference_service import InferenceService
+
+        assert InferenceService._ambient_counts(
+            self._sae(acts=None), [make_hit(pos_end=6)]) is None
+
+
+class TestGenerationPathWiring:
+    """R1 (finder B): begin/flush placement on the REAL generation paths."""
+
+    def _service_with_model(self):
+        from millm.services.inference_service import InferenceService
+
+        service = InferenceService(model_service=MagicMock())
+        return service
+
+    async def test_nonstreaming_chat_begins_and_flushes(self):
+        import torch as _torch
+        from millm.api.schemas.openai import ChatCompletionRequest, ChatMessage
+
+        service = self._service_with_model()
+        request = ChatCompletionRequest(
+            model="m", messages=[ChatMessage(role="user", content="hi")])
+
+        begin_calls = []
+        notify_calls = []
+
+        with patch.object(service, "_sensing_begin",
+                          side_effect=lambda rid: begin_calls.append(rid) or
+                          ("SAE", "prof")) as _, \
+             patch.object(service, "_notify_sensing",
+                          side_effect=lambda ctx, ids:
+                          notify_calls.append((ctx, ids)) or _async_none()), \
+             patch.object(service, "_format_chat_messages", return_value="hi"), \
+             patch.object(service, "_generate_sync",
+                          return_value=_torch.tensor([[1, 2, 3, 4]])), \
+             patch.object(type(service), "_tokenizer",
+                          property(lambda self: _make_tokenizer())), \
+             patch.object(service, "_check_context_length"), \
+             patch.object(service, "_build_generate_kwargs",
+                          return_value={}), \
+             patch.object(service, "get_loaded_model_info",
+                          return_value=_model_info("m")):
+            await service.create_chat_completion(request)
+
+        assert len(begin_calls) == 1
+        assert len(notify_calls) == 1
+        ctx, full_ids = notify_calls[0]
+        assert ctx == ("SAE", "prof")
+        assert _torch.equal(full_ids, _torch.tensor([1, 2, 3, 4]))
+
+    async def test_n_gt_1_goes_unsensed(self):
+        import torch as _torch
+        from millm.api.schemas.openai import ChatCompletionRequest, ChatMessage
+
+        service = self._service_with_model()
+        request = ChatCompletionRequest(
+            model="m", messages=[ChatMessage(role="user", content="hi")], n=2)
+
+        with patch.object(service, "_sensing_begin") as begin, \
+             patch.object(service, "_notify_sensing",
+                          side_effect=lambda ctx, ids: _async_none()), \
+             patch.object(service, "_format_chat_messages", return_value="hi"), \
+             patch.object(service, "_generate_sync",
+                          return_value=_torch.tensor([[1, 2, 3]])), \
+             patch.object(type(service), "_tokenizer",
+                          property(lambda self: _make_tokenizer())), \
+             patch.object(service, "_check_context_length"), \
+             patch.object(service, "_build_generate_kwargs", return_value={}), \
+             patch.object(service, "get_loaded_model_info",
+                          return_value=_model_info("m")):
+            await service.create_chat_completion(request)
+        begin.assert_not_called()
+
+    def test_force_serial_false_leaves_cbm_eligible(self):
+        """EC-11.3: with forcing off, armed requests stay CBM-eligible (and
+        go unsensed there — begin only exists on the serial paths)."""
+        from millm.core.config import settings
+        from millm.services.inference_service import InferenceService
+
+        service = InferenceService(model_service=MagicMock())
+        backend = MagicMock()
+        backend.is_running = True
+        backend.sampling_params_match = MagicMock(return_value=True)
+        service._cbm_backend = backend
+        service._cbm_force_serial_monitoring = False
+
+        armed_sae = MagicMock()
+        armed_sae.is_sensing_armed = True
+        with patch("millm.services.sae_service.AttachedSAEState") as MockState, \
+             patch.object(settings, "SENSING_FORCE_SERIAL", False):
+            MockState.return_value.attached_sae = armed_sae
+            assert service._use_cbm_for_request(
+                temperature=None, top_p=None, has_steering_override=False
+            ) is True
+
+
+def _async_none():
+    import asyncio
+
+    future = asyncio.get_event_loop().create_future()
+    future.set_result(None)
+    return future
+
+
+def _make_tokenizer():
+    tokenizer = MagicMock()
+    encoded = MagicMock()
+    encoded.input_ids = torch.tensor([[1, 2]])
+    encoded.to.return_value = encoded
+    tokenizer.return_value = encoded
+    tokenizer.decode.return_value = "hello"
+    tokenizer.eos_token_id = 0
+    return tokenizer
+
+
+def _model_info(name: str):
+    info = MagicMock()
+    info.name = name  # name= is a reserved MagicMock kwarg
+    return info

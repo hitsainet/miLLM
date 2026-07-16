@@ -32,6 +32,13 @@ class MiLLMError(Exception):
 # =============================================================================
 
 
+class SensingEventNotFoundError(MiLLMError):
+    """Sensing event does not exist (pruned, cleared, or never existed)."""
+
+    code = "SENSING_EVENT_NOT_FOUND"
+    status_code = 404
+
+
 class ModelNotFoundError(MiLLMError):
     """Raised when a requested model does not exist."""
 

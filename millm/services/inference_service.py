@@ -1764,63 +1764,74 @@ class InferenceService:
         async with self._request_queue.acquire():
             gen_config = GenerationConfig.from_request(request)
 
-            for i, prompt_text in enumerate(prompts):
-                # Tokenize input
-                inputs = self._tokenizer(prompt_text, return_tensors="pt").to(
-                    self._get_input_device()
-                )
-                prompt_tokens = inputs.input_ids.shape[1]
-                self._check_context_length(prompt_tokens, gen_config.max_new_tokens)
+            # Sensing boundary (011 R1: this endpoint was silently unsensed
+            # while status said armed). Single-prompt only — multiple
+            # prompts would concatenate position accounting, like n>1.
+            _sensing_ctx = (self._sensing_begin(completion_id)
+                            if len(prompts) == 1 else None)
+            _sensing_full_ids = None
 
-                # Generate - offload to thread to avoid blocking the event loop
-                generate_kwargs = self._build_generate_kwargs(
-                    gen_config, inputs
-                )
-                outputs = await asyncio.to_thread(
-                    self._generate_sync, generate_kwargs
-                )
-
-                # Notify monitoring after generation
-                self._notify_monitoring(request_id=completion_id)
-
-                # Decode output
-                generated_ids = outputs[0][prompt_tokens:]
-                completion_text = self._tokenizer.decode(
-                    generated_ids, skip_special_tokens=True
-                )
-                completion_tokens = len(generated_ids)
-
-                # Apply stop sequences
-                completion_text, stopped_by_sequence = (
-                    self._apply_stop_sequences(
-                        completion_text, gen_config.stop_sequences
+            try:
+                for i, prompt_text in enumerate(prompts):
+                    # Tokenize input
+                    inputs = self._tokenizer(prompt_text, return_tensors="pt").to(
+                        self._get_input_device()
                     )
-                )
+                    prompt_tokens = inputs.input_ids.shape[1]
+                    self._check_context_length(prompt_tokens, gen_config.max_new_tokens)
 
-                # Determine finish reason with EOS logging
-                if stopped_by_sequence:
-                    logger.debug("finish_reason_stop_sequence")
-                    finish_reason = "stop"
-                else:
-                    last_token_id = (
-                        int(generated_ids[-1]) if len(generated_ids) > 0 else None
+                    # Generate - offload to thread to avoid blocking the event loop
+                    generate_kwargs = self._build_generate_kwargs(
+                        gen_config, inputs
                     )
-                    finish_reason = self._determine_finish_reason(
-                        completion_tokens,
-                        gen_config.max_new_tokens,
-                        last_token_id=last_token_id,
+                    outputs = await asyncio.to_thread(
+                        self._generate_sync, generate_kwargs
+                    )
+                    _sensing_full_ids = outputs[0]
+
+                    # Notify monitoring after generation
+                    self._notify_monitoring(request_id=completion_id)
+
+                    # Decode output
+                    generated_ids = outputs[0][prompt_tokens:]
+                    completion_text = self._tokenizer.decode(
+                        generated_ids, skip_special_tokens=True
+                    )
+                    completion_tokens = len(generated_ids)
+
+                    # Apply stop sequences
+                    completion_text, stopped_by_sequence = (
+                        self._apply_stop_sequences(
+                            completion_text, gen_config.stop_sequences
+                        )
                     )
 
-                choices.append(
-                    TextCompletionChoice(
-                        index=i,
-                        text=completion_text,
-                        finish_reason=finish_reason,
-                    )
-                )
+                    # Determine finish reason with EOS logging
+                    if stopped_by_sequence:
+                        logger.debug("finish_reason_stop_sequence")
+                        finish_reason = "stop"
+                    else:
+                        last_token_id = (
+                            int(generated_ids[-1]) if len(generated_ids) > 0 else None
+                        )
+                        finish_reason = self._determine_finish_reason(
+                            completion_tokens,
+                            gen_config.max_new_tokens,
+                            last_token_id=last_token_id,
+                        )
 
-                total_prompt_tokens += prompt_tokens
-                total_completion_tokens += completion_tokens
+                    choices.append(
+                        TextCompletionChoice(
+                            index=i,
+                            text=completion_text,
+                            finish_reason=finish_reason,
+                        )
+                    )
+
+                    total_prompt_tokens += prompt_tokens
+                    total_completion_tokens += completion_tokens
+            finally:
+                await self._notify_sensing(_sensing_ctx, _sensing_full_ids)
 
         model_info = self.get_loaded_model_info()
         model_name = model_info.name if model_info else "unknown"

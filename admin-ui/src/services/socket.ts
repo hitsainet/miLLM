@@ -356,8 +356,14 @@ class SocketClient {
     this.socket?.on(event, handler as any);
   }
 
-  off<K extends keyof SocketEventHandlers>(event: K): void {
-    this.socket?.off(event);
+  off<K extends keyof SocketEventHandlers>(
+    event: K,
+    handler?: SocketEventHandlers[K]
+  ): void {
+    // With a handler, remove only that listener — off(event) wholesale
+    // silently killed sibling components' subscriptions (011 R1).
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    this.socket?.off(event, handler as any);
   }
 
   get isConnected(): boolean {

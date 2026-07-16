@@ -1,0 +1,478 @@
+{
+  "$defs": {
+    "ClusterBundleV1": {
+      "description": "A multi-cluster export: an array of definitions in one file.",
+      "properties": {
+        "definitions": {
+          "items": {
+            "$ref": "#/$defs/ClusterDefinitionV1"
+          },
+          "maxItems": 50,
+          "minItems": 1,
+          "title": "Definitions",
+          "type": "array"
+        },
+        "kind": {
+          "const": "mistudio.cluster-bundle",
+          "default": "mistudio.cluster-bundle",
+          "title": "Kind",
+          "type": "string"
+        },
+        "schema_version": {
+          "const": "1",
+          "default": "1",
+          "title": "Schema Version",
+          "type": "string"
+        }
+      },
+      "required": [
+        "definitions"
+      ],
+      "title": "ClusterBundleV1",
+      "type": "object"
+    },
+    "ClusterDefinitionV1": {
+      "description": "One portable cluster definition (the mobile artifact \u2014 IDL-30).",
+      "properties": {
+        "budget": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ProfileBudget"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "display_token": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Display Token"
+        },
+        "kind": {
+          "const": "mistudio.cluster-definition",
+          "default": "mistudio.cluster-definition",
+          "title": "Kind",
+          "type": "string"
+        },
+        "members": {
+          "items": {
+            "$ref": "#/$defs/ProfileMember"
+          },
+          "maxItems": 20,
+          "minItems": 1,
+          "title": "Members",
+          "type": "array"
+        },
+        "model": {
+          "$ref": "#/$defs/DefinitionModelRef"
+        },
+        "name": {
+          "maxLength": 120,
+          "minLength": 1,
+          "title": "Name",
+          "type": "string"
+        },
+        "narrative": {
+          "anyOf": [
+            {
+              "maxLength": 10000,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Narrative"
+        },
+        "provenance": {
+          "$ref": "#/$defs/DefinitionProvenance"
+        },
+        "sae": {
+          "$ref": "#/$defs/DefinitionSAERef"
+        },
+        "schema_version": {
+          "const": "1",
+          "default": "1",
+          "title": "Schema Version",
+          "type": "string"
+        }
+      },
+      "required": [
+        "name",
+        "members"
+      ],
+      "title": "ClusterDefinitionV1",
+      "type": "object"
+    },
+    "DefinitionModelRef": {
+      "properties": {
+        "hf_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Hf Id"
+        },
+        "mistudio_model_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Mistudio Model Id"
+        }
+      },
+      "title": "DefinitionModelRef",
+      "type": "object"
+    },
+    "DefinitionProvenance": {
+      "properties": {
+        "created_at": {
+          "anyOf": [
+            {
+              "format": "date-time",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Created At"
+        },
+        "exported_at": {
+          "anyOf": [
+            {
+              "format": "date-time",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Exported At"
+        },
+        "mistudio_version": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Mistudio Version"
+        },
+        "source_note": {
+          "anyOf": [
+            {
+              "maxLength": 500,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Source Note"
+        }
+      },
+      "title": "DefinitionProvenance",
+      "type": "object"
+    },
+    "DefinitionSAERef": {
+      "properties": {
+        "d_model": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "D Model"
+        },
+        "hook_type": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Hook Type"
+        },
+        "layer": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Layer"
+        },
+        "mistudio_sae_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Mistudio Sae Id"
+        },
+        "n_features": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "N Features"
+        },
+        "source_hint": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "e.g. 'hf:repo/path' \u2014 NEVER an absolute local path",
+          "title": "Source Hint"
+        }
+      },
+      "title": "DefinitionSAERef",
+      "type": "object"
+    },
+    "ProfileBudget": {
+      "description": "Allocation snapshot from Feature 013 (self-describing: formula + constants travel).",
+      "properties": {
+        "B": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "B"
+        },
+        "B_dir": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "B Dir"
+        },
+        "G": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "G"
+        },
+        "constants": {
+          "anyOf": [
+            {
+              "additionalProperties": {
+                "type": "number"
+              },
+              "type": "object"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Constants"
+        },
+        "f_eff": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "F Eff"
+        },
+        "formula_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Formula Id"
+        },
+        "intensity": {
+          "default": 1.0,
+          "maximum": 2.0,
+          "minimum": 0.0,
+          "title": "Intensity",
+          "type": "number"
+        },
+        "intensity_range": {
+          "items": {
+            "type": "number"
+          },
+          "title": "Intensity Range",
+          "type": "array"
+        }
+      },
+      "title": "ProfileBudget",
+      "type": "object"
+    },
+    "ProfileMember": {
+      "description": "A cluster member snapshot with its tuned strength.",
+      "properties": {
+        "activation_frequency": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Activation Frequency"
+        },
+        "feature_idx": {
+          "minimum": 0,
+          "title": "Feature Idx",
+          "type": "integer"
+        },
+        "label": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Label"
+        },
+        "max_activation": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Max Activation"
+        },
+        "pinned": {
+          "default": false,
+          "title": "Pinned",
+          "type": "boolean"
+        },
+        "sign": {
+          "default": 1,
+          "enum": [
+            1,
+            -1
+          ],
+          "title": "Sign",
+          "type": "integer"
+        },
+        "similarity": {
+          "anyOf": [
+            {
+              "maximum": 1.0,
+              "minimum": 0.0,
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Similarity"
+        },
+        "strength": {
+          "maximum": 300.0,
+          "minimum": -300.0,
+          "title": "Strength",
+          "type": "number"
+        }
+      },
+      "required": [
+        "feature_idx",
+        "strength"
+      ],
+      "title": "ProfileMember",
+      "type": "object"
+    }
+  },
+  "$id": "https://mistudio.hitsai.net/schemas/cluster-definition-v1.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "description": "Portable cluster definition (mistudio.cluster-definition/v1) \u2014 the consumer-neutral interchange artifact for cluster profiles (IDL-30). Also includes the bundle wrapper (mistudio.cluster-bundle/v1) under $defs. Generated from the pydantic contract; regenerate via backend/tests/unit/test_cluster_definition_schema_sync.py instructions.",
+  "oneOf": [
+    {
+      "$ref": "#/$defs/ClusterDefinitionV1"
+    },
+    {
+      "$ref": "#/$defs/ClusterBundleV1"
+    }
+  ],
+  "title": "miStudio Cluster Definition v1"
+}

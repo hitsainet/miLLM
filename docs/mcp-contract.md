@@ -46,11 +46,14 @@ Every management endpoint (everything under `/api/`) returns:
 **`active_profile`** (added for this contract):
 `{id, name, source_kind: "manual"|"cluster", intensity, sensing_enabled} | null`.
 
-**Gate semantics:** `degraded` (and any 200) is **AVAILABLE** — miLLM with no
-model loaded must still accept cluster imports and report status. Only
-connection failure / timeout / non-2xx marks the product unavailable; tools
-then return a structured `{"unavailable": "millm", "reason": …}` result and are
-**never unregistered** (MCP clients cache tool lists).
+**Gate semantics:** available ⇔ **2xx AND `status != "unhealthy"`** —
+`degraded` IS available (miLLM with no model loaded must still accept cluster
+imports and report status). Connection failure, timeout, non-2xx (including
+3xx redirects, which the gate does not follow), or a 2xx body reporting
+`status: "unhealthy"` (reserved; today's liveness endpoint only ever reports
+healthy) mark the product unavailable; tools then return a structured
+`{"unavailable": "millm", "reason": …}` result and are **never unregistered**
+(MCP clients cache tool lists).
 
 ## 4. Endpoint inventory consumed by the MCP tools
 
@@ -67,8 +70,8 @@ then return a structured `{"unavailable": "millm", "reason": …}` result and ar
 | Tool | Endpoint |
 |---|---|
 | `millm_list_clusters` | `GET /api/clusters` |
-| `millm_import_cluster` (inline) | `POST /api/clusters/import?activate=` (body = raw v1 document) |
-| `millm_import_cluster` (hub) | `POST /api/clusters/hub/import` (`{repo_id, filename, revision?, activate?}`) |
+| `millm_import_cluster` (inline) | `POST /api/clusters/import?activate=&on_conflict=` (body = raw v1 document; `on_conflict`: `rename` (default) \| `fail`) |
+| `millm_import_cluster` (hub) | `POST /api/clusters/hub/import` (`{repo_id, filename, revision?, activate?, on_conflict?}`) |
 | `millm_hub_search` | `GET /api/clusters/hub/search?q=&base_model=&limit=` |
 | `millm_activate_cluster` | `POST /api/clusters/{id}/activate` |
 | `millm_deactivate_cluster` | `POST /api/clusters/{id}/deactivate` |

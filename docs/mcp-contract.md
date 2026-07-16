@@ -21,11 +21,20 @@ Every management endpoint (everything under `/api/`) returns:
 { "success": false, "data": null, "error": { "code": "UPPER_SNAKE", "message": "…", "details": { } } }
 ```
 
-- HTTP status mirrors the error class (400/404/409/422/503); the envelope is
-  authoritative for machine handling — unwrap in the client, never in tools.
-- Exceptions: `GET /api/clusters/{id}/export` returns the RAW portable
-  cluster-definition document (no envelope — the response *is* the artifact),
-  and `/v1/*` endpoints speak the OpenAI error shape instead.
+- **The envelope is authoritative for machine handling** — unwrap in the
+  client, never in tools. HTTP status *usually* mirrors the error class
+  (400/404/409/422/503), but NOT always: the cluster import route returns
+  some refusals as **HTTP 200 with `success: false`** (`PAYLOAD_TOO_LARGE`,
+  `UNKNOWN_KIND`, contract `VALIDATION_ERROR`, `NO_ACTIVE_CLUSTER`) — house
+  style for handler-level failures. Never branch on status alone.
+- Non-envelope endpoints: `GET /api/clusters/{id}/export` returns the RAW
+  portable cluster-definition document (the response *is* the artifact);
+  `GET /api/health`, `/api/health/detailed`, and `/api/health/ready` return
+  bare DTOs (no envelope); `/v1/*` endpoints speak the OpenAI error shape.
+- FastAPI *request-validation* failures on management routes (bad query/body
+  types, out-of-range values) return the default 422
+  `{"detail": [...]}` shape — no envelope, no `error.code`. Clients should
+  validate tool arguments before calling.
 
 ## 3. Health-gate contract
 
@@ -69,7 +78,7 @@ then return a structured `{"unavailable": "millm", "reason": …}` result and ar
 | Tool | Endpoint |
 |---|---|
 | `millm_sensing_status` | `GET /api/sensing/status` |
-| `millm_sensing_events` | `GET /api/sensing/events?profile_id=&limit=&since=` |
+| `millm_sensing_events` | `GET /api/sensing/events?profile_id=&limit=&since=` (list rows include context fields) |
 | `millm_sensing_enable` / `_disable` | `POST /api/sensing/{profile_id}/enable` / `/disable` |
 
 Notes:
@@ -83,11 +92,14 @@ Notes:
 
 ## 5. Error codes the MCP client must map
 
-`VALIDATION_ERROR` (422), `PROFILE_NOT_FOUND` (404), `MODEL_NOT_LOADED` (503),
-`SAE_NOT_ATTACHED` (409/400 family), `PAYLOAD_TOO_LARGE`, `UNKNOWN_KIND`,
-`HUB_UNAVAILABLE` (503, circuit open), `SENSING_EVENT_NOT_FOUND` (404),
-`NO_ACTIVE_CLUSTER`, `INTERNAL_ERROR` (500). Unknown codes: surface
-`error.message` verbatim — messages are written to be user/agent-safe.
+`VALIDATION_ERROR` (422), `PROFILE_NOT_FOUND` (404), `MODEL_NOT_LOADED`
+(**400** on management routes; the 503 mapping applies only to `/v1/*`),
+`SAE_NOT_ATTACHED` (409/400 family), `PAYLOAD_TOO_LARGE` (200+envelope),
+`UNKNOWN_KIND` (200+envelope), `HUB_UNAVAILABLE` (503, circuit open),
+`NO_ACTIVE_CLUSTER` (200+envelope), `INTERNAL_ERROR` (500).
+(`SENSING_EVENT_NOT_FOUND` (404) exists on the event-detail route, which no
+MCP tool currently consumes.) Unknown codes: surface `error.message`
+verbatim — messages are written to be user/agent-safe.
 
 ## 6. Auth posture & deployment guidance (Task 1.3)
 

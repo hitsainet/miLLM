@@ -31,6 +31,9 @@ interface SocketEventHandlers {
   // Monitoring events
   'monitoring:activation': EventCallback<ActivationEvent>;
 
+  // Sensing events (Feature 11) — payload excludes context (fetched via REST)
+  'sensing:event': EventCallback<import('@/types/sensing').SensingEvent>;
+
   // System events
   'system:metrics': EventCallback<SystemMetricsEvent>;
 }

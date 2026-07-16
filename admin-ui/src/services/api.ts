@@ -198,6 +198,13 @@ async function request<T>(
  * await modelApi.load(model.id);
  * ```
  */
+import type {
+  SensingEvent,
+  SensingEventList,
+  SensingStatus,
+  SensingToggleResult,
+} from '@/types/sensing';
+
 export const modelApi = {
   /**
    * Lists all downloaded models.
@@ -902,6 +909,36 @@ export const clusterApi = {
   },
 };
 
+export const sensingApi = {
+  /** Runtime status: armed cluster, threshold mode, overhead. */
+  status: () => request<SensingStatus>('/sensing/status'),
+
+  /** Newest-first events, optionally scoped to a cluster. */
+  events: (opts?: { profileId?: string; limit?: number }) => {
+    const params = new URLSearchParams();
+    if (opts?.profileId) params.set('profile_id', opts.profileId);
+    if (opts?.limit) params.set('limit', String(opts.limit));
+    const qs = params.toString();
+    return request<SensingEventList>(`/sensing/events${qs ? `?${qs}` : ''}`);
+  },
+
+  /** Event detail — the only path that carries context text. */
+  eventDetail: (id: number) => request<SensingEvent>(`/sensing/events/${id}`),
+
+  /** Clears events (all, or one cluster's). */
+  clearEvents: (profileId?: string) => {
+    const qs = profileId ? `?profile_id=${encodeURIComponent(profileId)}` : '';
+    return request<{ deleted: number }>(`/sensing/events${qs}`, { method: 'DELETE' });
+  },
+
+  /** Persists the per-cluster toggle and live-arms/disarms when active. */
+  setEnabled: (profileId: string, enabled: boolean) =>
+    request<SensingToggleResult>(
+      `/sensing/${profileId}/${enabled ? 'enable' : 'disable'}`,
+      { method: 'POST' }
+    ),
+};
+
 export const api = {
   /** Model management operations */
   models: modelApi,
@@ -915,6 +952,7 @@ export const api = {
   profiles: profileApi,
   /** Imported cluster operations (Feature 8) */
   clusters: clusterApi,
+  sensing: sensingApi,
   /** Server status operations */
   server: serverApi,
 };

@@ -6,6 +6,7 @@
 
 import { useState } from 'react';
 import {
+  Activity,
   AlertTriangle,
   ChevronDown,
   ChevronRight,
@@ -22,6 +23,7 @@ interface ClusterCardProps {
   onDeactivate: () => void;
   onSetIntensity: (intensity: number) => void;
   onExport: () => void;
+  onToggleSensing?: (enabled: boolean) => void;
   isActivating?: boolean;
   isDeactivating?: boolean;
 }
@@ -32,6 +34,7 @@ export function ClusterCard({
   onDeactivate,
   onSetIntensity,
   onExport,
+  onToggleSensing,
   isActivating,
   isDeactivating,
 }: ClusterCardProps) {
@@ -79,6 +82,25 @@ export function ClusterCard({
         </div>
 
         <div className="flex items-center gap-2 shrink-0">
+          {onToggleSensing && (
+            <Button
+              variant="ghost"
+              size="sm"
+              onClick={() => onToggleSensing(!cluster.sensing_enabled)}
+              title={
+                cluster.sensing_enabled
+                  ? 'Sensing enabled — co-activation events are recorded while this cluster is active. Click to disable.'
+                  : 'Enable co-activation sensing (arms while this cluster is active with an SAE attached)'
+              }
+              data-testid="sensing-toggle"
+            >
+              <Activity
+                className={`w-4 h-4 ${
+                  cluster.sensing_enabled ? 'text-emerald-400' : 'text-slate-500'
+                }`}
+              />
+            </Button>
+          )}
           <Button
             variant="ghost"
             size="sm"

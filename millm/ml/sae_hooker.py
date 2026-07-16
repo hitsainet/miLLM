@@ -81,11 +81,13 @@ class SAEHooker:
         # Register hook
         handle = target_layer.register_forward_hook(hook_fn)
 
+        # NOTE: stdlib logger — no structlog kwargs here (a kwarg call made
+        # EVERY attach 500 with 'Logger._log() got an unexpected keyword
+        # argument'; pinned by tests/unit/test_logging_conventions.py)
         logger.info(
-            "sae_hook_installed",
-            layer=layer,
-            module_path=self.last_resolved_module_path,
-            mode="direct_steering",
+            "sae_hook_installed: layer=%s module_path=%s mode=direct_steering",
+            layer,
+            self.last_resolved_module_path,
         )
         return handle
 

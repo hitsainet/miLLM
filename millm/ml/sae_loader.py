@@ -292,9 +292,9 @@ class SAELoader:
         if W_enc.shape != (config.d_in, config.d_sae):
             if W_enc.shape == (config.d_sae, config.d_in):
                 logger.info(
-                    "sae_loader_transposed_W_enc_auto_corrected",
-                    original_shape=tuple(W_enc.shape),
-                    corrected_shape=(config.d_in, config.d_sae),
+                    "sae_loader_transposed_W_enc_auto_corrected: %s -> %s",
+                    tuple(W_enc.shape),
+                    (config.d_in, config.d_sae),
                 )
                 W_enc = W_enc.T.contiguous()
             else:
@@ -314,9 +314,9 @@ class SAELoader:
         if W_dec.shape != (config.d_sae, config.d_in):
             if W_dec.shape == (config.d_in, config.d_sae):
                 logger.info(
-                    "sae_loader_transposed_W_dec_auto_corrected",
-                    original_shape=tuple(W_dec.shape),
-                    corrected_shape=(config.d_sae, config.d_in),
+                    "sae_loader_transposed_W_dec_auto_corrected: %s -> %s",
+                    tuple(W_dec.shape),
+                    (config.d_sae, config.d_in),
                 )
                 W_dec = W_dec.T.contiguous()
             else:

@@ -76,3 +76,14 @@ async def test_response_schema_exposes_cluster_fields(test_session, make_profile
     assert resp.source_kind == "cluster"
     assert resp.intensity == 0.8
     assert resp.sensing_enabled is False
+
+
+async def test_sae_id_accepts_real_hf_derived_ids(test_session, make_profile):
+    """Live-E2E find: VARCHAR(50) truncated real SAE ids (59 chars) and
+    500'd every bound cluster import — must fit SAE.id's full width."""
+    long_id = "mistudio--sae-lfm2.5-1.2b-instruct--layer_12--width_8k--res"
+    assert len(long_id) > 50
+    profile = make_profile(id="prof_longsae1", name="long-sae", sae_id=long_id)
+    test_session.add(profile)
+    await test_session.flush()
+    assert profile.sae_id == long_id

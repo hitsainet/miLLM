@@ -56,7 +56,9 @@ class Profile(Base):
         nullable=True,
     )
     sae_id: Mapped[str | None] = mapped_column(
-        String(50),
+        # Matches SAE.id (String(100)) — 50 truncated real HF-derived ids
+        # and 500'd every BOUND cluster import (found by the 010 live E2E)
+        String(100),
         nullable=True,
     )
     layer: Mapped[int | None] = mapped_column(

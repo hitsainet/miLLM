@@ -32,7 +32,11 @@ jobs:
           rm -rf .claude/
           rm -f CLAUDE.md
           rm -rf backups/
-          rm -rf docs/
+          # docs/ is dev-internal EXCEPT the vendored interchange contract:
+          # docs/schemas/cluster-definition-v1.json is the frozen public
+          # mistudio.cluster-definition/v1 schema — the schema-sync test
+          # (and consumers of the public repo) need it, so preserve it.
+          find docs/ -mindepth 1 -maxdepth 1 ! -name schemas -exec rm -rf {} +
           rm -rf scripts/
           # Remove any other development artifacts
           rm -rf .vscode/

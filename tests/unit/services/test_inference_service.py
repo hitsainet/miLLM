@@ -1820,7 +1820,7 @@ class TestCBMProfileRouting:
 
         # Compatible sampling params but a profile is present → serial.
         result = service._use_cbm_for_request(
-            temperature=None, top_p=None, has_profile=True
+            temperature=None, top_p=None, has_steering_override=True
         )
         assert result is False
 
@@ -1832,7 +1832,7 @@ class TestCBMProfileRouting:
         service._cbm_force_serial_monitoring = False
 
         result = service._use_cbm_for_request(
-            temperature=None, top_p=None, has_profile=False
+            temperature=None, top_p=None, has_steering_override=False
         )
         assert result is True
 

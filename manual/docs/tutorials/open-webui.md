@@ -48,21 +48,27 @@ intensity per chat — without touching the server-side state other users see.
 
 **Install:** in Open WebUI go to **Admin Panel → Functions → Import Function** and paste the
 contents of [`integrations/openwebui/millm_dial_filter.py`](https://github.com/Onegaishimas/miLLM/blob/main/integrations/openwebui/millm_dial_filter.py)
-from the miLLM repo. Enable it globally or per model.
+from the miLLM repo. Enable it per model on miLLM-served models. (Only enable it globally if
+Open WebUI talks exclusively to miLLM — strict OpenAI-compatible providers may reject the extra
+field with a 400.)
 
-**Use:** every user gets a **dial** valve (chat ⚙ → Valves):
+**Use:** every user gets a **dial** valve (chat ⚙ → Valves) — a dropdown, so typos are
+impossible:
 
 | Dial | Effect on this user's requests |
 |------|-------------------------------|
-| `default` | Leave steering exactly as the server has it |
+| `default` | Use the operator's `default_dial` setting (which itself defaults to leaving steering as-is) |
 | `off` | Steering disabled for the request (λ = 0) |
-| `min` / `max` | The active cluster's declared `intensity_range` bounds |
-| a number `0`–`2` | That exact λ (e.g. `0.8`) |
+| `min` / `max` | The steering base's declared `intensity_range` bounds (the active cluster's, or the named profile's when a request also carries `profile`) |
+| `custom` | The exact λ from your `custom_lambda` valve (`0`–`2`, clamped into the cluster's declared range) |
+
+Operators get matching `default_dial` / `default_custom_lambda` valves that apply to users who
+leave their dial at `default`.
 
 The dial rides each request as miLLM's `steering_intensity` extension field: miLLM applies it
 inside the request boundary and restores the previous steering afterwards, so **concurrent chats
-with different dials never interfere**. Responses echo the effective λ in the
-`X-miLLM-Steering-Intensity` header.
+with different dials never interfere**. Responses echo the resolved λ in the
+`X-miLLM-Steering-Intensity` header (omitted when nothing can apply — e.g. no SAE attached).
 
 :::info Global vs per-request
 The Admin UI's intensity slider (and `PUT /api/clusters/active/intensity`) changes the **global**

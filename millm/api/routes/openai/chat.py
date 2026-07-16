@@ -77,11 +77,13 @@ async def create_chat_completion(
     # the request (serial queue vs continuous batching) for latency debugging.
     backend = inference.backend_name
 
-    # X-miLLM-Steering-Intensity echoes the effective lambda back to dial
+    # X-miLLM-Steering-Intensity echoes the resolved lambda back to dial
     # clients (Feature 10) — emitted only when the field was present.  Resolved
     # here (not stashed at apply time) because streaming headers are sent
-    # before the generator body runs; symbolic values resolve against the same
-    # profile the apply path will use, so the echo matches what applies.
+    # before the generator body runs.  Best-effort by design: the helper
+    # returns None (no header) when nothing can apply (no SAE, unknown
+    # profile, DB hiccup), and a concurrent profile switch while the request
+    # queues can still skew a symbolic echo — documented in the API reference.
     echo_intensity = None
     if request.steering_intensity is not None:
         effective = await inference.resolve_request_intensity(request)

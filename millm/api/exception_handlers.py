@@ -25,6 +25,46 @@ def _is_openai_route(request: Request) -> bool:
     return request.url.path.startswith("/v1/")
 
 
+async def openai_validation_error_handler(
+    request: Request, exc: Exception
+) -> JSONResponse:
+    """
+    Convert FastAPI RequestValidationError to the response shape each API
+    family promises.
+
+    /v1/* clients speak the OpenAI protocol: invalid parameters are a 400
+    with an {"error": {message, type, param, code}} envelope (EC-10.3) — not
+    FastAPI's default 422 pydantic dump with errors.pydantic.dev URLs.
+    Non-/v1 paths keep FastAPI's default 422 shape, which the Admin UI's
+    envelope-first parser already handles.
+    """
+    from fastapi.exception_handlers import request_validation_exception_handler
+    from fastapi.exceptions import RequestValidationError
+
+    assert isinstance(exc, RequestValidationError)
+    if not _is_openai_route(request):
+        return await request_validation_exception_handler(request, exc)  # type: ignore[return-value]
+
+    errors = exc.errors()
+    first = errors[0] if errors else {}
+    loc = [str(part) for part in first.get("loc", []) if part != "body"]
+    param = ".".join(loc) or None
+    message = first.get("msg", "Invalid request")
+    # pydantic prefixes custom validator messages with "Value error, "
+    if message.startswith("Value error, "):
+        message = message[len("Value error, "):]
+    if param:
+        message = f"Invalid value for '{param}': {message}"
+
+    return create_openai_error(
+        message=message,
+        error_type="invalid_request_error",
+        param=param,
+        code="invalid_parameter",
+        status_code=400,
+    )
+
+
 async def millm_error_handler(request: Request, exc: MiLLMError) -> JSONResponse:
     """
     Convert MiLLMError to the appropriate error response format.
@@ -125,7 +165,7 @@ async def generic_exception_handler(request: Request, exc: Exception) -> JSONRes
             # crashing the handler on every unhandled exception. Ask the
             # stdlib logger directly.
             "technical_message": str(exc)
-            if logging.getLogger("millm.api.exception_handlers").isEnabledFor(logging.DEBUG)
+            if logging.getLogger(__name__).isEnabledFor(logging.DEBUG)
             else "See server logs",
         },
     )

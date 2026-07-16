@@ -290,6 +290,11 @@ All errors return a standard response format:
     )
 
     # Exception handlers
+    from fastapi.exceptions import RequestValidationError
+
+    from millm.api.exception_handlers import openai_validation_error_handler
+
+    app.add_exception_handler(RequestValidationError, openai_validation_error_handler)
     app.add_exception_handler(MiLLMError, millm_error_handler)
     app.add_exception_handler(Exception, generic_exception_handler)
 

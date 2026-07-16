@@ -3,7 +3,7 @@ Integration tests for OpenAI chat completions endpoint.
 
 Tests the full endpoint behavior including:
 - No model loaded returns 503
-- Invalid parameters return 422
+- Invalid parameters return 400
 - Valid requests return proper responses
 """
 
@@ -54,7 +54,7 @@ class TestChatCompletionsValidation:
     """Tests for request validation."""
 
     def test_invalid_temperature_too_low(self, client):
-        """Negative temperature returns 422."""
+        """Negative temperature returns 400."""
         response = client.post(
             "/v1/chat/completions",
             json={
@@ -63,10 +63,10 @@ class TestChatCompletionsValidation:
                 "temperature": -1.0,
             },
         )
-        assert response.status_code == 422
+        assert response.status_code == 400
 
     def test_invalid_temperature_too_high(self, client):
-        """Temperature > 2 returns 422."""
+        """Temperature > 2 returns 400."""
         response = client.post(
             "/v1/chat/completions",
             json={
@@ -75,26 +75,26 @@ class TestChatCompletionsValidation:
                 "temperature": 3.0,
             },
         )
-        assert response.status_code == 422
+        assert response.status_code == 400
 
     def test_missing_messages(self, client):
-        """Request without messages returns 422."""
+        """Request without messages returns 400."""
         response = client.post(
             "/v1/chat/completions",
             json={"model": "gpt-4"},
         )
-        assert response.status_code == 422
+        assert response.status_code == 400
 
     def test_missing_model(self, client):
-        """Request without model returns 422."""
+        """Request without model returns 400."""
         response = client.post(
             "/v1/chat/completions",
             json={"messages": [{"role": "user", "content": "Hello"}]},
         )
-        assert response.status_code == 422
+        assert response.status_code == 400
 
     def test_invalid_role(self, client):
-        """Invalid message role returns 422."""
+        """Invalid message role returns 400."""
         response = client.post(
             "/v1/chat/completions",
             json={
@@ -102,10 +102,10 @@ class TestChatCompletionsValidation:
                 "messages": [{"role": "invalid", "content": "Hello"}],
             },
         )
-        assert response.status_code == 422
+        assert response.status_code == 400
 
     def test_too_many_stop_sequences(self, client):
-        """More than 4 stop sequences returns 422."""
+        """More than 4 stop sequences returns 400."""
         response = client.post(
             "/v1/chat/completions",
             json={
@@ -114,10 +114,10 @@ class TestChatCompletionsValidation:
                 "stop": ["1", "2", "3", "4", "5"],
             },
         )
-        assert response.status_code == 422
+        assert response.status_code == 400
 
     def test_invalid_top_p(self, client):
-        """top_p > 1 returns 422."""
+        """top_p > 1 returns 400."""
         response = client.post(
             "/v1/chat/completions",
             json={
@@ -126,7 +126,7 @@ class TestChatCompletionsValidation:
                 "top_p": 1.5,
             },
         )
-        assert response.status_code == 422
+        assert response.status_code == 400
 
 
 class TestChatCompletionsWithValidParams:
@@ -251,19 +251,24 @@ class TestSteeringIntensityDial:
         "messages": [{"role": "user", "content": "Hello"}],
     }
 
-    def test_invalid_dial_returns_422_before_model_check(self, client):
+    def test_invalid_dial_returns_openai_400(self, client):
         response = client.post(
             "/v1/chat/completions",
             json={**self.BODY, "steering_intensity": 5.0},
         )
-        assert response.status_code == 422
+        assert response.status_code == 400
+        error = response.json()["error"]
+        assert error["type"] == "invalid_request_error"
+        assert "steering_intensity" in (error.get("param") or "")
+        assert "[0, 2]" in error["message"]
 
-    def test_symbolic_garbage_returns_422(self, client):
+    def test_symbolic_garbage_returns_openai_400(self, client):
         response = client.post(
             "/v1/chat/completions",
             json={**self.BODY, "steering_intensity": "loud"},
         )
-        assert response.status_code == 422
+        assert response.status_code == 400
+        assert response.json()["error"]["type"] == "invalid_request_error"
 
     def test_valid_dial_reaches_model_gate(self, client):
         """A well-formed dial doesn't break routing — request proceeds to the

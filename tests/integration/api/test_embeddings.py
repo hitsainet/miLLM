@@ -3,7 +3,7 @@ Integration tests for OpenAI embeddings endpoint.
 
 Tests the full endpoint behavior including:
 - No model loaded returns 503
-- Invalid parameters return 422
+- Invalid parameters return 400
 """
 
 import pytest
@@ -41,20 +41,20 @@ class TestEmbeddingsValidation:
     """Tests for request validation."""
 
     def test_missing_input(self, client):
-        """Request without input returns 422."""
+        """Request without input returns 400."""
         response = client.post(
             "/v1/embeddings",
             json={"model": "text-embedding-ada-002"},
         )
-        assert response.status_code == 422
+        assert response.status_code == 400
 
     def test_missing_model(self, client):
-        """Request without model returns 422."""
+        """Request without model returns 400."""
         response = client.post(
             "/v1/embeddings",
             json={"input": "Hello world"},
         )
-        assert response.status_code == 422
+        assert response.status_code == 400
 
 
 class TestEmbeddingsWithValidParams:

@@ -34,10 +34,13 @@ miLLM exposes an OpenAI-compatible API at `/v1`, making it a drop-in replacement
 | `frequency_penalty` | float | `0.0` | −2 to 2; mapped to repetition penalty internally |
 | `presence_penalty` | float | `0.0` | −2 to 2; mapped to repetition penalty internally |
 | `profile` | string | — | **miLLM extension**: apply a saved [steering profile](/features/profiles) for this request only |
+| `steering_intensity` | float \| string | — | **miLLM extension** (chat completions only): per-request steering dial — a λ in `0`–`2`, or `"off"` / `"min"` / `"max"` |
 
 :::note Intensity coupling
-When the named profile is an imported **cluster**, its stored strengths are scaled by the cluster's persistent intensity dial (λ, set on the Clusters page) before applying — API callers share that dial until the per-request `steering_intensity` extension ships (Feature 10).
+When the steering base is an imported **cluster**, its stored strengths are scaled by an intensity dial (λ) before applying. Without `steering_intensity`, the cluster's persistent dial (set on the Clusters page) applies; with it, the request's λ **overrides** the stored one for that request only. Symbolic `"min"`/`"max"` resolve to the cluster's declared `intensity_range` bounds, and numeric λ is clamped into that range (dialing to `0`/`"off"` is always allowed). The base is the named `profile` if given, else the active profile, else the live steering values.
 :::
+
+Responses to dialed requests carry an `X-miLLM-Steering-Intensity` header echoing the resolved λ. The echo is best-effort: it is omitted when nothing can apply (no SAE attached, unknown profile), and a concurrent profile switch while the request queues can in rare cases make a symbolic echo differ from the applied λ.
 
 ```bash
 curl http://localhost:8000/v1/chat/completions \
@@ -150,10 +153,11 @@ Only the currently loaded model is listed — use the [Management API](/api/mode
 | Prompt + `max_tokens` exceeds context window | 400 | `context_length_exceeded` |
 | Request queue full | 429 | `rate_limit_exceeded` |
 | Unknown `profile` | 404 | `profile_not_found` |
+| Invalid `steering_intensity` (outside 0–2 / unknown symbol) | 400 | `invalid_parameter` |
 
 ## Behavior under continuous batching
 
-If the opt-in [CBM backend](/concepts/architecture#continuous-batching-opt-in) is enabled, requests matching the server's fixed sampling parameters are batched for throughput; requests with different `temperature`/`top_p`, a `profile` parameter, or (optionally) active monitoring fall back to the serial path automatically. `GET /api/health/inference` shows which backend is active.
+If the opt-in [CBM backend](/concepts/architecture#continuous-batching-opt-in) is enabled, requests matching the server's fixed sampling parameters are batched for throughput; requests with different `temperature`/`top_p`, a `profile` or `steering_intensity` parameter, or (optionally) active monitoring fall back to the serial path automatically. `GET /api/health/inference` shows which backend is active.
 
 :::tip Integration with Other Tools
 - **Open WebUI:** set the OpenAI API base URL to `http://<host>:8000/v1` — [tutorial](/tutorials/open-webui)

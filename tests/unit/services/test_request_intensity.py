@@ -123,7 +123,9 @@ class TestDialSemantics:
         sae.enable_steering.assert_called_once_with(False)
 
     async def test_dial_only_uses_active_profile_as_base(self, service):
-        sae = make_sae()
+        # enabled=True: an active profile implies steering is on; dial-only
+        # requests refuse to enable disabled steering (R1 fix, tested below)
+        sae = make_sae(enabled=True)
         active = make_profile(
             steering={"7": 50.0}, intensity=1.0, source_kind="cluster",
             cluster_meta={"budget": {"intensity_range": [0.5, 1.5]}},
@@ -203,19 +205,21 @@ class TestRoutingCondition:
         service._cbm_force_serial_monitoring = False
 
         assert service._use_cbm_for_request(
-            temperature=None, top_p=None, has_profile=True
+            temperature=None, top_p=None, has_steering_override=True
         ) is False
         assert service._use_cbm_for_request(
-            temperature=None, top_p=None, has_profile=False
+            temperature=None, top_p=None, has_steering_override=False
         ) is True
 
 
 class TestResolveRequestIntensityEcho:
-    """Route-level resolution for the X-miLLM-Steering-Intensity echo."""
+    """Route-level resolution for the X-miLLM-Steering-Intensity echo —
+    best-effort and honest: None (no header) when nothing can apply."""
 
     async def test_numeric_fast_path_no_db(self, service):
         request = MagicMock(steering_intensity=1.3, profile=None)
-        with patch("millm.db.base.async_session_factory") as factory:
+        with apply_ctx(make_sae()), \
+             patch("millm.db.base.async_session_factory") as factory:
             assert await service.resolve_request_intensity(request) == 1.3
             factory.assert_not_called()
 
@@ -226,18 +230,187 @@ class TestResolveRequestIntensityEcho:
     async def test_symbolic_resolves_against_active(self, service):
         request = MagicMock(steering_intensity="max", profile=None)
         active = make_profile(cluster_meta={"budget": {"intensity_range": [0.5, 1.5]}})
-        with patch("millm.db.base.async_session_factory"), \
-             patch("millm.db.repositories.profile_repository.ProfileRepository") as MockRepo:
-            MockRepo.return_value.get_active = AsyncMock(return_value=active)
+        with apply_ctx(make_sae(), active=active):
             assert await service.resolve_request_intensity(request) == 1.5
 
     async def test_symbolic_resolves_against_named_profile(self, service):
         request = MagicMock(steering_intensity="min", profile="p")
         named = make_profile(cluster_meta={"budget": {"intensity_range": [0.7, 1.4]}})
-        with patch("millm.db.base.async_session_factory"), \
-             patch("millm.db.repositories.profile_repository.ProfileRepository") as MockRepo:
-            MockRepo.return_value.get_by_name = AsyncMock(return_value=named)
+        with apply_ctx(make_sae(), by_name=named):
             assert await service.resolve_request_intensity(request) == 0.7
+
+    async def test_no_sae_suppresses_echo(self, service):
+        """R1 fix: apply will no-op — an echoed lambda would be a lie."""
+        request = MagicMock(steering_intensity=1.5, profile=None)
+        with apply_ctx(None):
+            assert await service.resolve_request_intensity(request) is None
+
+    async def test_missing_named_profile_suppresses_echo(self, service):
+        """R1 fix: apply will 404 — don't emit a confident header first."""
+        request = MagicMock(steering_intensity="max", profile="ghost")
+        with apply_ctx(make_sae(), by_name=None):
+            assert await service.resolve_request_intensity(request) is None
+
+    async def test_db_failure_degrades_to_no_header(self, service):
+        """R1 fix: a symbolic echo must never 500 the whole request."""
+        request = MagicMock(steering_intensity="max", profile=None)
+        with patch("millm.services.sae_service.AttachedSAEState") as MockState, \
+             patch("millm.db.base.async_session_factory",
+                   side_effect=RuntimeError("db down")):
+            MockState.return_value.attached_sae = make_sae()
+            assert await service.resolve_request_intensity(request) is None
+
+
+class TestReviewRound1Fixes:
+    """Pins for the R1 findings fixed in _apply_request_steering."""
+
+    async def test_named_empty_profile_with_dial_is_noop_not_live_scaling(
+        self, service
+    ):
+        """R1: profile-with-no-steering + dial must NOT fall through to
+        scaling the active cluster's live values."""
+        sae = make_sae(values={3: 10.0}, enabled=True)
+        profile = make_profile(steering=None, name="neutral")
+        with apply_ctx(sae, by_name=profile):
+            result = await service._apply_request_steering("neutral", 1.5)
+        assert result is None
+        sae.set_steering_batch.assert_not_called()
+
+    async def test_empty_cluster_profile_still_gated(self, service):
+        """R1: the n_features gate runs even when the cluster's steering is
+        empty (pre-010 ordering restored)."""
+        sae = make_sae(d_sae=100)
+        profile = make_profile(
+            steering=None, source_kind="cluster", name="hollow",
+            cluster_meta={"sae": {"n_features": 32768}},
+        )
+        with apply_ctx(sae, by_name=profile):
+            with pytest.raises(InvalidFeatureIndexError):
+                await service._apply_request_steering("hollow", 1.2)
+
+    async def test_dial_only_never_reenables_disabled_active_profile(
+        self, service
+    ):
+        """R1: operator disabled steering globally; a dial>0 on the active
+        profile must not switch it back on."""
+        sae = make_sae(values={7: 50.0}, enabled=False)
+        active = make_profile(steering={"7": 50.0})
+        with apply_ctx(sae, active=active):
+            result = await service._apply_request_steering(None, 1.5)
+        assert result is None
+        sae.enable_steering.assert_not_called()
+        sae.set_steering_batch.assert_not_called()
+
+    async def test_named_profile_may_still_enable(self, service):
+        """Explicitly naming a profile keeps pre-010 enable semantics."""
+        sae = make_sae(values={}, enabled=False)
+        profile = make_profile(steering={"7": 50.0})
+        with apply_ctx(sae, by_name=profile):
+            saved = await service._apply_request_steering("p", None)
+        assert saved == {"values": {}, "enabled": False}
+        sae.enable_steering.assert_called_with(True)
+
+    async def test_numeric_dial_clamped_to_authored_range(self, service):
+        """R1: /v1 is unauthenticated — a numeric lambda must not overdrive
+        past the cluster's declared intensity_range."""
+        sae = make_sae()
+        profile = make_profile(
+            steering={"10": 100.0}, source_kind="cluster",
+            cluster_meta={"budget": {"intensity_range": [0.5, 1.2]}},
+        )
+        with apply_ctx(sae, by_name=profile):
+            await service._apply_request_steering("p", 2.0)
+        sae.set_steering_batch.assert_called_once_with({10: 120.0})
+
+    async def test_dial_to_zero_bypasses_range_floor(self, service):
+        """Dialing to 0 stays always allowed (set_intensity parity)."""
+        sae = make_sae(values={10: 100.0}, enabled=True)
+        profile = make_profile(
+            steering={"10": 100.0}, source_kind="cluster",
+            cluster_meta={"budget": {"intensity_range": [0.5, 1.2]}},
+        )
+        with apply_ctx(sae, by_name=profile):
+            saved = await service._apply_request_steering("p", 0.0)
+        assert saved is not None
+        sae.enable_steering.assert_called_once_with(False)
+
+    async def test_swapped_authored_range_is_normalized(self, service):
+        """R1: a hand-authored [hi, lo] range must not invert min/max."""
+        profile = make_profile(
+            cluster_meta={"budget": {"intensity_range": [1.5, 0.5]}})
+        assert InferenceService._resolve_intensity("min", profile) == 0.5
+        assert InferenceService._resolve_intensity("max", profile) == 1.5
+
+    async def test_garbage_authored_range_falls_back_to_config(self, service):
+        from millm.core.config import settings
+
+        profile = make_profile(
+            cluster_meta={"budget": {"intensity_range": [None, "x"]}})
+        assert (InferenceService._resolve_intensity("max", profile)
+                == settings.CLUSTER_INTENSITY_MAX)
+
+    async def test_streaming_setup_failure_restores_steering(self, service):
+        """R1 top finding: an exception between apply and the streaming
+        try/finally (tokenize/context-check/thread-start) must restore."""
+        import torch as _torch  # noqa: F401
+
+        sae = make_sae(values={5: 3.0}, enabled=True)
+        request = MagicMock()
+        request.profile = None
+        request.steering_intensity = 0.0
+        request.messages = [MagicMock(role="user", content="hi")]
+        request.temperature = None
+        request.top_p = None
+
+        restored = []
+        original_restore = service._restore_request_profile
+
+        def spy_restore(saved):
+            restored.append(saved)
+            original_restore(saved)
+
+        with apply_ctx(sae, active=None), \
+             patch.object(service, "_restore_request_profile",
+                          side_effect=spy_restore), \
+             patch.object(service, "_format_chat_messages", return_value="hi"), \
+             patch.object(type(service), "_tokenizer",
+                          property(lambda self: (_ for _ in ()).throw(
+                              RuntimeError("tokenizer exploded")))):
+            with pytest.raises(RuntimeError, match="tokenizer exploded"):
+                async for _ in service.stream_chat_completion(request):
+                    pass
+        assert restored == [{"values": {5: 3.0}, "enabled": True}]
+
+    async def test_call_site_passes_dial_into_routing(self, service):
+        """R1: pin the actual call-site expression — a dial-only request must
+        reach _use_cbm_for_request with has_steering_override=True."""
+        assert service._has_steering_override(
+            MagicMock(profile=None, steering_intensity=1.5)) is True
+        assert service._has_steering_override(
+            MagicMock(profile="p", steering_intensity=None)) is True
+        assert service._has_steering_override(
+            MagicMock(profile=None, steering_intensity=None)) is False
+        assert service._has_steering_override(object()) is False  # no fields
+
+        seen = {}
+        original = service._use_cbm_for_request
+
+        def spy(*args, **kwargs):
+            seen.update(kwargs)
+            return original(*args, **kwargs)
+
+        request = MagicMock(profile=None, steering_intensity="off",
+                            temperature=None, top_p=None)
+        request.messages = [MagicMock(role="user", content="hi")]
+        with patch.object(service, "_use_cbm_for_request", side_effect=spy), \
+             patch.object(service, "_format_chat_messages", return_value="hi"):
+            gen = service.stream_chat_completion(request)
+            try:
+                await gen.__anext__()
+            except Exception:
+                pass
+            await gen.aclose()
+        assert seen.get("has_steering_override") is True
 
 
 class TestDialConcurrency:

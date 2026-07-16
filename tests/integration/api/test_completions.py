@@ -3,7 +3,7 @@ Integration tests for OpenAI text completions endpoint.
 
 Tests the full endpoint behavior including:
 - No model loaded returns 503
-- Invalid parameters return 422
+- Invalid parameters return 400
 """
 
 import pytest
@@ -41,7 +41,7 @@ class TestCompletionsValidation:
     """Tests for request validation."""
 
     def test_invalid_temperature(self, client):
-        """Temperature out of range returns 422."""
+        """Temperature out of range returns 400."""
         response = client.post(
             "/v1/completions",
             json={
@@ -50,23 +50,23 @@ class TestCompletionsValidation:
                 "temperature": 3.0,
             },
         )
-        assert response.status_code == 422
+        assert response.status_code == 400
 
     def test_missing_prompt(self, client):
-        """Request without prompt returns 422."""
+        """Request without prompt returns 400."""
         response = client.post(
             "/v1/completions",
             json={"model": "gpt-3.5-turbo-instruct"},
         )
-        assert response.status_code == 422
+        assert response.status_code == 400
 
     def test_missing_model(self, client):
-        """Request without model returns 422."""
+        """Request without model returns 400."""
         response = client.post(
             "/v1/completions",
             json={"prompt": "Once upon a time"},
         )
-        assert response.status_code == 422
+        assert response.status_code == 400
 
 
 class TestCompletionsWithValidParams:

@@ -449,6 +449,17 @@ class TestSteeringIntensityField:
         with pytest.raises(ValidationError):
             self.make(steering_intensity=value)
 
+    @pytest.mark.parametrize("value", [
+        float("nan"), float("inf"), float("-inf"), 1e308, "nan", "infinity",
+    ])
+    def test_nonfinite_rejected(self, value):
+        """nan rejection currently rides on the chained-comparison form
+        `not 0.0 <= v <= 2.0` (0<=nan is False -> rejected). Pin it so an
+        'equivalent' validator rewrite can't silently let nan through into
+        the steering delta (nan*strength poisons every logit)."""
+        with pytest.raises(ValidationError):
+            self.make(steering_intensity=value)
+
     def test_out_of_range_message_names_the_bounds(self):
         with pytest.raises(ValidationError, match=r"\[0, 2\]"):
             self.make(steering_intensity=5.0)

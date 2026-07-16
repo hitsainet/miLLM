@@ -1,0 +1,56 @@
+# Multi-Agent Review — Feature 10: OWUI Cluster Dial
+
+**Date:** 2026-07-16 · **Scope:** feature (commits `566c774..HEAD`, miLLM)
+**Goal gate:** ≥10 findings per round, 3 rounds.
+
+---
+
+## Round 1 (multi-angle /code-review, 2 parallel finder agents) — 24 raw / 19 unique: 15 fixed, 4 documented
+
+**Critical, fixed:**
+1. **Streaming steering leak** — apply ran at the top of the semaphore block but tokenization,
+   `_check_context_length` (raises) and `thread.start()` sat BEFORE the try/finally that restores;
+   a context-length error with `dial=off` left steering globally disabled (or 2× overdriven with
+   `dial=2.0`) for all users. → setup window wrapped in restore-and-reraise; regression test
+   simulates a tokenizer explosion and asserts restore.
+2. **Named empty-steering profile + dial fell through to the live-values base** — the request got
+   steered by a profile the caller never named (and the cluster gate was skipped for
+   empty-membership clusters, since it lived inside the steering-truthy branch). → gate hoisted
+   before ALL decisions (pre-010 ordering restored); named-empty is a logged no-op with or
+   without a dial.
+3. **Dial could re-enable operator-disabled steering** — dial-only requests over the active profile
+   called `enable_steering(True)` unconditionally. → dial-only requests never enable disabled
+   steering (explicitly named profiles keep pre-010 enable semantics).
+4. **Numeric λ bypassed the authored `intensity_range` on unauthenticated /v1** — management
+   `set_intensity` enforces the declared safe envelope; the request dial accepted any λ in [0,2].
+   → numeric λ clamps into the cluster's declared range at apply (dial-to-0 exempt, matching
+   set_intensity), logged when it engages.
+5. **/v1 validation errors were raw pydantic 422 dumps** (errors.pydantic.dev URLs to OpenAI-SDK
+   clients; EC-10.3 wanted OpenAI-style 400). → `RequestValidationError` handler: /v1 → 400
+   `{"error":{message,type,param,code}}` (benefits every /v1 param, not just the dial); non-/v1
+   keeps FastAPI's 422. 14 pre-existing test assertions updated.
+
+**Also fixed:** echo header honesty (suppressed when no SAE attached / named profile missing;
+DB failure degrades to no-header instead of 500ing symbolic-dial requests); swapped (`[hi,lo]`)
+or garbage authored ranges normalized/fallback instead of inverting min/max or 500ing;
+OWUI filter dropped dict-shaped `__user__["valves"]` (getattr on dict) — reads both shapes now;
+free-text dial valve replaced with a Literal dropdown + typed `custom_lambda` (typos
+unrepresentable, spec'd DIAL-F2 shape); per-model enablement guidance for mixed-provider OWUI
+(strict upstreams 400 on unknown fields); routing condition de-triplicated into
+`_has_steering_override` with an honest `per_request_steering_override` log reason and a
+call-site spy test; API reference updated (it described Feature 10 as unshipped in the same
+commit range that shipped it — field row, header, error row, CBM note added); type annotations
+on the new service functions; hardcoded logger name → `__name__`; non-finite λ pinning tests
+(nan currently rejected only via the chained-comparison form — now regression-pinned).
+
+**Documented (not fixed this round):**
+- Global `set_intensity`/`activate` mutating SAE state is not serialized with the inference
+  queue — a concurrent global dial change during an in-flight request can be clobbered by the
+  request's restore. Pre-existing class of race (any activation during generation), needs
+  queue-serialized steering mutations as its own work item.
+- Symbolic echo TOCTOU (profile switch while queued) — inherent to headers-before-body;
+  documented in the API reference.
+- Symbolic dials cost two profile reads (route echo + apply); the second is inside the semaphore
+  and load-bearing, the first degrades gracefully — acceptable.
+- `steering_intensity` remains chat-completions-only (text completions lack `profile` too);
+  `_has_steering_override` is deliberately uniform so adding the fields later inherits routing.

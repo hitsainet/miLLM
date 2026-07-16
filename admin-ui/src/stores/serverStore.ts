@@ -98,8 +98,8 @@ interface ServerActions {
   // Profile actions
   setProfiles: (profiles: Profile[]) => void;
   addProfile: (profile: Profile) => void;
-  updateProfile: (id: number, updates: Partial<Profile>) => void;
-  removeProfile: (id: number) => void;
+  updateProfile: (id: string, updates: Partial<Profile>) => void;
+  removeProfile: (id: string) => void;
   setActiveProfile: (profile: Profile | null) => void;
   setProfilesLoading: (loading: boolean) => void;
 

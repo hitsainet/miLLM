@@ -4,9 +4,9 @@ import { Button, Modal } from '@components/common';
 import type { ProfileExport } from '@/types';
 
 interface ImportExportButtonsProps {
-  onExport: (profileId: number) => Promise<ProfileExport | null>;
+  onExport: (profileId: string) => Promise<ProfileExport | null>;
   onImport: (data: ProfileExport) => Promise<void>;
-  profiles: Array<{ id: number; name: string }>;
+  profiles: Array<{ id: string; name: string }>;
   isExporting?: boolean;
   isImporting?: boolean;
 }
@@ -20,7 +20,7 @@ export function ImportExportButtons({
 }: ImportExportButtonsProps) {
   const fileInputRef = useRef<HTMLInputElement>(null);
   const [showExportModal, setShowExportModal] = useState(false);
-  const [selectedProfileId, setSelectedProfileId] = useState<number | null>(null);
+  const [selectedProfileId, setSelectedProfileId] = useState<string | null>(null);
   const [importError, setImportError] = useState<string | null>(null);
 
   const handleExportClick = () => {
@@ -31,7 +31,7 @@ export function ImportExportButtons({
     }
   };
 
-  const handleExport = async (profileId: number) => {
+  const handleExport = async (profileId: string) => {
     try {
       const data = await onExport(profileId);
       if (!data) {

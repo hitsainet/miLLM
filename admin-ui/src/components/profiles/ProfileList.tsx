@@ -5,14 +5,14 @@ import type { Profile } from '@/types';
 
 interface ProfileListProps {
   profiles: Profile[];
-  activeProfileId?: number;
-  onActivate: (id: number) => void;
-  onDeactivate: (id: number) => void;
+  activeProfileId?: string;
+  onActivate: (id: string) => void;
+  onDeactivate: (id: string) => void;
   onEdit: (profile: Profile) => void;
-  onDelete: (id: number) => void;
-  activatingId?: number;
-  deactivatingId?: number;
-  deletingId?: number;
+  onDelete: (id: string) => void;
+  activatingId?: string;
+  deactivatingId?: string;
+  deletingId?: string;
   disabled?: boolean;
 }
 

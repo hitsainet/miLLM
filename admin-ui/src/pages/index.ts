@@ -5,3 +5,4 @@ export { SteeringPage } from './SteeringPage';
 export { MonitoringPage } from './MonitoringPage';
 export { ProfilesPage } from './ProfilesPage';
 export { SettingsPage } from './SettingsPage';
+export { ClustersPage } from './ClustersPage';

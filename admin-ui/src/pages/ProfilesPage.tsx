@@ -33,9 +33,9 @@ export function ProfilesPage() {
 
   const [showForm, setShowForm] = useState(false);
   const [editingProfile, setEditingProfile] = useState<Profile | undefined>();
-  const [activatingId, setActivatingId] = useState<number | undefined>();
-  const [deactivatingId, setDeactivatingId] = useState<number | undefined>();
-  const [deletingId, setDeletingId] = useState<number | undefined>();
+  const [activatingId, setActivatingId] = useState<string | undefined>();
+  const [deactivatingId, setDeactivatingId] = useState<string | undefined>();
+  const [deletingId, setDeletingId] = useState<string | undefined>();
 
   // Check if we should auto-open the form (from steering page)
   const createFromCurrent = (location.state as { createFromCurrent?: boolean })?.createFromCurrent;
@@ -68,7 +68,7 @@ export function ProfilesPage() {
     }
   };
 
-  const handleDelete = async (id: number) => {
+  const handleDelete = async (id: string) => {
     setDeletingId(id);
     try {
       await deleteProfile(id);
@@ -77,7 +77,7 @@ export function ProfilesPage() {
     }
   };
 
-  const handleActivate = async (id: number) => {
+  const handleActivate = async (id: string) => {
     setActivatingId(id);
     try {
       await activateProfile(id);
@@ -86,7 +86,7 @@ export function ProfilesPage() {
     }
   };
 
-  const handleDeactivate = async (id: number) => {
+  const handleDeactivate = async (id: string) => {
     setDeactivatingId(id);
     try {
       await deactivateProfile(id);
@@ -100,7 +100,7 @@ export function ProfilesPage() {
     setShowForm(true);
   };
 
-  const handleExport = async (profileId: number): Promise<ProfileExport | null> => {
+  const handleExport = async (profileId: string): Promise<ProfileExport | null> => {
     return exportProfile(profileId);
   };
 

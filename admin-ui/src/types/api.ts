@@ -257,7 +257,8 @@ export interface TopFeaturesResponse {
 
 // Profile types
 export interface Profile {
-  id: number;
+  // Backend ids are strings ("prof_<hex>") — was mistyped as number.
+  id: string;
   name: string;
   description?: string;
   model_repo_id?: string;

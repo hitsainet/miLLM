@@ -32,7 +32,7 @@ export function useProfiles() {
   });
 
   const updateMutation = useMutation({
-    mutationFn: ({ id, data }: { id: number; data: UpdateProfileRequest }) =>
+    mutationFn: ({ id, data }: { id: string; data: UpdateProfileRequest }) =>
       profileApi.update(id, data),
     onSuccess: (profile) => {
       queryClient.invalidateQueries({ queryKey: ['profiles'] });
@@ -44,7 +44,7 @@ export function useProfiles() {
   });
 
   const deleteMutation = useMutation({
-    mutationFn: (id: number) => profileApi.delete(id),
+    mutationFn: (id: string) => profileApi.delete(id),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['profiles'] });
       toast.success('Profile deleted');
@@ -55,7 +55,7 @@ export function useProfiles() {
   });
 
   const activateMutation = useMutation({
-    mutationFn: (id: number) => profileApi.activate(id),
+    mutationFn: (id: string) => profileApi.activate(id),
     onSuccess: (profile) => {
       setActiveProfile(profile);
       queryClient.invalidateQueries({ queryKey: ['profiles'] });
@@ -68,7 +68,7 @@ export function useProfiles() {
   });
 
   const deactivateMutation = useMutation({
-    mutationFn: (id: number) => profileApi.deactivate(id),
+    mutationFn: (id: string) => profileApi.deactivate(id),
     onSuccess: () => {
       setActiveProfile(null);
       queryClient.invalidateQueries({ queryKey: ['profiles'] });
@@ -79,7 +79,7 @@ export function useProfiles() {
     },
   });
 
-  const exportProfile = async (id: number): Promise<ProfileExport | null> => {
+  const exportProfile = async (id: string): Promise<ProfileExport | null> => {
     try {
       const data = await profileApi.export(id);
       return data;
@@ -108,7 +108,7 @@ export function useProfiles() {
     create: createMutation.mutate,
     createProfile: createMutation.mutateAsync,
     update: updateMutation.mutate,
-    updateProfile: (id: number, data: UpdateProfileRequest) =>
+    updateProfile: (id: string, data: UpdateProfileRequest) =>
       updateMutation.mutateAsync({ id, data }),
     delete: deleteMutation.mutate,
     deleteProfile: deleteMutation.mutateAsync,

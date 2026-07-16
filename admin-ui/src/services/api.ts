@@ -39,6 +39,15 @@ import type {
   ProfileExport,
   ServerStatus,
 } from '@/types';
+import type {
+  ClusterDefinitionV1,
+  ClusterImportItem,
+  ClusterImportResult,
+  ClusterListResponse,
+  HubDefinitionRef,
+  HubRepoInfo,
+} from '@/types/clusters';
+
 
 /** Base URL for all API requests */
 const API_BASE = '/api';
@@ -674,7 +683,7 @@ export const profileApi = {
    * @param id - Profile ID
    * @returns Promise resolving to profile information
    */
-  get: (id: number) => request<Profile>(`/profiles/${id}`),
+  get: (id: string) => request<Profile>(`/profiles/${id}`),
 
   /**
    * Creates a new profile from current steering configuration.
@@ -693,7 +702,7 @@ export const profileApi = {
    * @param req - Updated profile data
    * @returns Promise resolving to updated profile
    */
-  update: (id: number, req: UpdateProfileRequest) =>
+  update: (id: string, req: UpdateProfileRequest) =>
     request<Profile>(`/profiles/${id}`, {
       method: 'PUT',
       body: JSON.stringify(req),
@@ -704,7 +713,7 @@ export const profileApi = {
    * @param id - Profile ID to delete
    * @returns Promise resolving when deletion is complete
    */
-  delete: (id: number) =>
+  delete: (id: string) =>
     request<void>(`/profiles/${id}`, {
       method: 'DELETE',
     }),
@@ -715,7 +724,7 @@ export const profileApi = {
    * @param id - Profile ID to activate
    * @returns Promise resolving to activated profile
    */
-  activate: (id: number) =>
+  activate: (id: string) =>
     request<Profile>(`/profiles/${id}/activate`, {
       method: 'POST',
     }),
@@ -725,7 +734,7 @@ export const profileApi = {
    * @param id - Profile ID to deactivate
    * @returns Promise resolving to deactivated profile
    */
-  deactivate: (id: number) =>
+  deactivate: (id: string) =>
     request<Profile>(`/profiles/${id}/deactivate`, {
       method: 'POST',
     }),
@@ -735,7 +744,7 @@ export const profileApi = {
    * @param id - Profile ID to export
    * @returns Promise resolving to exportable profile data
    */
-  export: (id: number) => request<ProfileExport>(`/profiles/${id}/export`),
+  export: (id: string) => request<ProfileExport>(`/profiles/${id}/export`),
 
   /**
    * Imports a profile from miStudio export format.
@@ -796,6 +805,88 @@ export const serverApi = {
  * await api.steering.enable();
  * ```
  */
+
+// ============================================================
+// Cluster API (Feature 8)
+// ============================================================
+
+/**
+ * API client for imported cluster definitions (Feature 8).
+ * Import portable mistudio.cluster-definition/v1 documents, browse public
+ * Hugging Face cluster packs (consume-only), activate clusters, and adjust
+ * the lambda intensity dial.
+ */
+export const clusterApi = {
+  /** Lists imported cluster profiles. */
+  list: () => request<ClusterListResponse>('/clusters'),
+
+  /**
+   * Imports a definition or bundle (kind-keyed).
+   * @param payload - Parsed definition/bundle JSON
+   */
+  import: (payload: unknown, opts?: { onConflict?: 'rename' | 'fail'; activate?: boolean }) => {
+    const params = new URLSearchParams();
+    if (opts?.onConflict) params.set('on_conflict', opts.onConflict);
+    if (opts?.activate) params.set('activate', 'true');
+    const qs = params.toString();
+    return request<ClusterImportResult>(`/clusters/import${qs ? `?${qs}` : ''}`, {
+      method: 'POST',
+      body: JSON.stringify(payload),
+    });
+  },
+
+  /** Searches public Hub cluster packs (anonymous, tag-filtered). */
+  hubSearch: (opts?: { q?: string; baseModel?: string; limit?: number }) => {
+    const params = new URLSearchParams();
+    if (opts?.q) params.set('q', opts.q);
+    if (opts?.baseModel) params.set('base_model', opts.baseModel);
+    if (opts?.limit) params.set('limit', String(opts.limit));
+    const qs = params.toString();
+    return request<HubRepoInfo[]>(`/clusters/hub/search${qs ? `?${qs}` : ''}`);
+  },
+
+  /** Lists a repo's definitions (manifest preferred). */
+  hubDefinitions: (repoId: string) =>
+    request<HubDefinitionRef[]>(`/clusters/hub/${repoId}/definitions`),
+
+  /** Imports one definition file from a Hub repo. */
+  hubImport: (req: { repo_id: string; filename: string; revision?: string; activate?: boolean }) =>
+    request<ClusterImportItem>('/clusters/hub/import', {
+      method: 'POST',
+      body: JSON.stringify(req),
+    }),
+
+  /** Activates a cluster (hard compatibility gate server-side). */
+  activate: (id: string) =>
+    request<{ profile_id: string; applied_steering: boolean; feature_count: number }>(
+      `/clusters/${id}/activate`,
+      { method: 'POST' }
+    ),
+
+  /** Deactivates a cluster. */
+  deactivate: (id: string) =>
+    request<{ profile_id: string }>(`/clusters/${id}/deactivate`, { method: 'POST' }),
+
+  /** Sets a cluster's lambda intensity (re-applies when active). */
+  setIntensity: (id: string, intensity: number, reapply = true) =>
+    request<{ profile_id: string; intensity: number; reapplied: boolean }>(
+      `/clusters/${id}/intensity`,
+      { method: 'PUT', body: JSON.stringify({ intensity, reapply }) }
+    ),
+
+  /**
+   * Exports the lossless original definition. Raw artifact — served without
+   * the ApiResponse envelope, so this bypasses request().
+   */
+  export: async (id: string): Promise<ClusterDefinitionV1> => {
+    const response = await fetch(`${API_BASE}/clusters/${id}/export`);
+    if (!response.ok) {
+      throw new ApiError('EXPORT_FAILED', `Export failed (${response.status})`);
+    }
+    return (await response.json()) as ClusterDefinitionV1;
+  },
+};
+
 export const api = {
   /** Model management operations */
   models: modelApi,
@@ -807,6 +898,8 @@ export const api = {
   monitoring: monitoringApi,
   /** Profile management operations */
   profiles: profileApi,
+  /** Imported cluster operations (Feature 8) */
+  clusters: clusterApi,
   /** Server status operations */
   server: serverApi,
 };

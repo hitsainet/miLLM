@@ -11,6 +11,7 @@ import {
   ChevronLeft,
   ChevronRight,
   BookOpen,
+  Boxes,
 } from 'lucide-react';
 import { useUIStore } from '@/stores/uiStore';
 
@@ -23,6 +24,7 @@ const navItems = [
   { id: 'steering', label: 'Steering', path: '/steering', icon: Sliders },
   { id: 'monitoring', label: 'Probe', path: '/monitoring', icon: Activity },
   { id: 'profiles', label: 'Profiles', path: '/profiles', icon: FileJson },
+  { id: 'clusters', label: 'Clusters', path: '/clusters', icon: Boxes },
 ];
 
 const bottomNavItems = [

@@ -33,27 +33,27 @@
 
 ## Tasks
 
-- [ ] 1.0 Request schema extension (covers FR-10.1; DIAL-A1)
-  - [ ] 1.1 Add `steering_intensity` field + validator to ChatCompletionRequest
-  - [ ] 1.2 Schema unit tests: numeric bounds, symbolic set, 400 messages, extra="ignore" retained
+- [x] 1.0 Request schema extension (covers FR-10.1; DIAL-A1)
+  - [x] 1.1 Add `steering_intensity` field + validator to ChatCompletionRequest
+  - [x] 1.2 Schema unit tests: numeric bounds, symbolic set, 400 messages, extra="ignore" retained
 
-- [ ] 2.0 Inference-path dial (covers FR-10.1, FR-10.2; DIAL-A2..A7)
-  - [ ] 2.1 `_resolve_intensity` (symbolic→λ from intensity_range; config fallback; numeric passthrough)
-  - [ ] 2.2 Generalize `_apply_request_profile` → `_apply_request_steering` (base selection: named > active > live; request-λ overrides stored λ; λ=0 disable path; clamp via shared helper)
-  - [ ] 2.3 Swap both call sites (non-streaming + streaming) keeping restore-in-finally placement
-  - [ ] 2.4 Extend serial-routing condition (`has_profile or steering_intensity is not None`)
-  - [ ] 2.5 `X-miLLM-Steering-Intensity` echo on both paths (stash-at-apply for streaming)
-  - [ ] 2.6 No-op semantics: field absent vs λ=1.0 vs no SAE/no profile (logged notice, never error)
-  - [ ] 2.7 Unit tests: resolution matrix, override semantics, λ=0, composition with `profile`, clamp parity, saved/restored shape
+- [x] 2.0 Inference-path dial (covers FR-10.1, FR-10.2; DIAL-A2..A7)
+  - [x] 2.1 `_resolve_intensity` (symbolic→λ from intensity_range; config fallback; numeric passthrough)
+  - [x] 2.2 Generalize `_apply_request_profile` → `_apply_request_steering` (base selection: named > active > live; request-λ overrides stored λ; λ=0 disable path; clamp via shared helper)
+  - [x] 2.3 Swap both call sites (non-streaming + streaming) keeping restore-in-finally placement
+  - [x] 2.4 Extend serial-routing condition (`has_profile or steering_intensity is not None`)
+  - [x] 2.5 `X-miLLM-Steering-Intensity` echo on both paths (stash-at-apply for streaming)
+  - [x] 2.6 No-op semantics: field absent vs λ=1.0 vs no SAE/no profile (logged notice, never error)
+  - [x] 2.7 Unit tests: resolution matrix, override semantics, λ=0, composition with `profile`, clamp parity, saved/restored shape
 
-- [ ] 3.0 OWUI Function + docs (covers FR-10.3, FR-10.4; DIAL-F1..F4)
-  - [ ] 3.1 `integrations/openwebui/millm_dial_filter.py` (Valves/UserValves, inlet-only, version-note header)
-  - [ ] 3.2 Manual: Function install + dial usage + global-vs-per-request distinction in open-webui.md
-  - [ ] 3.3 Lint/self-test the plugin file standalone (no miLLM imports)
+- [x] 3.0 OWUI Function + docs (covers FR-10.3, FR-10.4; DIAL-F1..F4)
+  - [x] 3.1 `integrations/openwebui/millm_dial_filter.py` (Valves/UserValves, inlet-only, version-note header)
+  - [x] 3.2 Manual: Function install + dial usage + global-vs-per-request distinction in open-webui.md
+  - [x] 3.3 Lint/self-test the plugin file standalone (no miLLM imports)
 
-- [ ] 4.0 Integration verification (covers FR-10.2, FR-10.4)
-  - [ ] 4.1 Integration tests: streaming + non-streaming with field; serial routing asserted; global state identical before/after; no-active-cluster no-op
-  - [ ] 4.2 Concurrency test: two interleaved requests with different λ produce independent applies (serialized) and clean restores
+- [x] 4.0 Integration verification (covers FR-10.2, FR-10.4)
+  - [x] 4.1 Integration tests: streaming + non-streaming with field; serial routing asserted; global state identical before/after; no-active-cluster no-op
+  - [x] 4.2 Concurrency test: two interleaved requests with different λ produce independent applies (serialized) and clean restores
   - [ ] 4.3 E2E script: identical prompt at off/min/max on a validated cluster (post-deploy); OWUI manual walkthrough
 
 - [ ] 5.0 Feature Acceptance (per instruct 008)

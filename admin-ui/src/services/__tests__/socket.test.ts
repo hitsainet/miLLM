@@ -336,16 +336,28 @@ describe('SocketClient', () => {
         (call) => call[0] === 'monitoring:activation'
       )?.[1];
 
+      // Real backend emission shape (millm/sockets/progress.py
+      // emit_activation_update): {timestamp, activations, request_id, position}
       const activationData = {
         timestamp: '2024-01-15T12:00:00Z',
-        features: [{ idx: 1234, value: 0.85 }],
+        activations: [{ feature_index: 1234, activation: 0.85 }],
+        request_id: 'req-1',
+        position: 7,
       };
 
       activationHandler?.(activationData);
 
-      expect(mockServerStore.addActivationRecord).toHaveBeenCalledWith(
-        activationData
+      expect(mockServerStore.setLatestActivations).toHaveBeenCalledWith(
+        activationData.activations
       );
+      // Handler transforms the event into an ActivationRecord for history
+      expect(mockServerStore.addActivationRecord).toHaveBeenCalledWith({
+        timestamp: '2024-01-15T12:00:00Z',
+        request_id: 'req-1',
+        token_position: 7,
+        activations: activationData.activations,
+        top_k: activationData.activations,
+      });
     });
 
     it('ignores activation events when paused', () => {

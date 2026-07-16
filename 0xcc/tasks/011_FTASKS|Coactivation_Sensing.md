@@ -36,50 +36,50 @@
 
 ## Tasks
 
-- [ ] 1.0 Persistence layer (covers FR-11.4; SEN-P1, SEN-P2)
-  - [ ] 1.1 Migration `008_create_sensing_events_table.py` (up+down, indexes, FK CASCADE)
-  - [ ] 1.2 `db/models/sensing_event.py` + `sensing_repository.py` (create_many/list/clear/prune)
-  - [ ] 1.3 Repo unit tests incl. retention cap + age prune + CASCADE with profile delete
+- [x] 1.0 Persistence layer (covers FR-11.4; SEN-P1, SEN-P2)
+  - [x] 1.1 Migration `008_create_sensing_events_table.py` (up+down, indexes, FK CASCADE)
+  - [x] 1.2 `db/models/sensing_event.py` + `sensing_repository.py` (create_many/list/clear/prune)
+  - [x] 1.3 Repo unit tests incl. retention cap + age prune + CASCADE with profile delete
 
-- [ ] 2.0 Detection core in LoadedSAE (covers FR-11.1; SEN-D1..D5)
-  - [ ] 2.1 SensingConfig/SensedHit dataclasses; arm/disarm (W_enc_m cache, dtype/device parity with encode)
-  - [ ] 2.2 `_sense` per-pass evaluation (thresholds, min_k, hot positions) + suppressed() early-return
-  - [ ] 2.3 Debounce to spans incl. cross-pass tail-merge; offset/phase accounting (prefill/decode/speculative shapes)
-  - [ ] 2.4 Per-request cap + truncated flag + `_sensing_done` fast path
-  - [ ] 2.5 Unit tests: predicate matrix, ε-fallback→floor_only mode, spans, cap, offsets, suppressed, arm idempotence, buffer hygiene (begin resets; no-begin ⇒ empty collect)
-  - [ ] 2.6 Hook branch in `sae_hooker.hook_fn` (sibling of monitoring, before apply_steering)
+- [x] 2.0 Detection core in LoadedSAE (covers FR-11.1; SEN-D1..D5)
+  - [x] 2.1 SensingConfig/SensedHit dataclasses; arm/disarm (W_enc_m cache, dtype/device parity with encode)
+  - [x] 2.2 `_sense` per-pass evaluation (thresholds, min_k, hot positions) + suppressed() early-return
+  - [x] 2.3 Debounce to spans incl. cross-pass tail-merge; offset/phase accounting (prefill/decode/speculative shapes)
+  - [x] 2.4 Per-request cap + truncated flag + `_sensing_done` fast path
+  - [x] 2.5 Unit tests: predicate matrix, ε-fallback→floor_only mode, spans, cap, offsets, suppressed, arm idempotence, buffer hygiene (begin resets; no-begin ⇒ empty collect)
+  - [x] 2.6 Hook branch in `sae_hooker.hook_fn` (sibling of monitoring, before apply_steering)
 
-- [ ] 3.0 Service + lifecycle + flush (covers FR-11.2, FR-11.3, FR-11.5; SEN-R1..R4, SEN-S1..S3)
-  - [ ] 3.1 `sensing_service.py`: _build_config from cluster_meta (overrides), arm_for_profile/disarm/should_sense/status
-  - [ ] 3.2 Inference wiring: begin after apply, collect in finally, async `_notify_sensing` beside `_notify_monitoring` (both paths)
-  - [ ] 3.3 Context capture: outputs[0] (non-stream), IdCaptureStoppingCriteria (stream), prompt ids (prefill); ±K decode off hot path; K=0 path
-  - [ ] 3.4 `ambient_fired_count` best-effort fill (full-width monitoring only, else NULL); summary builder (≤300 chars)
-  - [ ] 3.5 Routing: SENSING_FORCE_SERIAL condition in `_use_cbm_for_request`; non-forced CBM ⇒ unsensed
-  - [ ] 3.6 `sensing_overhead_ms` accumulator + warn threshold; exposed in status
-  - [ ] 3.7 Config keys (SENSING_*); arm/disarm hooks in profile activate/deactivate + SAE detach
-  - [ ] 3.8 Unit tests: config build, context slicing edges (pos 0, end, early stop), summary, ambient rules, lifecycle
+- [x] 3.0 Service + lifecycle + flush (covers FR-11.2, FR-11.3, FR-11.5; SEN-R1..R4, SEN-S1..S3)
+  - [x] 3.1 `sensing_service.py`: _build_config from cluster_meta (overrides), arm_for_profile/disarm/should_sense/status
+  - [x] 3.2 Inference wiring: begin after apply, collect in finally, async `_notify_sensing` beside `_notify_monitoring` (both paths)
+  - [x] 3.3 Context capture: outputs[0] (non-stream), IdCaptureStoppingCriteria (stream), prompt ids (prefill); ±K decode off hot path; K=0 path
+  - [x] 3.4 `ambient_fired_count` best-effort fill (full-width monitoring only, else NULL); summary builder (≤300 chars)
+  - [x] 3.5 Routing: SENSING_FORCE_SERIAL condition in `_use_cbm_for_request`; non-forced CBM ⇒ unsensed
+  - [x] 3.6 `sensing_overhead_ms` accumulator + warn threshold; exposed in status
+  - [x] 3.7 Config keys (SENSING_*); arm/disarm hooks in profile activate/deactivate + SAE detach
+  - [x] 3.8 Unit tests: config build, context slicing edges (pos 0, end, early stop), summary, ambient rules, lifecycle
 
-- [ ] 4.0 API + WS surface (covers FR-11.4; SEN-P3, SEN-P4)
-  - [ ] 4.1 `api/schemas/sensing.py` + `routes/management/sensing.py` (status/events/enable/disable/clear)
-  - [ ] 4.2 DI + router registration; route tests (envelope, filters, enable toggles column + live arm)
-  - [ ] 4.3 `emit_sensing_event` in sockets/progress.py (payload w/o context_text) + emission test
+- [x] 4.0 API + WS surface (covers FR-11.4; SEN-P3, SEN-P4)
+  - [x] 4.1 `api/schemas/sensing.py` + `routes/management/sensing.py` (status/events/enable/disable/clear)
+  - [x] 4.2 DI + router registration; route tests (envelope, filters, enable toggles column + live arm)
+  - [x] 4.3 `emit_sensing_event` in sockets/progress.py (payload w/o context_text) + emission test
 
-- [ ] 5.0 Clusters-page sensing UI (covers SEN-P5)
-  - [ ] 5.1 `services/sensing.ts` + `useSensing.ts` + WS subscription (live prepend)
-  - [ ] 5.2 SensingPanel (status strip, event list) + SensingEventDetail (member table, highlighted context)
-  - [ ] 5.3 Wire SensingToggle (Feature 8 stub) to enable/disable
-  - [ ] 5.4 Vitest: panel render, toggle flow, live event prepend
+- [x] 5.0 Clusters-page sensing UI (covers SEN-P5)
+  - [x] 5.1 `services/sensing.ts` + `useSensing.ts` + WS subscription (live prepend)
+  - [x] 5.2 SensingPanel (status strip, event list) + SensingEventDetail (member table, highlighted context)
+  - [x] 5.3 Wire SensingToggle (Feature 8 stub) to enable/disable
+  - [x] 5.4 Vitest: panel render, toggle flow, live event prepend
 
-- [ ] 6.0 Integration verification (covers FR-11.1..11.5 end-to-end)
-  - [ ] 6.1 `test_sensing_workflow.py`: arm→generate on a known co-firing fixture→events with correct spans/quorum/context
+- [x] 6.0 Integration verification (covers FR-11.1..11.5 end-to-end)
+  - [x] 6.1 `test_sensing_workflow.py`: arm→generate on a known co-firing fixture→events with correct spans/quorum/context
   - [ ] 6.2 Streaming early-stop context correctness; prefill event context
-  - [ ] 6.3 Lifecycle: enable/disable live, SAE detach disarms, profile delete cascades events
-  - [ ] 6.4 Safety: serial forcing asserted; CBM-unsensed; overhead accumulator populated; un-armed zero-delta smoke
-  - [ ] 6.5 WS emission observed end-to-end
+  - [x] 6.3 Lifecycle: enable/disable live, SAE detach disarms, profile delete cascades events
+  - [x] 6.4 Safety: serial forcing asserted; CBM-unsensed; overhead accumulator populated; un-armed zero-delta smoke
+  - [x] 6.5 WS emission observed end-to-end
 
 - [ ] 7.0 Feature Acceptance (per instruct 008)
   - [ ] 7.1 Verify FPRD §9 criteria 1–5 + all US/EC boxes one-by-one
-  - [ ] 7.2 Manual: sensing semantics section (fired/attribution/alone-within caveat/retention+privacy)
+  - [x] 7.2 Manual: sensing semantics section (fired/attribution/alone-within caveat/retention+privacy)
   - [ ] 7.3 Full suite green; update CLAUDE.md Document Inventory + Current Status
 
 ## Coverage Audit

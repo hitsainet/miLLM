@@ -159,3 +159,38 @@ class TestRealFixtureWorkflow:
         row = await service.repository.get(item.profile_id)
         assert row.sae_id == "sae_local"
         assert row.is_active is True
+
+
+class TestGenericRouteGateHTTP:
+    """Round-3: the round-1 bypass fix verified at the HTTP layer — the
+    generic profiles route must surface the cluster gate as a 422 envelope."""
+
+    async def test_profiles_activate_route_blocks_mismatched_cluster(
+        self, service, real_definition
+    ):
+        from fastapi import FastAPI
+        from httpx import ASGITransport, AsyncClient
+
+        from millm.api.dependencies import get_profile_service
+        from millm.api.exception_handlers import millm_error_handler
+        from millm.api.routes.management.profiles import router
+        from millm.core.errors import MiLLMError
+
+        with patched_state():
+            item = await service.import_definition(real_definition)
+
+        app = FastAPI()
+        app.include_router(router)
+        app.add_exception_handler(MiLLMError, millm_error_handler)
+        app.dependency_overrides[get_profile_service] = (
+            lambda: service.profile_service
+        )
+
+        with patched_state(d_sae=64):   # mismatched SAE
+            async with AsyncClient(
+                transport=ASGITransport(app=app), base_url="http://test"
+            ) as client:
+                r = await client.post(f"/api/profiles/{item.profile_id}/activate", json={})
+        assert r.status_code == 422
+        body = r.json()
+        assert "meaningless" in body["error"]["message"]

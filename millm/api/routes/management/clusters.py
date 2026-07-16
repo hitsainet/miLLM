@@ -207,8 +207,7 @@ async def set_active_intensity(
     Per-request isolation is the OpenAI-API `steering_intensity` extension
     (Feature 10) — this endpoint serves the Admin UI and MCP tools.
     """
-    clusters = await service.list_clusters()
-    active = next((c for c in clusters if c.is_active), None)
+    active = await service.get_active_cluster()
     if active is None:
         return ApiResponse.fail(
             code="NO_ACTIVE_CLUSTER",

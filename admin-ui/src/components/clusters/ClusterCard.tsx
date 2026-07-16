@@ -69,6 +69,12 @@ export function ClusterCard({
             {cluster.layer != null && ` · L${cluster.layer}`}
             {cluster.model_id && ` · ${cluster.model_id}`}
             {cluster.hub_ref && ` · ${cluster.hub_ref.repo_id}@${cluster.hub_ref.revision}`}
+            {cluster.budget_b != null && (
+              <span className="font-mono"> · B {cluster.budget_b.toFixed(2)}</span>
+            )}
+            {cluster.formula_id && (
+              <span className="font-mono text-slate-500"> · {cluster.formula_id}</span>
+            )}
           </div>
         </div>
 

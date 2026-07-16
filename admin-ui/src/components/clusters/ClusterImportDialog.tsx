@@ -6,6 +6,7 @@
 import { useRef, useState } from 'react';
 import { Search, Upload } from 'lucide-react';
 import { Badge, Button, Input, Modal, Spinner } from '@components/common';
+import { useServerStore } from '@stores/serverStore';
 import { clusterApi } from '@/services/api';
 import type { HubDefinitionRef, HubRepoInfo } from '@/types/clusters';
 
@@ -32,7 +33,9 @@ export function ClusterImportDialog({
   const fileRef = useRef<HTMLInputElement>(null);
 
   // Hub browse state
+  const { loadedModel } = useServerStore();
   const [query, setQuery] = useState('');
+  const [matchLoadedModel, setMatchLoadedModel] = useState(false);
   const [repos, setRepos] = useState<HubRepoInfo[] | null>(null);
   const [selectedRepo, setSelectedRepo] = useState<string | null>(null);
   const [definitions, setDefinitions] = useState<HubDefinitionRef[] | null>(null);
@@ -68,7 +71,10 @@ export function ClusterImportDialog({
     setSelectedRepo(null);
     setDefinitions(null);
     try {
-      setRepos(await clusterApi.hubSearch({ q: query || undefined }));
+      setRepos(await clusterApi.hubSearch({
+        q: query || undefined,
+        baseModel: matchLoadedModel ? loadedModel?.repo_id : undefined,
+      }));
     } catch (e) {
       setHubError((e as Error).message);
     } finally {
@@ -178,6 +184,17 @@ export function ClusterImportDialog({
               <Search className="w-4 h-4" />
             </Button>
           </div>
+          {loadedModel && (
+            <label className="flex items-center gap-2 text-xs text-slate-400 cursor-pointer">
+              <input
+                type="checkbox"
+                checked={matchLoadedModel}
+                onChange={(e) => setMatchLoadedModel(e.target.checked)}
+                className="w-3.5 h-3.5"
+              />
+              Only packs for {loadedModel.repo_id}
+            </label>
+          )}
           {hubBusy && <Spinner size="sm" />}
           {hubError && <p className="text-xs text-red-400">{hubError}</p>}
 

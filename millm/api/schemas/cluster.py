@@ -147,6 +147,8 @@ class ClusterSummary(BaseModel):
     warnings: list[str] = Field(default_factory=list)
     hub_ref: dict[str, Any] | None = None
     intensity_range: list[float] | None = None
+    budget_b: float | None = None
+    formula_id: str | None = None
     created_at: datetime
     updated_at: datetime
 

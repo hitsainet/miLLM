@@ -43,7 +43,11 @@ ERROR_MESSAGES: dict[str, str] = {
     "INVALID_PROFILE_FORMAT": "The profile file format is invalid. Please use a valid JSON profile.",
 
     # Validation errors
-    "VALIDATION_ERROR": "The request contains invalid data. Please check your input and try again.",
+    # VALIDATION_ERROR deliberately has NO generic entry: gate messages
+    # (cluster feature-space mismatch, intensity range, index bounds) are
+    # crafted for users and were being replaced by a generic sentence
+    # (review find) — the handler's default (the exception's own message)
+    # flows through instead.
     "INVALID_FEATURE_INDEX": "The feature index is outside the valid range for the attached SAE.",
 
     # Generic error

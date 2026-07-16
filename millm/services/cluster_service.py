@@ -160,6 +160,12 @@ class ClusterService:
 
     # ── Listing / activation / intensity / export ────────────────────────
 
+    async def get_active_cluster(self) -> Profile | None:
+        """The active profile row iff it is a cluster (repo lookup — no
+        summary construction; used by the global intensity endpoint)."""
+        active = await self.repository.get_active()
+        return active if active is not None and active.source_kind == "cluster" else None
+
     async def list_clusters(self) -> list[ClusterSummary]:
         rows = [p for p in await self.repository.get_all() if p.source_kind == "cluster"]
         return [self._summarize(p) for p in rows]
@@ -367,6 +373,8 @@ class ClusterService:
             # the server will enforce, so the two can never disagree
             # (round-2 find: three different fallback envelopes existed).
             intensity_range=list(self._intensity_bounds(profile)),
+            budget_b=budget.get("B") if isinstance(budget.get("B"), (int, float)) else None,
+            formula_id=budget.get("formula_id"),
             created_at=profile.created_at,
             updated_at=profile.updated_at,
         )

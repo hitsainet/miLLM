@@ -41,6 +41,7 @@ const sidebars: SidebarsConfig = {
         'features/feature-steering',
         'features/probe-monitoring',
         'features/profiles',
+        'features/clusters',
       ],
     },
     {

@@ -174,16 +174,16 @@ class TestHubRoutes:
 
 class TestIntensityRouting:
     async def test_active_intensity_no_active_cluster(self, client, mock_service):
-        mock_service.list_clusters = AsyncMock(return_value=[make_summary(is_active=False)])
+        mock_service.get_active_cluster = AsyncMock(return_value=None)
         async with client:
             r = await client.put("/api/clusters/active/intensity",
                                  json={"intensity": 0.5})
         assert r.json()["error"]["code"] == "NO_ACTIVE_CLUSTER"
 
     async def test_active_intensity_routes_to_active_row(self, client, mock_service):
-        mock_service.list_clusters = AsyncMock(return_value=[
-            make_summary(id="prof_on", is_active=True)
-        ])
+        mock_service.get_active_cluster = AsyncMock(
+            return_value=MagicMock(id="prof_on")
+        )
         async with client:
             r = await client.put("/api/clusters/active/intensity",
                                  json={"intensity": 1.5, "reapply": True})

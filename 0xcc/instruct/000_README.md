@@ -64,6 +64,8 @@ This framework addresses these challenges through:
 The framework follows a hierarchical structure that mirrors how humans naturally think about software projects:
 
 ```
+Business Requirements (Raw Input Level)
+    ↓
 Business Vision (Project Level)
     ↓
 Technical Foundation (Architecture Level)  
@@ -81,7 +83,8 @@ Actionable Tasks (Development Level)
 
 ```mermaid
 graph TD
-    A[Project PRD] --> B[Architecture Decision Record]
+    Z[Business Requirements Document] --> A[Project PRD]
+    A --> B[Architecture Decision Record]
     B --> C[Feature PRD 1]
     B --> D[Feature PRD 2]
     B --> E[Feature PRD N]
@@ -94,14 +97,42 @@ graph TD
     I --> L[Feature Tasks 1]
     J --> M[Feature Tasks 2]
     K --> N[Feature Tasks N]
-    B --> O[CLAUDE.md Memory]
+    B --> O[AGENT.md Memory]
+    B --> P[Project Foundation Tasks]
 ```
 
 ## Instruction Documents
 
 This section details each instruction document's purpose, approach, inputs, and outputs.
 
-### 1. `001_create-project-prd.md`
+### 1. `001_generate-brd.md`
+
+**Purpose:** Converts a free-form transcript plus supporting research/documents into a structured Business Requirements Document (BRD) — the first step of the whole workflow, run once per project right after cloning the template
+
+**Philosophy:** Capture the "why" from raw, unstructured input before any structured planning begins
+
+**Process:**
+- Takes a free-form transcript (e.g. speech-to-text) plus any other informing material (research, notes, existing specs)
+- Asks grouped clarifying questions (scope, users, timeline, success metrics, integrations, risks) before writing anything
+- Generates a BRD in a fixed YAML schema once questions are answered
+
+**Inputs:**
+- Free-form project transcript
+- Supporting documents (research, notes, existing requirements)
+- Answers to clarifying questions
+
+**Outputs:**
+- `000_BRD|[project-name].md` in `0xcc/prds/` folder
+- Structured business context consumed directly by `002_create-project-prd.md`
+
+**Key Questions Addressed:**
+- What is this project for, in the requester's own words?
+- What business requirements and constraints already exist?
+- What's still unknown or needs clarification before planning starts?
+
+---
+
+### 2. `002_create-project-prd.md`
 
 **Purpose:** Creates the foundational project vision and feature breakdown
 
@@ -130,7 +161,7 @@ This section details each instruction document's purpose, approach, inputs, and 
 
 ---
 
-### 2. `002_create-adr.md`
+### 3. `003_create-adr.md`
 
 **Purpose:** Establishes foundational technology choices and development standards
 
@@ -140,7 +171,7 @@ This section details each instruction document's purpose, approach, inputs, and 
 - Analyzes project requirements from Project PRD
 - Presents technology options with trade-offs for each decision area
 - Creates comprehensive standards for code organization, testing, and quality
-- Generates memory content for AI context in CLAUDE.md
+- Generates memory content for AI context in AGENT.md
 
 **Inputs:**
 - Project PRD reference for context and requirements
@@ -149,7 +180,7 @@ This section details each instruction document's purpose, approach, inputs, and 
 
 **Outputs:**
 - `000_PADR|[project-name].md` in `/adrs/` folder (full documentation)
-- Project Standards section for CLAUDE.md (condensed memory)
+- Project Standards section for AGENT.md (condensed memory)
 - Technology stack decisions and architectural principles
 
 **Technology Decision Areas:**
@@ -163,7 +194,7 @@ This section details each instruction document's purpose, approach, inputs, and 
 
 ---
 
-### 3. `003_create-feature-prd.md`
+### 4. `004_create-feature-prd.md`
 
 **Purpose:** Creates detailed requirements for individual features
 
@@ -195,7 +226,7 @@ This section details each instruction document's purpose, approach, inputs, and 
 
 ---
 
-### 4. `004_create-tdd.md`
+### 5. `005_create-tdd.md`
 
 **Purpose:** Creates technical architecture and design for features
 
@@ -229,7 +260,7 @@ This section details each instruction document's purpose, approach, inputs, and 
 
 ---
 
-### 5. `005_create-tid.md`
+### 6. `006_create-tid.md`
 
 **Purpose:** Provides specific implementation guidance and coding hints
 
@@ -263,38 +294,38 @@ This section details each instruction document's purpose, approach, inputs, and 
 
 ---
 
-### 6. `006_generate-tasks.md`
+### 7. `007_generate-tasks.md`
 
-**Purpose:** Generates detailed, actionable development tasks
+**Purpose:** Generates the feature's complete task backlog — every requirement, acceptance criterion, edge case, and technical concern maps to a task
 
-**Philosophy:** Break complex features into manageable, sequential work items
+**Philosophy:** A backlog is complete when nothing is silently omitted — every category of work either produces tasks or is explicitly marked N/A with a reason
 
 **Process:**
-- Analyzes Feature PRD for functional requirements
-- References TDD and TID for implementation approach
-- Creates hierarchical task structure with parent tasks and sub-tasks
-- Identifies all files that need creation or modification
+- Analyzes the Feature PRD, TDD, and TID together (all three required)
+- Creates hierarchical task structure scaled to feature complexity, with parent tasks citing the requirement numbers they cover
+- Applies a category checklist (data, API, UI, integration, error handling, testing, performance/security, config/deploy, docs)
+- Converts open questions to spike tasks, derives cross-feature integration tasks, and ends with a Feature Acceptance parent task
+- Runs a coverage audit before saving: no uncovered requirement, criterion, or TDD/TID section
 
 **Inputs:**
-- Feature PRD reference
-- Optional TDD and TID references for enhanced context
+- Feature PRD, TDD, and TID references (TDD/TID required — they carry the migration, deployment, config, and error-handling work the PRD alone does not)
+- Project ADR for standards and test commands
 - User confirmation to proceed from parent tasks to sub-tasks
 
 **Outputs:**
 - `[###]_FTASKS|[feature-name].md` in `/tasks/` folder
-- Hierarchical task list with parent tasks and sub-tasks
-- Relevant files section with creation/modification needs
-- Testing requirements integrated into tasks
+- Once per project: `000_FTASKS|Project_Foundation.md` — the foundation backlog generated from the Project PRD + ADR (scaffolding, CI/CD, database, auth, tooling)
 
 **Task Structure:**
-- Parent tasks (high-level implementation phases)
-- Sub-tasks (specific, actionable work items)
-- File identification (all files needing attention)
-- Testing integration (unit tests for each component)
+- Parent tasks citing covered requirement numbers
+- Sub-tasks sized at roughly one commit each
+- Implementing and testing sub-tasks for every acceptance criterion and edge case
+- Category Checklist Results section (tasks or N/A-with-reason per category)
+- Final Feature Acceptance parent task
 
 ---
 
-### 7. `007_process-task-list.md`
+### 8. `008_process-task-list.md`
 
 **Purpose:** Guides task execution and progress tracking
 
@@ -312,22 +343,39 @@ This section details each instruction document's purpose, approach, inputs, and 
 - Git commits with conventional commit format
 - Progress tracking in task list file
 - File maintenance for "Relevant Files" section
+- Feature Acceptance protocol at the end: verify every PRD acceptance criterion, run the full suite, mark the feature ✅ in AGENT.md's Document Inventory, and route discovered work to the right backlog
 
 ## Workflow Implementation
 
 ### Phase-by-Phase Workflow
 
+#### Phase 0: Business Requirements (once per project)
+```bash
+# Clone template, rm -rf .git, rename root, git init
+@0xcc/instruct/001_generate-brd.md
+# Provide: free-form transcript + supporting research/documents
+# Generate: 000_BRD|[project-name].md
+```
+
 #### Phase 1: Project Foundation (Session 1-2)
 ```bash
 # Session 1: Project Vision
-@instruct/001_create-project-prd.md
+@0xcc/instruct/002_create-project-prd.md
+@0xcc/prds/000_BRD|[project-name].md   # if it exists
 # Generate: 000_PPRD|[project-name].md
 
 # Session 2: Technical Foundation  
-@instruct/002_create-adr.md
-@prds/000_PPRD|[project-name].md
+@0xcc/instruct/003_create-adr.md
+@0xcc/prds/000_PPRD|[project-name].md
 # Generate: 000_PADR|[project-name].md
-# Copy Project Standards to CLAUDE.md
+# Copy Project Standards to AGENT.md
+
+# Session 3: Foundation Backlog
+@0xcc/instruct/007_generate-tasks.md
+@0xcc/prds/000_PPRD|[project-name].md
+@0xcc/adrs/000_PADR|[project-name].md
+# Generate: 000_FTASKS|Project_Foundation.md
+# (scaffolding, CI/CD, database, auth, tooling — work owned by no single feature)
 ```
 
 #### Phase 2: Feature Development (Sessions 3-N)
@@ -335,30 +383,32 @@ For each feature from the Project PRD:
 
 ```bash
 # Feature Requirements Session
-@instruct/003_create-feature-prd.md
-@prds/000_PPRD|[project-name].md
-@adrs/000_PADR|[project-name].md
+@0xcc/instruct/004_create-feature-prd.md
+@0xcc/prds/000_PPRD|[project-name].md
+@0xcc/adrs/000_PADR|[project-name].md
 # Generate: 001_FPRD|[feature-name].md
 
 # Technical Design Session
-@instruct/004_create-tdd.md
-@prds/001_FPRD|[feature-name].md
+@0xcc/instruct/005_create-tdd.md
+@0xcc/prds/001_FPRD|[feature-name].md
 # Generate: 001_FTDD|[feature-name].md
 
 # Implementation Planning Session
-@instruct/005_create-tid.md
-@prds/001_FPRD|[feature-name].md
-@tdds/001_FTDD|[feature-name].md
+@0xcc/instruct/006_create-tid.md
+@0xcc/prds/001_FPRD|[feature-name].md
+@0xcc/tdds/001_FTDD|[feature-name].md
 # Generate: 001_FTID|[feature-name].md
 
 # Task Generation Session
-@instruct/006_generate-tasks.md
-@prds/001_FPRD|[feature-name].md
+@0xcc/instruct/007_generate-tasks.md
+@0xcc/prds/001_FPRD|[feature-name].md
+@0xcc/tdds/001_FTDD|[feature-name].md
+@0xcc/tids/001_FTID|[feature-name].md
 # Generate: 001_FTASKS|[feature-name].md
 
 # Implementation Sessions
-@instruct/007_process-task-list.md
-@tasks/001_FTASKS|[feature-name].md
+@0xcc/instruct/008_process-task-list.md
+@0xcc/tasks/001_FTASKS|[feature-name].md
 # Execute tasks with progress tracking
 ```
 
@@ -366,52 +416,56 @@ For each feature from the Project PRD:
 
 ```
 project-root/
-├── CLAUDE.md                                   # Project memory and standards
-├── prds/
-│   ├── 000_PPRD|Project_Name.md               # Project PRD
-│   ├── 001_FPRD|Feature_A.md                  # Feature PRDs
-│   ├── 002_FPRD|Feature_B.md
-│   └── 003_FPRD|Feature_C.md
-├── adrs/
-│   └── 000_PADR|Project_Name.md               # Architecture Decision Record
-├── tdds/
-│   ├── 001_FTDD|Feature_A.md                  # Technical Design Documents
-│   ├── 002_FTDD|Feature_B.md
-│   └── 003_FTDD|Feature_C.md
-├── tids/
-│   ├── 001_FTID|Feature_A.md                  # Technical Implementation Documents
-│   ├── 002_FTID|Feature_B.md
-│   └── 003_FTID|Feature_C.md
-├── tasks/
-│   ├── 001_FTASKS|Feature_A.md                # Task Lists
-│   ├── 002_FTASKS|Feature_B.md
-│   └── 003_FTASKS|Feature_C.md
-├── docs/
-│   └── [Additional project documentation]
-└── instruct/
-    ├── 000_README.md                           # This document
-    ├── 001_create-project-prd.md
-    ├── 002_create-adr.md
-    ├── 003_create-feature-prd.md
-    ├── 004_create-tdd.md
-    ├── 005_create-tid.md
-    ├── 006_generate-tasks.md
-    └── 007_process-task-list.md
+├── AGENT.md                                     # Project memory and standards (canonical)
+├── CLAUDE.md                                    # Stub → @AGENT.md
+├── GEMINI.md                                    # Stub → @AGENT.md
+└── 0xcc/
+    ├── prds/
+    │   ├── 000_BRD|Project_Name.md              # Business Requirements Document
+    │   ├── 000_PPRD|Project_Name.md             # Project PRD
+    │   ├── 001_FPRD|Feature_A.md                # Feature PRDs
+    │   ├── 002_FPRD|Feature_B.md
+    │   └── 003_FPRD|Feature_C.md
+    ├── adrs/
+    │   └── 000_PADR|Project_Name.md             # Architecture Decision Record
+    ├── tdds/
+    │   ├── 001_FTDD|Feature_A.md                # Technical Design Documents
+    │   ├── 002_FTDD|Feature_B.md
+    │   └── 003_FTDD|Feature_C.md
+    ├── tids/
+    │   ├── 001_FTID|Feature_A.md                # Technical Implementation Documents
+    │   ├── 002_FTID|Feature_B.md
+    │   └── 003_FTID|Feature_C.md
+    ├── tasks/
+    │   ├── 000_FTASKS|Project_Foundation.md     # Foundation backlog (from PPRD + ADR)
+    │   ├── 001_FTASKS|Feature_A.md              # Feature Task Lists
+    │   ├── 002_FTASKS|Feature_B.md
+    │   └── 003_FTASKS|Feature_C.md
+    ├── docs/
+    │   └── [Additional project documentation]
+    └── instruct/
+        ├── 000_README.md                        # This document
+        ├── 001_generate-brd.md
+        ├── 002_create-project-prd.md
+        ├── 003_create-adr.md
+        ├── 004_create-feature-prd.md
+        ├── 005_create-tdd.md
+        ├── 006_create-tid.md
+        ├── 007_generate-tasks.md
+        └── 008_process-task-list.md
 ```
 
 ## Context Management
 
-### Memory Architecture
+### AGENT.md as Project Memory
 
-The framework uses a multi-layered memory system to enable seamless pause/resume operations:
+AGENT.md is the single file that carries project state between sessions — no separate session-state files or checkpoint system needed:
 
-#### 1. CLAUDE.md - Primary Memory File
 ```markdown
 # Project: [Your Project Name]
 
 ## Current Status
 - **Phase:** [Current development phase]
-- **Last Session:** [Date and brief summary]
 - **Next Steps:** [Specific next actions]
 - **Active Document:** [Document currently being worked on]
 
@@ -430,80 +484,17 @@ The framework uses a multi-layered memory system to enable seamless pause/resume
 1. Feature A (Core/MVP)
 2. Feature B (Important)  
 3. Feature C (Future)
-
-## Session Context Commands
-- Use `/compact` for session summaries
-- Use `@CLAUDE.md` to reload project context
-- Use `@prds/000_PPRD|Project_Name.md` for project overview
 ```
 
-#### 2. Session Resume Protocol
+To resume work in a new session, load `@AGENT.md` and check the Document Inventory to see what's done and what's pending — that's sufficient context to continue. Claude Code's own conversation history and `/compact` handle everything else.
 
-**Every Session Start:**
-```bash
-# 1. Get session context
-/compact
-# Reviews: "Working on [Project] documentation. Currently at [phase]. Need to [action]."
-
-# 2. Load project memory
-@CLAUDE.md
-
-# 3. Load current work area  
-@prds/  # or @tdds/ @tids/ @tasks/ depending on current phase
-
-# 4. Proceed with work
-```
-
-#### 3. Session End Protocol
-
-**Before Every Break:**
-```bash
-# 1. Update CLAUDE.md status
-# Edit current status, last session summary, next steps
-
-# 2. Create session summary
-/compact "Completed [specific accomplishments]. Next: [specific next action]."
-
-# 3. Commit progress
-git add .
-git commit -m "docs: completed [task] - Next: [specific action]"
-```
-
-#### 4. Context Recovery Strategies
-
-**Mild Context Loss:**
-```bash
-@CLAUDE.md                    # Load project memory
-ls -la */                    # Check file completion status  
-@instruct/[current-phase].md  # Load current instruction
-```
-
-**Severe Context Loss:**
-```bash
-@CLAUDE.md                           # Project memory
-@prds/000_PPRD|[project-name].md     # Project foundation
-@adrs/000_PADR|[project-name].md     # Technical standards
-ls -la */                           # Assess completion status
-@instruct/                          # Review methodology if needed
-```
-
-### Progress Tracking Systems
-
-#### 1. Document Status Tracking
+### Document Status Tracking
 - **✅ Complete:** Document finished and reviewed
 - **⏳ In Progress:** Currently being worked on  
 - **❌ Pending:** Not yet started
 - **🔄 Needs Update:** Requires revision based on changes
 
-#### 2. Session Logging
-Each session should update CLAUDE.md with:
-- Date and duration
-- Documents worked on
-- Key decisions made
-- Next session objectives
-- Any blockers or questions
-
-#### 3. Git Workflow Integration
+### Git Workflow Integration
 ```bash
 # Feature branch for documentation phase
 git checkout -b docs/feature-planning
@@ -530,40 +521,29 @@ git merge docs/feature-planning
 
 ### Quick Start Guide
 
-#### Step 1: Initialize Project Structure
+#### Step 1: Create Your Project from the Template
 ```bash
-# Create project directory
-mkdir my-awesome-project
-cd my-awesome-project
+# On GitHub: open hitsainet/xcc_open and click "Use this template",
+# then clone your new repository:
+git clone https://github.com/yourusername/your-project-name.git
+cd your-project-name
 
-# Initialize git
-git init
-
-# Create folder structure
-mkdir -p prds adrs tdds tids tasks docs instruct
-
-# Create initial CLAUDE.md
-touch CLAUDE.md
+# (Alternative: clone the template directly, rm -rf .git, and git init —
+# see the root README.md "Step-by-Step Setup" for the full manual flow)
 ```
 
-#### Step 2: Set Up Framework Files
+#### Step 2: Verify Framework Files
 ```bash
-# Copy instruction files to instruct/ folder
-# (From this framework repository)
-cp framework/instruct/* instruct/
-
-# Verify instruction files
-ls instruct/
-# Should show: 000_README.md through 007_process-task-list.md
+ls 0xcc/instruct/
+# Should show: 000_README.md through 008_process-task-list.md
 ```
 
 #### Step 3: Start Documentation Workflow
 ```bash
-# Start Claude Code session
-claude-code
-
-# Begin with Project PRD
-@instruct/001_create-project-prd.md
+# Start a Claude Code session, then:
+# Begin with the BRD (once per project), then the Project PRD
+@0xcc/instruct/001_generate-brd.md
+@0xcc/instruct/002_create-project-prd.md
 
 # Follow the guided process...
 ```
@@ -572,7 +552,7 @@ claude-code
 
 **Week 1: Foundation**
 - Day 1-2: Project PRD and ADR creation
-- Day 3-4: CLAUDE.md setup and first feature PRD
+- Day 3-4: AGENT.md setup and first feature PRD
 
 **Week 2-N: Feature Development**
 - 2-3 days per feature for complete documentation cycle
@@ -597,32 +577,18 @@ You'll know the framework is working when:
    - ✅ "Create user registration form with email validation, password strength requirements, and email confirmation workflow"
 
 2. **Reference Context Explicitly**
-   - Always reference related documents: `@prds/000_PPRD|Project_Name.md`
+   - Always reference related documents: `@0xcc/prds/000_PPRD|Project_Name.md`
    - Link to ADR decisions: "Following JWT approach per ADR section 2.3"
 
 3. **Update Status Religiously**
-   - Update CLAUDE.md after every session
+   - Update AGENT.md after every session
    - Use consistent status indicators (✅⏳❌🔄)
    - Include specific next steps, not vague intentions
 
 ### Session Management
 
-1. **Start Every Session with Context Loading**
-   ```bash
-   /compact
-   @CLAUDE.md
-   ls -la */
-   ```
-
-2. **End Every Session with Status Update**
-   - Update CLAUDE.md current status
-   - Create specific `/compact` summary
-   - Commit progress with clear message
-
-3. **Break Work into Session-Sized Chunks**
-   - Single document per session ideally
-   - Complex documents can span 2-3 sessions max
-   - Always end at logical stopping points
+1. **Start Sessions by Loading Context:** `@AGENT.md`, then check the Document Inventory for what's pending
+2. **Break Work into Session-Sized Chunks:** single document per session ideally; complex documents can span 2-3 sessions max; end at logical stopping points
 
 ### Quality Gates
 
@@ -646,11 +612,11 @@ You'll know the framework is working when:
 ### Common Issues and Solutions
 
 #### "I Lost Context Between Sessions"
-**Solution:** Follow the Context Recovery protocol
+**Solution:** Reload the core project files
 ```bash
-@CLAUDE.md                           # Load project memory
-@prds/000_PPRD|[project-name].md     # Project foundation  
-@adrs/000_PADR|[project-name].md     # Technical standards
+@AGENT.md                           # Project memory and Document Inventory
+@0xcc/prds/000_PPRD|[project-name].md     # Project foundation  
+@0xcc/adrs/000_PADR|[project-name].md     # Technical standards
 ls -la */                           # Check completion status
 ```
 
@@ -663,15 +629,15 @@ ls -la */                           # Check completion status
 
 #### "Documents Are Inconsistent"
 **Solution:** ADR standards not being followed
-1. Review ADR and update CLAUDE.md if needed
+1. Review ADR and update AGENT.md if needed
 2. Check that each document references ADR decisions
 3. Update inconsistent documents to match standards
 4. Add ADR references to instruction prompts
 
 #### "Progress Tracking Is Confusing"
-**Solution:** Improve CLAUDE.md maintenance
+**Solution:** Improve AGENT.md maintenance
 1. Use consistent status indicators (✅⏳❌🔄)
-2. Update after every session, no exceptions
+2. Keep the Document Inventory current as documents are completed
 3. Include specific next steps, not vague goals
 4. Reference exact document names and numbers
 
@@ -684,9 +650,8 @@ ls -la */                           # Check completion status
 ### Getting Help
 
 1. **Review Instruction Documents:** Each has specific guidance for its phase
-2. **Check CLAUDE.md:** Verify project standards are properly loaded
+2. **Check AGENT.md:** Verify project standards are properly loaded
 3. **Validate Document Chain:** Ensure each document builds properly on previous ones
-4. **Use `/compact` Summaries:** Help AI understand where you are in the process
 
 ---
 
@@ -700,6 +665,6 @@ Remember: **Think first, then build.** The time invested in proper documentation
 
 ---
 
-*Framework Version: 1.0*  
-*Last Updated: [Current Date]*  
-*License: [Your License Choice]*
+*Framework Version: 1.2*  
+*Last Updated: 2026-07-05*  
+*License: MIT*

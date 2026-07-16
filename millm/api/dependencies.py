@@ -321,3 +321,39 @@ async def get_profile_service(
 
 # Type alias for injected ProfileService
 ProfileServiceDep = Annotated["ProfileService", Depends(get_profile_service)]
+
+async def get_cluster_service(
+    profile_service: ProfileServiceDep,
+    repository: ProfileRepo,
+    sae_service: SAEServiceDep,
+) -> "ClusterService":
+    """Dependency that provides a ClusterService (Feature 8)."""
+    from millm.services.cluster_service import ClusterService
+
+    return ClusterService(
+        profile_service=profile_service,
+        repository=repository,
+        sae_service=sae_service,
+    )
+
+
+# Type alias for injected ClusterService
+ClusterServiceDep = Annotated["ClusterService", Depends(get_cluster_service)]
+
+# Module-level singleton so the Hub listing cache survives across requests.
+_cluster_hub_service: "ClusterHubService | None" = None
+
+
+def get_cluster_hub_service() -> "ClusterHubService":
+    """Dependency that provides the shared ClusterHubService (Feature 8)."""
+    from millm.services.cluster_hub_service import ClusterHubService
+
+    global _cluster_hub_service
+    if _cluster_hub_service is None:
+        _cluster_hub_service = ClusterHubService()
+    return _cluster_hub_service
+
+
+# Type alias for injected ClusterHubService
+ClusterHubServiceDep = Annotated["ClusterHubService", Depends(get_cluster_hub_service)]
+

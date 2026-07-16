@@ -1,11 +1,12 @@
 # Project: miLLM - Mechanistic Interpretability LLM Server
 
 ## Current Status
-- **Phase:** Hardening & Documentation
-- **Last Session:** May 11, 2026 - Inference optimisation, test fixes, security review, code review
-- **Next Steps:** v1.0 release prep — push commits, tag release, update docs
-- **Active Document:** None (all review findings resolved)
-- **Current Feature:** All features implemented; 705 tests passing; 4 commits staged for push
+- **Phase:** Planning next increment (Cluster Runtime)
+- **Last Session:** July 16, 2026 — BRD-MILLM-CLUSTERS-001 drafted (incremental BRD via 001_generate-brd.md)
+- **Next Steps:** When execution begins: `0xcc/instruct/002_create-project-prd.md` — add increment rows/sections to 000_PPRD|miLLM referencing BRD-MILLM-CLUSTERS-001. Early design spikes flagged in the BRD: OWUI dial mechanism, unified-MCP ownership.
+- **Active Document:** 0xcc/prds/BRD-MILLM-CLUSTERS-001.md (draft, clarifications answered 2026-07-16)
+- **New Increment (scoped 2026-07-16):** cluster-definition import (mistudio.cluster-definition/v1, file + HF consume-only) → steering profiles; unified MCP server (both products, health-gated categories); Open WebUI live cluster dial; cluster co-activation sensing. Locked: incremental BRD style; HF publishing stays miStudio-side; budgets frozen on import (assumed, confirm pre-PRD).
+- **Baseline:** v1.0 features 001–007 all ✅ (705 tests) + post-v1.0: GitOps/ArgoCD K8s deploy, CBM + speculative decoding + torch.compile, hybrid/Mamba support, Neuronpedia links, security hardening. Version 0.5.1.
 
 ## Quick Resume Commands
 ```
@@ -138,6 +139,8 @@ refactor(services): extract HuggingFace logic
 ## Document Inventory
 
 ### Project Level Documents
+- ✅ 0xcc/docs/miLLM_BRD_v1.0.md (original v1.0 BRD)
+- ✅ 0xcc/prds/BRD-MILLM-CLUSTERS-001.md (Incremental BRD — Cluster Runtime: import / unified MCP / OWUI dial / sensing, drafted 2026-07-16)
 - ✅ 0xcc/prds/000_PPRD|miLLM.md (Project PRD)
 - ✅ 0xcc/adrs/000_PADR|miLLM.md (Architecture Decision Record)
 

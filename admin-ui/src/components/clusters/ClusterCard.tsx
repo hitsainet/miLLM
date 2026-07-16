@@ -39,6 +39,10 @@ export function ClusterCard({
   const [pendingIntensity, setPendingIntensity] = useState<number | null>(null);
 
   const intensity = pendingIntensity ?? cluster.intensity;
+  // Authored safe envelope (server-enforced); dial-off (0) is always allowed.
+  const [rangeLo, rangeHi] = cluster.intensity_range ?? [0, 2];
+  const sliderMin = Math.min(0, rangeLo);
+  const sliderMax = Math.max(rangeHi, 0);
 
   return (
     <div
@@ -91,11 +95,11 @@ export function ClusterCard({
               variant="primary"
               size="sm"
               onClick={onActivate}
-              disabled={isActivating || !cluster.bound}
+              disabled={isActivating}
               title={
                 cluster.bound
                   ? 'Apply all members at their tuned strengths'
-                  : 'Unbound — attach a compatible SAE, then activate to bind'
+                  : 'Unbound — activating binds this cluster against the attached SAE (blocked server-side if incompatible)'
               }
             >
               <Play className="w-4 h-4 mr-1" />
@@ -121,8 +125,8 @@ export function ClusterCard({
         <span className="text-xs text-slate-400 font-mono w-16">λ {intensity.toFixed(2)}</span>
         <input
           type="range"
-          min={0}
-          max={2}
+          min={sliderMin}
+          max={sliderMax}
           step={0.05}
           value={intensity}
           aria-label={`Intensity for ${cluster.name}`}

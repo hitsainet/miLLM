@@ -68,9 +68,9 @@ export function ClustersPage() {
               <ClusterCard
                 key={c.id}
                 cluster={c}
-                onActivate={() => void activateCluster(c.id)}
-                onDeactivate={() => void deactivateCluster(c.id)}
-                onSetIntensity={(intensity) => void setIntensity({ id: c.id, intensity })}
+                onActivate={() => activateCluster(c.id).catch(() => {})}
+                onDeactivate={() => deactivateCluster(c.id).catch(() => {})}
+                onSetIntensity={(intensity) => setIntensity({ id: c.id, intensity }).catch(() => {})}
                 onExport={() => void exportCluster(c.id, c.name)}
                 isActivating={isActivating}
                 isDeactivating={isDeactivating}

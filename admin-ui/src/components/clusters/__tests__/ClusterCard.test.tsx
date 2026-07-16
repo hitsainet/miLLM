@@ -50,12 +50,21 @@ describe('ClusterCard', () => {
     expect(screen.getByText(/3 members/)).toBeInTheDocument();
   });
 
-  it('disables Activate for unbound clusters with a helpful title', () => {
+  it('keeps Activate ENABLED for unbound clusters (activation is the binding mechanism)', () => {
+    // Review find: disabling it made unbound imports permanently stuck —
+    // the server-side gate refuses incompatible activations anyway.
     renderCard(makeCluster({ bound: false }));
     const btn = screen.getByRole('button', { name: /Activate/ });
-    expect(btn).toBeDisabled();
-    expect(btn).toHaveAttribute('title', expect.stringContaining('Unbound'));
+    expect(btn).toBeEnabled();
+    expect(btn).toHaveAttribute('title', expect.stringContaining('binds'));
     expect(screen.getByText('unbound')).toBeInTheDocument();
+  });
+
+  it('honors the authored intensity_range for the slider bounds', () => {
+    renderCard(makeCluster({ intensity_range: [0.5, 1.5] }));
+    const slider = screen.getByLabelText('Intensity for fear cluster');
+    expect(slider).toHaveAttribute('min', '0');   // dial-off always allowed
+    expect(slider).toHaveAttribute('max', '1.5'); // authored ceiling enforced
   });
 
   it('shows Deactivate for the active cluster', () => {

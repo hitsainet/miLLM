@@ -60,6 +60,7 @@ export interface ClusterSummary {
   bound: boolean;
   warnings: string[];
   hub_ref?: { repo_id: string; revision: string; path: string } | null;
+  intensity_range?: number[] | null;
   created_at: string;
   updated_at: string;
 }

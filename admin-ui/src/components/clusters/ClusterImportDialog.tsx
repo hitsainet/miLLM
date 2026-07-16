@@ -48,8 +48,14 @@ export function ClusterImportDialog({
       setParseError('Not valid JSON');
       return;
     }
-    await onImport(payload);
-    onClose();
+    try {
+      await onImport(payload);
+      onClose();
+    } catch (e) {
+      // Toast already fired via the mutation's onError; surface inline too so
+      // the user sees WHY the paste failed without leaving the dialog.
+      setParseError((e as Error).message);
+    }
   };
 
   const handleFile = async (file: File) => {
@@ -86,8 +92,12 @@ export function ClusterImportDialog({
 
   const importFromHub = async (filename: string) => {
     if (!selectedRepo) return;
-    await onHubImport({ repo_id: selectedRepo, filename });
-    onClose();
+    try {
+      await onHubImport({ repo_id: selectedRepo, filename });
+      onClose();
+    } catch (e) {
+      setHubError((e as Error).message);
+    }
   };
 
   return (

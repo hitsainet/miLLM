@@ -1,4 +1,5 @@
-import { TrendingUp, TrendingDown, Activity, Hash } from 'lucide-react';
+import { TrendingUp, TrendingDown, Activity } from 'lucide-react';
+import { featureColor } from '@/utils/featureColors';
 import { Card, CardHeader, EmptyState } from '@components/common';
 import type { FeatureStatistics } from '@/types';
 
@@ -42,20 +43,22 @@ export function StatisticsPanel({
       />
 
       <div className="space-y-3 max-h-80 overflow-y-auto pr-1">
-        {statistics.map((stat) => (
+        {statistics.map((stat, order) => {
+          const c = featureColor(order);
+          return (
           <div
             key={stat.feature_idx}
-            className="p-3 bg-slate-800/30 rounded-lg border border-slate-700/50"
+            className={`p-2 rounded-lg border ${c.border} ${c.bg}`}
           >
-            <div className="flex items-center justify-between mb-3">
-              <div className="flex items-center gap-2">
-                <Hash className="w-4 h-4 text-primary-400" />
-                <span className="font-mono text-sm font-semibold text-primary-400">
-                  {stat.feature_idx}
+            <div className="flex items-center justify-between mb-2">
+              <div className="flex items-center gap-1.5">
+                <span className={`w-2 h-2 rounded-full ${c.dot}`} />
+                <span className={`font-mono text-sm font-semibold ${c.text}`}>
+                  #{stat.feature_idx}
                 </span>
               </div>
-              <span className="text-xs text-slate-500">
-                {stat.count} samples
+              <span className="text-xs text-slate-500 font-mono">
+                n {stat.count}
               </span>
             </div>
 
@@ -84,7 +87,8 @@ export function StatisticsPanel({
               />
             </div>
           </div>
-        ))}
+          );
+        })}
       </div>
     </Card>
   );

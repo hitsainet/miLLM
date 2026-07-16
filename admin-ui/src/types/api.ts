@@ -259,6 +259,10 @@ export interface TopFeaturesResponse {
 export interface Profile {
   // Backend ids are strings ("prof_<hex>") — was mistyped as number.
   id: string;
+  /** 'manual' | 'cluster' — imported clusters render on the Clusters page. */
+  source_kind?: string;
+  intensity?: number;
+  sensing_enabled?: boolean;
   name: string;
   description?: string;
   model_repo_id?: string;

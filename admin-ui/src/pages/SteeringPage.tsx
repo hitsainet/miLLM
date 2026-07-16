@@ -215,10 +215,12 @@ export function SteeringPage() {
           <div className="space-y-2">
             {[...features]
               .sort((a, b) => a.index - b.index)
-              .map((feature) => (
+              .map((feature, order) => (
                   <SteeringSlider
                     key={feature.index}
                     featureIndex={feature.index}
+                    colorOrder={order}
+                    layer={attachedSAE?.trained_layer}
                     neuronpediaBase={neuronpediaBaseUrl(attachedSAE)}
                     strength={feature.strength}
                     onStrengthChange={(newStrength) => handleStrengthChange(feature.index, newStrength)}

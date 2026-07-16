@@ -47,6 +47,13 @@ export function ProfilesPage() {
 
   const currentFeatures = steering?.features || [];
 
+  // Imported clusters are profiles under the hood but are managed on the
+  // dedicated Clusters page (lambda dial, lossless export, compat gate) —
+  // rendering them here as ordinary editable rows invited double-scaling and
+  // lossy flat exports (review find).
+  const manualProfiles = profiles.filter((p) => p.source_kind !== 'cluster');
+  const clusterCount = profiles.length - manualProfiles.length;
+
   const handleCreate = async (data: CreateProfileRequest) => {
     await createProfile(data);
     setShowForm(false);
@@ -136,7 +143,7 @@ export function ProfilesPage() {
             <ImportExportButtons
               onExport={handleExport}
               onImport={handleImport}
-              profiles={(profiles || []).map((p) => ({ id: p.id, name: p.name }))}
+              profiles={manualProfiles.map((p) => ({ id: p.id, name: p.name }))}
               isExporting={isExporting}
               isImporting={isImporting}
             />
@@ -153,8 +160,14 @@ export function ProfilesPage() {
       </Card>
 
       {/* Profile List */}
+      {clusterCount > 0 && (
+        <p className="text-xs text-slate-500">
+          {clusterCount} imported cluster{clusterCount === 1 ? '' : 's'} managed on the{' '}
+          <a href="/clusters" className="text-cyan-400 hover:underline">Clusters page</a>.
+        </p>
+      )}
       <ProfileList
-        profiles={profiles || []}
+        profiles={manualProfiles}
         activeProfileId={activeProfile?.id}
         onActivate={handleActivate}
         onDeactivate={handleDeactivate}

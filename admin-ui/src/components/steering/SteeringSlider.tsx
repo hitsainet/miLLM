@@ -1,9 +1,19 @@
-import { useState, useEffect } from 'react';
-import { Hash, ExternalLink } from 'lucide-react';
-import { Button } from '@components/common';
+/**
+ * SteeringSlider — a miStudio-style feature tile: colored card border/tint,
+ * mono #index header with layer chip, boxed strength input with coef readout,
+ * and a warning-zone gradient range slider.
+ */
+
+import { useEffect, useState } from 'react';
+import { ExternalLink, Layers, X } from 'lucide-react';
+import { featureColor, steeringTrackGradient } from '@/utils/featureColors';
 
 interface SteeringSliderProps {
   featureIndex: number;
+  /** Position in the list — drives the palette color (miStudio parity). */
+  colorOrder?: number;
+  /** Layer the attached SAE steers (shown as a chip). */
+  layer?: number | null;
   /** Neuronpedia base derived from the attached SAE (utils/neuronpedia). */
   neuronpediaBase?: string;
   strength: number;
@@ -18,6 +28,8 @@ interface SteeringSliderProps {
 
 export function SteeringSlider({
   featureIndex,
+  colorOrder = 0,
+  layer,
   neuronpediaBase,
   strength,
   onStrengthChange,
@@ -30,6 +42,7 @@ export function SteeringSlider({
 }: SteeringSliderProps) {
   const [localStrength, setLocalStrength] = useState(strength);
   const [inputValue, setInputValue] = useState(String(strength));
+  const c = featureColor(colorOrder);
 
   useEffect(() => {
     setLocalStrength(strength);
@@ -38,91 +51,100 @@ export function SteeringSlider({
 
   const roundToStep = (value: number) => Math.round(value * 10) / 10;
 
-  const handleInputChange = (e: React.ChangeEvent<HTMLInputElement>) => {
-    setInputValue(e.target.value);
+  const commit = (value: number) => {
+    const clamped = roundToStep(Math.max(min, Math.min(max, value)));
+    setLocalStrength(clamped);
+    setInputValue(String(clamped));
+    onStrengthChange(clamped);
   };
 
   const handleInputBlur = () => {
     const value = parseFloat(inputValue);
     if (!isNaN(value)) {
-      const clamped = roundToStep(Math.max(min, Math.min(max, value)));
-      setLocalStrength(clamped);
-      setInputValue(String(clamped));
-      onStrengthChange(clamped);
+      commit(value);
     } else {
       setInputValue(String(localStrength));
     }
   };
 
-  const handleInputKeyDown = (e: React.KeyboardEvent) => {
-    if (e.key === 'Enter') {
-      (e.target as HTMLInputElement).blur();
-    }
-  };
-
-  const getStrengthColor = () => {
-    if (localStrength > 0) return 'text-green-400';
-    if (localStrength < 0) return 'text-red-400';
-    return 'text-slate-400';
-  };
-
   return (
-    <div className="group flex items-center gap-4 p-3 bg-slate-800/30 rounded-lg border border-slate-700/50 hover:border-slate-600/50 transition-colors">
-      {/* Feature Info */}
-      <div className="flex-shrink-0 min-w-[120px]">
-        <div className="flex items-center gap-1.5">
-          <Hash className="w-3.5 h-3.5 text-primary-400" />
-          <span className="font-mono text-sm font-semibold text-primary-400">
-            {featureIndex}
+    <div className={`p-2 rounded-lg border ${c.border} ${c.bg} transition-colors`}>
+      {/* Header: dot · #index · layer chip · label — link/remove right */}
+      <div className="flex items-center gap-1.5 min-w-0">
+        <span className={`w-2 h-2 rounded-full ${c.dot} shrink-0`} />
+        <span className={`font-mono text-sm font-semibold ${c.text} shrink-0`}>
+          #{featureIndex}
+        </span>
+        {layer != null && (
+          <span className="flex items-center gap-0.5 text-[10px] text-slate-500 shrink-0">
+            <Layers className="w-3 h-3" />
+            L{layer}
           </span>
-          <a
-            href={`${(neuronpediaBase ?? 'https://neuronpedia.hitsai.net').replace(/\/$/, '')}/${featureIndex}`}
-            target="_blank"
-            rel="noopener noreferrer"
-            className="opacity-0 group-hover:opacity-100 transition-opacity"
-            title="View on Neuronpedia"
-          >
-            <ExternalLink className="w-3 h-3 text-slate-500 hover:text-primary-400" />
-          </a>
-        </div>
-        {label && (
-          <p className="text-xs text-slate-500 truncate mt-0.5" title={label}>
-            {label}
-          </p>
         )}
+        {label && (
+          <span className="text-xs text-slate-500 truncate" title={label}>
+            {label}
+          </span>
+        )}
+        <span className="flex-1" />
+        <a
+          href={`${(neuronpediaBase ?? 'https://neuronpedia.hitsai.net').replace(/\/$/, '')}/${featureIndex}`}
+          target="_blank"
+          rel="noopener noreferrer"
+          title="View on Neuronpedia"
+          className="shrink-0"
+        >
+          <ExternalLink className="w-3 h-3 text-slate-500 hover:text-slate-300" />
+        </a>
+        <button
+          onClick={onRemove}
+          disabled={disabled}
+          title="Remove feature"
+          aria-label={`Remove feature ${featureIndex}`}
+          className="shrink-0 text-slate-500 hover:text-red-400 disabled:opacity-50"
+        >
+          <X className="w-3.5 h-3.5" />
+        </button>
       </div>
 
-      {/* Strength Input - direct entry with 0.1 step arrows */}
-      <div className="flex-1 flex items-center justify-center">
+      {/* Strength input + coef readout */}
+      <div className="mt-1.5 flex items-center gap-2">
         <input
           type="number"
           step={step}
           min={min}
           max={max}
           value={inputValue}
-          onChange={handleInputChange}
+          onChange={(e) => setInputValue(e.target.value)}
           onBlur={handleInputBlur}
-          onKeyDown={handleInputKeyDown}
+          onKeyDown={(e) => e.key === 'Enter' && (e.target as HTMLInputElement).blur()}
           disabled={disabled}
-          className={`
-            w-24 px-3 py-1.5 bg-slate-900/50 border border-slate-700 rounded-lg text-center text-sm font-mono
-            focus:outline-none focus:ring-1 focus:ring-primary-500 focus:border-primary-500
-            disabled:opacity-50 disabled:cursor-not-allowed
-            ${getStrengthColor()}
-          `}
+          aria-label={`Strength for feature ${featureIndex}`}
+          className="w-16 px-2 py-0.5 bg-slate-900/70 border border-slate-700 rounded text-center text-sm font-mono text-slate-100 focus:outline-none focus:border-slate-500 disabled:opacity-50 disabled:cursor-not-allowed"
         />
+        <span className="text-xs text-slate-500">strength</span>
+        <span className="flex-1" />
+        <span className="text-xs font-mono text-slate-300">
+          coef: <span className={c.text}>{localStrength}</span>
+        </span>
       </div>
 
-      {/* Remove Button */}
-      <Button
-        variant="ghost"
-        size="sm"
-        onClick={onRemove}
+      {/* Warning-zone gradient slider (red extremes, feature color mid-band) */}
+      <input
+        type="range"
+        min={min}
+        max={max}
+        step={step}
+        value={localStrength}
+        onChange={(e) => commit(parseFloat(e.target.value))}
         disabled={disabled}
-        className="flex-shrink-0 text-slate-500 hover:text-red-400 text-xs"
-      >
-        Remove
-      </Button>
+        aria-label={`Strength slider for feature ${featureIndex}`}
+        className="mt-1.5 w-full h-1.5 rounded-full appearance-none cursor-pointer disabled:cursor-not-allowed"
+        style={{
+          background: steeringTrackGradient(c.accent),
+          accentColor: c.accent,
+        }}
+      />
     </div>
   );
 }

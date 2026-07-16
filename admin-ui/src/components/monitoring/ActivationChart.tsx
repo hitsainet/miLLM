@@ -1,4 +1,5 @@
-import { Hash, ExternalLink } from 'lucide-react';
+import { ExternalLink, Hash } from 'lucide-react';
+import { featureColor } from '@/utils/featureColors';
 import { Card, CardHeader } from '@components/common';
 import type { FeatureActivation } from '@/types';
 
@@ -20,13 +21,6 @@ export function ActivationChart({
 }: ActivationChartProps) {
   const maxActivation = maxValue || Math.max(...activations.map((a) => Math.abs(a.activation)), 1);
 
-  const getBarColor = (activation: number) => {
-    if (activation > 0.7) return 'bg-green-500';
-    if (activation > 0.4) return 'bg-primary-500';
-    if (activation > 0.2) return 'bg-yellow-500';
-    return 'bg-slate-500';
-  };
-
   return (
     <Card>
       <CardHeader
@@ -38,22 +32,23 @@ export function ActivationChart({
         <div className="space-y-2 max-h-80 overflow-y-auto pr-1">
           {activations.map((item, index) => {
             const widthPercent = (Math.abs(item.activation) / maxActivation) * 100;
+            const c = featureColor(index);
 
             return (
               <div
                 key={item.feature_index}
-                className="group flex items-center gap-3 py-1.5"
+                className={`group flex items-center gap-3 px-2 py-1.5 rounded-lg border ${c.border} ${c.bg}`}
               >
                 {/* Rank */}
-                <span className="w-6 text-xs text-slate-500 text-right font-mono">
+                <span className="w-5 text-xs text-slate-500 text-right font-mono">
                   {index + 1}.
                 </span>
 
                 {/* Feature Index */}
-                <div className="w-20 flex items-center gap-1">
-                  <Hash className="w-3 h-3 text-primary-400" />
-                  <span className="font-mono text-sm text-primary-400">
-                    {item.feature_index}
+                <div className="w-24 flex items-center gap-1.5">
+                  <span className={`w-2 h-2 rounded-full ${c.dot} shrink-0`} />
+                  <span className={`font-mono text-sm font-semibold ${c.text}`}>
+                    #{item.feature_index}
                   </span>
                   <a
                     href={`${neuronpediaBaseUrl.replace(/\/$/, '')}/${item.feature_index}`}
@@ -66,11 +61,11 @@ export function ActivationChart({
                   </a>
                 </div>
 
-                {/* Bar */}
-                <div className="flex-1 h-5 bg-slate-800/50 rounded overflow-hidden">
+                {/* Bar — feature-color fill (miStudio tile language) */}
+                <div className="flex-1 h-4 bg-slate-800/50 rounded overflow-hidden">
                   <div
-                    className={`h-full ${getBarColor(item.activation)} transition-all duration-300`}
-                    style={{ width: `${widthPercent}%` }}
+                    className="h-full transition-all duration-300"
+                    style={{ width: `${widthPercent}%`, backgroundColor: c.accent }}
                   />
                 </div>
 

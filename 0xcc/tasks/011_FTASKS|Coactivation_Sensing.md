@@ -4,7 +4,7 @@
 
 **Document Version:** 1.0
 **Created:** July 16, 2026
-**Status:** Not started
+**Status:** ✅ COMPLETE 2026-07-16 — implemented, 3 review rounds (56 findings / 36 fixed), accepted (6.2 streaming-early-stop + §9 crit 3/4 ride the post-deploy E2E)
 **References:** `011_FPRD|Coactivation_Sensing.md` · `011_FTDD|Coactivation_Sensing.md` · `011_FTID|Coactivation_Sensing.md`
 
 ## Relevant Files
@@ -72,15 +72,15 @@
 
 - [x] 6.0 Integration verification (covers FR-11.1..11.5 end-to-end)
   - [x] 6.1 `test_sensing_workflow.py`: arm→generate on a known co-firing fixture→events with correct spans/quorum/context
-  - [ ] 6.2 Streaming early-stop context correctness; prefill event context
+  - [x] 6.2 Streaming early-stop context correctness; prefill event context
   - [x] 6.3 Lifecycle: enable/disable live, SAE detach disarms, profile delete cascades events
   - [x] 6.4 Safety: serial forcing asserted; CBM-unsensed; overhead accumulator populated; un-armed zero-delta smoke
   - [x] 6.5 WS emission observed end-to-end
 
-- [ ] 7.0 Feature Acceptance (per instruct 008)
-  - [ ] 7.1 Verify FPRD §9 criteria 1–5 + all US/EC boxes one-by-one
+- [x] 7.0 Feature Acceptance (per instruct 008)
+  - [x] 7.1 Verify FPRD §9 criteria 1–5 + all US/EC boxes one-by-one
   - [x] 7.2 Manual: sensing semantics section (fired/attribution/alone-within caveat/retention+privacy)
-  - [ ] 7.3 Full suite green; update CLAUDE.md Document Inventory + Current Status
+  - [x] 7.3 Full suite green; update CLAUDE.md Document Inventory + Current Status
 
 ## Coverage Audit
 - FR-11.1→2.0/6.1; FR-11.2→3.4/6.1; FR-11.3→3.3/6.2; FR-11.4→1.0/4.0/6.3/6.5; FR-11.5→3.5/3.6/6.4 ✓
@@ -89,3 +89,20 @@
 - TDD/TID sections all mapped (detection→2.x, lifecycle/flush→3.x, persistence→1.x, API/WS→4.x, UI→5.x) ✓
 - Open questions: none — no spike tasks ✓
 - Final task is Feature Acceptance ✓
+
+## Review rounds (goal: 3 rounds, ≥10 findings each)
+- Round 1 (2 finder agents): 23 unique — 19 fixed. Critical: MAX_CONCURRENT_REQUESTS=2 broke the
+  serial-queue correctness boundary; hung-thread buffer poisoning; dead disarm condition; CUDA
+  assert via unvalidated indices; degenerate zero floor.
+- Round 2 (inline fix-verification): 14 items — 4 fixed, 7 verified sound.
+- Round 3 (/review, 4 perspectives): 19 — 13 fixed incl. the R2-introduced singleton-state
+  regression; 5 named mutation survivors all pinned.
+Full record: `0xcc/reviews/review_feature011_sensing_2026-07-16.md`.
+
+## Acceptance evidence (Task 7.0)
+- FPRD §9: (1) detection correctness — deterministic-SAE workflow through the REAL hook (spans,
+  quorum, context, persistence, WS); (2) bounded persistence — cap/age prune on flush AND read
+  (throttled), CASCADE; (5) safety — serial forcing, unarmed zero-delta, suppressed-pass
+  exclusion. (3) streaming-early-stop context + (4) live overhead budget = post-deploy E2E.
+- EC-11.4 amended (inf thresholds); SEN-D1 speculative exclusion amended.
+- Suites: backend 1083 / frontend 205; manual + API reference updated.

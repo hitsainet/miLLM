@@ -72,13 +72,17 @@ shows events live.
 
 **What counts as an event:** at a token position, a member *fires* when its activation exceeds
 `θᵢ = max(θ_floor, ε · max_activationᵢ)` (ε = 0.1 by default; definitions without
-`max_activation` data fall back to the floor and the panel shows a *floor-only thresholds*
-warning). An **event** is a position where at least `min_k` members fire at once (default:
+`max_activation` data — or with zero/negative values — get an **infinite threshold** and never
+fire unless a positive `theta_floor` is configured; definitions with *no* usable thresholds
+refuse to arm with an actionable message, and the panel shows a *floor-only thresholds* warning
+when the floor alone governs). An **event** is a position where at least `min_k` members fire at once (default:
 ~30% of the cluster, minimum 2). Consecutive positions merge into one span.
 
 **Attribution convention:** an event attaches to the token being *read* at that position — the
-token the model emits next is unknowable at sensing time. Under speculative decoding, spans may
-include positions of later-rejected draft tokens (accepted v1 inaccuracy). The
+token the model emits next is unknowable at sensing time. **Speculative decoding disables
+sensing** for those requests (verification passes re-run rejected positions, which would corrupt
+position accounting) — with a draft model configured, expect zero events while status shows
+armed; the skip is logged per request. The
 `ambient_fired_count` field (how many features across the *whole* SAE fired — the
 "alone vs. within a crowd" signal) is best-effort: it is filled only when full-width monitoring
 happens to be running, and is never estimated.

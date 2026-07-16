@@ -123,14 +123,18 @@ class TestEventRoutes:
             response = client.get("/api/sensing/events/7")
         assert response.json()["data"]["context_text"] == "the deep ocean"
 
-    def test_event_detail_missing_is_422_envelope(self, client):
+    def test_event_detail_missing_is_404(self, client):
+        """Pruned events are EXPECTED under retention — clients branch on
+        404 (011 R1 fix; this pin previously asserted only the envelope)."""
         with patch("millm.db.repositories.sensing_repository.SensingRepository") as MockRepo, \
              patch("millm.db.base.async_session_factory",
                    return_value=self._session_ctx()):
             MockRepo.return_value.get = _async_return(None)
             response = client.get("/api/sensing/events/999")
+        assert response.status_code == 404
         body = response.json()
         assert body["success"] is False
+        assert body["error"]["code"] == "SENSING_EVENT_NOT_FOUND"
         assert "not found" in body["error"]["message"]
 
     def test_clear_events(self, client):

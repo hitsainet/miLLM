@@ -164,6 +164,7 @@ async def hub_import(
     item = await service.import_definition(
         definition, raw_payload=raw_payload,
         hub_ref=hub_ref, activate=request.activate,
+        on_conflict=request.on_conflict,
     )
     return ApiResponse.ok(item)
 

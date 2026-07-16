@@ -60,14 +60,22 @@ class SensingService:
         members = meta.get("members", [])
         overrides = meta.get("sensing", {}) or {}
 
-        def _override(key: str, default: float) -> float:
+        def _override(key: str, default: float,
+                      minimum: Optional[float] = None) -> float:
             try:
-                return float(overrides.get(key, default))
+                value = float(overrides.get(key, default))
             except (TypeError, ValueError):
                 return default
+            # Out-of-range authored overrides degrade to defaults — a
+            # negative epsilon would resurrect the fire-on-anything
+            # degenerate case (011 R3 #2).
+            if minimum is not None and value < minimum:
+                return default
+            return value
 
-        eps = _override("epsilon", settings.SENSING_EPSILON)
-        floor = _override("theta_floor", settings.SENSING_THETA_FLOOR)
+        eps = _override("epsilon", settings.SENSING_EPSILON, minimum=1e-9)
+        floor = _override("theta_floor", settings.SENSING_THETA_FLOOR,
+                          minimum=0.0)
 
         indices: list[int] = []
         thetas: list[float] = []
@@ -78,6 +86,10 @@ class SensingService:
             try:
                 max_act = float(max_act) if max_act is not None else None
             except (TypeError, ValueError):
+                max_act = None
+            # A zero/negative max_activation is as degenerate as a missing
+            # one (theta would be 0 -> fires on anything: 011 R3 #2).
+            if max_act is not None and max_act <= 0:
                 max_act = None
             if max_act is None:
                 missing += 1
@@ -199,10 +211,15 @@ class SensingService:
         # A re-arm between begin and flush swapped the armed identity: the
         # summary formatter (display token, member labels) now belongs to a
         # DIFFERENT cluster than these hits. Persist under the snapshot id
-        # with neutral formatting rather than mis-branding (011 R2).
+        # with neutral formatting rather than mis-branding — via LOCAL
+        # formatting inputs: mutating self.* here stomped the state
+        # arm_for_profile had just set for the NEW cluster (011 R3 #1).
         if profile_id != self._armed_profile_id:
-            self._display_token = profile_id
-            self._member_labels = {}
+            display_token = profile_id
+            member_labels: dict[int, str] = {}
+        else:
+            display_token = self._display_token
+            member_labels = self._member_labels
         config = self._armed_config
         k = config.context_tokens if config else 0
 
@@ -222,7 +239,7 @@ class SensingService:
                 "ambient_fired_count": (ambient_counts or {}).get(i),
                 "context_text": context_text,
                 "context_token_ids": context_ids,
-                "summary": self._summary(hit),
+                "summary": self._summary(hit, display_token, member_labels),
                 # Only the LAST event marks truncation — that's where the
                 # per-request cap actually cut (011 R1: stamping every row
                 # made the cut point unrecoverable).
@@ -268,16 +285,24 @@ class SensingService:
             logger.warning("sensing_context_decode_failed", exc_info=False)
             return None, None
 
-    def _summary(self, hit: SensedHit) -> str:
-        """Human-readable one-liner, hard-capped at 300 chars (SEN-R4)."""
+    def _summary(self, hit: SensedHit,
+                 display_token: Optional[str] = None,
+                 member_labels: Optional[dict[int, str]] = None) -> str:
+        """Human-readable one-liner, hard-capped at 300 chars (SEN-R4).
+        Formatting inputs are parameters so a snapshot flush can render
+        neutrally without touching singleton state (011 R3 #1)."""
+        display_token = (display_token if display_token is not None
+                         else self._display_token)
+        member_labels = (member_labels if member_labels is not None
+                         else self._member_labels)
         m = len(self._armed_config.member_indices) if self._armed_config else 0
         peak_idx, peak_act = max(hit.fired, key=lambda p: p[1]) if hit.fired \
             else (0, 0.0)
-        label = self._member_labels.get(peak_idx)
+        label = member_labels.get(peak_idx)
         peak = f"F{peak_idx}" + (f" '{label}'" if label else "")
         span = (f"@ {hit.pos_start}" if hit.pos_start == hit.pos_end
                 else f"@ {hit.pos_start}–{hit.pos_end}")
-        text = (f"{self._display_token}: {hit.fired_count}/{m} members fired "
+        text = (f"{display_token}: {hit.fired_count}/{m} members fired "
                 f"(peak {peak} {hit.score:.1f}×θ) during {hit.phase} {span}")
         return text[:300]
 
@@ -322,6 +347,22 @@ class SensingService:
             )
 
     def status(self) -> dict[str, Any]:
+        # Reconcile the two armed-state sources (011 R3): if the SAE is gone
+        # or no longer armed (e.g. a swallowed disarm failure on detach),
+        # the service must not keep reporting armed forever.
+        if self._armed_profile_id is not None:
+            try:
+                from millm.services.sae_service import AttachedSAEState
+
+                sae = AttachedSAEState().attached_sae
+                if sae is None or not sae.is_sensing_armed:
+                    logger.warning(
+                        "sensing_state_reconciled",
+                        stale_profile_id=self._armed_profile_id,
+                    )
+                    self.disarm(sae)
+            except Exception:
+                pass
         config = self._armed_config
         return {
             "armed": self.is_armed,

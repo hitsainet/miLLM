@@ -80,7 +80,8 @@ export function SensingEventDetail({ event, onClose }: SensingEventDetailProps) 
       )}
       {detailQuery.isSuccess && !detail.context_text && (
         <div className="text-xs text-slate-500">
-          No context captured (context_tokens = 0 for this cluster).
+          No context captured for this event (context capture disabled for
+          the cluster, or the window could not be decoded).
         </div>
       )}
     </div>

@@ -842,10 +842,22 @@ class SAEService:
             if (active is not None
                     and getattr(active, "source_kind", None) == "cluster"
                     and bool(getattr(active, "sensing_enabled", False))):
-                deps.get_sensing_service().arm_for_profile(
-                    active, self._sae_state.attached_sae
-                )
-                logger.info("sensing_rearmed_on_attach", profile_id=active.id)
+                try:
+                    deps.get_sensing_service().arm_for_profile(
+                        active, self._sae_state.attached_sae
+                    )
+                    logger.info("sensing_rearmed_on_attach",
+                                profile_id=active.id)
+                except ValueError as arm_error:
+                    # Surface the refusal in the attach response (011 R3:
+                    # log-only left the toggle on with sensing silently
+                    # dark — the same class R2 fixed for activation).
+                    compat.warnings.append(
+                        f"sensing enabled for '{active.name}' but could not "
+                        f"arm: {arm_error}"
+                    )
+                    logger.warning("sensing_rearm_on_attach_refused",
+                                   profile_id=active.id, error=str(arm_error))
         except Exception as e:
             logger.warning("sensing_rearm_on_attach_failed", error=str(e))
 

@@ -85,6 +85,7 @@ observation back into authoring").
 **EC-11.3: CBM-routed request** — **Behavior:** sensing-armed ⇒ forced serial (default); if the
 operator disables forcing, CBM requests are simply NOT sensed — never approximated.
 **EC-11.4: Members without max_activation** — **Behavior:** threshold falls back to act>θ_floor
+  **[AMENDED 2026-07-16, review R1/R3]** Zero-floor fallback was degenerate (members fired on any positive activation, inflating min_k): members without usable `max_activation` (missing, zero, or negative) now receive an INFINITE threshold and never fire unless a positive `theta_floor` is configured; clusters with no usable thresholds at all REFUSE to arm with an actionable message. `floor_only` mode reports when a positive floor alone governs.
 (degenerate act>0 when floor=0); recorded in status so results are interpretable.
 **EC-11.5: context_tokens=0** — **Behavior:** events persist without text (metadata only).
 **EC-11.6: Embeddings requests** — **Behavior:** already excluded (suppressed hook context).

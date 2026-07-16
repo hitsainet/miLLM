@@ -51,6 +51,8 @@ function makeStatus(overrides: Partial<SensingStatus> = {}): SensingStatus {
     last_request_overhead_ms: 0.42,
     overhead_warn_threshold_ms: 5,
     events_recorded_since_start: 2,
+    ws_events_dropped: 0,
+    enabled_clusters: [],
     retention: { max_events_per_cluster: 1000, max_age_days: 7 },
     ...overrides,
   };
@@ -144,13 +146,46 @@ describe('SensingPanel', () => {
     expect(items[0].textContent).toContain('LIVE');
   });
 
-  it('clears events for the armed cluster', async () => {
+  it('clears ALL events after confirmation (R3: scope matches the list)', async () => {
     statusMock.mockResolvedValue(makeStatus());
     eventsMock.mockResolvedValue({ events: [makeEvent()], total: 1 });
     clearEventsMock.mockResolvedValue({ deleted: 1 });
+    const confirmSpy = vi.spyOn(window, 'confirm').mockReturnValue(true);
     renderPanel();
     await screen.findByText(/fear: 2\/3 members fired/);
-    fireEvent.click(screen.getByText('Clear'));
-    await waitFor(() => expect(clearEventsMock).toHaveBeenCalledWith('prof_s1'));
+    fireEvent.click(screen.getByText('Clear all'));
+    await waitFor(() => expect(clearEventsMock).toHaveBeenCalledWith(undefined));
+    expect(confirmSpy).toHaveBeenCalled();
+    confirmSpy.mockRestore();
+  });
+
+  it('declining the confirm does not clear', async () => {
+    statusMock.mockResolvedValue(makeStatus());
+    eventsMock.mockResolvedValue({ events: [makeEvent()], total: 1 });
+    const confirmSpy = vi.spyOn(window, 'confirm').mockReturnValue(false);
+    renderPanel();
+    await screen.findByText(/fear: 2\/3 members fired/);
+    fireEvent.click(screen.getByText('Clear all'));
+    expect(clearEventsMock).not.toHaveBeenCalled();
+    confirmSpy.mockRestore();
+  });
+
+  it('shows enabled-but-unarmed clusters and throttled-drop count', async () => {
+    statusMock.mockResolvedValue(
+      makeStatus({
+        armed: false,
+        profile_id: null,
+        ws_events_dropped: 7,
+        enabled_clusters: [
+          { id: 'prof_s1', name: 'fear cluster', is_active: false },
+        ],
+      })
+    );
+    eventsMock.mockResolvedValue({ events: [], total: 0 });
+    renderPanel();
+    expect(
+      await screen.findByText(/sensing is enabled for fear cluster/)
+    ).toBeInTheDocument();
+    expect(screen.getByText(/7 live updates throttled/)).toBeInTheDocument();
   });
 });

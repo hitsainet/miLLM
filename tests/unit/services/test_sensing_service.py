@@ -186,8 +186,13 @@ class TestLifecycle:
     def test_status_shape(self, service):
         status = service.status()
         assert status["armed"] is False
-        service.arm_for_profile(make_profile(), MagicMock(d_sae=16384))
-        status = service.status()
+        sae = MagicMock(d_sae=16384)
+        sae.is_sensing_armed = True
+        service.arm_for_profile(make_profile(), sae)
+        # status() reconciles against the attached SAE (R3 fix)
+        with patch("millm.services.sae_service.AttachedSAEState") as MockState:
+            MockState.return_value.attached_sae = sae
+            status = service.status()
         assert status["member_count"] == 3
         assert status["threshold_mode"] == "epsilon_max"
         assert status["retention"]["max_events_per_cluster"] == \
@@ -476,3 +481,158 @@ def _model_info(name: str):
     info = MagicMock()
     info.name = name  # name= is a reserved MagicMock kwarg
     return info
+
+
+class TestReviewRound3Pins:
+    """011 R3: pins for the R2 fixes and named mutation survivors."""
+
+    def test_status_reports_ws_dropped_and_first_flush_emits(self, service):
+        assert service.status()["ws_events_dropped"] == 0
+        # first flush must emit (throttle initialized to -inf, R2 fix 2)
+        sent = []
+        emitter = MagicMock()
+        emitter.emit_sensing_event.side_effect = lambda p: sent.append(p)
+        with patch("millm.sockets.progress.progress_emitter", emitter):
+            service._emit_events([{"id": 1, "summary": "s"}])
+        assert len(sent) == 1
+
+    def test_throttle_drops_are_counted_and_observable(self, service):
+        emitter = MagicMock()
+        with patch("millm.sockets.progress.progress_emitter", emitter):
+            service._emit_events([{"id": i, "summary": "s"} for i in range(8)])
+            service._emit_events([{"id": 9, "summary": "s"}])  # within 100ms
+        # 8 - _WS_MAX_PER_FLUSH(5) = 3 dropped from flush 1; flush 2 fully dropped
+        assert service.status()["ws_events_dropped"] == 4
+        assert emitter.emit_sensing_event.call_count == 5
+
+    async def test_rearm_mismatch_does_not_stomp_new_cluster_state(
+        self, service
+    ):
+        """R3 #1 (the regression R3 found): a snapshot flush after a re-arm
+        must render neutrally WITHOUT mutating the armed cluster's state."""
+        sae_a = MagicMock(d_sae=16384)
+        service.arm_for_profile(make_profile(profile_id="prof_A"), sae_a)
+        service.arm_for_profile(
+            make_profile(profile_id="prof_B", display_token="anger",
+                         name="anger cluster"),
+            MagicMock(d_sae=16384))
+
+        rows = {}
+
+        class _Repo:
+            def __init__(self, session):
+                pass
+
+            async def create_many(self, events):
+                rows["events"] = events
+                out = []
+                for event in events:
+                    row = MagicMock()
+                    row.to_dict.return_value = dict(event, id=1)
+                    out.append(row)
+                return out
+
+            async def prune(self, *a, **kw):
+                return 0
+
+        class _Ctx:
+            async def __aenter__(self):
+                session = MagicMock()
+
+                async def _commit():
+                    return None
+
+                session.commit = _commit
+                return session
+
+            async def __aexit__(self, *a):
+                return False
+
+        with patch("millm.db.base.async_session_factory",
+                   return_value=_Ctx()), \
+             patch("millm.db.repositories.sensing_repository.SensingRepository",
+                   _Repo), \
+             patch.object(service, "_emit_events"):
+            await service.record("req-1", [make_hit()], False, None, None,
+                                 profile_id="prof_A")
+
+        # A's rows render neutrally under the snapshot id...
+        assert rows["events"][0]["summary"].startswith("prof_A:")
+        # ...and B's armed formatting is untouched
+        assert service._display_token == "anger"
+
+    def test_zero_max_activation_treated_as_missing(self, service):
+        """R3 #2: max_activation 0.0 must not produce theta=0."""
+        members = [
+            {"feature_idx": 1, "strength": 1.0, "max_activation": 0.0},
+            {"feature_idx": 2, "strength": 1.0, "max_activation": 10.0},
+        ]
+        config = service.build_config(make_profile(members=members))
+        assert config.thresholds.tolist()[0] == float("inf")
+
+    def test_negative_epsilon_override_degrades_to_default(self, service):
+        from millm.core.config import settings
+
+        config = service.build_config(make_profile(
+            sensing={"epsilon": -1.0}))
+        assert config.thresholds[0].item() == pytest.approx(
+            settings.SENSING_EPSILON * 40.0)
+
+    def test_status_reconciles_stale_armed_state(self, service):
+        """R3: swallowed disarm (e.g. detach failure) must not report armed
+        forever."""
+        service.arm_for_profile(make_profile(), MagicMock(d_sae=16384))
+        with patch("millm.services.sae_service.AttachedSAEState") as MockState:
+            MockState.return_value.attached_sae = None  # SAE gone
+            status = service.status()
+        assert status["armed"] is False
+
+    async def test_truncated_last_event_only_persisted(self, service):
+        """R3 mutation pin: the cut point must be recoverable from rows."""
+        service.arm_for_profile(make_profile(), MagicMock(d_sae=16384))
+        captured = {}
+
+        class _Repo:
+            def __init__(self, session):
+                pass
+
+            async def create_many(self, events):
+                captured["events"] = events
+                out = []
+                for event in events:
+                    row = MagicMock()
+                    row.to_dict.return_value = dict(event, id=1)
+                    out.append(row)
+                return out
+
+            async def prune(self, *a, **kw):
+                return 0
+
+        class _Ctx:
+            async def __aenter__(self):
+                session = MagicMock()
+
+                async def _commit():
+                    return None
+
+                session.commit = _commit
+                return session
+
+            async def __aexit__(self, *a):
+                return False
+
+        with patch("millm.db.base.async_session_factory",
+                   return_value=_Ctx()), \
+             patch("millm.db.repositories.sensing_repository.SensingRepository",
+                   _Repo), \
+             patch.object(service, "_emit_events"):
+            await service.record(
+                "req-1",
+                [make_hit(pos_start=1, pos_end=1),
+                 make_hit(pos_start=5, pos_end=5)],
+                True, None, None)
+        flags = [e["truncated"] for e in captured["events"]]
+        assert flags == [False, True]
+
+    def test_events_recorded_counter_increments(self, service):
+        assert service.status()["events_recorded_since_start"] == 0

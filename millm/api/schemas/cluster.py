@@ -183,3 +183,5 @@ class HubImportRequest(BaseModel):
     filename: str = Field(..., min_length=1, max_length=300)
     revision: str | None = None
     activate: bool = False
+    # 009 R2: agents' dedupe guard — parity with the inline import route
+    on_conflict: Literal["rename", "fail"] = "rename"

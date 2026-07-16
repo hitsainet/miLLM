@@ -299,3 +299,39 @@ class TestHookIntegration:
         x = hidden([pos_row({0: 2.0})])
         hook_fn(None, None, x)
         assert sae._sensing_overhead_ms == 0.0
+
+
+class TestRound3MutationPins:
+    def test_peak_keeps_max_when_later_position_is_lower(self, sae):
+        """R3 mutation pin: merged[idx] must be the running MAX — a plain
+        assignment survives when only the increasing member is asserted."""
+        sae.arm_sensing(make_config())
+        sae.begin_sensing_request("req-1")
+        sae._sense(hidden([pos_row({0: 5.0, 1: 2.0})]))
+        sae._sense(hidden([pos_row({0: 2.0, 1: 2.0})]))  # pos 1: member 0 LOWER
+        _, hits, _ = sae.collect_sensing_hits()
+        assert dict(hits[0].fired)[0] == 5.0  # peak retained
+
+    def test_post_cap_adjacent_positions_do_not_resurrect(self, sae):
+        """R3 mutation pin: _sensing_done must stop sensing even for
+        positions adjacent to the buffer tail."""
+        sae.arm_sensing(make_config(cap=1))
+        sae.begin_sensing_request("req-1")
+        hot = pos_row({0: 2.0, 1: 2.0})
+        sae._sense(hidden([hot, pos_row({}), hot]))  # span 0, cap at pos 2
+        sae._sense(hidden([hot]))  # pos 3 — would tail-merge if not done
+        _, hits, truncated = sae.collect_sensing_hits()
+        assert truncated is True
+        assert [(h.pos_start, h.pos_end) for h in hits] == [(0, 0)]
+
+    def test_merged_fired_count_is_union_size(self, sae):
+        """R3 mutation pin: fired_count == len(fired_members) after merges
+        across positions firing DIFFERENT members."""
+        sae.arm_sensing(make_config(members=(0, 1, 2, 3), min_k=2,
+                                    thresholds=(1.0, 1.0, 1.0, 1.0)))
+        sae.begin_sensing_request("req-1")
+        sae._sense(hidden([pos_row({0: 2.0, 1: 2.0})]))
+        sae._sense(hidden([pos_row({2: 2.0, 3: 2.0})]))  # pos 1, other members
+        _, hits, _ = sae.collect_sensing_hits()
+        assert len(hits) == 1
+        assert hits[0].fired_count == 4 == len(hits[0].fired)

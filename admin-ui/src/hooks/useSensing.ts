@@ -29,6 +29,9 @@ export function useSensing(profileId?: string) {
     queryFn: () => sensingApi.events({ profileId, limit: 100 }),
   });
 
+  // Status invalidation debounced: one GET per burst, not per event (011 R3).
+  const lastStatusInvalidate = { current: 0 } as { current: number };
+
   // Live prepend: WS events land at the top of the list without a refetch.
   // Each cached list is updated against ITS OWN scope key — a hook scoped
   // to cluster X must not drop cluster Y's events from the 'all' cache
@@ -47,7 +50,11 @@ export function useSensing(profileId?: string) {
           events: [event, ...data.events].slice(0, MAX_LIVE_EVENTS),
         });
       }
-      queryClient.invalidateQueries({ queryKey: STATUS_KEY });
+      const now = Date.now();
+      if (now - lastStatusInvalidate.current > 5000) {
+        lastStatusInvalidate.current = now;
+        queryClient.invalidateQueries({ queryKey: STATUS_KEY });
+      }
     };
     socketClient.on('sensing:event', handler);
     return () => {

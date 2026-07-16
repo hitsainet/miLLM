@@ -784,6 +784,17 @@ class LoadedSAE:
         else:
             self._steering_delta = None
 
+        # Sensing tensors move with the weights (011 R3: a device move on an
+        # armed SAE left the member slices behind — every _sense pass then
+        # threw and was swallowed, sensing silently dark while status said
+        # armed).
+        if self._W_enc_m is not None:
+            self._W_enc_m = self._W_enc_m.to(device)
+        if self._b_enc_m is not None:
+            self._b_enc_m = self._b_enc_m.to(device)
+        if self._sensing is not None:
+            self._sensing.thresholds = self._sensing.thresholds.to(device)
+
         logger.debug(f"LoadedSAE moved to {device}")
 
     def to_cpu(self) -> None:

@@ -23,6 +23,11 @@ from millm.core.errors import (
     SensingEventNotFoundError,
     ValidationError,
 )
+
+# Read-path retention runs at most this often (011 R3: pruning on EVERY
+# list request made reads DB writers racing the flush-path prune).
+_PRUNE_ON_READ_INTERVAL_S = 600.0
+_last_read_prune: list[float] = [0.0]
 from millm.core.logging import get_logger
 
 router = APIRouter(prefix="/api/sensing", tags=["sensing"])
@@ -78,16 +83,22 @@ async def list_events(
     from millm.db.base import async_session_factory
     from millm.db.repositories.sensing_repository import SensingRepository
 
+    import time
+
     from millm.core.config import settings
 
     async with async_session_factory() as session:
         repo = SensingRepository(session)
         # Retention on READ as well as on flush (FPRD SEN-P2): the age cap
         # is the documented privacy control and must hold for idle clusters
-        # that never flush again.
-        pruned = await repo.prune_aged(settings.SENSING_MAX_AGE_DAYS)
-        if pruned:
-            await session.commit()
+        # that never flush again. Throttled — reads must not become writers
+        # on every request (011 R3).
+        now = time.monotonic()
+        if now - _last_read_prune[0] >= _PRUNE_ON_READ_INTERVAL_S:
+            _last_read_prune[0] = now
+            pruned = await repo.prune_aged(settings.SENSING_MAX_AGE_DAYS)
+            if pruned:
+                await session.commit()
         events = await repo.list_events(
             profile_id=profile_id, limit=limit, since=since
         )

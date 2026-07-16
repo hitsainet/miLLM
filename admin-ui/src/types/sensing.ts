@@ -33,6 +33,9 @@ export interface SensingStatus {
   last_request_overhead_ms: number;
   overhead_warn_threshold_ms: number;
   events_recorded_since_start: number;
+  ws_events_dropped: number;
+  /** Persistent per-cluster intent (distinct from `armed`) */
+  enabled_clusters: { id: string; name: string; is_active: boolean }[];
   retention: {
     max_events_per_cluster?: number;
     max_age_days?: number;

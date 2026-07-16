@@ -25,10 +25,17 @@ export function SensingPanel() {
           <Button
             variant="ghost"
             size="sm"
-            onClick={() => clearEvents(status?.profile_id ?? undefined)}
+            onClick={() => {
+              // Clears what the list shows: ALL clusters' events. A scoped
+              // clear silently left other clusters' rows (011 R3) — and a
+              // destructive action gets a confirm.
+              if (window.confirm('Delete ALL stored sensing events?')) {
+                clearEvents(undefined);
+              }
+            }}
           >
             <Trash2 className="mr-1 h-4 w-4" />
-            Clear
+            Clear all
           </Button>
         )}
       </div>
@@ -59,8 +66,19 @@ export function SensingPanel() {
           </>
         ) : (
           <span>
-            Not armed — activate a cluster with sensing enabled (and an SAE
-            attached) to start observing co-activations.
+            {status?.enabled_clusters?.length
+              ? `Not armed — sensing is enabled for ${status.enabled_clusters
+                  .map((c) => c.name)
+                  .join(', ')}; it arms when that cluster is active with an SAE attached.`
+              : 'Not armed — activate a cluster with sensing enabled (and an SAE attached) to start observing co-activations.'}
+          </span>
+        )}
+        {(status?.ws_events_dropped ?? 0) > 0 && (
+          <span
+            className="font-mono text-amber-400"
+            title="Live updates throttled under burst — the stored list is complete; refresh to reconcile"
+          >
+            {status?.ws_events_dropped} live updates throttled
           </span>
         )}
         <span className="ml-auto font-mono">{totalEvents} stored</span>

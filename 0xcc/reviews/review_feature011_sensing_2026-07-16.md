@@ -93,3 +93,46 @@ reindent (structure + full suite).
 **Documented:** toggle-route arm failure persists the column then errors (intent-vs-runtime split
 is deliberate; the 422 reason tells the user); WS throttle drops reconcile on refetch (stated in
 the WS reference); `_sensing_batch_warned` is once-per-process by design.
+
+## Round 3 (/review, 4 perspectives) — 19 findings: 13 fixed, 6 documented
+
+**The round's genuine regression (fixed):** the R2 neutral-branding fix MUTATED singleton state —
+a snapshot flush after a re-arm stomped the newly armed cluster's display token and labels for
+every subsequent event. → local formatting inputs threaded through `_summary`; pinned by a test
+that arms A, re-arms B, flushes A's snapshot, and asserts B's state is untouched.
+
+**Also fixed:** `max_activation <= 0` treated as missing (same degenerate class as R1's zero
+floor; negative `epsilon`/`theta_floor` overrides degrade to defaults); `to_device` migrates the
+sensing tensors (a device move left member slices behind — sensing went silently dark);
+attach-path arm refusals land in the attach response `warnings` (same silent class R2 fixed for
+activation); armed-state duality self-heals (status() reconciles against the attached SAE — a
+swallowed disarm can no longer report armed forever); prune-on-read throttled to once/10 min
+(every list request was a DB writer racing the flush prune); frontend `SensingStatus` gained
+`ws_events_dropped` + `enabled_clusters` and the panel shows both (the R2 observability fix ended
+at the JSON boundary); Clear button scope matches the list (clear ALL + confirm; scoped clear
+silently left other clusters' rows / deleted everything when disarmed); status invalidation
+debounced (burst = one GET, not one per event); honest no-context message (decode failures were
+mislabeled as K=0 config); manual speculative wording (sensing is DISABLED under speculative,
+not "slightly noisy"); FPRD EC-11.4 amended (dated) to the shipped inf-threshold semantics;
+R2 fixes + R1's 404 now pinned (truncated-last persist, throttle counts, re-arm mismatch,
+reconcile, zero-max-activation, negative-epsilon, peak-decrease, post-cap tail, union
+fired_count — the round's named mutation survivors all die).
+
+**Documented:**
+- The `sensing` override block lives OUTSIDE the frozen v1 schema (additive-unknown by design —
+  the contract is miStudio-owned; producers can emit it once the contract revs). Manual documents
+  the keys; a typo degrades to defaults by construction.
+- begin/flush choreography is triplicated across chat/stream/text with per-path drift
+  (hang-disarm exists only on streaming — the other paths use `asyncio.to_thread` without a
+  timeout, so the hang class differs); a SensingRequestContext refactor is named debt.
+- Toggle-route vs `_sync_sensing_arm_state` duplicate the arm/disarm decision with different
+  error surfacing (deliberate: route raises, activation warns) — consolidation debt.
+- Span highlighting in SensingEventDetail needs a persisted `context_start_pos` (schema change);
+  the metadata line carries the absolute span meanwhile.
+- FTASKS 6.2 (streaming early-stop context) + §9 criteria 3/4 ride the post-deploy E2E.
+- Speculative-decoding exclusion is an accepted FPRD SEN-D1 deviation (amended note).
+
+## Gate
+**SHIP** — 56 findings across 3 rounds (36 fixed, 13 documented, 7 verified-sound), suites
+backend 1083 / frontend 205 green. Post-deploy E2E (live co-firing traffic + overhead budget)
+rides the increment's rollout.

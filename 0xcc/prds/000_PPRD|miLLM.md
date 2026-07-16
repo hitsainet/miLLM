@@ -2,10 +2,17 @@
 
 ## Mechanistic Interpretability LLM Server
 
-**Document Version:** 1.0
+**Document Version:** 1.1
 **Created:** January 30, 2026
 **Status:** Draft
-**Reference:** BRD v1.0 (January 29, 2026)
+**Reference:** BRD v1.0 (January 29, 2026) · BRD-MILLM-CLUSTERS-001 (July 16, 2026)
+
+### Document Revision History
+
+| Version | Date | Changes |
+|---------|------|---------|
+| 1.0 | 2026-01-30 | Initial project PRD (Features 1–7, from BRD v1.0) |
+| 1.1 | 2026-07-16 | Cluster Runtime increment (BRD-MILLM-CLUSTERS-001): Features 8–11 (Cluster Import, Unified MCP, OWUI Cluster Dial, Co-Activation Sensing), FR-8.x–FR-11.x, NFR-1.4, matrix extension; former future stubs renumbered 12–14 |
 
 ---
 
@@ -291,12 +298,42 @@ Organized by logical workflow (matching UI structure):
 - FR-7.6: Profile management interface
 - FR-7.7: Server status display
 
+#### Cluster Import (FR-8.x) — Increment: Cluster Runtime
+- FR-8.1: Import `mistudio.cluster-definition/v1` documents (single) and `mistudio.cluster-bundle/v1` documents (multi) from JSON with strict schema validation
+- FR-8.2: Evaluate import compatibility against the attached model+SAE (bind / warn-bind / block / unbound) and report outcomes honestly per item
+- FR-8.3: Materialize imported definitions as cluster-typed steering profiles preserving name, narrative, members with tuned strengths/signs, budget metadata (incl. intensity λ), and provenance
+- FR-8.4: Activate an imported cluster so ALL members steer together at their stored strengths (λ-scaled, clamped to the steering range) with no manual tuning
+- FR-8.5: Browse and import public cluster packs from Hugging Face anonymously (tag convention `mistudio-cluster-definition`), recording hub provenance
+- FR-8.6: Treat imported definitions strictly as data (size/count caps; no paths, no credentials, no execution)
+- FR-8.7: Re-export an imported cluster as a lossless `mistudio.cluster-definition/v1` document
+- FR-8.8: Dedicated Clusters page in the Admin UI (list, import dialog with file/paste/HF tabs, activate, intensity, narrative display)
+
+#### Unified MCP (FR-9.x) — Increment: Cluster Runtime
+- FR-9.1: A single unified MCP server (evolved from the miStudio server) exposes miLLM tool categories gated by per-product health checks
+- FR-9.2: miLLM tools cover model/SAE status, profile list/activate, cluster import (file + hub), intensity control, and sensing readout
+- FR-9.3: miLLM publishes the management-API contract the MCP server consumes (`docs/mcp-contract.md`) and an `active_profile` block in detailed health
+- FR-9.4: A single-product deployment presents a coherent, self-describing tool set (absent product's tools return structured "unavailable")
+
+#### OWUI Cluster Dial (FR-10.x) — Increment: Cluster Runtime
+- FR-10.1: Accept a per-request `steering_intensity` extension (numeric λ or symbolic off/min/max) on `/v1/chat/completions`, resolved server-side against the active cluster's intensity range
+- FR-10.2: Per-request intensity is isolated (apply/restore within the request boundary) and concurrency-safe
+- FR-10.3: Ship an Open WebUI Filter Function (in-repo artifact) exposing a per-user dial valve that injects the extension field
+- FR-10.4: A user can compare identical prompts at dial off/min/max within one chat session
+
+#### Co-Activation Sensing (FR-11.x) — Increment: Cluster Runtime
+- FR-11.1: Detect, per forward pass, moments when a designated cluster's members co-fire (threshold ε·max_activation per member; quorum min_k), opt-in per cluster and off by default
+- FR-11.2: Each event records the alone-vs-within-larger-set distinction (best-effort v1: ambient fired count when full-width monitoring is active)
+- FR-11.3: Each event captures a configurable window of token context (±K tokens, decoded off the hot path; K=0 disables text capture)
+- FR-11.4: Events persist with bounded retention (per-cluster cap + age pruning) and are retrievable via API, UI, and WebSocket
+- FR-11.5: Sensing overhead is observable (`sensing_overhead_ms`) and bounded; sensing-armed requests route serial (never approximated on the batching path)
+
 ### Non-Functional Requirements
 
 #### Performance (NFR-1.x)
 - NFR-1.1: SAE hook overhead <15% vs base model latency
 - NFR-1.2: Graceful request queuing for 5+ pending requests
 - NFR-1.3: Time to first token <500ms after model loaded
+- NFR-1.4: Sensing (armed) adds no user-perceivable latency — overhead observable and warned above 5 ms/request (Increment: Cluster Runtime)
 
 #### Reliability (NFR-2.x)
 - NFR-2.1: Configuration errors fail fast with clear messages
@@ -326,10 +363,11 @@ Organized by logical workflow (matching UI structure):
 - Standard chat functionality works without client modification
 - Tested with Open WebUI and LibreChat
 
-#### miStudio Integration (Future-Ready)
+#### miStudio Integration
 - Profile export format: JSON schema (model, SAE, layer, features)
 - Profile import with validation
-- Management API designed for future miStudio direct integration
+- Management API designed for miStudio direct integration
+- Increment (Cluster Runtime): `mistudio.cluster-definition/v1` + bundle as the sole cluster interchange (kind-keyed, frozen v1 schema; vendored copy + sync test); unified MCP server contract; Hugging Face tag convention (consume-only)
 
 ---
 
@@ -467,40 +505,115 @@ Features organized by UI workflow tabs, with requirements matrix:
 
 ---
 
+### Increment: Cluster Runtime (BRD-MILLM-CLUSTERS-001)
+
+#### Feature 8: Cluster Import
+**User Value:** Clusters tuned and validated in miStudio (or published to Hugging Face by the community) run in miLLM with zero manual strength entry — import, activate, steer.
+
+**UI Tab:** Clusters (new)
+
+**Requirements Covered:** FR-8.1 through FR-8.8
+
+**Key Capabilities:**
+- `mistudio.cluster-definition/v1` + bundle import (file/paste/HF browse)
+- Compatibility matrix vs attached SAE (bind/warn/block/unbound)
+- Cluster-typed profiles: members→steering, narrative, budget+λ, provenance retained losslessly
+- Anonymous Hugging Face pack browse/import (consume-only)
+- Dedicated Clusters Admin-UI page
+
+**Dependencies:** Feature 6 (Profile Management), Feature 3 (Feature Steering)
+
+---
+
+#### Feature 9: Unified MCP
+**User Value:** Agents work across authoring (miStudio) and serving (miLLM) through ONE MCP endpoint that adapts to whichever back ends are present.
+
+**UI Tab:** None (agent surface)
+
+**Requirements Covered:** FR-9.1 through FR-9.4
+
+**Key Capabilities:**
+- miLLM tool categories on the evolved miStudio MCP server (cross-repo)
+- Per-product health gating with structured degradation
+- Published miLLM management-API contract (`docs/mcp-contract.md`)
+- `active_profile` block added to detailed health
+
+**Dependencies:** Feature 8 (endpoints), Features 10/11 (tools); miStudio MCP server (cross-repo)
+
+---
+
+#### Feature 10: OWUI Cluster Dial
+**User Value:** End users feel a cluster's influence live in real chat — off/min/max on identical prompts — without leaving Open WebUI.
+
+**UI Tab:** None (OWUI-side Filter Function + OpenAI-API extension)
+
+**Requirements Covered:** FR-10.1 through FR-10.4
+
+**Key Capabilities:**
+- Per-request `steering_intensity` extension (numeric or off/min/max)
+- Server-side λ resolution from the cluster's intensity range; request-scoped apply/restore
+- In-repo Open WebUI Filter Function with per-user dial valve
+
+**Dependencies:** Feature 8 (imported clusters + intensity semantics)
+
+---
+
+#### Feature 11: Co-Activation Sensing
+**User Value:** Close the authoring loop — observe when a cluster's members actually fire together in production traffic, with token context, to learn what patterns to monitor for.
+
+**UI Tab:** Clusters (sensing panel)
+
+**Requirements Covered:** FR-11.1 through FR-11.5
+
+**Key Capabilities:**
+- Per-forward-pass member-only detection (ε·max_activation thresholds, min_k quorum)
+- Alone-vs-within side channel (best-effort v1)
+- ±K token context per event (configurable, off-hot-path decode)
+- Bounded persistence (per-cluster cap + age prune) + API/UI/WS readout
+- Serial-only, opt-in, observable overhead
+
+**Dependencies:** Feature 8 (cluster profiles), Feature 7 (monitoring hook path)
+
+---
+
 ### Future Features (Post v1.0)
 
-#### Feature 8: Multi-User Authentication
+#### Feature 12: Multi-User Authentication
 **User Value:** Enable secure access for team environments and non-local deployments.
 
 **Priority:** v1.1+
 
 ---
 
-#### Feature 9: Multi-SAE Support
+#### Feature 13: Multi-SAE Support
 **User Value:** Attach SAEs to multiple layers for more sophisticated steering.
 
 **Priority:** v2.0
 
 ---
 
-#### Feature 10: Neuronpedia Integration
+#### Feature 14: Neuronpedia Integration
 **User Value:** Browse and search features with human-readable labels from Neuronpedia.
 
-**Priority:** v1.1+
+**Priority:** v1.1+ (partially delivered post-v1.0: probe feature links derive from attached SAE metadata)
 
 ---
 
 ### Feature-Requirements Matrix
 
-| Feature | FR-1.x | FR-2.x | FR-3.x | FR-4.x | FR-5.x | FR-6.x | FR-7.x |
-|---------|--------|--------|--------|--------|--------|--------|--------|
-| 1. Model Management | ✓ | | | | | | ✓ |
-| 2. SAE Management | | ✓ | | | | | ✓ |
-| 3. Feature Steering | | | ✓ | | | | ✓ |
-| 4. OpenAI API | ✓ | | ✓ | | ✓ | | |
-| 5. Admin UI | | | | | | | ✓ |
-| 6. Profile Management | | | ✓ | | | ✓ | ✓ |
-| 7. Feature Monitoring | | ✓ | | ✓ | | | ✓ |
+| Feature | FR-1.x | FR-2.x | FR-3.x | FR-4.x | FR-5.x | FR-6.x | FR-7.x | FR-8.x | FR-9.x | FR-10.x | FR-11.x |
+|---------|--------|--------|--------|--------|--------|--------|--------|--------|--------|---------|---------|
+| 1. Model Management | ✓ | | | | | | ✓ | | | | |
+| 2. SAE Management | | ✓ | | | | | ✓ | | | | |
+| 3. Feature Steering | | | ✓ | | | | ✓ | | | | |
+| 4. OpenAI API | ✓ | | ✓ | | ✓ | | | | | | |
+| 5. Admin UI | | | | | | | ✓ | | | | |
+| 6. Profile Management | | | ✓ | | | ✓ | ✓ | | | | |
+| 7. Feature Monitoring | | ✓ | | ✓ | | | ✓ | | | | |
+| 8. Cluster Import | | | ✓ | | | ✓ | | ✓ | | | |
+| 9. Unified MCP | | | | | | | | ✓ | ✓ | ✓ | ✓ |
+| 10. OWUI Cluster Dial | | | ✓ | | ✓ | | | ✓ | | ✓ | |
+| 11. Co-Activation Sensing | | | | ✓ | | | | ✓ | | | ✓ |
 
 ---
 

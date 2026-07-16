@@ -1,10 +1,10 @@
 # Project: miLLM - Mechanistic Interpretability LLM Server
 
 ## Current Status
-- **Phase:** Planning next increment (Cluster Runtime)
-- **Last Session:** July 16, 2026 — BRD-MILLM-CLUSTERS-001 drafted (incremental BRD via 001_generate-brd.md)
-- **Next Steps:** When execution begins: `0xcc/instruct/002_create-project-prd.md` — add increment rows/sections to 000_PPRD|miLLM referencing BRD-MILLM-CLUSTERS-001. Early design spikes flagged in the BRD: OWUI dial mechanism, unified-MCP ownership.
-- **Active Document:** 0xcc/prds/BRD-MILLM-CLUSTERS-001.md (draft, clarifications answered 2026-07-16)
+- **Phase:** Cluster Runtime increment — documentation COMPLETE, ready for implementation
+- **Last Session:** July 16, 2026 — full XCC doc chain for BRD-MILLM-CLUSTERS-001: PPRD v1.1 (Features 8–11, FR-8.x–11.x, matrix; future stubs renumbered 12–14), PADR v1.1 (6 increment decisions + risks), and 16 feature docs (008–011 × FPRD/FTDD/FTID/FTASKS). All increment design questions RESOLVED: MCP = evolve miStudio server (cross-repo); OWUI dial = Filter Function + per-request `steering_intensity`; sensing = per-event summaries + ±K token context, bounded, serial-only v1; UI = new Clusters page; λ stored raw + clamped ±200 at apply (contract-conflict fix).
+- **Next Steps:** Execute Feature 008 via `0xcc/instruct/008_process-task-list.md` starting with `0xcc/tasks/008_FTASKS|Cluster_Import.md` (sequencing: 008 → 010 → 011 → 009; 009 last, consumes the others' endpoints; its miStudio-repo tasks are flagged [CROSS-REPO]).
+- **Active Document:** 0xcc/tasks/008_FTASKS|Cluster_Import.md (not started)
 - **New Increment (scoped 2026-07-16):** cluster-definition import (mistudio.cluster-definition/v1, file + HF consume-only) → steering profiles; unified MCP server (both products, health-gated categories); Open WebUI live cluster dial; cluster co-activation sensing. Locked: incremental BRD style; HF publishing stays miStudio-side; budgets frozen on import (assumed, confirm pre-PRD).
 - **Baseline:** v1.0 features 001–007 all ✅ (705 tests) + post-v1.0: GitOps/ArgoCD K8s deploy, CBM + speculative decoding + torch.compile, hybrid/Mamba support, Neuronpedia links, security hardening. Version 0.5.1.
 
@@ -141,8 +141,34 @@ refactor(services): extract HuggingFace logic
 ### Project Level Documents
 - ✅ 0xcc/docs/miLLM_BRD_v1.0.md (original v1.0 BRD)
 - ✅ 0xcc/prds/BRD-MILLM-CLUSTERS-001.md (Incremental BRD — Cluster Runtime: import / unified MCP / OWUI dial / sensing, drafted 2026-07-16)
-- ✅ 0xcc/prds/000_PPRD|miLLM.md (Project PRD)
-- ✅ 0xcc/adrs/000_PADR|miLLM.md (Architecture Decision Record)
+- ✅ 0xcc/prds/000_PPRD|miLLM.md (Project PRD v1.1 — Features 8–11 added 2026-07-16)
+- ✅ 0xcc/adrs/000_PADR|miLLM.md (Architecture Decision Record v1.1 — increment decisions 2026-07-16)
+
+**Increment: Cluster Runtime (BRD-MILLM-CLUSTERS-001) — docs complete 2026-07-16, implementation not started**
+
+**Feature 8: Cluster Import**
+- ✅ 0xcc/prds/008_FPRD|Cluster_Import.md
+- ✅ 0xcc/tdds/008_FTDD|Cluster_Import.md
+- ✅ 0xcc/tids/008_FTID|Cluster_Import.md
+- ✅ 0xcc/tasks/008_FTASKS|Cluster_Import.md
+
+**Feature 9: Unified MCP**
+- ✅ 0xcc/prds/009_FPRD|Unified_MCP.md
+- ✅ 0xcc/tdds/009_FTDD|Unified_MCP.md
+- ✅ 0xcc/tids/009_FTID|Unified_MCP.md
+- ✅ 0xcc/tasks/009_FTASKS|Unified_MCP.md
+
+**Feature 10: OWUI Cluster Dial**
+- ✅ 0xcc/prds/010_FPRD|OWUI_Cluster_Dial.md
+- ✅ 0xcc/tdds/010_FTDD|OWUI_Cluster_Dial.md
+- ✅ 0xcc/tids/010_FTID|OWUI_Cluster_Dial.md
+- ✅ 0xcc/tasks/010_FTASKS|OWUI_Cluster_Dial.md
+
+**Feature 11: Co-Activation Sensing**
+- ✅ 0xcc/prds/011_FPRD|Coactivation_Sensing.md
+- ✅ 0xcc/tdds/011_FTDD|Coactivation_Sensing.md
+- ✅ 0xcc/tids/011_FTID|Coactivation_Sensing.md
+- ✅ 0xcc/tasks/011_FTASKS|Coactivation_Sensing.md
 
 ### Feature Documents
 

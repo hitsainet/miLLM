@@ -2,10 +2,11 @@
 
 ## Mechanistic Interpretability LLM Server
 
-**Document Version:** 1.0
+**Document Version:** 1.1
 **Created:** January 30, 2026
+**Updated:** July 16, 2026 (Cluster Runtime increment — BRD-MILLM-CLUSTERS-001)
 **Status:** Approved
-**Reference:** Project PRD (000_PPRD|miLLM.md)
+**Reference:** Project PRD (000_PPRD|miLLM.md v1.1) · BRD-MILLM-CLUSTERS-001
 
 ---
 
@@ -28,6 +29,11 @@
 | Real-time | REST + WebSocket (Socket.IO) | REST for CRUD, WebSocket for monitoring streams |
 | Testing | Balanced pyramid | 80%+ backend coverage, Vitest frontend, Playwright E2E |
 | Code Organization | Layer-based | Clear separation of concerns |
+| Cluster interchange (v1.1) | `mistudio.cluster-definition/v1`, frozen, kind-keyed | Consumer-neutral contract; vendored schema + sync test prevents drift |
+| Cluster storage (v1.1) | Extend `profiles` table (`source_kind`, `cluster_meta`, `intensity`, `sensing_enabled`) | Preserves single-active invariant; reuses the whole activation path |
+| Unified MCP home (v1.1) | Evolve the miStudio MCP server (cross-repo) | Proven auth/gating/audit infra; miLLM ships the API contract |
+| OWUI dial (v1.1) | Per-request `steering_intensity` + OWUI Filter Function | Concurrency-safe (request-scoped apply/restore); no OpenAI-API contamination |
+| Sensing (v1.1) | Member-only encode per forward pass; DB-persisted bounded events | Decoupled from monitoring; observable overhead; serial-only v1 |
 
 ### Decision-Making Criteria
 1. **miStudio Compatibility:** Align architecture for future integration
@@ -1119,7 +1125,34 @@ SAE_CACHE_DIR=./data/saes
 
 ### Major Trade-offs
 
-#### PostgreSQL vs SQLite
+#### Cluster Runtime increment (v1.1, 2026-07-16)
+
+#### Extend `profiles` vs new `cluster_profiles` table
+**Decision:** Extend `profiles` (`source_kind`, `cluster_meta` JSONB, `intensity`, `sensing_enabled`)
+**Trade-off:** Wider table with nullable cluster columns vs duplicated activation machinery
+**Rationale:** The partial unique index `idx_active_profile` enforces one active steering config — a second table cannot share that invariant; `ProfileService.activate_profile` and the per-request `profile` override work on cluster rows unchanged. UI separation is a `source_kind` filter, not a schema.
+
+#### λ (intensity) stored raw vs baked into strengths
+**Decision:** Store member strengths at λ=1 basis; scale by `profile.intensity` at activation, clamped to the ±200 steering range
+**Trade-off:** Two-step apply math vs lossless round-trip
+**Rationale:** Baking λ destroys export fidelity and makes the dial destructive. The clamp resolves a real contract conflict: definitions allow ±300 × λ≤2 while the apply path enforces ±200 (import warns when clamping would engage).
+
+#### Unified MCP: evolve miStudio server vs new server in miLLM vs third repo
+**Decision:** Evolve the miStudio MCP server; miLLM publishes its management-API contract (`docs/mcp-contract.md`) + one additive health field
+**Trade-off:** Cross-repo coupling vs duplicated bearer-auth/category-gating/audit infrastructure
+**Rationale:** The miStudio server already has the hard parts (auth, gating, audit, deployment). Health-gated `millm_*` categories keep single-product deployments coherent; contract-first tools decouple the release trains.
+
+#### OWUI dial: per-request field vs global mutation
+**Decision:** Per-request `steering_intensity` extension (primary; OWUI Filter injects it); global `PUT /api/clusters/{id}/intensity` documented as global (Admin-UI/MCP)
+**Trade-off:** Two mechanisms vs one
+**Rationale:** Global-only mutation is not concurrency-safe — `set_steering_batch` swaps the steering delta mid-flight for other users' in-flight generations. Per-request apply/restore inside the request-queue semaphore isolates each generation; `extra="ignore"` on the request schema makes rollout safe.
+
+#### Sensing: member-only encode per pass vs reuse of monitoring capture
+**Decision:** Dedicated `_sense` path in `LoadedSAE` (cached `W_enc[:, members]`, ≤20 columns), armed-only, serial-only v1, events flushed post-generation to a bounded `sensing_events` table with ±K token context
+**Trade-off:** A second (tiny) encode vs entanglement with monitoring
+**Rationale:** Monitoring compacts positionally and only the last forward pass survives to `on_activation` — reusing it would miss mid-generation co-activations and mis-index features. A ≤20-column matmul per pass is microseconds; decoupling means sensing cannot change monitoring behavior. CBM rows cannot be attributed to requests, so sensing-armed requests route serial (never approximated).
+
+
 **Decision:** PostgreSQL
 **Trade-off:** More setup complexity vs miStudio alignment and production readiness
 **Rationale:** Ecosystem consistency outweighs local simplicity; Docker makes setup trivial
@@ -1142,6 +1175,12 @@ SAE_CACHE_DIR=./data/saes
 | React | Svelte | Smaller ecosystem, less familiar |
 | PostgreSQL | SQLite | Doesn't align with miStudio |
 | Tailwind | CSS-in-JS | More familiar to team, faster development |
+| Extend `profiles` (v1.1) | New `cluster_profiles` table | Cannot share the single-active partial unique index; duplicates activation path |
+| Evolve miStudio MCP (v1.1) | New MCP server in miLLM | Duplicates auth/gating/audit; two servers for agents to juggle |
+| Evolve miStudio MCP (v1.1) | Third standalone repo | Most ceremony (new CI/CD + deploy) for no functional gain now |
+| OWUI Filter Function (v1.1) | Synthetic model variants in /v1/models | Model-list clutter; coarse; no per-user isolation |
+| Per-request λ (v1.1) | Global-only live mutation | Alters other users' in-flight generations mid-stream |
+| Member-only sense encode (v1.1) | Reuse monitoring capture | Positional compaction + last-pass-only semantics miss/mislabel events |
 
 ### Risk Assessment
 
@@ -1150,6 +1189,11 @@ SAE_CACHE_DIR=./data/saes
 | Socket.IO performance | Low | Medium | Fallback to SSE for monitoring |
 | PostgreSQL overhead | Low | Low | SQLite option documented for simple deploys |
 | React bundle size | Medium | Low | Code splitting, lazy loading |
+| Strength/λ range conflict (±300×2 vs ±200 gate) (v1.1) | Medium | High | Clamp at apply time in both activation paths; import-time warning |
+| Sensing hot-path overhead (v1.1) | Medium | High | Armed-only member encode; per-request event cap; `sensing_overhead_ms` observable with warn threshold |
+| Cross-repo MCP coupling (v1.1) | Medium | Medium | Contract-first tools; health-gated categories degrade to structured "unavailable" |
+| Unauthenticated miLLM management API reachable by MCP server (v1.1) | Medium | Medium | Same-segment deployment; optional bearer token as follow-up |
+| Schema drift between repos (v1.1) | Low | High | Vendored `cluster-definition-v1.json` + pydantic sync test in miLLM |
 
 ---
 

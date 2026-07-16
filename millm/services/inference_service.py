@@ -410,8 +410,10 @@ class InferenceService:
         needed and generation proceeds under the current global steering.
 
         Raises a MiLLMError subclass when the requested profile genuinely cannot
-        be applied (profile not found, out-of-range feature index, invalid
-        steering value).  Raising rather than silently falling through is
+        be applied (profile not found, out-of-range feature index). Out-of-range
+        VALUES no longer reject — they clamp to the steering range at apply time
+        (Feature 8 / PADR v1.1: cluster strengths scaled by the intensity dial
+        may legitimately exceed the range).  Raising rather than silently falling through is
         deliberate: the client explicitly asked for this profile's causal
         influence, so serving a response under the *wrong* steering would be a
         silent correctness failure.  The error propagates to the API layer and

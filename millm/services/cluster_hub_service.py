@@ -4,8 +4,9 @@ Hugging Face cluster-pack consumption (Feature 8, consume-only).
 Browses public repos tagged with the community convention
 (`mistudio-cluster-definition`), lists their definitions (manifest.jsonl
 preferred, loose *.cluster.json fallback), and fetches single definition
-files anonymously. All Hub calls run in a thread, behind the shared
-huggingface circuit breaker, with a short-TTL listing cache.
+files anonymously. All Hub calls run in a thread, behind a DEDICATED
+cluster-hub circuit breaker (user-typed repo ids must never block model/SAE
+downloads), with a bounded short-TTL listing cache.
 """
 
 import asyncio
@@ -16,6 +17,12 @@ from typing import Any
 
 import structlog
 from huggingface_hub import HfApi, hf_hub_download
+from huggingface_hub.utils import (
+    EntryNotFoundError,
+    GatedRepoError,
+    RepositoryNotFoundError,
+    RevisionNotFoundError,
+)
 
 from millm.api.schemas.cluster import (
     MAX_IMPORT_BYTES,
@@ -25,7 +32,27 @@ from millm.api.schemas.cluster import (
 )
 from millm.core.config import settings
 from millm.core.errors import ValidationError
-from millm.core.resilience import huggingface_circuit
+from millm.core.resilience import CircuitBreaker, CircuitBreakerConfig
+
+# Dedicated breaker: hub BROWSE failures (often user-typed repo ids) must
+# never open the shared huggingface circuit and block model/SAE downloads
+# (review find). Not-found errors are converted to clean ValidationErrors
+# BEFORE the breaker sees them, so typos don't count as service failures.
+cluster_hub_circuit = CircuitBreaker(
+    name="cluster_hub",
+    config=CircuitBreakerConfig(
+        failure_threshold=3,
+        recovery_timeout=60.0,
+        success_threshold=1,
+    ),
+)
+
+_NOT_FOUND_ERRORS = (
+    RepositoryNotFoundError,
+    EntryNotFoundError,
+    RevisionNotFoundError,
+    GatedRepoError,
+)
 
 logger = structlog.get_logger()
 
@@ -35,7 +62,7 @@ DEFINITION_SUFFIX = ".cluster.json"
 MANIFEST_NAME = "manifest.jsonl"
 
 
-@huggingface_circuit
+@cluster_hub_circuit
 def _list_models_sync(tag: str, query: str | None, base_model: str | None, limit: int):
     api = HfApi()
     filters = [tag]
@@ -44,13 +71,13 @@ def _list_models_sync(tag: str, query: str | None, base_model: str | None, limit
     return list(api.list_models(filter=filters, search=query, limit=limit))
 
 
-@huggingface_circuit
+@cluster_hub_circuit
 def _list_repo_files_sync(repo_id: str, revision: str | None) -> list[str]:
     api = HfApi()
     return list(api.list_repo_files(repo_id, revision=revision))
 
 
-@huggingface_circuit
+@cluster_hub_circuit
 def _download_file_sync(repo_id: str, filename: str, revision: str | None,
                         cache_dir: str) -> str:
     return hf_hub_download(
@@ -115,7 +142,13 @@ class ClusterHubService:
         if cached is not None:
             return cached
 
-        files = await asyncio.to_thread(_list_repo_files_sync, repo_id, revision)
+        try:
+            files = await asyncio.to_thread(_list_repo_files_sync, repo_id, revision)
+        except _NOT_FOUND_ERRORS as e:
+            raise ValidationError(
+                f"Hub repo not found or not accessible: {repo_id}",
+                details={"repo_id": repo_id, "reason": type(e).__name__},
+            ) from e
 
         refs: list[HubDefinitionRef]
         if MANIFEST_NAME in files:
@@ -149,9 +182,16 @@ class ClusterHubService:
                 "Invalid filename", details={"filename": filename}
             )
 
-        path = await asyncio.to_thread(
-            _download_file_sync, repo_id, filename, revision, self._cache_dir
-        )
+        try:
+            path = await asyncio.to_thread(
+                _download_file_sync, repo_id, filename, revision, self._cache_dir
+            )
+        except _NOT_FOUND_ERRORS as e:
+            raise ValidationError(
+                f"Definition not found on the Hub: {repo_id}/{filename}",
+                details={"repo_id": repo_id, "filename": filename,
+                         "reason": type(e).__name__},
+            ) from e
         size = os.path.getsize(path)
         if size > MAX_IMPORT_BYTES:
             raise ValidationError(
@@ -182,9 +222,9 @@ class ClusterHubService:
                     continue
                 try:
                     row = json.loads(line)
-                    if isinstance(row, dict) and row.get("file", "").endswith(
-                        DEFINITION_SUFFIX
-                    ):
+                    if (isinstance(row, dict)
+                            and isinstance(row.get("file"), str)
+                            and row["file"].endswith(DEFINITION_SUFFIX)):
                         refs.append(HubDefinitionRef(
                             file=row["file"],
                             name=row.get("name"),
@@ -203,5 +243,16 @@ class ClusterHubService:
             return hit[1]
         return None
 
+    MAX_CACHE_ENTRIES = 64
+
     def _cache_put(self, key: str, value: Any) -> None:
-        self._cache[key] = (time.monotonic(), value)
+        now = time.monotonic()
+        # Evict expired entries; the cache must not grow for the process
+        # lifetime under varied search strings (review find).
+        expired = [k for k, (ts, _) in self._cache.items() if now - ts >= self._ttl]
+        for k in expired:
+            del self._cache[k]
+        if len(self._cache) >= self.MAX_CACHE_ENTRIES:
+            oldest = min(self._cache, key=lambda k: self._cache[k][0])
+            del self._cache[oldest]
+        self._cache[key] = (now, value)

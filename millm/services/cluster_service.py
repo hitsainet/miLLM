@@ -50,6 +50,7 @@ class ClusterService:
         self,
         definition: ClusterDefinitionV1,
         *,
+        raw_payload: dict[str, Any] | None = None,
         on_conflict: str = "rename",
         hub_ref: dict[str, Any] | None = None,
         activate: bool = False,
@@ -77,7 +78,10 @@ class ClusterService:
             str(m.feature_idx): float(m.sign) * float(m.strength)
             for m in definition.members
         }
-        meta = definition.model_dump(mode="json")
+        # Store the RAW document when available: pydantic's extra="ignore"
+        # would silently strip additive optional fields a newer producer may
+        # emit, breaking the lossless re-export contract (review find).
+        meta = dict(raw_payload) if raw_payload else definition.model_dump(mode="json")
         meta["warnings"] = warnings
         if hub_ref:
             meta["hub_ref"] = hub_ref
@@ -111,20 +115,32 @@ class ClusterService:
             except Exception as e:  # activation failure must not undo the import
                 warnings.append(f"Imported but activation failed: {e}")
                 status = "imported"
+                # Persist the warning — the in-place mutation above happened
+                # AFTER the row was flushed, so without this the Clusters page
+                # would show a clean row (review find).
+                await self.repository.update(
+                    profile.id, cluster_meta={**meta, "warnings": warnings}
+                )
 
         return ClusterImportItem(
             name=name, status=status, profile_id=profile.id, warnings=warnings
         )
 
     async def import_bundle(
-        self, bundle: ClusterBundleV1, *, on_conflict: str = "rename"
+        self, bundle: ClusterBundleV1, *,
+        raw_payload: dict[str, Any] | None = None,
+        on_conflict: str = "rename",
     ) -> ClusterImportResult:
         """Import every definition in a bundle; one bad item never poisons the rest."""
         results: list[ClusterImportItem] = []
-        for definition in bundle.definitions:
+        raw_items = (raw_payload or {}).get("definitions") if raw_payload else None
+        for i, definition in enumerate(bundle.definitions):
+            raw_item = raw_items[i] if raw_items and i < len(raw_items) else None
             try:
                 results.append(
-                    await self.import_definition(definition, on_conflict=on_conflict)
+                    await self.import_definition(
+                        definition, raw_payload=raw_item, on_conflict=on_conflict
+                    )
                 )
             except Exception as e:
                 logger.exception("cluster_bundle_item_failed", name=definition.name)
@@ -146,50 +162,27 @@ class ClusterService:
 
     async def activate(self, profile_id: str) -> dict[str, Any]:
         """
-        Activate a cluster profile with the hard compatibility gate.
+        Activate a cluster profile.
 
-        Gate (in order): row must be a cluster; an SAE must be attached; the
-        definition's declared n_features (when present) must equal the attached
-        SAE's d_sae; every member index must be within [0, d_sae). Unbound rows
-        that pass the gate are bound to the attached SAE as a side effect.
+        The hard compatibility gate (declared n_features vs attached d_sae,
+        member-index bounds) lives in ProfileService._validate_activation —
+        the single choke point EVERY activation path shares, including the
+        generic /api/profiles route (review find: the gate used to be
+        bypassable there). Unbound rows that activate successfully are bound
+        to the attached SAE afterwards (never before — a failed gate must not
+        leave a wrong binding).
         """
         profile = await self._get_cluster(profile_id)
 
-        sae = AttachedSAEState().attached_sae
-        if sae is None:
-            # ProfileService raises SAENotAttachedError with the house message;
-            # delegate so the error shape matches manual profiles.
-            return await self.profile_service.activate_profile(profile_id)
+        result = await self.profile_service.activate_profile(profile_id)
 
-        declared = ((profile.cluster_meta or {}).get("sae") or {}).get("n_features")
-        if declared is not None and int(declared) != sae.d_sae:
-            raise ValidationError(
-                f"Cluster '{profile.name}' was authored for an SAE with "
-                f"{declared} features; the attached SAE has {sae.d_sae}. "
-                "Member indices would be meaningless — activation blocked.",
-                details={"profile_id": profile_id, "declared_n_features": declared,
-                         "attached_d_sae": sae.d_sae},
-            )
-
-        bad = [int(k) for k in (profile.steering or {}) if not 0 <= int(k) < sae.d_sae]
-        if bad:
-            raise ValidationError(
-                f"Cluster '{profile.name}' references feature indices out of range "
-                f"[0, {sae.d_sae}) for the attached SAE: {sorted(bad)[:8]} — "
-                "activation blocked.",
-                details={"profile_id": profile_id, "bad_indices": sorted(bad)[:20],
-                         "attached_d_sae": sae.d_sae},
-            )
-
-        # Late binding: an unbound import that passes the gate binds to the
-        # SAE it is now steering against (provenance keeps the original ref).
+        # Late binding AFTER success (provenance keeps the original ref).
         attachment = self.sae_service.get_attachment_status()
         if profile.sae_id is None and attachment.sae_id:
             await self.repository.update(
                 profile_id, sae_id=attachment.sae_id, layer=attachment.layer
             )
-
-        return await self.profile_service.activate_profile(profile_id)
+        return result
 
     async def deactivate(self, profile_id: str) -> dict[str, Any]:
         await self._get_cluster(profile_id)
@@ -198,15 +191,51 @@ class ClusterService:
     async def set_intensity(
         self, profile_id: str, intensity: float, *, reapply: bool = True
     ) -> dict[str, Any]:
-        """Persist the lambda dial; re-apply steering when the cluster is active."""
+        """
+        Persist the lambda dial; re-apply steering when the cluster is active.
+
+        The requested lambda is validated against the definition's declared
+        intensity_range (config fallback bounds when absent) — the authored
+        safe envelope is enforced, not decorative (review find). A failed
+        re-apply rolls the persisted lambda back so DB state never diverges
+        from what is actually applied (review find).
+        """
         profile = await self._get_cluster(profile_id)
+
+        lo, hi = self._intensity_bounds(profile)
+        if not lo <= float(intensity) <= hi:
+            raise ValidationError(
+                f"Intensity {intensity:g} is outside this cluster's declared "
+                f"range [{lo:g}, {hi:g}]",
+                details={"profile_id": profile_id, "intensity": intensity,
+                         "range": [lo, hi]},
+            )
+
+        previous = profile.intensity
         await self.repository.update(profile_id, intensity=float(intensity))
         reapplied = False
         if reapply and profile.is_active:
-            await self.activate(profile_id)
-            reapplied = True
+            try:
+                await self.activate(profile_id)
+                reapplied = True
+            except Exception:
+                # Roll back: live steering still runs at the old lambda.
+                await self.repository.update(profile_id, intensity=previous)
+                raise
         return {"profile_id": profile_id, "intensity": float(intensity),
                 "reapplied": reapplied}
+
+    def _intensity_bounds(self, profile: Profile) -> tuple[float, float]:
+        """Authored intensity_range when present; config fallback otherwise.
+        The dial may always be turned OFF (0) regardless of the range floor."""
+        from millm.core.config import settings
+
+        rng = ((profile.cluster_meta or {}).get("budget") or {}).get("intensity_range")
+        if isinstance(rng, list) and len(rng) == 2:
+            lo, hi = float(rng[0]), float(rng[1])
+        else:
+            lo, hi = settings.CLUSTER_INTENSITY_MIN, settings.CLUSTER_INTENSITY_MAX
+        return min(0.0, lo), max(hi, 0.0)
 
     async def export_definition(self, profile_id: str) -> ClusterDefinitionV1:
         """Re-emit the lossless original definition from cluster_meta."""
@@ -297,6 +326,7 @@ class ClusterService:
 
     def _summarize(self, profile: Profile) -> ClusterSummary:
         meta = profile.cluster_meta or {}
+        budget = meta.get("budget") or {}
         return ClusterSummary(
             id=profile.id,
             name=profile.name,
@@ -312,6 +342,9 @@ class ClusterService:
             bound=profile.sae_id is not None,
             warnings=list(meta.get("warnings", [])),
             hub_ref=meta.get("hub_ref"),
+            intensity_range=(budget.get("intensity_range")
+                             if isinstance(budget.get("intensity_range"), list)
+                             else None),
             created_at=profile.created_at,
             updated_at=profile.updated_at,
         )

@@ -11,7 +11,7 @@ to the vendored file. Never "fix" the vendored file; fix the mirror.
 from datetime import datetime
 from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, Field, field_validator
 
 SCHEMA_VERSION = "1"
 DEFINITION_KIND = "mistudio.cluster-definition"
@@ -126,9 +126,11 @@ class ClusterImportResult(BaseModel):
 
 
 class ClusterSummary(BaseModel):
-    """One cluster-typed profile row for the Clusters page."""
+    """One cluster-typed profile row for the Clusters page.
 
-    model_config = ConfigDict(from_attributes=True)
+    Built manually by ClusterService._summarize (member_count/bound/warnings
+    are derived, not ORM attributes) — deliberately NOT from_attributes.
+    """
 
     id: str
     name: str
@@ -144,6 +146,7 @@ class ClusterSummary(BaseModel):
     bound: bool = False
     warnings: list[str] = Field(default_factory=list)
     hub_ref: dict[str, Any] | None = None
+    intensity_range: list[float] | None = None
     created_at: datetime
     updated_at: datetime
 

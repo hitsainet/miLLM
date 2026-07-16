@@ -35,6 +35,10 @@ miLLM exposes an OpenAI-compatible API at `/v1`, making it a drop-in replacement
 | `presence_penalty` | float | `0.0` | −2 to 2; mapped to repetition penalty internally |
 | `profile` | string | — | **miLLM extension**: apply a saved [steering profile](/features/profiles) for this request only |
 
+:::note Intensity coupling
+When the named profile is an imported **cluster**, its stored strengths are scaled by the cluster's persistent intensity dial (λ, set on the Clusters page) before applying — API callers share that dial until the per-request `steering_intensity` extension ships (Feature 10).
+:::
+
 ```bash
 curl http://localhost:8000/v1/chat/completions \
   -H "Content-Type: application/json" \

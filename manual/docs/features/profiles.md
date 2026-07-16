@@ -28,7 +28,7 @@ Or create one directly on the **Profiles** page, or via `POST /api/profiles` wit
 
 Activation is a **replace**, not a merge — whatever was configured on the Steering page before is cleared first. Activating a profile with an *empty* steering map is a supported way to switch to a clean, unsteered state.
 
-Profile steering values are validated at activation against the attached SAE: out-of-range feature indices or strengths outside ±200 are rejected with a 4xx error rather than partially applied.
+Profile steering values are validated at activation against the attached SAE: out-of-range feature indices are rejected with a 4xx error rather than partially applied, and validation runs BEFORE any live steering is touched. Strengths are scaled by the profile's intensity dial (λ, default 1.0) and **clamped to ±200** at apply time — imported cluster strengths (contract range ±300) times λ can legitimately exceed the steering range, so values clamp instead of rejecting.
 
 ## Per-Request Profiles (API)
 

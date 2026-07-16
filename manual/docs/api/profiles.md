@@ -77,7 +77,7 @@ curl -X POST http://localhost:8000/api/profiles/prof_1a2b3c/deactivate
 Activation **replaces** the current steering values with the profile's and enables steering:
 
 - Requires an attached SAE when the profile has steering values (`400 SAE_NOT_ATTACHED` otherwise)
-- Values are validated against the attached SAE first — out-of-range indices or strengths outside ±200 fail with `400` and nothing is partially applied
+- Indices are validated against the attached SAE first — out-of-range indices fail with `400` BEFORE any live steering is touched (nothing is partially applied). Values are scaled by the profile's intensity (λ) and clamped to ±200 at apply time
 - Activating an empty-steering profile clears existing steering
 - Deactivation (optionally `?clear_steering=false`) clears the steering values by default
 

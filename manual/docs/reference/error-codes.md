@@ -46,7 +46,7 @@ Machine-readable error codes returned by the management API in the [error envelo
 | `SAE_ALREADY_ATTACHED` | 409 | One SAE at a time; also raised deleting an attached SAE |
 | `SAE_INCOMPATIBLE` | 400 | `d_in` doesn't match the loaded model's hidden size |
 | `SAE_LOAD_FAILED` | 500 | Weight loading crashed |
-| `INVALID_FEATURE_INDEX` | 400 | Feature index outside `[0, d_sae)`, or steering value outside ±200 — `details` names the offender |
+| `INVALID_FEATURE_INDEX` | 400 | Feature index outside `[0, d_sae)` — `details` names the offender. (Steering values no longer reject: they clamp to ±200 at apply time.) |
 
 ## Profile errors
 

@@ -9,7 +9,7 @@ the lambda intensity dial, and re-export lossless definitions.
 import json
 from typing import Annotated, Any
 
-from fastapi import APIRouter, Body, Path, Query
+from fastapi import APIRouter, Body, Path, Query, Request
 from pydantic import ValidationError as PydanticValidationError
 
 from millm.api.dependencies import ClusterHubServiceDep, ClusterServiceDep
@@ -54,6 +54,7 @@ async def list_clusters(service: ClusterServiceDep) -> ApiResponse[ClusterListRe
     summary="Import a cluster definition or bundle",
 )
 async def import_clusters(
+    request: Request,
     service: ClusterServiceDep,
     payload: dict[str, Any] = Body(..., description="Definition or bundle JSON"),
     on_conflict: str = Query("rename", pattern="^(rename|fail)$"),
@@ -64,7 +65,16 @@ async def import_clusters(
     `mistudio.cluster-bundle/v1` (per-item isolated). Kind-keyed; strict
     validation against the frozen v1 contract.
     """
-    # Cheap size cap before any validation work (defense against hostile payloads).
+    # Size gates. Content-Length is the true pre-parse defense (FastAPI has
+    # already deserialized `payload` by the time this handler runs); the
+    # re-serialization check below bounds downstream work (Pydantic, DB row)
+    # for chunked bodies without a declared length.
+    declared = request.headers.get("content-length")
+    if declared and declared.isdigit() and int(declared) > MAX_IMPORT_BYTES:
+        return ApiResponse.fail(
+            code="PAYLOAD_TOO_LARGE",
+            message=f"Import exceeds {MAX_IMPORT_BYTES} bytes",
+        )
     if len(json.dumps(payload, separators=(",", ":"))) > MAX_IMPORT_BYTES:
         return ApiResponse.fail(
             code="PAYLOAD_TOO_LARGE",
@@ -75,11 +85,12 @@ async def import_clusters(
     try:
         if kind == BUNDLE_KIND:
             bundle = ClusterBundleV1.model_validate(payload)
-            result = await service.import_bundle(bundle, on_conflict=on_conflict)
+            result = await service.import_bundle(bundle, raw_payload=payload, on_conflict=on_conflict)
         elif kind == DEFINITION_KIND:
             definition = ClusterDefinitionV1.model_validate(payload)
             item = await service.import_definition(
-                definition, on_conflict=on_conflict, activate=activate
+                definition, raw_payload=payload,
+                on_conflict=on_conflict, activate=activate,
             )
             result = ClusterImportResult(
                 results=[item],

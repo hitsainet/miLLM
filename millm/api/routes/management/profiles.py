@@ -281,6 +281,11 @@ class ProfileImportRequest(BaseModel):
     """Request schema for importing a profile."""
 
     version: str = Field(default="1.0", description="Export format version")
+    kind: str | None = Field(
+        default=None,
+        description="Present only in cluster documents — triggers a redirect "
+                    "to /api/clusters/import",
+    )
     name: str = Field(..., min_length=1, max_length=100)
     description: str | None = None
     model_id: str | None = None
@@ -305,6 +310,19 @@ async def export_profile(
     Returns the profile data in a portable format for sharing or miStudio import.
     """
     profile = await service.get_profile(profile_id)
+
+    # Imported clusters export through /api/clusters/{id}/export — the flat
+    # format has no intensity/sign/budget fields, so exporting one here would
+    # silently drop the lambda dial (recipient gets a different steering
+    # effect than the exporter hears; review find).
+    if profile.source_kind == "cluster":
+        return ApiResponse.fail(
+            code="IS_CLUSTER",
+            message=(
+                "This profile is an imported cluster — export the lossless "
+                f"portable definition via /api/clusters/{profile_id}/export"
+            ),
+        )
 
     return ApiResponse.ok(ProfileExportData(
         name=profile.name,
@@ -334,6 +352,19 @@ async def import_profile(
     Creates a new profile from the imported data. Validates the format
     and steering values before creating.
     """
+    # A cluster definition pasted into the flat import would "succeed" as an
+    # empty 0-feature profile (unknown fields ignored, steering defaults {});
+    # detect the kind marker and point at the right endpoint (review find).
+    if request.kind and str(request.kind).startswith("mistudio.cluster"):
+        return ApiResponse.fail(
+            code="IS_CLUSTER_DOCUMENT",
+            message=(
+                "This is a cluster definition/bundle — import it via "
+                "/api/clusters/import (the flat profile format has no members/"
+                "budget semantics)"
+            ),
+        )
+
     # Convert string keys to int keys for steering; reject on any conversion failure
     # rather than silently dropping invalid entries — the caller must know if data
     # was not imported.

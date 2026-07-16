@@ -29,10 +29,20 @@ class FakeAttachedState:
 
 
 def patched_state(**kw):
-    return patch(
-        "millm.services.cluster_service.AttachedSAEState",
-        return_value=FakeAttachedState(**kw),
-    )
+    """Patch the singleton at BOTH import sites: ClusterService (compat
+    assessment) and ProfileService._validate_activation (the shared gate)."""
+    import contextlib
+
+    @contextlib.contextmanager
+    def _both():
+        state = FakeAttachedState(**kw)
+        with patch("millm.services.cluster_service.AttachedSAEState",
+                   return_value=state), \
+             patch("millm.services.sae_service.AttachedSAEState",
+                   return_value=state):
+            yield state
+
+    return _both()
 
 
 @pytest.fixture

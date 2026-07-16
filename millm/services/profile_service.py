@@ -14,6 +14,7 @@ from millm.core.errors import (
     ProfileAlreadyExistsError,
     ProfileNotFoundError,
     SAENotAttachedError,
+    ValidationError,
 )
 from millm.core.steering_range import clamp_steering, would_clamp
 from millm.db.models.profile import Profile
@@ -229,6 +230,18 @@ class ProfileService:
         # Verify profile exists
         profile = await self.get_profile(profile_id)
 
+        # Cluster rows carry lambda=1-basis steering + a lossless stored
+        # definition; free-form steering edits here would silently double-
+        # scale on activation and diverge from the exported artifact
+        # (review find). Clusters change via re-import or the Clusters page.
+        if steering is not None and profile.source_kind == "cluster":
+            raise ValidationError(
+                f"Profile '{profile.name}' is an imported cluster — its "
+                "steering cannot be edited directly. Re-import an updated "
+                "definition or adjust the intensity dial instead.",
+                details={"profile_id": profile_id, "source_kind": "cluster"},
+            )
+
         # Check name uniqueness if changing name
         if name and name != profile.name:
             if await self.repository.name_exists(name, exclude_id=profile_id):
@@ -275,6 +288,45 @@ class ProfileService:
     # Activation Methods
     # =========================================================================
 
+    def _validate_activation(self, profile: Profile) -> None:
+        """
+        Hard activation gate, shared by every activation path.
+
+        Cluster rows (Feature 8): the definition's declared n_features must
+        match the attached SAE's feature space. All rows: every steering
+        index must be within [0, d_sae). Runs BEFORE any live-steering
+        mutation so a refused activation leaves the current steering intact.
+        """
+        from millm.services.sae_service import AttachedSAEState
+
+        sae = AttachedSAEState().attached_sae
+        if sae is None:
+            return  # caller raises SAENotAttachedError with the house message
+
+        if profile.source_kind == "cluster":
+            declared = ((profile.cluster_meta or {}).get("sae") or {}).get("n_features")
+            if declared is not None and int(declared) != sae.d_sae:
+                raise ValidationError(
+                    f"Cluster '{profile.name}' was authored for an SAE with "
+                    f"{declared} features; the attached SAE has {sae.d_sae}. "
+                    "Member indices would be meaningless — activation blocked.",
+                    details={"profile_id": profile.id,
+                             "declared_n_features": declared,
+                             "attached_d_sae": sae.d_sae},
+                )
+
+        bad = [int(k) for k in (profile.steering or {})
+               if not 0 <= int(k) < sae.d_sae]
+        if bad:
+            raise ValidationError(
+                f"Profile '{profile.name}' references feature indices out of "
+                f"range [0, {sae.d_sae}) for the attached SAE: "
+                f"{sorted(bad)[:8]} — activation blocked.",
+                details={"profile_id": profile.id,
+                         "bad_indices": sorted(bad)[:20],
+                         "attached_d_sae": sae.d_sae},
+            )
+
     async def activate_profile(
         self,
         profile_id: str,
@@ -308,6 +360,12 @@ class ProfileService:
                     raise SAENotAttachedError(
                         "Cannot apply steering: no SAE is attached",
                     )
+                # Validate EVERYTHING before touching live steering: this is
+                # the single choke point every activation path goes through
+                # (Profiles route, Clusters route, MCP), and clearing before a
+                # failed set_steering_batch would wipe the active profile's
+                # live steering with no record (review find).
+                self._validate_activation(profile)
                 # Convert string keys back to int and apply. Steering values are
                 # stored at lambda=1 basis (Feature 8): scale by the profile's
                 # intensity dial and clamp to the supported range — imported
@@ -391,8 +449,11 @@ class ProfileService:
 
         cleared_steering = False
 
-        # Clear steering if requested
-        if clear_steering:
+        # Clear steering if requested — but ONLY when the row being
+        # deactivated is the one whose steering is live. Deactivating an
+        # inactive profile must never wipe the active profile's steering
+        # (review find: POST /deactivate on any id used to clear globally).
+        if clear_steering and profile.is_active:
             attachment = self.sae_service.get_attachment_status()
             if attachment.is_attached:
                 self.sae_service.clear_steering()

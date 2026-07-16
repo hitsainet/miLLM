@@ -212,7 +212,9 @@ export function SteeringPage() {
         />
 
         {featureCount > 0 ? (
-          <div className="space-y-2">
+          /* Compact grid: tiles stay elastic INSIDE small cells so many
+             features lay out side-by-side instead of full-width rows */
+          <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 2xl:grid-cols-4 gap-2 items-start">
             {[...features]
               .sort((a, b) => a.index - b.index)
               .map((feature, order) => (

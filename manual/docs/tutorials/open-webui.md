@@ -41,6 +41,38 @@ Open WebUI can't send miLLM's custom `profile` parameter from the chat box, but 
 - **Server-side switching** — activate a different profile in the miLLM UI between conversations
 - **Scripted clients** — anything that lets you set extra body parameters can pass `"profile": "<name>"` per request; see [Per-request profiles](/features/profiles#per-request-profiles-api)
 
+## Step 5 — The Cluster Dial (Filter Function)
+
+With a [cluster](/features/clusters) active, each Open WebUI user can dial the cluster's steering
+intensity per chat — without touching the server-side state other users see.
+
+**Install:** in Open WebUI go to **Admin Panel → Functions → Import Function** and paste the
+contents of [`integrations/openwebui/millm_dial_filter.py`](https://github.com/Onegaishimas/miLLM/blob/main/integrations/openwebui/millm_dial_filter.py)
+from the miLLM repo. Enable it globally or per model.
+
+**Use:** every user gets a **dial** valve (chat ⚙ → Valves):
+
+| Dial | Effect on this user's requests |
+|------|-------------------------------|
+| `default` | Leave steering exactly as the server has it |
+| `off` | Steering disabled for the request (λ = 0) |
+| `min` / `max` | The active cluster's declared `intensity_range` bounds |
+| a number `0`–`2` | That exact λ (e.g. `0.8`) |
+
+The dial rides each request as miLLM's `steering_intensity` extension field: miLLM applies it
+inside the request boundary and restores the previous steering afterwards, so **concurrent chats
+with different dials never interfere**. Responses echo the effective λ in the
+`X-miLLM-Steering-Intensity` header.
+
+:::info Global vs per-request
+The Admin UI's intensity slider (and `PUT /api/clusters/active/intensity`) changes the **global**
+dial — it persists and affects everyone. The OWUI dial is **per request**: it overrides the stored
+λ for that request only and leaves the global state untouched.
+:::
+
+Older miLLM builds without the dial simply ignore the field — enabling the Function against them
+is safe and has no effect.
+
 ## Troubleshooting
 
 | Symptom | Cause / Fix |

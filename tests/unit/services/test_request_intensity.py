@@ -216,12 +216,31 @@ class TestResolveRequestIntensityEcho:
     """Route-level resolution for the X-miLLM-Steering-Intensity echo —
     best-effort and honest: None (no header) when nothing can apply."""
 
-    async def test_numeric_fast_path_no_db(self, service):
+    async def test_numeric_echo_when_live_base_applies(self, service):
         request = MagicMock(steering_intensity=1.3, profile=None)
-        with apply_ctx(make_sae()), \
-             patch("millm.db.base.async_session_factory") as factory:
+        sae = make_sae(values={3: 10.0}, enabled=True)
+        with apply_ctx(sae, active=None):
             assert await service.resolve_request_intensity(request) == 1.3
-            factory.assert_not_called()
+
+    async def test_numeric_echo_capped_at_authored_ceiling(self, service):
+        """R2 fix: a capped numeric dial echoes the lambda that applies."""
+        request = MagicMock(steering_intensity=2.0, profile="p")
+        named = make_profile(
+            steering={"10": 100.0}, source_kind="cluster",
+            cluster_meta={"budget": {"intensity_range": [0.5, 1.2]}},
+        )
+        with apply_ctx(make_sae(enabled=True), by_name=named):
+            assert await service.resolve_request_intensity(request) == 1.2
+
+    async def test_echo_suppressed_when_apply_will_noop(self, service):
+        """R2 fix: dial-only with disabled/empty steering emits no header."""
+        request = MagicMock(steering_intensity=1.5, profile=None)
+        with apply_ctx(make_sae(values={3: 1.0}, enabled=False), active=None):
+            assert await service.resolve_request_intensity(request) is None
+        named_empty = make_profile(steering=None, name="neutral")
+        request = MagicMock(steering_intensity=1.5, profile="neutral")
+        with apply_ctx(make_sae(enabled=True), by_name=named_empty):
+            assert await service.resolve_request_intensity(request) is None
 
     async def test_absent_field_is_none(self, service):
         request = MagicMock(steering_intensity=None)
@@ -229,14 +248,20 @@ class TestResolveRequestIntensityEcho:
 
     async def test_symbolic_resolves_against_active(self, service):
         request = MagicMock(steering_intensity="max", profile=None)
-        active = make_profile(cluster_meta={"budget": {"intensity_range": [0.5, 1.5]}})
-        with apply_ctx(make_sae(), active=active):
+        active = make_profile(
+            steering={"7": 50.0},
+            cluster_meta={"budget": {"intensity_range": [0.5, 1.5]}},
+        )
+        with apply_ctx(make_sae(enabled=True), active=active):
             assert await service.resolve_request_intensity(request) == 1.5
 
     async def test_symbolic_resolves_against_named_profile(self, service):
         request = MagicMock(steering_intensity="min", profile="p")
-        named = make_profile(cluster_meta={"budget": {"intensity_range": [0.7, 1.4]}})
-        with apply_ctx(make_sae(), by_name=named):
+        named = make_profile(
+            steering={"7": 50.0},
+            cluster_meta={"budget": {"intensity_range": [0.7, 1.4]}},
+        )
+        with apply_ctx(make_sae(enabled=True), by_name=named):
             assert await service.resolve_request_intensity(request) == 0.7
 
     async def test_no_sae_suppresses_echo(self, service):
@@ -310,9 +335,9 @@ class TestReviewRound1Fixes:
         assert saved == {"values": {}, "enabled": False}
         sae.enable_steering.assert_called_with(True)
 
-    async def test_numeric_dial_clamped_to_authored_range(self, service):
-        """R1: /v1 is unauthenticated — a numeric lambda must not overdrive
-        past the cluster's declared intensity_range."""
+    async def test_numeric_dial_capped_at_authored_ceiling(self, service):
+        """R1/R2: /v1 is unauthenticated — a numeric lambda must not
+        overdrive past the cluster's declared MAXIMUM."""
         sae = make_sae()
         profile = make_profile(
             steering={"10": 100.0}, source_kind="cluster",
@@ -321,6 +346,28 @@ class TestReviewRound1Fixes:
         with apply_ctx(sae, by_name=profile):
             await service._apply_request_steering("p", 2.0)
         sae.set_steering_batch.assert_called_once_with({10: 120.0})
+
+    async def test_sub_floor_dial_passes_through(self, service):
+        """R2 fix: set_intensity's bounds are [0, hi] — a request BELOW the
+        authored floor dials down, it must never be amplified UP to it."""
+        sae = make_sae()
+        profile = make_profile(
+            steering={"10": 100.0}, source_kind="cluster",
+            cluster_meta={"budget": {"intensity_range": [0.5, 1.2]}},
+        )
+        with apply_ctx(sae, by_name=profile):
+            await service._apply_request_steering("p", 0.05)
+        sae.set_steering_batch.assert_called_once_with({10: 5.0})
+
+    async def test_lambda_zero_skips_index_validation_by_design(self, service):
+        """R2: lambda=0 disables without applying, so index validation is
+        deliberately skipped — pinned so the discontinuity is intentional."""
+        sae = make_sae(d_sae=100, values={5: 1.0}, enabled=True)
+        profile = make_profile(steering={"999": 5.0})
+        with apply_ctx(sae, by_name=profile):
+            saved = await service._apply_request_steering("p", 0.0)
+        assert saved is not None
+        sae.enable_steering.assert_called_once_with(False)
 
     async def test_dial_to_zero_bypasses_range_floor(self, service):
         """Dialing to 0 stays always allowed (set_intensity parity)."""

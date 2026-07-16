@@ -66,6 +66,11 @@ ERROR_STATUS_MAP: dict[str, tuple[int, str]] = {
     "MODEL_LOADING": (503, "server_error"),
     # Validation errors
     "VALIDATION_ERROR": (400, "invalid_request_error"),
+    # Steering profile / dial errors (Feature 8/10): unknown resource and
+    # bad indices are the caller's problem, not the server's — without these
+    # rows the fallback branded them "server_error" (010 R2 find)
+    "PROFILE_NOT_FOUND": (404, "invalid_request_error"),
+    "INVALID_FEATURE_INDEX": (400, "invalid_request_error"),
     "CONTEXT_LENGTH_EXCEEDED": (400, "invalid_request_error"),
     "INVALID_PARAMETER": (400, "invalid_request_error"),
     # Resource errors

@@ -246,14 +246,19 @@ class ClusterService:
 
     def _intensity_bounds(self, profile: Profile) -> tuple[float, float]:
         """Authored intensity_range when present; config fallback otherwise.
-        The dial may always be turned OFF (0) regardless of the range floor."""
+        The dial may always be turned OFF (0) regardless of the range floor.
+        Parsing goes through the shared declared_intensity_range so the
+        management API, /v1 dial, and import warnings can never disagree
+        about the same document (010 R2 find) — and garbage content degrades
+        to the fallback instead of 500ing set_intensity/summaries."""
         from millm.core.config import settings
+        from millm.core.steering_range import declared_intensity_range
 
-        rng = ((profile.cluster_meta or {}).get("budget") or {}).get("intensity_range")
-        if isinstance(rng, list) and len(rng) == 2:
-            lo, hi = float(rng[0]), float(rng[1])
-        else:
+        rng = declared_intensity_range(profile.cluster_meta)
+        if rng is None:
             lo, hi = settings.CLUSTER_INTENSITY_MIN, settings.CLUSTER_INTENSITY_MAX
+        else:
+            lo, hi = rng
         return min(0.0, lo), max(hi, 0.0)
 
     async def export_definition(self, profile_id: str) -> dict[str, Any]:
@@ -321,8 +326,13 @@ class ClusterService:
         return state.attached_sae_id, warnings
 
     def _range_warnings(self, definition: ClusterDefinitionV1) -> list[str]:
+        from millm.core.steering_range import declared_intensity_range
+
         rng = definition.budget.intensity_range if definition.budget else None
-        lam_max = float(rng[1]) if rng and len(rng) == 2 else 2.0
+        normalized = declared_intensity_range(
+            {"budget": {"intensity_range": rng}} if rng is not None else None
+        )
+        lam_max = normalized[1] if normalized is not None else 2.0
         hot = [m.feature_idx for m in definition.members
                if would_clamp(float(m.sign) * float(m.strength) * lam_max)]
         if not hot:

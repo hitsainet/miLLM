@@ -97,6 +97,13 @@ async def create_chat_completion(
         # status is already 200 and the client sees a malformed stream instead of
         # a proper error response.
         from millm.services.request_queue import QueueFullError
+
+        # Same pre-commit rule for a bad profile name: apply-time validation
+        # runs inside the generator (headers already sent), so check the 404
+        # case here while we can still return a proper error response.
+        if request.profile:
+            await inference.ensure_profile_exists(request.profile)
+
         queue = inference.request_queue
         if queue.pending_count >= queue.max_pending:
             raise QueueFullError(

@@ -54,3 +54,44 @@ on the new service functions; hardcoded logger name → `__name__`; non-finite �
   and load-bearing, the first degrades gracefully — acceptable.
 - `steering_intensity` remains chat-completions-only (text completions lack `profile` too);
   `_has_steering_override` is deliberately uniform so adding the fields later inherits routing.
+
+## Round 2 (post-fix verification + fresh angles, 1 finder agent + inline) — 11 findings: 8 fixed, 3 documented
+
+**All 8 round-1 fix verifications passed** (streaming restore has no double-restore/GeneratorExit
+hole; gate hoisting is manual-profile-safe; the 400 handler is registration-order-proof and
+admin-ui-neutral; filter valve matrix verified; manual anchors resolve).
+
+**Fixed:**
+1. **The R1 clamp was wrong in the down direction** — it clamped sub-floor λ UP to the authored
+   floor (a 0.05 request against range [0.5, 1.5] applied at 0.5 — 10× stronger than asked, on a
+   dial the user was turning toward off). set_intensity's authoritative bounds are [0, hi] →
+   ceiling-only cap now; sub-floor passthrough pinned.
+2. **The numeric echo lied whenever the cap engaged** (header echoed the raw λ, apply capped it).
+   → echo and apply now share ONE pure decision core, `_plan_effective_intensity` (deep fix: they
+   cannot drift), and the echo mirrors the ceiling cap.
+3. **Echo still lied on no-op paths** (dial-only with steering disabled / empty base / named-empty
+   profile) → the shared planner returns None for every no-op → header suppressed; docs updated.
+4. **Three divergent interpreters of `budget.intensity_range`** (v1 contract enforces no ordering):
+   /v1 swapped descending pairs, management `_intensity_bounds` didn't (same document produced
+   envelope [0.5,1.5] on /v1 vs [0,0.5] on the management API), `_range_warnings` read `rng[1]`
+   blind. → single shared parser `steering_range.declared_intensity_range` (normalized, guarded);
+   all three consumers rewired.
+5. **Management API still 500'd on garbage ranges** (the R1 hardening was /v1-only;
+   `_intensity_bounds` did bare `float()`) → fixed via the shared parser.
+6. **Streaming + bad named profile aborted the stream after a committed 200** instead of the
+   documented 404 → pre-stream `ensure_profile_exists` check in the route (mirrors the existing
+   pre-stream QueueFullError check); integration test.
+7. **`PROFILE_NOT_FOUND`/`INVALID_FEATURE_INDEX` missing from ERROR_STATUS_MAP** — /v1 branded
+   caller errors as `server_error` (pre-existing, exposed by the new test) → rows added.
+8. **Stale `apply_request_profile` identifier** in the restore docstring → fixed.
+   **Manual wording shipped the wrong (R1) clamp semantics** → corrected to ceiling-cap +
+   sub-floor honored + λ=0-skips-validation note (inline finding).
+
+**Documented:**
+- λ=0 with a named empty profile disables live steering while λ=0.5 no-ops — FPRD DIAL-A3's
+  unconditional "λ=0 disables" wins; discontinuity documented in the API reference, disable log
+  now names the base.
+- λ=0 deliberately skips per-feature index validation (nothing is applied) — pinned by test,
+  documented.
+- 0xcc design docs retain the historical `_apply_request_profile` name in their "generalize
+  this" instructions — accurate as specs, left unchanged.

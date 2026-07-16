@@ -374,3 +374,33 @@ class TestSteeringIntensityDial:
             response = tc.post("/v1/chat/completions", json=self.BODY)
         assert response.status_code == 503
         assert "X-miLLM-Steering-Intensity" not in response.headers
+
+    def test_streaming_bad_profile_404_before_stream_commits(self):
+        """R2: a bad profile name must 404 pre-stream, not abort a 200."""
+        from unittest.mock import AsyncMock, MagicMock
+
+        from millm.api.dependencies import get_inference_service, get_model_service
+        from millm.core.errors import ProfileNotFoundError
+        from millm.main import create_app
+
+        app = create_app()
+        inference = MagicMock()
+        inference.get_loaded_model_info.return_value = MagicMock()
+        inference.get_loaded_model_info.return_value.name = "gpt-4"
+        inference.backend_name = "serial"
+        inference.resolve_request_intensity = AsyncMock(return_value=None)
+        inference.ensure_profile_exists = AsyncMock(
+            side_effect=ProfileNotFoundError("Profile 'ghost' not found")
+        )
+        model_service = MagicMock()
+        model_service.find_model_by_name = AsyncMock(return_value=MagicMock())
+        app.dependency_overrides[get_inference_service] = lambda: inference
+        app.dependency_overrides[get_model_service] = lambda: model_service
+
+        with TestClient(app) as tc:
+            response = tc.post(
+                "/v1/chat/completions",
+                json={**self.BODY, "profile": "ghost", "stream": True},
+            )
+        assert response.status_code == 404
+        assert response.json()["error"]["type"] == "invalid_request_error"

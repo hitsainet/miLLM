@@ -60,7 +60,7 @@ impossible:
 | `default` | Use the operator's `default_dial` setting (which itself defaults to leaving steering as-is) |
 | `off` | Steering disabled for the request (λ = 0) |
 | `min` / `max` | The steering base's declared `intensity_range` bounds (the active cluster's, or the named profile's when a request also carries `profile`) |
-| `custom` | The exact λ from your `custom_lambda` valve (`0`–`2`, clamped into the cluster's declared range) |
+| `custom` | The exact λ from your `custom_lambda` valve (`0`–`2`, capped at the cluster's declared maximum; dialing below the declared floor is honored) |
 
 Operators get matching `default_dial` / `default_custom_lambda` valves that apply to users who
 leave their dial at `default`.

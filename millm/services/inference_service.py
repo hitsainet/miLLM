@@ -412,27 +412,52 @@ class InferenceService:
 
     @staticmethod
     def _intensity_range_of(profile: Any) -> Optional[tuple[float, float]]:
+        """The profile's declared intensity_range via the SHARED parser
+        (millm.core.steering_range.declared_intensity_range) so the /v1 dial,
+        management API, and import warnings interpret the document
+        identically (010 R2 find)."""
+        from millm.core.steering_range import declared_intensity_range
+
+        if profile is None:
+            return None
+        return declared_intensity_range(getattr(profile, "cluster_meta", None))
+
+    @staticmethod
+    def _plan_effective_intensity(
+        explicit: bool,
+        profile: Any,
+        lam: Optional[float],
+        steering_enabled: bool,
+        has_live_values: bool,
+    ) -> Optional[float]:
         """
-        The profile's declared budget.intensity_range as an ordered float
-        pair, or None when absent/malformed. cluster_meta stores the RAW
-        imported document (lossless storage), so nothing about the shape or
-        ordering of the range can be assumed here — a swapped or
-        non-numeric range degrades to None rather than inverting the dial
-        or 500ing every symbolic request.
+        Pure decision core shared by _apply_request_steering and the echo
+        header: the effective lambda this request will run under, or None
+        when apply will leave steering untouched (no-op). Keeping both
+        consumers on ONE function is what makes the X-miLLM-Steering-
+        Intensity header honest — echo and apply cannot drift (010 R2).
+
+        lam is the already-resolved, already-ceiling-clamped request lambda
+        (None = field absent).
         """
-        if profile is None or not getattr(profile, "cluster_meta", None):
+        if profile is None and lam is None:
             return None
-        budget = (profile.cluster_meta or {}).get("budget") or {}
-        candidate = budget.get("intensity_range")
-        if not isinstance(candidate, list) or len(candidate) != 2:
+        if lam == 0.0:
+            # Request-level "off" applies to whatever is running.
+            return 0.0 if steering_enabled else None
+        if profile is not None and profile.steering:
+            if not explicit and not steering_enabled:
+                return None  # dial-only never enables disabled steering
+            if lam is not None:
+                return lam
+            return profile.intensity if profile.intensity is not None else 1.0
+        if explicit and profile is not None:
+            return None  # named profile with no steering — nothing to override
+        if lam is None:
             return None
-        try:
-            lo, hi = float(candidate[0]), float(candidate[1])
-        except (TypeError, ValueError):
-            return None
-        if lo > hi:
-            lo, hi = hi, lo
-        return (lo, hi)
+        if not has_live_values or not steering_enabled:
+            return None  # nothing to scale; never enable unconfigured steering
+        return lam
 
     @classmethod
     def _resolve_intensity(
@@ -457,6 +482,28 @@ class InferenceService:
                   else (settings.CLUSTER_INTENSITY_MIN, settings.CLUSTER_INTENSITY_MAX))
         return {"off": 0.0, "min": lo, "max": hi}[raw]
 
+    async def ensure_profile_exists(self, profile_name: str) -> None:
+        """
+        Raise ProfileNotFoundError when the named profile doesn't exist.
+
+        Used by the streaming route BEFORE committing a 200: apply-time
+        validation runs inside the response generator, after headers are
+        sent, so a bad profile name would otherwise abort the stream instead
+        of returning the documented 404 (010 R2 find). Mirrors the existing
+        pre-stream QueueFullError check.
+        """
+        from millm.core.errors import ProfileNotFoundError
+        from millm.db.base import async_session_factory
+        from millm.db.repositories.profile_repository import ProfileRepository
+
+        async with async_session_factory() as session:
+            repo = ProfileRepository(session)
+            if await repo.get_by_name(profile_name) is None:
+                raise ProfileNotFoundError(
+                    f"Profile '{profile_name}' not found",
+                    details={"profile": profile_name},
+                )
+
     async def resolve_request_intensity(
         self, request: ChatCompletionRequest
     ) -> Optional[float]:
@@ -474,28 +521,43 @@ class InferenceService:
         raw = getattr(request, "steering_intensity", None)
         if raw is None:
             return None
-
-        from millm.services.sae_service import AttachedSAEState
-
-        if AttachedSAEState().attached_sae is None:
-            return None  # apply will no-op; an echoed lambda would be a lie
-        if isinstance(raw, (int, float)):
-            return float(raw)
         try:
+            from millm.services.sae_service import AttachedSAEState
+
+            sae = AttachedSAEState().attached_sae
+            if sae is None:
+                return None  # apply will no-op; an echoed lambda would lie
+
             from millm.db.base import async_session_factory
             from millm.db.repositories.profile_repository import ProfileRepository
 
+            profile_name = getattr(request, "profile", None)
             async with async_session_factory() as session:
                 repo = ProfileRepository(session)
-                profile = (await repo.get_by_name(request.profile)
-                           if getattr(request, "profile", None)
-                           else await repo.get_active())
+                profile = (await repo.get_by_name(profile_name)
+                           if profile_name else await repo.get_active())
+            if profile_name and profile is None:
+                return None  # apply will raise ProfileNotFound; don't echo first
+
+            lam = self._resolve_intensity(raw, profile)
+            # Mirror the apply-time ceiling cap so a capped numeric dial
+            # echoes the lambda that actually applies (R2 find).
+            if lam is not None and profile is not None:
+                rng = self._intensity_range_of(profile)
+                if rng is not None and lam > rng[1]:
+                    lam = rng[1]
+            # Same decision core as apply: None here means apply will no-op
+            # (disabled steering, empty base, ...) — emit no header for it.
+            return self._plan_effective_intensity(
+                bool(profile_name),
+                profile,
+                lam,
+                sae.is_steering_enabled,
+                bool(sae.get_steering_values()),
+            )
         except Exception:
             logger.warning("intensity_echo_resolution_failed", exc_info=True)
             return None
-        if getattr(request, "profile", None) and profile is None:
-            return None  # apply will raise ProfileNotFound; don't echo first
-        return self._resolve_intensity(raw, profile)
 
     async def _apply_request_steering(
         self,
@@ -590,30 +652,51 @@ class InferenceService:
                              "d_sae": sae.d_sae},
                 )
 
-        # A numeric dial is clamped into the cluster's authored
-        # intensity_range (the declared safe envelope the management API
-        # already enforces — /v1 is unauthenticated and must not become the
-        # overdrive loophole). Dial-to-0 stays always allowed, matching
-        # set_intensity semantics; symbolic values resolve inside the range
-        # by construction.
-        if lam is not None and lam != 0.0 and profile is not None:
+        # A numeric dial is capped at the cluster's authored CEILING (the
+        # declared safe maximum the management API already enforces — /v1 is
+        # unauthenticated and must not become the overdrive loophole).
+        # Only the ceiling: set_intensity's authoritative bounds are
+        # [0, hi] — dialing DOWN below the authored floor (toward off) is
+        # always allowed, and clamping a 0.05 request UP to a 0.5 floor
+        # would amplify steering the caller asked to reduce (R2 find).
+        if lam is not None and profile is not None:
             rng = self._intensity_range_of(profile)
-            if rng is not None:
-                bounded = min(max(lam, rng[0]), rng[1])
-                if bounded != lam:
-                    logger.info(
-                        "request_intensity_clamped_to_authored_range",
-                        requested=lam,
-                        applied=bounded,
-                        profile=profile.name,
-                    )
-                    lam = bounded
+            if rng is not None and lam > rng[1]:
+                logger.info(
+                    "request_intensity_capped_at_authored_max",
+                    requested=lam,
+                    applied=rng[1],
+                    profile=profile.name,
+                )
+                lam = rng[1]
+
+        # ONE decision core for "what will this request run under" — shared
+        # with the echo header so the two can never drift (R2 find). All
+        # no-op decisions live in the planner; the raises (gate above, index
+        # validation below) stay here.
+        effective = self._plan_effective_intensity(
+            explicit,
+            profile,
+            lam,
+            sae.is_steering_enabled,
+            bool(sae.get_steering_values()),
+        )
+        if effective is None:
+            logger.info(
+                "steering_intensity_noop",
+                profile=profile.name if profile else None,
+                explicit=explicit,
+                intensity=lam,
+                steering_enabled=sae.is_steering_enabled,
+            )
+            return None
 
         if lam == 0.0:
             # Effective λ 0 disables steering for this request only —
-            # uniformly, whatever the base would have been.
-            if not sae.is_steering_enabled:
-                return None  # already off; nothing to restore
+            # uniformly, whatever the base would have been. NOTE: this
+            # deliberately skips per-feature index validation (nothing is
+            # applied), so a profile that would 400 at λ=0.01 succeeds at
+            # λ=0 — pinned by test, documented in the API reference.
             saved: dict = {
                 "values": sae.get_steering_values(),
                 "enabled": True,
@@ -622,28 +705,17 @@ class InferenceService:
             logger.info(
                 "request_steering_disabled",
                 profile=profile.name if profile else None,
+                base="profile" if (profile is not None and profile.steering)
+                     else "live",
                 intensity=0.0,
             )
             return saved
 
         if profile is not None and profile.steering:
-            if not explicit and not sae.is_steering_enabled:
-                # Dial-only requests must never turn ON steering the
-                # operator turned off (010 pitfall 3) — only an explicitly
-                # named profile may enable.
-                logger.info(
-                    "steering_intensity_noop",
-                    reason="steering disabled; dial-only request will not enable it",
-                    intensity=lam,
-                )
-                return None
-
             # The request dial is ABSOLUTE: it overrides the stored intensity
-            # rather than multiplying it (010 pitfall 1). Field absent falls
-            # back to the profile's stored λ.
-            if lam is None:
-                lam = profile.intensity if profile.intensity is not None else 1.0
-
+            # rather than multiplying it (010 pitfall 1); the planner already
+            # folded the stored-λ fallback into `effective`.
+            #
             # Parse and validate the profile's steering before mutating any
             # state, so a bad value fails cleanly without leaving partial
             # steering applied. Values are stored at lambda=1 basis (Feature
@@ -662,36 +734,14 @@ class InferenceService:
                         details={"profile": profile.name, "feature_idx": idx,
                                  "d_sae": sae.d_sae},
                     )
-                steering[idx] = clamp_steering(float(v) * lam)
-        elif explicit and profile is not None:
-            # Named profile with no steering values — nothing to override,
-            # WITH or WITHOUT a dial (pre-010 semantics preserved; falling
-            # through to the live-values base would steer the request by a
-            # profile the caller never named).
-            logger.info(
-                "steering_intensity_noop",
-                reason="named profile has no steering values",
-                profile=profile.name,
-                intensity=lam,
-            )
-            return None
+                steering[idx] = clamp_steering(float(v) * effective)
         else:
-            # Dial over live steering (no profile carries a base). Never
-            # enable steering that wasn't already configured and enabled
-            # (010 pitfall 3): with steering disabled or empty, a dial has
-            # nothing to scale.
-            if lam is None:
-                return None
+            # Dial over live steering: the planner guaranteed live values
+            # exist and steering is enabled (it returns None otherwise —
+            # never enabling unconfigured steering, never falling through
+            # for a named-but-empty profile).
             live = sae.get_steering_values()
-            if not live or not sae.is_steering_enabled:
-                logger.info(
-                    "steering_intensity_noop",
-                    reason="no live steering to scale",
-                    intensity=lam,
-                )
-                return None
-            # Live values are the λ=1 base for this request.
-            steering = {int(i): clamp_steering(float(v) * lam)
+            steering = {int(i): clamp_steering(float(v) * effective)
                         for i, v in live.items()}
 
         # Save the state we are about to overwrite
@@ -706,7 +756,7 @@ class InferenceService:
         logger.info(
             "request_steering_applied",
             profile=profile.name if profile else None,
-            intensity=lam,
+            intensity=effective,
             features=len(steering),
         )
         return saved
@@ -716,7 +766,7 @@ class InferenceService:
         Restore SAE steering to the state it was in before this request's
         profile override.  Always called in a finally block.
 
-        If saved is None (apply_request_profile found nothing to override)
+        If saved is None (_apply_request_steering found nothing to override)
         this is a no-op.
         """
         if saved is None:

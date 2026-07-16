@@ -250,3 +250,23 @@ class TestIntensityAndExport:
         assert clusters[0].display_token == "fear"
         assert clusters[0].member_count == 2
         assert clusters[0].bound is True
+
+
+class TestSharedRangeParser:
+    """010 R2: one interpreter for budget.intensity_range everywhere."""
+
+    def test_garbage_range_degrades_instead_of_500(self):
+        from millm.core.steering_range import declared_intensity_range
+
+        assert declared_intensity_range(
+            {"budget": {"intensity_range": [None, "x"]}}) is None
+        assert declared_intensity_range(
+            {"budget": {"intensity_range": [1.0]}}) is None
+        assert declared_intensity_range({"budget": {}}) is None
+        assert declared_intensity_range(None) is None
+
+    def test_swapped_range_normalized_ascending(self):
+        from millm.core.steering_range import declared_intensity_range
+
+        assert declared_intensity_range(
+            {"budget": {"intensity_range": [1.5, 0.5]}}) == (0.5, 1.5)

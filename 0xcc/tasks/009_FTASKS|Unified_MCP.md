@@ -4,7 +4,7 @@
 
 **Document Version:** 1.0
 **Created:** July 16, 2026
-**Status:** Not started
+**Status:** Implemented 2026-07-16 (miLLM 0020dce + miStudio 40f55f2) — 4.2/5.2 live E2E post-deploy; reviews + acceptance pending
 **References:** `009_FPRD|Unified_MCP.md` · `009_FTDD|Unified_MCP.md` · `009_FTID|Unified_MCP.md`
 
 ## Relevant Files
@@ -39,32 +39,32 @@
 
 ## Tasks
 
-- [ ] 1.0 miLLM contract deliverables (covers FR-9.3; MCP-C1..C3)
-  - [ ] 1.1 Write `docs/mcp-contract.md` (endpoint inventory, envelope, health-gate contract, auth posture, additive-only versioning rule)
-  - [ ] 1.2 Add `ActiveProfileInfo` + `active_profile` to DetailedHealthResponse; populate from `ProfileRepository.get_active()`; unit test (null + populated)
-  - [ ] 1.3 Document auth posture + same-segment deployment guidance in the contract doc
+- [x] 1.0 miLLM contract deliverables (covers FR-9.3; MCP-C1..C3)
+  - [x] 1.1 Write `docs/mcp-contract.md` (endpoint inventory, envelope, health-gate contract, auth posture, additive-only versioning rule)
+  - [x] 1.2 Add `ActiveProfileInfo` + `active_profile` to DetailedHealthResponse; populate from `ProfileRepository.get_active()`; unit test (null + populated)
+  - [x] 1.3 Document auth posture + same-segment deployment guidance in the contract doc
 
-- [ ] 2.0 [CROSS-REPO] Server plumbing (covers FR-9.1; MCP-S1, MCP-S2, MCP-S4)
-  - [ ] 2.1 config.py: 3 categories in VALID_CATEGORIES (opt-in) + `MILLM_API_URL`
-  - [ ] 2.2 `millm_client.py` with envelope unwrap → BackendError
-  - [ ] 2.3 `health_gate.py` (TTL 10 s; degraded=available; reasons)
-  - [ ] 2.4 Unit tests: client unwrap paths, gate TTL/degraded/refused
-  - [ ] 2.5 server.py wiring: instantiate client+gate; skip millm_* registration when URL empty (log once)
+- [x] 2.0 [CROSS-REPO] Server plumbing (covers FR-9.1; MCP-S1, MCP-S2, MCP-S4)
+  - [x] 2.1 config.py: 3 categories in VALID_CATEGORIES (opt-in) + `MILLM_API_URL`
+  - [x] 2.2 `millm_client.py` with envelope unwrap → BackendError
+  - [x] 2.3 `health_gate.py` (TTL 10 s; degraded=available; reasons)
+  - [x] 2.4 Unit tests: client unwrap paths, gate TTL/degraded/refused
+  - [x] 2.5 server.py wiring: instantiate client+gate; skip millm_* registration when URL empty (log once)
 
-- [ ] 3.0 [CROSS-REPO] miLLM tool modules (covers FR-9.2; MCP-S3, MCP-S5)
-  - [ ] 3.1 `tools/millm_runtime.py` (status/list/activate/set_intensity)
-  - [ ] 3.2 `tools/millm_clusters.py` (list/import XOR-source/hub_search/activate/export)
-  - [ ] 3.3 `tools/millm_sensing.py` (status/events/enable/disable)
-  - [ ] 3.4 Uniform structured-unavailable decorator applied to all millm_* tools
-  - [ ] 3.5 Tool smoke tests (mocked MiLLMClient) incl. XOR validation
-  - [ ] 3.6 SERVER_INSTRUCTIONS: cross-product flow paragraph
+- [x] 3.0 [CROSS-REPO] miLLM tool modules (covers FR-9.2; MCP-S3, MCP-S5)
+  - [x] 3.1 `tools/millm_runtime.py` (status/list/activate/set_intensity)
+  - [x] 3.2 `tools/millm_clusters.py` (list/import XOR-source/hub_search/activate/export)
+  - [x] 3.3 `tools/millm_sensing.py` (status/events/enable/disable)
+  - [x] 3.4 Uniform structured-unavailable decorator applied to all millm_* tools
+  - [x] 3.5 Tool smoke tests (mocked MiLLMClient) incl. XOR validation
+  - [x] 3.6 SERVER_INSTRUCTIONS: cross-product flow paragraph
 
 - [ ] 4.0 [CROSS-REPO] Topology verification (covers FR-9.4)
-  - [ ] 4.1 Matrix test: both products / miStudio-only (URL unset ⇒ categories absent) / miLLM-down (structured unavailable)
+  - [x] 4.1 Matrix test: both products / miStudio-only (URL unset ⇒ categories absent) / miLLM-down (structured unavailable)
   - [ ] 4.2 Live E2E: export_cluster_definition → millm_import_cluster → millm_activate_cluster against deployed stacks (US-9.1)
 
 - [ ] 5.0 Deployment wiring (covers rollout)
-  - [ ] 5.1 [CROSS-REPO] mistudio k8s/base mcp.yaml + compose: MILLM_API_URL + categories env
+  - [x] 5.1 [CROSS-REPO] mistudio k8s/base mcp.yaml + compose: MILLM_API_URL + categories env
   - [ ] 5.2 Verify health-gate behavior on the deployed pair; record in contract doc
 
 - [ ] 6.0 Feature Acceptance (per instruct 008)

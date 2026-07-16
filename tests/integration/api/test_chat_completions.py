@@ -241,3 +241,131 @@ class TestChatCompletionsErrorFormat:
         )
         data = response.json()
         assert data["error"]["type"] == "server_error"
+
+
+class TestSteeringIntensityDial:
+    """Feature 10: the steering_intensity field at the HTTP boundary."""
+
+    BODY = {
+        "model": "gpt-4",
+        "messages": [{"role": "user", "content": "Hello"}],
+    }
+
+    def test_invalid_dial_returns_422_before_model_check(self, client):
+        response = client.post(
+            "/v1/chat/completions",
+            json={**self.BODY, "steering_intensity": 5.0},
+        )
+        assert response.status_code == 422
+
+    def test_symbolic_garbage_returns_422(self, client):
+        response = client.post(
+            "/v1/chat/completions",
+            json={**self.BODY, "steering_intensity": "loud"},
+        )
+        assert response.status_code == 422
+
+    def test_valid_dial_reaches_model_gate(self, client):
+        """A well-formed dial doesn't break routing — request proceeds to the
+        normal no-model 503, not a validation failure."""
+        for dial in ("off", "min", "max", 1.25):
+            response = client.post(
+                "/v1/chat/completions",
+                json={**self.BODY, "steering_intensity": dial},
+            )
+            assert response.status_code == 503, dial
+
+    def test_echo_header_non_streaming(self):
+        """X-miLLM-Steering-Intensity echoes the effective lambda."""
+        from unittest.mock import AsyncMock, MagicMock
+
+        from millm.api.dependencies import get_inference_service, get_model_service
+        from millm.api.schemas.openai import (
+            ChatCompletionChoice,
+            ChatCompletionResponse,
+            ChatMessage,
+            Usage,
+        )
+        from millm.main import create_app
+
+        app = create_app()
+        inference = MagicMock()
+        inference.get_loaded_model_info.return_value = MagicMock(name="gpt-4")
+        inference.get_loaded_model_info.return_value.name = "gpt-4"
+        inference.backend_name = "serial"
+        inference.resolve_request_intensity = AsyncMock(return_value=1.4)
+        inference.create_chat_completion = AsyncMock(
+            return_value=ChatCompletionResponse(
+                id="chatcmpl-1", created=1, model="gpt-4",
+                choices=[ChatCompletionChoice(
+                    index=0,
+                    message=ChatMessage(role="assistant", content="hi"),
+                    finish_reason="stop",
+                )],
+                usage=Usage(prompt_tokens=1, completion_tokens=1, total_tokens=2),
+            )
+        )
+        model_service = MagicMock()
+        model_service.find_model_by_name = AsyncMock(return_value=MagicMock())
+        app.dependency_overrides[get_inference_service] = lambda: inference
+        app.dependency_overrides[get_model_service] = lambda: model_service
+
+        with TestClient(app) as tc:
+            response = tc.post(
+                "/v1/chat/completions",
+                json={**self.BODY, "steering_intensity": "max"},
+            )
+        assert response.status_code == 200
+        assert response.headers["X-miLLM-Steering-Intensity"] == "1.4"
+
+    def test_echo_header_streaming(self):
+        """Streaming sends the echo header before the body."""
+        from unittest.mock import AsyncMock, MagicMock
+
+        from millm.api.dependencies import get_inference_service, get_model_service
+        from millm.main import create_app
+
+        async def fake_stream(request):
+            yield "data: [DONE]\n\n"
+
+        app = create_app()
+        inference = MagicMock()
+        inference.get_loaded_model_info.return_value = MagicMock()
+        inference.get_loaded_model_info.return_value.name = "gpt-4"
+        inference.backend_name = "serial"
+        inference.resolve_request_intensity = AsyncMock(return_value=0.0)
+        inference.stream_chat_completion = fake_stream
+        inference.request_queue = MagicMock(pending_count=0, max_pending=5)
+        model_service = MagicMock()
+        model_service.find_model_by_name = AsyncMock(return_value=MagicMock())
+        app.dependency_overrides[get_inference_service] = lambda: inference
+        app.dependency_overrides[get_model_service] = lambda: model_service
+
+        with TestClient(app) as tc:
+            response = tc.post(
+                "/v1/chat/completions",
+                json={**self.BODY, "steering_intensity": "off", "stream": True},
+            )
+        assert response.status_code == 200
+        assert response.headers["X-miLLM-Steering-Intensity"] == "0"
+        assert response.headers["X-miLLM-Backend"] == "serial"
+
+    def test_no_dial_no_echo_header(self):
+        """Without the field, the header is absent (and no resolution runs)."""
+        from unittest.mock import AsyncMock, MagicMock
+
+        from millm.api.dependencies import get_inference_service, get_model_service
+        from millm.main import create_app
+
+        app = create_app()
+        inference = MagicMock()
+        inference.get_loaded_model_info.return_value = None
+        model_service = MagicMock()
+        model_service.find_model_by_name = AsyncMock(return_value=MagicMock())
+        app.dependency_overrides[get_inference_service] = lambda: inference
+        app.dependency_overrides[get_model_service] = lambda: model_service
+
+        with TestClient(app) as tc:
+            response = tc.post("/v1/chat/completions", json=self.BODY)
+        assert response.status_code == 503
+        assert "X-miLLM-Steering-Intensity" not in response.headers

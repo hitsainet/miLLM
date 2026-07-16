@@ -238,3 +238,43 @@ class TestResolveRequestIntensityEcho:
              patch("millm.db.repositories.profile_repository.ProfileRepository") as MockRepo:
             MockRepo.return_value.get_by_name = AsyncMock(return_value=named)
             assert await service.resolve_request_intensity(request) == 0.7
+
+
+class TestDialConcurrency:
+    """Task 4.2: interleaved dialed requests serialize on the request queue —
+    each apply sees its own lambda and every restore returns the SAE to the
+    pre-request state."""
+
+    async def test_two_dials_apply_independently_and_restore_cleanly(self, service):
+        import asyncio
+
+        # Real steering state (dict-backed fake SAE) shared across "requests".
+        state = {"values": {3: 10.0}, "enabled": True}
+        sae = MagicMock()
+        sae.d_sae = 16384
+        sae.get_steering_values.side_effect = lambda: dict(state["values"])
+        sae.set_steering_batch.side_effect = lambda v: state.update(values=dict(v))
+        sae.enable_steering.side_effect = lambda e: state.update(enabled=e)
+        sae.clear_steering.side_effect = lambda: state.update(values={})
+        type(sae).is_steering_enabled = property(lambda self: state["enabled"])
+
+        observed = []
+
+        async def one_request(lam):
+            async with service._request_queue.acquire():
+                with apply_ctx(sae, active=None):
+                    saved = await service._apply_request_steering(None, lam)
+                    observed.append((lam, dict(state["values"]), state["enabled"]))
+                    await asyncio.sleep(0)  # yield inside the critical section
+                    service._restore_request_profile(saved)
+
+        await asyncio.gather(one_request(2.0), one_request(0.0))
+
+        # Each request saw ONLY its own dial while holding the semaphore.
+        for lam, values, enabled in observed:
+            if lam == 2.0:
+                assert values == {3: 20.0} and enabled is True
+            else:
+                assert enabled is False
+        # And the global state came back exactly as it started.
+        assert state == {"values": {3: 10.0}, "enabled": True}

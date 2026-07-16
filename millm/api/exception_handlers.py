@@ -119,7 +119,14 @@ async def generic_exception_handler(request: Request, exc: Exception) -> JSONRes
         message=user_message,
         details={
             "type": type(exc).__name__,
-            "technical_message": str(exc) if logger.is_enabled_for(logging.DEBUG) else "See server logs",
+            # structlog's stdlib BoundLogger exposes isEnabledFor (camelCase);
+            # is_enabled_for only resolves on the unconfigured lazy proxy, so
+            # under the production logging config it raised AttributeError —
+            # crashing the handler on every unhandled exception. Ask the
+            # stdlib logger directly.
+            "technical_message": str(exc)
+            if logging.getLogger("millm.api.exception_handlers").isEnabledFor(logging.DEBUG)
+            else "See server logs",
         },
     )
 

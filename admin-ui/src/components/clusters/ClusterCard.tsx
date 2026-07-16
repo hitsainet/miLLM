@@ -140,6 +140,13 @@ export function ClusterCard({
             }
             setPendingIntensity(null);
           }}
+          onBlur={() => {
+            // Keyboard users adjust with arrows then Tab away — commit on blur.
+            if (pendingIntensity !== null && pendingIntensity !== cluster.intensity) {
+              onSetIntensity(pendingIntensity);
+            }
+            setPendingIntensity(null);
+          }}
         />
       </div>
 

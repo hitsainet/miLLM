@@ -280,6 +280,166 @@
       "title": "DefinitionSAERef",
       "type": "object"
     },
+    "MemberExample": {
+      "additionalProperties": true,
+      "description": "One representative activating snippet (span = the prime token).",
+      "properties": {
+        "span": {
+          "anyOf": [
+            {
+              "maxLength": 100,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Span"
+        },
+        "text": {
+          "anyOf": [
+            {
+              "maxLength": 500,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Text"
+        }
+      },
+      "title": "MemberExample",
+      "type": "object"
+    },
+    "MemberMeta": {
+      "additionalProperties": true,
+      "description": "Optional display/interpretability metadata for a member \u2014 additive\ncontract revision 2026-07-17 (standardized so importing apps can render\nfeature tiles without a miStudio round-trip).\n\nEVERY field is optional and unknown keys are preserved (extra=\"allow\"):\nconsumers render what they understand and pass the rest through. Nothing\nhere may be load-bearing for steering math \u2014 it is display/reference\ndata only.",
+      "properties": {
+        "category": {
+          "anyOf": [
+            {
+              "maxLength": 50,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Category"
+        },
+        "description": {
+          "anyOf": [
+            {
+              "maxLength": 1000,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Description"
+        },
+        "example": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/MemberExample"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "interpretability": {
+          "anyOf": [
+            {
+              "maximum": 1.0,
+              "minimum": 0.0,
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Interpretability"
+        },
+        "label_source": {
+          "anyOf": [
+            {
+              "maxLength": 50,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Label Source"
+        },
+        "mean_activation": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Mean Activation"
+        },
+        "neuronpedia": {
+          "anyOf": [
+            {
+              "maxLength": 500,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Neuronpedia"
+        },
+        "signature": {
+          "anyOf": [
+            {
+              "maxLength": 200,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Signature"
+        },
+        "top_tokens": {
+          "anyOf": [
+            {
+              "items": {
+                "type": "string"
+              },
+              "maxItems": 10,
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Top Tokens"
+        }
+      },
+      "title": "MemberMeta",
+      "type": "object"
+    },
     "ProfileBudget": {
       "description": "Allocation snapshot from Feature 013 (self-describing: formula + constants travel).",
       "properties": {
@@ -419,6 +579,17 @@
           ],
           "default": null,
           "title": "Max Activation"
+        },
+        "meta": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/MemberMeta"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
         },
         "pinned": {
           "default": false,

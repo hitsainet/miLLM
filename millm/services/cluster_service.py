@@ -389,6 +389,12 @@ class ClusterService:
             is_active=profile.is_active,
             intensity=profile.intensity,
             sensing_enabled=profile.sensing_enabled,
+            members=[
+                (int(mem.get("feature_idx", -1)),
+                 mem.get("label"),
+                 float(mem.get("strength", 0.0)))
+                for mem in (profile.cluster_meta or {}).get("members", [])
+            ][:20],
             member_count=len(meta.get("members", []) or profile.steering or {}),
             display_token=meta.get("display_token"),
             bound=profile.sae_id is not None,

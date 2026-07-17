@@ -11,7 +11,7 @@ to the vendored file. Never "fix" the vendored file; fix the mirror.
 from datetime import datetime
 from typing import Any, Literal
 
-from pydantic import BaseModel, Field, field_validator
+from pydantic import ConfigDict, BaseModel, Field, field_validator
 
 SCHEMA_VERSION = "1"
 DEFINITION_KIND = "mistudio.cluster-definition"
@@ -26,6 +26,46 @@ MAX_IMPORT_BYTES = 1_048_576  # 1 MB — definitions are a few KB; near this is 
 
 # ── Interchange contract (frozen v1 — mirrors miStudio exactly) ─────────────
 
+class MemberExample(BaseModel):
+    """One representative activating snippet (span = the prime token)."""
+
+    model_config = ConfigDict(extra="allow")
+
+    text: str | None = Field(None, max_length=500)
+    span: str | None = Field(None, max_length=100)
+
+
+class MemberMeta(BaseModel):
+    """Optional display/interpretability metadata for a member — additive
+    contract revision 2026-07-17 (standardized so importing apps can render
+    feature tiles without a miStudio round-trip).
+
+    EVERY field is optional and unknown keys are preserved (extra="allow"):
+    consumers render what they understand and pass the rest through. Nothing
+    here may be load-bearing for steering math — it is display/reference
+    data only."""
+
+    model_config = ConfigDict(extra="allow")
+
+    description: str | None = Field(None, max_length=1000)
+    category: str | None = Field(None, max_length=50)
+    label_source: str | None = Field(None, max_length=50)
+    interpretability: float | None = Field(None, ge=0.0, le=1.0)
+    mean_activation: float | None = None
+    top_tokens: list[str] | None = Field(None, max_length=10)
+    signature: str | None = Field(None, max_length=200)
+    example: MemberExample | None = None
+    neuronpedia: str | None = Field(None, max_length=500)
+
+    @field_validator("neuronpedia")
+    @classmethod
+    def http_only(cls, v: str | None) -> str | None:
+        """Portable references only — never filesystem paths."""
+        if v and not (v.startswith("http://") or v.startswith("https://")):
+            raise ValueError("neuronpedia must be an http(s) URL")
+        return v
+
+
 class ProfileMember(BaseModel):
     """A cluster member snapshot with its tuned strength."""
 
@@ -37,6 +77,7 @@ class ProfileMember(BaseModel):
     strength: float = Field(..., ge=-300.0, le=300.0)
     sign: Literal[1, -1] = 1
     pinned: bool = False
+    meta: MemberMeta | None = None
 
 
 class ProfileBudget(BaseModel):
@@ -142,6 +183,9 @@ class ClusterSummary(BaseModel):
     intensity: float
     sensing_enabled: bool
     member_count: int = 0
+    # (feature_idx, label|None, strength) triples for member tiles/chips —
+    # labels arrive via the contract-rev meta enrichment (2026-07-17)
+    members: list[tuple[int, str | None, float]] = Field(default_factory=list)
     display_token: str | None = None
     bound: bool = False
     warnings: list[str] = Field(default_factory=list)

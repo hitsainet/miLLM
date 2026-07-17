@@ -56,6 +56,8 @@ export interface ClusterSummary {
   intensity: number;
   sensing_enabled: boolean;
   member_count: number;
+  /** [feature_idx, label|null, strength] triples for member chips */
+  members?: [number, string | null, number][];
   display_token?: string | null;
   bound: boolean;
   warnings: string[];

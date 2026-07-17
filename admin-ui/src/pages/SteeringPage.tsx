@@ -1,7 +1,9 @@
 import { useState, useMemo } from 'react';
+import { useQuery } from '@tanstack/react-query';
 import { useNavigate } from 'react-router-dom';
 import { AlertCircle, Sliders, Info, Save } from 'lucide-react';
 import { useSteering } from '@hooks/useSteering';
+import { clusterApi } from '@/services/api';
 import { useSAE } from '@hooks/useSAE';
 import { neuronpediaBaseUrl } from '@/utils/neuronpedia';
 import { useModels } from '@hooks/useModels';
@@ -44,6 +46,19 @@ export function SteeringPage() {
   const [profileDescription, setProfileDescription] = useState('');
 
   const features = steering?.features || [];
+  // Labels for the sliders: the ACTIVE cluster's member labels (contract-rev
+  // meta). Manual features have no labels; chips degrade gracefully.
+  const { data: clustersData } = useQuery({
+    queryKey: ['clusters'],
+    queryFn: () => clusterApi.list(),
+    staleTime: 30_000,
+  });
+  const memberLabels: Record<number, string> = {};
+  const activeCluster = clustersData?.clusters.find((c) => c.is_active);
+  activeCluster?.members?.forEach(([idx, label]) => {
+    if (label) memberLabels[idx] = label;
+  });
+
   const featureCount = features.length;
 
   // Generate suggested profile name and description
@@ -221,6 +236,7 @@ export function SteeringPage() {
                   <SteeringSlider
                     key={feature.index}
                     featureIndex={feature.index}
+                    label={memberLabels[feature.index] ?? undefined}
                     colorOrder={order}
                     layer={attachedSAE?.trained_layer}
                     neuronpediaBase={neuronpediaBaseUrl(attachedSAE)}

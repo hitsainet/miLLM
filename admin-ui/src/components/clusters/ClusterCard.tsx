@@ -138,6 +138,21 @@ export function ClusterCard({
         </div>
       </div>
 
+      {(cluster.members?.length ?? 0) > 0 && (
+        <div className="mt-2 flex flex-wrap gap-1">
+          {cluster.members!.map(([idx, label, strength]) => (
+            <span
+              key={idx}
+              title={`#${idx} · strength ${strength}`}
+              className="inline-flex items-center gap-1 rounded bg-slate-800/80 px-1.5 py-0.5 text-[10px] text-slate-300"
+            >
+              <span className="font-mono text-slate-500">#{idx}</span>
+              {label && <span className="max-w-[140px] truncate">{label}</span>}
+            </span>
+          ))}
+        </div>
+      )}
+
       {cluster.warnings.length > 0 && (
         <div className="mt-2 space-y-1">
           {cluster.warnings.map((w) => (

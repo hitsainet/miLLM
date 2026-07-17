@@ -1071,6 +1071,12 @@ class InferenceService:
             if service is None:
                 return
             service.note_request_overhead(sensing_sae._sensing_overhead_ms)
+            if not request_id:
+                # Empty id = the boundary was destroyed mid-request (a
+                # same-profile re-arm reset the buffer). The dropped hits
+                # were never reported — writing this sequence into history
+                # would suppress them FOREVER (enh R2 #2).
+                return
             # History advances on EVERY sensed request — the next request's
             # dedup boundary needs this sequence even when nothing fired.
             # Capped requests stop history at the last REPORTED position

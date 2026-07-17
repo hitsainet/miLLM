@@ -3,7 +3,7 @@
  * overhead) + newest-first event list with WS live prepend.
  */
 
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { Activity, RotateCcw, Trash2 } from 'lucide-react';
 import { Badge, Button } from '@components/common';
 import { useSensing } from '@hooks/useSensing';
@@ -15,6 +15,12 @@ export function SensingPanel() {
     useSensing();
   const [selected, setSelected] = useState<SensingEvent | null>(null);
   const [quorumDraft, setQuorumDraft] = useState<string>('');
+
+  // A draft typed for cluster A must never commit against cluster B after
+  // an armed-profile switch (enh R2 #11)
+  useEffect(() => {
+    setQuorumDraft('');
+  }, [status?.profile_id]);
 
   const commitQuorum = () => {
     if (!status?.profile_id) return;
@@ -79,9 +85,14 @@ export function SensingPanel() {
               / {status.sensable_count ?? status.member_count}
               <button
                 type="button"
-                onClick={() =>
-                  status.profile_id && setMinK(status.profile_id, null)
-                }
+                // preventDefault on mousedown: clicking Reset must not blur
+                // the input first and race a stale-draft commit against the
+                // null-clear (enh R2 #7)
+                onMouseDown={(e) => e.preventDefault()}
+                onClick={() => {
+                  setQuorumDraft('');
+                  if (status.profile_id) setMinK(status.profile_id, null);
+                }}
                 aria-label="Reset quorum to default"
                 title="Reset to the default quorum (all members that can fire)"
                 className="ml-0.5 text-slate-500 hover:text-slate-300"

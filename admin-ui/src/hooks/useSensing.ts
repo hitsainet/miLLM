@@ -3,7 +3,7 @@
  * sensing (Feature 11).
  */
 
-import { useEffect } from 'react';
+import { useEffect, useRef } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { sensingApi } from '@/services/api';
 import { socketClient } from '@/services/socket';
@@ -29,8 +29,10 @@ export function useSensing(profileId?: string) {
     queryFn: () => sensingApi.events({ profileId, limit: 100 }),
   });
 
-  // Status invalidation debounced: one GET per burst, not per event (011 R3).
-  const lastStatusInvalidate = { current: 0 } as { current: number };
+  // Status invalidation debounced: one GET per burst, not per event (011
+  // R3). A real ref — the object-literal version only worked because the
+  // effect deps never changed (enh R2 #9).
+  const lastStatusInvalidate = useRef(0);
 
   // Live prepend: WS events land at the top of the list without a refetch.
   // Each cached list is updated against ITS OWN scope key — a hook scoped

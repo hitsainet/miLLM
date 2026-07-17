@@ -142,7 +142,10 @@ class SensingService:
             threshold_mode=mode,
             min_k=min_k,
             context_tokens=context_tokens,
-            max_events_per_request=settings.SENSING_MAX_EVENTS_PER_REQUEST,
+            # Floor of 1: cap=0 would set truncated-with-zero-hits every
+            # request and freeze the dedup history (enh R2 #10)
+            max_events_per_request=max(
+                1, settings.SENSING_MAX_EVENTS_PER_REQUEST),
         )
 
     def arm_for_profile(self, profile: Any, sae: LoadedSAE) -> None:
@@ -337,6 +340,13 @@ class SensingService:
             d_through_span = tokenizer.decode(window[:span_hi],
                                               skip_special_tokens=False)
             d_all = tokenizer.decode(window, skip_special_tokens=False)
+            if not (d_through_span.startswith(d_before)
+                    and d_all.startswith(d_through_span)):
+                # Byte-level BPE can split a multi-byte character at the
+                # span boundary: the shorter prefix ends in U+FFFD which the
+                # longer one rewrites, so length-slicing would misplace the
+                # highlight (enh R2 #3). Plain text beats a wrong mark.
+                return text, window, None
             parts = {
                 "before": d_before,
                 "span": d_through_span[len(d_before):],

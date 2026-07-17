@@ -45,6 +45,7 @@ class SensingStatusResponse(BaseModel):
     profile_id: Optional[str] = None
     profile_name: Optional[str] = None
     member_count: int = 0
+    sensable_count: int = 0
     min_k: Optional[int] = None
     threshold_mode: Optional[str] = None
     context_tokens: Optional[int] = None

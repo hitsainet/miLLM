@@ -52,3 +52,36 @@ typing nits.
   class as steering mutations; queue-serialized arm mutations remain the named debt.
 - No-stopping-criteria environments store prompt-only history (decode events re-report; context
   degraded) — inherent to the transformers fallback, mitigated by never-shrink.
+
+## Round 2 (fix verification + fresh angles, 1 finder agent) — 11 findings: 9 fixed, 2 already-fixed/documented · 10 R1-fix verdicts (9 correct, 2 escalated)
+
+**Verified correct:** arm-clears-history (all 5 call sites lifecycle-level — dedup intact);
+truncation cap (hits proven ascending; truncated×prefix-guard proven safe — capped sequences are
+never mistaken for prefixes); disarm-path profile guard; SP prefix-decode; config snapshot
+(fresh object per arm — un-mutable by re-arms); sensable validation server-side; reset wiring;
+docs substance; WS prefix filter; export strip.
+
+**Fixed:**
+1. **`sensable_count` never reached the API** — the status schema lacked the field, pydantic
+   silently dropped it, and the UI's `?? member_count` fallback reverted the denominator/input
+   cap to pre-fix behavior. → schema field + a route-body test (the class of "service returns
+   it, schema eats it" now has a pin).
+2. **Same-profile mid-request re-arm caused PERMANENT suppression** — the re-arm destroys the
+   open boundary (hits dropped, documented) but the flush still wrote the full sequence into
+   history: dropped moments became LCP-suppressed forever. → empty request_id (the
+   destroyed-boundary signal) skips the history write.
+3. **Byte-level BPE mid-character splits** could misplace the highlight (U+FFFD rewrite breaks
+   length-slicing) → `startswith` consistency guard falls back to plain text.
+4. **`millm_sensing_config` cleared the override when called WITHOUT min_k** — an agent
+   "checking the config" wiped the operator's tuned quorum. → min_k-or-`reset=true` required;
+   omission refused; WRITES-config docstring; 3 pins (the tool was also entirely unpinned).
+5. Malformed admonition fence in the manual (caution block swallowed content); span-merge
+   sentence restored to its paragraph.
+6. Reset-vs-draft race (blur committed a stale draft against the null-clear) → mousedown
+   preventDefault + draft cleared; draft also cleared on armed-profile switch (a draft typed for
+   cluster A could commit against B); the invalidation debounce became a real `useRef`;
+   `SENSING_MAX_EVENTS_PER_REQUEST` floored at 1 (cap=0 froze dedup history while looking armed).
+
+**Already fixed mid-round:** CLAUDE.md session record (`d1a6f1e`, landed after the agent's
+snapshot). **Documented:** history LCP cost (~ms at 32k ctx, off the hot path) and ~1 MB
+worst-case history — acceptable.

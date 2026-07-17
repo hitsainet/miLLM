@@ -364,3 +364,39 @@ class TestConfigRoute:
         body = response.json()
         assert body["success"] is False
         assert "only 3" in body["error"]["message"]
+
+    def test_status_body_carries_sensable_count(self, client):
+        """Enh R2 #1: the schema silently dropped sensable_count — the UI
+        fallback reverted the denominator fix."""
+        import millm.api.dependencies as deps
+
+        service = deps.get_sensing_service()
+        with patch.object(service, "status", return_value={
+            "armed": True, "profile_id": "p", "profile_name": "n",
+            "member_count": 5, "sensable_count": 3, "min_k": 3,
+            "threshold_mode": "epsilon_max", "context_tokens": 8,
+            "last_request_overhead_ms": 0.1,
+            "overhead_warn_threshold_ms": 5.0,
+            "events_recorded_since_start": 0, "ws_events_dropped": 0,
+            "enabled_clusters": [], "retention": {},
+        }):
+            session = MagicMock()
+            result = MagicMock()
+            result.__iter__ = lambda self: iter([])
+
+            async def _execute(*a, **kw):
+                return result
+
+            session.execute = _execute
+
+            class _Ctx:
+                async def __aenter__(self_inner):
+                    return session
+
+                async def __aexit__(self_inner, *a):
+                    return False
+
+            with patch("millm.db.base.async_session_factory",
+                       return_value=_Ctx()):
+                response = client.get("/api/sensing/status")
+        assert response.json()["data"]["sensable_count"] == 3

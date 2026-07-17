@@ -26,6 +26,7 @@ const eventsMock = vi.fn();
 const eventDetailMock = vi.fn();
 const clearEventsMock = vi.fn();
 const setEnabledMock = vi.fn();
+const setConfigMock = vi.fn();
 
 vi.mock('@/services/api', () => ({
   sensingApi: {
@@ -34,6 +35,7 @@ vi.mock('@/services/api', () => ({
     eventDetail: (...args: unknown[]) => eventDetailMock(...args),
     clearEvents: (...args: unknown[]) => clearEventsMock(...args),
     setEnabled: (...args: unknown[]) => setEnabledMock(...args),
+    setConfig: (...args: unknown[]) => setConfigMock(...args),
   },
 }));
 
@@ -52,6 +54,7 @@ function makeStatus(overrides: Partial<SensingStatus> = {}): SensingStatus {
     overhead_warn_threshold_ms: 5,
     events_recorded_since_start: 2,
     ws_events_dropped: 0,
+    sensable_count: 3,
     enabled_clusters: [],
     retention: { max_events_per_cluster: 1000, max_age_days: 7 },
     ...overrides,
@@ -187,5 +190,68 @@ describe('SensingPanel', () => {
       await screen.findByText(/sensing is enabled for fear cluster/)
     ).toBeInTheDocument();
     expect(screen.getByText(/7 live updates throttled/)).toBeInTheDocument();
+  });
+});
+
+
+describe('SensingPanel quorum control', () => {
+  it('commits a typed quorum on Enter', async () => {
+    statusMock.mockResolvedValue(makeStatus());
+    eventsMock.mockResolvedValue({ events: [], total: 0 });
+    setConfigMock.mockResolvedValue({
+      profile_id: 'prof_s1', min_k: 2, effective_min_k: 2, armed: true,
+    });
+    renderPanel();
+    const input = await screen.findByLabelText(
+      'Quorum (members that must co-fire)'
+    );
+    fireEvent.change(input, { target: { value: '2' } });
+    fireEvent.keyDown(input, { key: 'Enter' });
+    fireEvent.blur(input);
+    await waitFor(() => expect(setConfigMock).toHaveBeenCalledWith('prof_s1', 2));
+    expect(setConfigMock).toHaveBeenCalledTimes(1); // Enter->blur = ONE commit
+  });
+
+  it('reset button clears the override (null)', async () => {
+    statusMock.mockResolvedValue(makeStatus());
+    eventsMock.mockResolvedValue({ events: [], total: 0 });
+    setConfigMock.mockResolvedValue({
+      profile_id: 'prof_s1', min_k: null, effective_min_k: 3, armed: true,
+    });
+    renderPanel();
+    fireEvent.click(await screen.findByLabelText('Reset quorum to default'));
+    await waitFor(() =>
+      expect(setConfigMock).toHaveBeenCalledWith('prof_s1', null)
+    );
+  });
+
+  it('highlights the fired span in event detail', async () => {
+    statusMock.mockResolvedValue(makeStatus());
+    eventsMock.mockResolvedValue({ events: [makeEvent()], total: 1 });
+    eventDetailMock.mockResolvedValue(
+      makeEvent({
+        context_parts: {
+          before: 'the deep ',
+          span: 'ocean',
+          after: ' current',
+        },
+      })
+    );
+    renderPanel();
+    fireEvent.click(await screen.findByText(/fear: 2\/3 members fired/));
+    const mark = await screen.findByText('ocean');
+    expect(mark.tagName).toBe('MARK');
+    expect(screen.getByText(/the deep/)).toBeInTheDocument();
+  });
+
+  it('falls back to plain context_text without parts', async () => {
+    statusMock.mockResolvedValue(makeStatus());
+    eventsMock.mockResolvedValue({ events: [makeEvent()], total: 1 });
+    eventDetailMock.mockResolvedValue(
+      makeEvent({ context_text: 'plain old context', context_parts: null })
+    );
+    renderPanel();
+    fireEvent.click(await screen.findByText(/fear: 2\/3 members fired/));
+    expect(await screen.findByText('plain old context')).toBeInTheDocument();
   });
 });

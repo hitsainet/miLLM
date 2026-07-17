@@ -83,6 +83,7 @@ healthy) mark the product unavailable; tools then return a structured
 | `millm_sensing_status` | `GET /api/sensing/status` |
 | `millm_sensing_events` | `GET /api/sensing/events?profile_id=&limit=&since=` (list rows include context fields) |
 | `millm_sensing_enable` / `_disable` | `POST /api/sensing/{profile_id}/enable` / `/disable` |
+| `millm_sensing_config` | `PUT /api/sensing/{profile_id}/config` (`{min_k}`; null restores the all-sensable default) |
 
 Notes:
 - `repo_id` contains a slash; miLLM's hub routes declare `{repo_id:path}` —

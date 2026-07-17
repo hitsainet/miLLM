@@ -324,3 +324,43 @@ class TestConfigRoute:
         body = response.json()
         assert body["success"] is False
         assert "between 1 and 3" in body["error"]["message"]
+
+    def test_live_rearm_branch_applies_new_quorum(self, client):
+        """Enh R1: the armed-cluster re-arm path (was untested)."""
+        import millm.api.dependencies as deps
+
+        profile = self._profile(is_active=True)
+        sae = MagicMock()
+        sae.d_sae = 16384
+        service = deps.get_sensing_service()
+        service._armed_profile_id = "prof_s1"
+        try:
+            with patch("millm.db.repositories.profile_repository.ProfileRepository") as MockRepo, \
+                 patch("millm.db.base.async_session_factory",
+                       return_value=self._ctx()), \
+                 patch("millm.services.sae_service.AttachedSAEState") as MockState, \
+                 patch.object(service, "arm_for_profile") as mock_arm:
+                MockRepo.return_value.get = _async_return(profile)
+                MockState.return_value.attached_sae = sae
+                response = client.put("/api/sensing/prof_s1/config",
+                                      json={"min_k": 2})
+            assert response.json()["success"] is True
+            mock_arm.assert_called_once()
+        finally:
+            deps._sensing_service = None
+
+    def test_min_k_above_sensable_ceiling_refused(self, client):
+        """Enh R1: quorums no member set can reach are rejected with both
+        counts named."""
+        profile = self._profile()
+        profile.cluster_meta["members"].append(
+            {"feature_idx": 99, "strength": 1.0})  # no max_activation: inf
+        with patch("millm.db.repositories.profile_repository.ProfileRepository") as MockRepo, \
+             patch("millm.db.base.async_session_factory",
+                   return_value=self._ctx()):
+            MockRepo.return_value.get = _async_return(profile)
+            response = client.put("/api/sensing/prof_s1/config",
+                                  json={"min_k": 4})
+        body = response.json()
+        assert body["success"] is False
+        assert "only 3" in body["error"]["message"]

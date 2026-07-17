@@ -85,6 +85,10 @@ All endpoints return the [management envelope](/api/overview#the-management-enve
 | `/api/sensing/events` | DELETE | Clear events (`?profile_id=` scopes to one cluster) |
 | `/api/sensing/{profile_id}/enable` | POST | Enable sensing for a cluster (arms live when that cluster is active with an SAE attached) |
 | `/api/sensing/{profile_id}/disable` | POST | Disable sensing (disarms live) |
+| `/api/sensing/{profile_id}/config` | PUT | Runtime overrides: `{"min_k": n}` sets the quorum (validated against the sensable-member ceiling), `{"min_k": null}` restores the default (all sensable members). Stored miLLM-locally — exports stay lossless. Re-arms live |
+
+Event detail responses include `context_parts` `{before, span, after}` — the window split at the
+fired span so clients can highlight it (older events predate the field and carry `null`).
 
 ## Health & operations (`/api/health`) — [full reference](/api/overview#health--operations-endpoints)
 

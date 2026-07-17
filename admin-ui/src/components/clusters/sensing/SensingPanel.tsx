@@ -4,7 +4,7 @@
  */
 
 import { useState } from 'react';
-import { Activity, Trash2 } from 'lucide-react';
+import { Activity, RotateCcw, Trash2 } from 'lucide-react';
 import { Badge, Button } from '@components/common';
 import { useSensing } from '@hooks/useSensing';
 import type { SensingEvent } from '@/types/sensing';
@@ -62,7 +62,7 @@ export function SensingPanel() {
               <input
                 type="number"
                 min={1}
-                max={status.member_count}
+                max={status.sensable_count ?? status.member_count}
                 placeholder={String(status.min_k ?? '')}
                 value={quorumDraft}
                 onChange={(e) => setQuorumDraft(e.target.value)}
@@ -74,7 +74,20 @@ export function SensingPanel() {
                 title="Members that must co-fire for an event (default: all sensable members). Type a value and press Enter."
                 className="w-12 rounded border border-slate-700 bg-slate-900/70 px-1 py-0.5 text-center font-mono text-xs text-slate-200 focus:border-slate-500 focus:outline-none"
               />
-              / {status.member_count}
+              {/* denominator = members that CAN fire — inf-threshold
+                  members never do (R1: total overstated the ceiling) */}
+              / {status.sensable_count ?? status.member_count}
+              <button
+                type="button"
+                onClick={() =>
+                  status.profile_id && setMinK(status.profile_id, null)
+                }
+                aria-label="Reset quorum to default"
+                title="Reset to the default quorum (all members that can fire)"
+                className="ml-0.5 text-slate-500 hover:text-slate-300"
+              >
+                <RotateCcw className="h-3 w-3" />
+              </button>
             </span>
             {status.threshold_mode === 'floor_only' && (
               <span title="No max_activation data in the definition — thresholds degraded to the floor">

@@ -231,12 +231,24 @@ async def set_sensing_config(
                 details={"profile_id": profile_id},
             )
         member_count = len((profile.cluster_meta or {}).get("members", []))
-        if request.min_k is not None and not 1 <= request.min_k <= member_count:
+        # Validate against the SENSABLE ceiling, not the raw member count:
+        # members with infinite thresholds can never fire, so a quorum above
+        # the sensable count makes events permanently unreachable while
+        # status looks healthy (R1 find).
+        try:
+            probe = service.build_config(profile)
+            sensable = int(sum(1 for theta in probe.thresholds.tolist()
+                               if theta != float("inf")))
+        except ValueError:
+            sensable = member_count
+        if request.min_k is not None and not 1 <= request.min_k <= sensable:
             raise ValidationError(
-                f"min_k must be between 1 and {member_count} "
-                f"(this cluster's member count)",
+                f"min_k must be between 1 and {sensable} — this cluster has "
+                f"{member_count} members but only {sensable} carry usable "
+                f"thresholds and can fire",
                 details={"min_k": request.min_k,
-                         "member_count": member_count},
+                         "member_count": member_count,
+                         "sensable_count": sensable},
             )
         meta = dict(profile.cluster_meta or {})
         local = dict(meta.get("sensing_overrides", {}) or {})
@@ -264,7 +276,7 @@ async def set_sensing_config(
                 raise ValidationError(
                     f"Override saved but re-arm failed: {exc}",
                     details={"profile_id": profile_id},
-                )
+                ) from exc
     try:
         effective_min_k = service.build_config(profile).min_k
     except ValueError:

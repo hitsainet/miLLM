@@ -79,7 +79,13 @@ when the floor alone governs). An **event** is a position where at least `min_k`
 members that *can* fire (members without usable activation statistics are excluded from the
 baseline, since they never fire). The quorum is adjustable live from the sensing panel (or
 `PUT /api/sensing/{id}/config`); the adjustment is stored miLLM-locally, so re-exporting the
-cluster stays lossless. Consecutive positions merge into one span.
+cluster stays lossless.
+
+:::caution Upgrading from earlier builds
+The default quorum used to be ~30% of members (minimum 2). Clusters that produced events under
+the old default may go quiet after upgrading — that's the stricter all-members default, not a
+fault. Lower the quorum from the sensing panel to taste.
+::: Consecutive positions merge into one span.
 
 **One report per moment:** every request re-processes its full prompt (chat history included),
 so without deduplication the same co-firing moment would re-report on every subsequent turn.

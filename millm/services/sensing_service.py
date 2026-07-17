@@ -167,6 +167,12 @@ class SensingService:
                 f"[0, {sae.d_sae}) for the attached SAE"
             )
         sae.arm_sensing(config)
+        # ANY (re)arm clears the dedup history: a cluster switch would LCP
+        # against the OLD cluster's sequence (suppressing moments the new
+        # cluster never reported), and a loosened quorum would keep
+        # newly-reachable moments suppressed (R1 finds). Cost: one
+        # duplicate-report cycle after unrelated re-arms — self-consistent.
+        self._last_request_ids = []
         self._armed_profile_id = profile.id
         self._armed_profile_name = profile.name
         self._armed_config = config
@@ -210,6 +216,7 @@ class SensingService:
         tokenizer: Any,
         ambient_counts: Optional[dict[int, int]] = None,
         profile_id: Optional[str] = None,
+        config_snapshot: Optional[SensingConfig] = None,
     ) -> list[dict[str, Any]]:
         """
         Decode context windows, persist bounded events, emit WS updates.
@@ -236,7 +243,10 @@ class SensingService:
         else:
             display_token = self._display_token
             member_labels = self._member_labels
-        config = self._armed_config
+        # The BEGIN-time config governs these hits (enh R1): after a
+        # mid-request re-arm the armed config carries the NEW cluster's
+        # context window size and member count.
+        config = config_snapshot or self._armed_config
         k = config.context_tokens if config else 0
 
         rows: list[dict[str, Any]] = []
@@ -257,7 +267,8 @@ class SensingService:
                 "context_text": context_text,
                 "context_token_ids": context_ids,
                 "context_parts": context_parts,
-                "summary": self._summary(hit, display_token, member_labels),
+                "summary": self._summary(hit, display_token, member_labels,
+                                          config),
                 # Only the LAST event marks truncation — that's where the
                 # per-request cap actually cut (011 R1: stamping every row
                 # made the cut point unrecoverable).
@@ -292,29 +303,44 @@ class SensingService:
         """±K token window around the span; K=0 keeps events without text.
 
         Returns (full_text, window_ids, parts) where parts splits the window
-        into before/span/after segments decoded SEPARATELY — the span is the
-        fired position(s), so the UI can highlight the prime token without
-        client-side tokenization. Segments are decoded per-segment because
-        token boundaries don't map to character offsets in the joined text.
+        into before/span/after segments so the UI can highlight the fired
+        span (the prime token) without client-side tokenization.
+
+        Segmentation uses PREFIX decodes and length slicing — decoding each
+        segment independently glues words on SentencePiece models (a
+        segment-leading '▁piece' loses its space when decoded standalone;
+        R1 find). Prefix decodes are monotonic appends, so slicing by the
+        shorter prefix's length keeps boundaries exact. Specials are kept
+        (skip_special_tokens=False) so the three prefixes stay aligned —
+        template tokens showing in context is informative for
+        template-anchored events; context_text remains the specials-free
+        plain fallback.
         """
         if k == 0 or full_ids is None or tokenizer is None:
             return None, None, None
         try:
             ids = full_ids[0] if full_ids.dim() == 2 else full_ids
             total = int(ids.shape[-1])
+            if hit.pos_start >= total:
+                # Span entirely beyond the available ids (decode-phase hit
+                # with prompt-only fallback ids): an empty context box with
+                # a zero-width highlight is worse than none (R1 find).
+                return None, None, None
             lo = max(0, hit.pos_start - k)
             hi = min(total, hit.pos_end + 1 + k)
             window = ids[lo:hi].tolist()
             text = tokenizer.decode(window, skip_special_tokens=True)
             span_lo = max(hit.pos_start - lo, 0)
             span_hi = min(hit.pos_end + 1 - lo, len(window))
+            d_before = tokenizer.decode(window[:span_lo],
+                                        skip_special_tokens=False)
+            d_through_span = tokenizer.decode(window[:span_hi],
+                                              skip_special_tokens=False)
+            d_all = tokenizer.decode(window, skip_special_tokens=False)
             parts = {
-                "before": tokenizer.decode(window[:span_lo],
-                                           skip_special_tokens=True),
-                "span": tokenizer.decode(window[span_lo:span_hi],
-                                         skip_special_tokens=False),
-                "after": tokenizer.decode(window[span_hi:],
-                                          skip_special_tokens=True),
+                "before": d_before,
+                "span": d_through_span[len(d_before):],
+                "after": d_all[len(d_through_span):],
             }
             return text, window, parts
         except Exception:
@@ -323,7 +349,8 @@ class SensingService:
 
     def _summary(self, hit: SensedHit,
                  display_token: Optional[str] = None,
-                 member_labels: Optional[dict[int, str]] = None) -> str:
+                 member_labels: Optional[dict[int, str]] = None,
+                 config: Optional[SensingConfig] = None) -> str:
         """Human-readable one-liner, hard-capped at 300 chars (SEN-R4).
         Formatting inputs are parameters so a snapshot flush can render
         neutrally without touching singleton state (011 R3 #1)."""
@@ -331,7 +358,8 @@ class SensingService:
                          else self._display_token)
         member_labels = (member_labels if member_labels is not None
                          else self._member_labels)
-        m = len(self._armed_config.member_indices) if self._armed_config else 0
+        config = config or self._armed_config
+        m = len(config.member_indices) if config else 0
         peak_idx, peak_act = max(hit.fired, key=lambda p: p[1]) if hit.fired \
             else (0, 0.0)
         label = member_labels.get(peak_idx)
@@ -373,7 +401,7 @@ class SensingService:
     # Status
     # ==========================================================================
 
-    def history_boundary(self, prompt_ids: "list[int]") -> int:
+    def history_boundary(self, prompt_ids: list[int]) -> int:
         """Longest common prefix between this request's prompt and the last
         sensed request's full sequence — positions below it were already
         reported when they first occurred (goal item 2). Returns 0 when
@@ -387,15 +415,37 @@ class SensingService:
             lcp += 1
         return lcp
 
-    def note_request_ids(self, full_ids: Any) -> None:
+    def note_request_ids(self, full_ids: Any,
+                         profile_id: Optional[str] = None,
+                         reported_through: Optional[int] = None) -> None:
         """Remember the request's full token sequence for the next request's
         dedup boundary. Called on every sensed request (even with no hits —
-        history must advance regardless)."""
+        history must advance regardless).
+
+        Guards (R1 finds):
+        - profile_id mismatch (disarm/re-arm mid-request) records nothing —
+          history must never bleed across arm states;
+        - reported_through caps the stored sequence when the request hit the
+          event cap: positions beyond the truncation point were NEVER
+          reported, so they must stay re-readable next turn;
+        - a new sequence that is a PREFIX of the current history (failed
+          generation stored prompt-only ids) is discarded — shrinking the
+          boundary would re-report already-reported moments.
+        """
         try:
             if full_ids is None:
                 return
+            if profile_id is not None and profile_id != self._armed_profile_id:
+                return
             ids = full_ids[0] if full_ids.dim() == 2 else full_ids
-            self._last_request_ids = [int(i) for i in ids.tolist()]
+            new_ids = [int(i) for i in ids.tolist()]
+            if reported_through is not None:
+                new_ids = new_ids[:max(0, reported_through)]
+            old_ids = self._last_request_ids
+            if (len(new_ids) < len(old_ids)
+                    and old_ids[:len(new_ids)] == new_ids):
+                return
+            self._last_request_ids = new_ids
         except Exception:
             logger.warning("sensing_history_note_failed", exc_info=False)
 
@@ -431,6 +481,11 @@ class SensingService:
             "profile_id": self._armed_profile_id,
             "profile_name": self._armed_profile_name,
             "member_count": len(config.member_indices) if config else 0,
+            "sensable_count": (
+                int(sum(1 for theta in config.thresholds.tolist()
+                        if theta != float("inf"))) if config is not None
+                else 0
+            ),
             "min_k": config.min_k if config else None,
             "threshold_mode": config.threshold_mode if config else None,
             "context_tokens": config.context_tokens if config else None,

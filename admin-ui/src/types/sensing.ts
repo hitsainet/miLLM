@@ -29,6 +29,8 @@ export interface SensingStatus {
   profile_id: string | null;
   profile_name: string | null;
   member_count: number;
+  /** Members with usable thresholds (only these can fire) */
+  sensable_count?: number;
   min_k: number | null;
   threshold_mode: 'epsilon_max' | 'floor_only' | null;
   context_tokens: number | null;

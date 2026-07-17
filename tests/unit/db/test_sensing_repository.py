@@ -139,3 +139,19 @@ class TestCascade:
         await test_session.flush()
         result = await test_session.execute(select(SensingEvent))
         assert result.scalars().all() == []
+
+
+async def test_context_parts_round_trips(repo, profile):
+    """Enh R1: the highlight segments must survive the JSON column."""
+    rows = await repo.create_many([make_event(
+        context_parts={"before": "the deep ", "span": "ocean",
+                       "after": " current"},
+    )])
+    row = await repo.get(rows[0].id)
+    assert row.context_parts == {"before": "the deep ", "span": "ocean",
+                                 "after": " current"}
+    payload = row.to_dict(include_context=True)
+    assert payload["context_parts"]["span"] == "ocean"
+    # old rows (pre-migration-010) carry None and must not break to_dict
+    old_rows = await repo.create_many([make_event()])
+    assert old_rows[0].to_dict()["context_parts"] is None

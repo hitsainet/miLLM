@@ -211,3 +211,20 @@ class TestUnboundActivateWarning:
         row = await cluster_service.repository.get(item.profile_id)
         assert any("skipped" in w
                    for w in row.cluster_meta.get("warnings", []))
+
+
+class TestSensingOverridesExportStrip:
+    async def test_export_strips_local_sensing_overrides(
+        self, cluster_service
+    ):
+        """Enh R1: UI-set min_k lives OUTSIDE the portable document."""
+        raw = make_definition().model_dump(mode="json")
+        definition = ClusterDefinitionV1.model_validate(raw)
+        with patched_state():
+            item = await cluster_service.import_definition(
+                definition, raw_payload=raw)
+        row = await cluster_service.repository.get(item.profile_id)
+        row.cluster_meta = {**row.cluster_meta,
+                            "sensing_overrides": {"min_k": 2}}
+        exported = await cluster_service.export_definition(item.profile_id)
+        assert "sensing_overrides" not in exported

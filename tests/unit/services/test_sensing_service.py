@@ -110,11 +110,14 @@ class TestContextSlicing:
             ids, make_hit(pos_start=50, pos_end=52), k=3, tokenizer=self.tokenizer)
         assert window == list(range(47, 56))
         assert text.startswith("t47")
-        # Highlighting: the span segment is the fired positions, decoded
-        # SEPARATELY from the before/after context (goal item 1)
+        # Highlighting via PREFIX decodes (R1: independent segment decodes
+        # glued words on SentencePiece) — the boundary space stays with the
+        # segment it precedes, and the parts exactly reconstruct the window
         assert parts["before"] == "t47 t48 t49"
-        assert parts["span"] == "t50 t51 t52"
-        assert parts["after"] == "t53 t54 t55"
+        assert parts["span"] == " t50 t51 t52"
+        assert parts["after"] == " t53 t54 t55"
+        assert parts["before"] + parts["span"] + parts["after"] == \
+            " ".join(f"t{i}" for i in range(47, 56))
 
     def test_event_at_position_zero(self, service):
         ids = torch.arange(10).unsqueeze(0)
@@ -128,7 +131,7 @@ class TestContextSlicing:
         _, window, parts = SensingService._context(
             ids, make_hit(pos_start=9, pos_end=9), k=4, tokenizer=self.tokenizer)
         assert window == [5, 6, 7, 8, 9]
-        assert parts["span"] == "t9" and parts["after"] == ""
+        assert parts["span"] == " t9" and parts["after"] == ""
 
     def test_k_zero_keeps_event_without_text(self, service):
         text, window, parts = SensingService._context(
@@ -285,7 +288,8 @@ class TestInferenceWiring:
         with patch("millm.services.sae_service.AttachedSAEState") as MockState:
             MockState.return_value.attached_sae = sae
             ctx = service._sensing_begin("req-1")
-        assert ctx == (sae, "prof_s1")
+        assert ctx[0] is sae and ctx[1] == "prof_s1"
+        assert ctx[2] is sae._sensing  # config snapshot (enh R1)
         sae.begin_sensing_request.assert_called_once_with("req-1")
 
     def test_begin_skips_under_speculative_decoding(self):
@@ -315,7 +319,7 @@ class TestInferenceWiring:
         with patch("millm.api.dependencies._sensing_service", sensing_service), \
              patch.object(type(service), "is_model_loaded",
                           lambda self: False):
-            await service._notify_sensing((sae, "prof_SNAPSHOT"), ids)
+            await service._notify_sensing((sae, "prof_SNAPSHOT", sae._sensing), ids)
         kwargs = sensing_service.record.await_args.kwargs
         assert kwargs["profile_id"] == "prof_SNAPSHOT"
         sensing_service.note_request_overhead.assert_called_once_with(0.5)
@@ -329,14 +333,14 @@ class TestInferenceWiring:
         with patch("millm.api.dependencies._sensing_service", sensing_service), \
              patch.object(type(service), "is_model_loaded",
                           lambda self: False):
-            await service._notify_sensing((sae, "p"), None)  # no raise
+            await service._notify_sensing((sae, "p", sae._sensing), None)  # no raise
 
     async def test_notify_noop_without_ctx_or_service(self):
         service = self._service()
         await service._notify_sensing(None, None)
         sae = self._armed_sae()
         with patch("millm.api.dependencies._sensing_service", None):
-            await service._notify_sensing((sae, "p"), None)
+            await service._notify_sensing((sae, "p", sae._sensing), None)
         sae.collect_sensing_hits.assert_called_once()  # boundary still closed
 
 
@@ -699,3 +703,79 @@ class TestGoalEnhancements2026_07_17:
         service.note_request_ids(_t.tensor([1, 2, 3]))
         service.disarm(None)
         assert service.history_boundary([1, 2, 3]) == 0
+
+
+class TestReviewRound1SensingEnh:
+    """R1 pins for the enhancement review (2026-07-17)."""
+
+    def test_sentencepiece_style_no_gluing(self, service):
+        """R1: independent segment decodes glue words on SP models — prefix
+        slicing must keep the boundary spaces."""
+        tokenizer = MagicMock()
+
+        def sp_decode(ids, **kw):
+            # SP semantics: pieces carry their own leading-space marker;
+            # a standalone segment decode STRIPS the leading space.
+            pieces = ["Hello", " world", " secret", " plans", " here"]
+            text = "".join(pieces[i] for i in ids)
+            return text.lstrip(" ")
+
+        tokenizer.decode.side_effect = sp_decode
+        _, _, parts = SensingService._context(
+            torch.arange(5), make_hit(pos_start=2, pos_end=2), k=2,
+            tokenizer=tokenizer)
+        joined = parts["before"] + parts["span"] + parts["after"]
+        assert joined == "Hello world secret plans here"
+        assert parts["span"] == " secret"  # boundary space preserved
+
+    def test_span_beyond_ids_yields_no_context(self, service):
+        """R1: decode-phase hit with prompt-only fallback ids must not
+        produce an empty context box with a zero-width highlight."""
+        tokenizer = MagicMock()
+        tokenizer.decode.side_effect = lambda ids, **kw: "x"
+        text, window, parts = SensingService._context(
+            torch.arange(5), make_hit(pos_start=9, pos_end=9), k=2,
+            tokenizer=tokenizer)
+        assert text is None and window is None and parts is None
+
+    def test_any_arm_clears_history(self, service):
+        service.arm_for_profile(make_profile(), MagicMock(d_sae=16384))
+        import torch as _t
+
+        service.note_request_ids(_t.tensor([1, 2, 3]))
+        assert service.history_boundary([1, 2, 3]) == 3
+        # re-arm (same OR different profile) invalidates the premise
+        service.arm_for_profile(make_profile(profile_id="prof_B",
+                                             name="other"),
+                                MagicMock(d_sae=16384))
+        assert service.history_boundary([1, 2, 3]) == 0
+
+    def test_note_guarded_by_armed_profile(self, service):
+        import torch as _t
+
+        service.arm_for_profile(make_profile(), MagicMock(d_sae=16384))
+        service.note_request_ids(_t.tensor([1, 2]), profile_id="prof_GHOST")
+        assert service.history_boundary([1, 2]) == 0  # mismatched: ignored
+        service.note_request_ids(_t.tensor([1, 2]), profile_id="prof_s1")
+        assert service.history_boundary([1, 2]) == 2
+
+    def test_truncated_request_caps_history_at_reported(self, service):
+        """R1: capped-away moments were NEVER reported — history must stop
+        at the truncation point so they re-read next turn."""
+        import torch as _t
+
+        service.note_request_ids(_t.tensor(list(range(100))),
+                                 reported_through=40)
+        assert service.history_boundary(list(range(100))) == 40
+
+    def test_prompt_only_fallback_never_shrinks_history(self, service):
+        """R1: a failed generation stores prompt-only ids — a prefix of the
+        existing history must not shrink the boundary."""
+        import torch as _t
+
+        service.note_request_ids(_t.tensor([1, 2, 3, 4, 5, 6]))
+        service.note_request_ids(_t.tensor([1, 2, 3]))  # prefix: ignored
+        assert service.history_boundary([1, 2, 3, 4, 5, 6, 7]) == 6
+        # a DIVERGING shorter sequence still replaces (new conversation)
+        service.note_request_ids(_t.tensor([9, 8]))
+        assert service.history_boundary([9, 8, 7]) == 2

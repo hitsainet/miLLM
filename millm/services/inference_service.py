@@ -1023,8 +1023,12 @@ class InferenceService:
                 )
                 return None
             sae.begin_sensing_request(request_id)
-            profile_id = sae._sensing.profile_id if sae._sensing else None
-            return (sae, profile_id)
+            # Snapshot profile AND config at begin (011 R1 + enh R1): a
+            # mid-request re-arm must not lend the flush the NEW cluster's
+            # context window size or member count.
+            config = sae._sensing
+            profile_id = config.profile_id if config else None
+            return (sae, profile_id, config)
         except Exception:
             logger.warning("sensing_begin_failed", exc_info=False)
         return None
@@ -1058,7 +1062,7 @@ class InferenceService:
         cannot mis-attribute the flush (011 R1)."""
         if sensing_ctx is None:
             return
-        sensing_sae, profile_id = sensing_ctx
+        sensing_sae, profile_id, config_snapshot = sensing_ctx
         try:
             import millm.api.dependencies as deps
 
@@ -1069,7 +1073,14 @@ class InferenceService:
             service.note_request_overhead(sensing_sae._sensing_overhead_ms)
             # History advances on EVERY sensed request — the next request's
             # dedup boundary needs this sequence even when nothing fired.
-            service.note_request_ids(full_ids)
+            # Capped requests stop history at the last REPORTED position
+            # (capped-away moments were never reported and must re-read
+            # next turn); the profile guard skips post-disarm races.
+            reported_through = None
+            if truncated:
+                reported_through = (hits[-1].pos_end + 1) if hits else 0
+            service.note_request_ids(full_ids, profile_id=profile_id,
+                                     reported_through=reported_through)
             if not hits:
                 return
             ambient = self._ambient_counts(sensing_sae, hits)
@@ -1081,6 +1092,7 @@ class InferenceService:
                 self._tokenizer if self.is_model_loaded() else None,
                 ambient_counts=ambient,
                 profile_id=profile_id,
+                config_snapshot=config_snapshot,
             )
         except Exception:
             logger.exception("sensing_flush_failed")

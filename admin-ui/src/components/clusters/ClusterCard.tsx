@@ -150,6 +150,11 @@ export function ClusterCard({
               {label && <span className="max-w-[140px] truncate">{label}</span>}
             </span>
           ))}
+          {cluster.member_count > cluster.members!.length && (
+            <span className="px-1.5 py-0.5 text-[10px] text-slate-500">
+              +{cluster.member_count - cluster.members!.length} more
+            </span>
+          )}
         </div>
       )}
 

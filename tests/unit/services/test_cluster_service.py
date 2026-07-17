@@ -270,3 +270,4 @@ class TestSharedRangeParser:
 
         assert declared_intensity_range(
             {"budget": {"intensity_range": [1.5, 0.5]}}) == (0.5, 1.5)
+

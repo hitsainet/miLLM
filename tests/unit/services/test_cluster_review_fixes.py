@@ -228,3 +228,51 @@ class TestSensingOverridesExportStrip:
                             "sensing_overrides": {"min_k": 2}}
         exported = await cluster_service.export_definition(item.profile_id)
         assert "sensing_overrides" not in exported
+
+
+class TestSignConvention:
+    """Contract-rev review: miStudio exports SIGNED strengths + a derived
+    sign; blind sign*strength double-negated suppressions into
+    amplifications. The canonical rule handles both producer conventions."""
+
+    async def test_signed_strength_with_redundant_sign(self, cluster_service):
+        """miStudio convention: (-5, sign=-1) must steer -5, not +5."""
+        d = make_definition(members=[
+            {"feature_idx": 100, "strength": -5.0, "sign": -1}])
+        with patched_state():
+            item = await cluster_service.import_definition(d)
+        row = await cluster_service.repository.get(item.profile_id)
+        assert row.steering["100"] == -5.0
+
+    async def test_magnitude_plus_sign(self, cluster_service):
+        """Docstring convention: (5, sign=-1) also steers -5."""
+        d = make_definition(members=[
+            {"feature_idx": 100, "strength": 5.0, "sign": -1}])
+        with patched_state():
+            item = await cluster_service.import_definition(d)
+        row = await cluster_service.repository.get(item.profile_id)
+        assert row.steering["100"] == -5.0
+
+    async def test_plain_positive(self, cluster_service):
+        d = make_definition(members=[
+            {"feature_idx": 100, "strength": 5.0, "sign": 1}])
+        with patched_state():
+            item = await cluster_service.import_definition(d)
+        row = await cluster_service.repository.get(item.profile_id)
+        assert row.steering["100"] == 5.0
+
+
+class TestSummaryMembers:
+    """Contract-rev: ClusterSummary carries member triples for tiles."""
+
+    async def test_summarize_emits_member_triples(self, cluster_service):
+        d = make_definition(members=[
+            {"feature_idx": 100, "strength": 1.2, "label": "fear_of_water"},
+            {"feature_idx": 200, "strength": -0.5},
+        ])
+        with patched_state():
+            item = await cluster_service.import_definition(d)
+            clusters = await cluster_service.list_clusters()
+        summary = next(c for c in clusters if c.id == item.profile_id)
+        assert (100, "fear_of_water", 1.2) in summary.members
+        assert any(m[0] == 200 and m[1] is None for m in summary.members)

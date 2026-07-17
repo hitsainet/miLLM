@@ -72,10 +72,18 @@ class ClusterService:
                 name=definition.name, status="error", error=str(e), warnings=warnings
             )
 
-        # Steering stored at lambda=1 basis; the member's sign folds into the
-        # stored value (definition strengths are magnitudes with a sign field).
+        # Steering stored at lambda=1 basis. Sign rule (contract-rev review):
+        # producers exist in TWO conventions — miStudio exports SIGNED
+        # strengths with a redundant derived sign, while the schema docstring
+        # invited magnitude+sign. Multiplying blindly double-negated
+        # miStudio's suppressions into amplifications. Canonical rule:
+        # a negative strength is already directional (sign is redundant);
+        # a non-negative strength takes its direction from sign.
         steering = {
-            str(m.feature_idx): float(m.sign) * float(m.strength)
+            str(m.feature_idx): (
+                float(m.strength) if float(m.strength) < 0
+                else float(m.sign) * float(m.strength)
+            )
             for m in definition.members
         }
         # Store the RAW document when available: pydantic's extra="ignore"

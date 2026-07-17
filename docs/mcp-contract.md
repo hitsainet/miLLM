@@ -86,6 +86,20 @@ healthy) mark the product unavailable; tools then return a structured
 | `millm_sensing_config` | `PUT /api/sensing/{profile_id}/config` (`{min_k}`; null restores the all-sensable default) |
 
 Notes:
+- **Member `meta` (contract rev 2026-07-17):** each member may carry an
+  optional, extensible `meta` object — display/reference data only
+  (description, category, label_source, interpretability, mean_activation,
+  top_tokens, signature, example{text,span}, neuronpedia URL). ALL fields
+  optional; unknown keys MUST be preserved (producers may add more); nothing
+  in `meta` is ever load-bearing for steering math. `member.label` is
+  populated by miStudio's export enrichment.
+- **Member sign rule:** a NEGATIVE `strength` is already directional (the
+  `sign` field is redundant there); a non-negative `strength` takes its
+  direction from `sign`. Consumers must NOT blindly multiply — miStudio
+  exports signed strengths with a derived sign, and multiplying
+  double-negates suppressions into amplifications.
+- `GET /api/clusters` summaries include `members`: `[feature_idx,
+  label|null, strength]` triples (first 20) for tile/chip display.
 - `repo_id` contains a slash; miLLM's hub routes declare `{repo_id:path}` —
   clients must NOT URL-encode the slash.
 - Cluster activation enforces the declared-feature-space gate server-side

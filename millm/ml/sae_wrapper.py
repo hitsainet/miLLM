@@ -170,6 +170,11 @@ class LoadedSAE:
         self._sensing_truncated: bool = False
         self._sensing_began: bool = False
         self._sensing_request_id: str = ""
+        # History-dedup boundary (goal item 2): positions BELOW this were
+        # part of a previous request's sequence (longest common prefix) and
+        # were already reported then — sensed passes still advance offsets,
+        # but hits anchored before the boundary are suppressed.
+        self._sensing_report_from: int = 0
         self._sensing_batch_warned: bool = False
         # Cumulative per-request overhead accumulator (ms) — read by the
         # sensing status endpoint (SEN-S2); reset at begin.
@@ -572,6 +577,15 @@ class LoadedSAE:
         self._reset_sensing_buffer()
         self._sensing_request_id = request_id
         self._sensing_began = True
+        self._sensing_report_from = 0
+
+    def set_sensing_report_from(self, boundary: int) -> None:
+        """Suppress event creation for absolute positions below `boundary`
+        (the longest common prefix with the previous request) — re-read chat
+        history re-fires the same co-activations every turn otherwise
+        (goal item 2). Offsets/phases still advance normally."""
+        if self._sensing_began:
+            self._sensing_report_from = max(0, int(boundary))
 
     def collect_sensing_hits(self) -> tuple[str, list["SensedHit"], bool]:
         """
@@ -662,6 +676,11 @@ class LoadedSAE:
 
         for row, pos in enumerate(hot_positions):
             abs_pos = self._sensing_token_offset + pos
+            if abs_pos < self._sensing_report_from:
+                # Re-read history (common prefix with the previous request)
+                # — this moment was reported when it first occurred
+                # (goal item 2).
+                continue
             member_mask = fired_hot[row]
             member_acts = acts_hot[row].tolist()
             fired_pairs: dict[int, float] = {}

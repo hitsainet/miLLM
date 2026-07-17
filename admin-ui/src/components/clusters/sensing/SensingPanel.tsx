@@ -11,8 +11,19 @@ import type { SensingEvent } from '@/types/sensing';
 import { SensingEventDetail } from './SensingEventDetail';
 
 export function SensingPanel() {
-  const { status, events, totalEvents, eventsLoading, clearEvents } = useSensing();
+  const { status, events, totalEvents, eventsLoading, clearEvents, setMinK } =
+    useSensing();
   const [selected, setSelected] = useState<SensingEvent | null>(null);
+  const [quorumDraft, setQuorumDraft] = useState<string>('');
+
+  const commitQuorum = () => {
+    if (!status?.profile_id) return;
+    const value = quorumDraft.trim();
+    setQuorumDraft('');
+    if (value === '') return;
+    const parsed = parseInt(value, 10);
+    if (!Number.isNaN(parsed)) setMinK(status.profile_id, parsed);
+  };
 
   return (
     <section className="space-y-3" data-testid="sensing-panel">
@@ -46,8 +57,24 @@ export function SensingPanel() {
           <>
             <Badge variant="success">armed</Badge>
             <span className="text-slate-300">{status.profile_name}</span>
-            <span className="font-mono">
-              {status.member_count} members · quorum {status.min_k}
+            <span className="flex items-center gap-1 font-mono">
+              {status.member_count} members · quorum
+              <input
+                type="number"
+                min={1}
+                max={status.member_count}
+                placeholder={String(status.min_k ?? '')}
+                value={quorumDraft}
+                onChange={(e) => setQuorumDraft(e.target.value)}
+                onBlur={commitQuorum}
+                onKeyDown={(e) =>
+                  e.key === 'Enter' && (e.target as HTMLInputElement).blur()
+                }
+                aria-label="Quorum (members that must co-fire)"
+                title="Members that must co-fire for an event (default: all sensable members). Type a value and press Enter."
+                className="w-12 rounded border border-slate-700 bg-slate-900/70 px-1 py-0.5 text-center font-mono text-xs text-slate-200 focus:border-slate-500 focus:outline-none"
+              />
+              / {status.member_count}
             </span>
             {status.threshold_mode === 'floor_only' && (
               <span title="No max_activation data in the definition — thresholds degraded to the floor">

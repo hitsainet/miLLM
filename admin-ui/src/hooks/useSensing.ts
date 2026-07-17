@@ -78,6 +78,20 @@ export function useSensing(profileId?: string) {
     onError: (error: Error) => toast.error(`Sensing toggle failed: ${error.message}`),
   });
 
+  const configMutation = useMutation({
+    mutationFn: ({ id, minK }: { id: string; minK: number | null }) =>
+      sensingApi.setConfig(id, minK),
+    onSuccess: (result) => {
+      queryClient.invalidateQueries({ queryKey: STATUS_KEY });
+      toast.success(
+        result.min_k == null
+          ? `Quorum reset to default (${result.effective_min_k ?? 'all'})`
+          : `Quorum set to ${result.effective_min_k}`
+      );
+    },
+    onError: (error: Error) => toast.error(`Quorum update failed: ${error.message}`),
+  });
+
   const clearMutation = useMutation({
     mutationFn: (id?: string) => sensingApi.clearEvents(id),
     onSuccess: (result) => {
@@ -95,6 +109,8 @@ export function useSensing(profileId?: string) {
     eventsLoading: eventsQuery.isLoading,
     setEnabled: (id: string, enabled: boolean) =>
       toggleMutation.mutate({ id, enabled }),
+    setMinK: (id: string, minK: number | null) =>
+      configMutation.mutate({ id, minK }),
     isToggling: toggleMutation.isPending,
     clearEvents: (id?: string) => clearMutation.mutate(id),
   };

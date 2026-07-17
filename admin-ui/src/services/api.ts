@@ -199,6 +199,7 @@ async function request<T>(
  * ```
  */
 import type {
+  SensingConfigResult,
   SensingEvent,
   SensingEventList,
   SensingStatus,
@@ -937,6 +938,13 @@ export const sensingApi = {
       `/sensing/${profileId}/${enabled ? 'enable' : 'disable'}`,
       { method: 'POST' }
     ),
+
+  /** Runtime overrides (min_k quorum); null clears back to the default. */
+  setConfig: (profileId: string, minK: number | null) =>
+    request<SensingConfigResult>(`/sensing/${profileId}/config`, {
+      method: 'PUT',
+      body: JSON.stringify({ min_k: minK }),
+    }),
 };
 
 export const api = {

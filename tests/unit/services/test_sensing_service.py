@@ -106,39 +106,46 @@ class TestContextSlicing:
 
     def test_window_around_span(self, service):
         ids = torch.arange(100).unsqueeze(0)  # (1, 100)
-        text, window = SensingService._context(
+        text, window, parts = SensingService._context(
             ids, make_hit(pos_start=50, pos_end=52), k=3, tokenizer=self.tokenizer)
         assert window == list(range(47, 56))
         assert text.startswith("t47")
+        # Highlighting: the span segment is the fired positions, decoded
+        # SEPARATELY from the before/after context (goal item 1)
+        assert parts["before"] == "t47 t48 t49"
+        assert parts["span"] == "t50 t51 t52"
+        assert parts["after"] == "t53 t54 t55"
 
     def test_event_at_position_zero(self, service):
         ids = torch.arange(10).unsqueeze(0)
-        _, window = SensingService._context(
+        _, window, parts = SensingService._context(
             ids, make_hit(pos_start=0, pos_end=0), k=4, tokenizer=self.tokenizer)
         assert window == [0, 1, 2, 3, 4]
+        assert parts["before"] == "" and parts["span"] == "t0"
 
     def test_event_at_end_of_sequence(self, service):
         ids = torch.arange(10)  # 1-D also accepted
-        _, window = SensingService._context(
+        _, window, parts = SensingService._context(
             ids, make_hit(pos_start=9, pos_end=9), k=4, tokenizer=self.tokenizer)
         assert window == [5, 6, 7, 8, 9]
+        assert parts["span"] == "t9" and parts["after"] == ""
 
     def test_k_zero_keeps_event_without_text(self, service):
-        text, window = SensingService._context(
+        text, window, parts = SensingService._context(
             torch.arange(10), make_hit(), k=0, tokenizer=self.tokenizer)
-        assert text is None and window is None
+        assert text is None and window is None and parts is None
 
     def test_missing_ids_degrades(self, service):
-        text, window = SensingService._context(
+        text, window, parts = SensingService._context(
             None, make_hit(), k=4, tokenizer=self.tokenizer)
-        assert text is None and window is None
+        assert text is None and window is None and parts is None
 
     def test_decode_failure_degrades(self, service):
         self.tokenizer.decode.side_effect = RuntimeError("boom")
-        text, window = SensingService._context(
+        text, window, parts = SensingService._context(
             torch.arange(10), make_hit(pos_start=2, pos_end=2), k=2,
             tokenizer=self.tokenizer)
-        assert text is None and window is None
+        assert text is None and window is None and parts is None
 
 
 class TestSummary:
@@ -636,3 +643,56 @@ class TestReviewRound3Pins:
 
     def test_events_recorded_counter_increments(self, service):
         assert service.status()["events_recorded_since_start"] == 0
+
+
+class TestGoalEnhancements2026_07_17:
+    """Pins for the post-increment goal items: quorum=ALL default, local
+    min_k overrides, history dedup, context parts."""
+
+    def test_default_quorum_is_all_sensable_members(self, service):
+        config = service.build_config(make_profile())
+        # 3 members, one lacks max_activation (inf threshold, can't fire)
+        # -> default quorum = the 2 sensable ones, NOT 3 and NOT the old 30%
+        assert config.min_k == 2
+
+    def test_default_quorum_all_when_all_sensable(self, service):
+        members = [
+            {"feature_idx": i, "strength": 1.0, "max_activation": 10.0}
+            for i in range(5)
+        ]
+        config = service.build_config(make_profile(members=members))
+        assert config.min_k == 5  # ALL members (goal item 3)
+
+    def test_local_override_beats_document_sensing_block(self, service):
+        profile = make_profile(sensing={"min_k": 1})
+        profile.cluster_meta["sensing_overrides"] = {"min_k": 2}
+        config = service.build_config(profile)
+        assert config.min_k == 2
+
+    def test_history_boundary_lcp(self, service):
+        from millm.core.config import settings
+
+        assert service.history_boundary([1, 2, 3]) == 0  # no history
+        import torch as _t
+
+        service.note_request_ids(_t.tensor([[1, 2, 3, 4, 5]]))
+        assert service.history_boundary([1, 2, 3, 9, 9]) == 3
+        assert service.history_boundary([1, 2, 3, 4, 5, 6, 7]) == 5
+        assert service.history_boundary([8, 9]) == 0
+
+    def test_history_dedup_flag_off_disables(self, service, monkeypatch):
+        import torch as _t
+
+        from millm.core import config as config_module
+
+        service.note_request_ids(_t.tensor([1, 2, 3]))
+        monkeypatch.setattr(config_module.settings,
+                            "SENSING_DEDUP_HISTORY", False)
+        assert service.history_boundary([1, 2, 3]) == 0
+
+    def test_disarm_clears_history(self, service):
+        import torch as _t
+
+        service.note_request_ids(_t.tensor([1, 2, 3]))
+        service.disarm(None)
+        assert service.history_boundary([1, 2, 3]) == 0

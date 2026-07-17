@@ -72,6 +72,9 @@ class SensingEvent(Base):
     context_token_ids: Mapped[list[int] | None] = mapped_column(
         JSONVariant, nullable=True
     )
+    # {before, span, after} decoded segments — the span is the fired
+    # position(s); lets the UI highlight the prime token (goal item 1)
+    context_parts: Mapped[dict | None] = mapped_column(JSONVariant, nullable=True)
     summary: Mapped[str] = mapped_column(String(300), nullable=False)
     truncated: Mapped[bool] = mapped_column(
         Boolean, server_default="false", nullable=False
@@ -110,4 +113,5 @@ class SensingEvent(Base):
         if include_context:
             data["context_text"] = self.context_text
             data["context_token_ids"] = self.context_token_ids
+            data["context_parts"] = self.context_parts
         return data

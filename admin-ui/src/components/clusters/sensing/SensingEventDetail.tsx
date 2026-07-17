@@ -68,13 +68,23 @@ export function SensingEventDetail({ event, onClose }: SensingEventDetailProps) 
       {detailQuery.isLoading && (
         <div className="text-xs text-slate-500">Loading context…</div>
       )}
-      {detail.context_text != null && detail.context_text !== '' && (
+      {(detail.context_parts != null || (detail.context_text != null && detail.context_text !== '')) && (
         <div>
           <div className="mb-1 text-xs text-slate-500">
             Context (±K tokens around the span)
           </div>
           <div className="rounded bg-slate-900/70 p-2 font-mono text-xs leading-relaxed text-slate-300">
-            {detail.context_text}
+            {detail.context_parts ? (
+              <>
+                {detail.context_parts.before}
+                <mark className="rounded-sm bg-emerald-500/25 px-0.5 font-semibold text-emerald-200">
+                  {detail.context_parts.span}
+                </mark>
+                {detail.context_parts.after}
+              </>
+            ) : (
+              detail.context_text
+            )}
           </div>
         </div>
       )}

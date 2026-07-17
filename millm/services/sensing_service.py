@@ -8,7 +8,6 @@ deactivate / SAE detach disarms; the enable/disable endpoints toggle the
 column and live-arm/disarm when that cluster is active.
 """
 
-import math
 from datetime import datetime
 from typing import Any, Optional
 
@@ -38,6 +37,10 @@ class SensingService:
         # on platforms where monotonic() starts near zero (011 R2).
         self._last_ws_emit_ts: float = float("-inf")
         self._ws_dropped: int = 0
+        # Previous sensed request's full token ids (CPU ints) — the dedup
+        # boundary source (goal item 2). Single-tenant serial server: one
+        # history entry suffices; bounded by the model's context length.
+        self._last_request_ids: list[int] = []
 
     _WS_MAX_PER_FLUSH = 5
     _WS_MIN_INTERVAL_S = 0.1
@@ -58,7 +61,12 @@ class SensingService:
         """
         meta = profile.cluster_meta or {}
         members = meta.get("members", [])
-        overrides = meta.get("sensing", {}) or {}
+        # Document overrides < miLLM-local runtime overrides. The local ones
+        # live under sensing_overrides (set from the UI/API) and are STRIPPED
+        # on export like 'warnings' — mutating the document's own 'sensing'
+        # block would break lossless re-export (goal item 4).
+        overrides = dict(meta.get("sensing", {}) or {})
+        overrides.update(meta.get("sensing_overrides", {}) or {})
 
         def _override(key: str, default: float,
                       minimum: Optional[float] = None) -> float:
@@ -114,7 +122,14 @@ class SensingService:
             )
 
         mode = "floor_only" if missing == len(indices) else "epsilon_max"
-        min_k = int(_override("min_k", max(2, math.ceil(0.3 * len(indices)))))
+        # Default quorum: ALL members that CAN fire (goal item 3). Members
+        # with infinite thresholds never fire — counting them would make
+        # events unreachable, so the "all" baseline is the sensable count.
+        sensable = sum(1 for theta in thetas if theta != float("inf"))
+        try:
+            min_k = int(_override("min_k", max(1, sensable)))
+        except (TypeError, ValueError):
+            min_k = max(1, sensable)
         min_k = max(1, min(min_k, len(indices)))
         context_tokens = int(_override(
             "context_tokens", settings.SENSING_CONTEXT_TOKENS))
@@ -172,6 +187,7 @@ class SensingService:
         self._armed_config = None
         self._display_token = ""
         self._member_labels = {}
+        self._last_request_ids = []
 
     @property
     def is_armed(self) -> bool:
@@ -225,7 +241,8 @@ class SensingService:
 
         rows: list[dict[str, Any]] = []
         for i, hit in enumerate(hits):
-            context_text, context_ids = self._context(full_ids, hit, k, tokenizer)
+            context_text, context_ids, context_parts = self._context(
+                full_ids, hit, k, tokenizer)
             rows.append({
                 "profile_id": profile_id,
                 "request_id": request_id,
@@ -239,6 +256,7 @@ class SensingService:
                 "ambient_fired_count": (ambient_counts or {}).get(i),
                 "context_text": context_text,
                 "context_token_ids": context_ids,
+                "context_parts": context_parts,
                 "summary": self._summary(hit, display_token, member_labels),
                 # Only the LAST event marks truncation — that's where the
                 # per-request cap actually cut (011 R1: stamping every row
@@ -270,20 +288,38 @@ class SensingService:
         hit: SensedHit,
         k: int,
         tokenizer: Any,
-    ) -> tuple[Optional[str], Optional[list[int]]]:
-        """±K token window around the span; K=0 keeps events without text."""
+    ) -> tuple[Optional[str], Optional[list[int]], Optional[dict[str, str]]]:
+        """±K token window around the span; K=0 keeps events without text.
+
+        Returns (full_text, window_ids, parts) where parts splits the window
+        into before/span/after segments decoded SEPARATELY — the span is the
+        fired position(s), so the UI can highlight the prime token without
+        client-side tokenization. Segments are decoded per-segment because
+        token boundaries don't map to character offsets in the joined text.
+        """
         if k == 0 or full_ids is None or tokenizer is None:
-            return None, None
+            return None, None, None
         try:
             ids = full_ids[0] if full_ids.dim() == 2 else full_ids
+            total = int(ids.shape[-1])
             lo = max(0, hit.pos_start - k)
-            hi = min(int(ids.shape[-1]), hit.pos_end + 1 + k)
+            hi = min(total, hit.pos_end + 1 + k)
             window = ids[lo:hi].tolist()
             text = tokenizer.decode(window, skip_special_tokens=True)
-            return text, window
+            span_lo = max(hit.pos_start - lo, 0)
+            span_hi = min(hit.pos_end + 1 - lo, len(window))
+            parts = {
+                "before": tokenizer.decode(window[:span_lo],
+                                           skip_special_tokens=True),
+                "span": tokenizer.decode(window[span_lo:span_hi],
+                                         skip_special_tokens=False),
+                "after": tokenizer.decode(window[span_hi:],
+                                          skip_special_tokens=True),
+            }
+            return text, window, parts
         except Exception:
             logger.warning("sensing_context_decode_failed", exc_info=False)
-            return None, None
+            return None, None, None
 
     def _summary(self, hit: SensedHit,
                  display_token: Optional[str] = None,
@@ -336,6 +372,32 @@ class SensingService:
     # ==========================================================================
     # Status
     # ==========================================================================
+
+    def history_boundary(self, prompt_ids: "list[int]") -> int:
+        """Longest common prefix between this request's prompt and the last
+        sensed request's full sequence — positions below it were already
+        reported when they first occurred (goal item 2). Returns 0 when
+        dedup is disabled or there is no history."""
+        if not settings.SENSING_DEDUP_HISTORY or not self._last_request_ids:
+            return 0
+        previous = self._last_request_ids
+        n = min(len(previous), len(prompt_ids))
+        lcp = 0
+        while lcp < n and previous[lcp] == prompt_ids[lcp]:
+            lcp += 1
+        return lcp
+
+    def note_request_ids(self, full_ids: Any) -> None:
+        """Remember the request's full token sequence for the next request's
+        dedup boundary. Called on every sensed request (even with no hits —
+        history must advance regardless)."""
+        try:
+            if full_ids is None:
+                return
+            ids = full_ids[0] if full_ids.dim() == 2 else full_ids
+            self._last_request_ids = [int(i) for i in ids.tolist()]
+        except Exception:
+            logger.warning("sensing_history_note_failed", exc_info=False)
 
     def note_request_overhead(self, overhead_ms: float) -> None:
         self._last_request_overhead_ms = overhead_ms

@@ -245,3 +245,82 @@ def _async_return(value):
         return value
 
     return MagicMock(side_effect=_call)
+
+
+class TestConfigRoute:
+    """Goal item 4: runtime min_k override — persisted locally (export
+    stays lossless) with live re-arm."""
+
+    def _profile(self, is_active=False):
+        profile = MagicMock()
+        profile.id = "prof_s1"
+        profile.source_kind = "cluster"
+        profile.is_active = is_active
+        profile.sensing_enabled = True
+        profile.cluster_meta = {
+            "members": [
+                {"feature_idx": 7, "strength": 1.0, "max_activation": 40.0},
+                {"feature_idx": 9, "strength": 1.0, "max_activation": 20.0},
+                {"feature_idx": 12, "strength": 1.0, "max_activation": 10.0},
+            ],
+        }
+        profile.name = "fear cluster"
+        return profile
+
+    def _ctx(self):
+        session = MagicMock()
+
+        async def _commit():
+            return None
+
+        session.commit = _commit
+
+        class _Ctx:
+            async def __aenter__(self_inner):
+                return session
+
+            async def __aexit__(self_inner, *a):
+                return False
+
+        return _Ctx()
+
+    def test_set_min_k_persists_local_override(self, client):
+        profile = self._profile()
+        with patch("millm.db.repositories.profile_repository.ProfileRepository") as MockRepo, \
+             patch("millm.db.base.async_session_factory",
+                   return_value=self._ctx()):
+            MockRepo.return_value.get = _async_return(profile)
+            response = client.put("/api/sensing/prof_s1/config",
+                                  json={"min_k": 2})
+        body = response.json()
+        assert body["success"] is True
+        assert body["data"]["effective_min_k"] == 2
+        # stored OUTSIDE the portable document
+        assert profile.cluster_meta["sensing_overrides"] == {"min_k": 2}
+        assert "min_k" not in profile.cluster_meta.get("sensing", {})
+
+    def test_null_clears_override_back_to_all(self, client):
+        profile = self._profile()
+        profile.cluster_meta["sensing_overrides"] = {"min_k": 1}
+        with patch("millm.db.repositories.profile_repository.ProfileRepository") as MockRepo, \
+             patch("millm.db.base.async_session_factory",
+                   return_value=self._ctx()):
+            MockRepo.return_value.get = _async_return(profile)
+            response = client.put("/api/sensing/prof_s1/config",
+                                  json={"min_k": None})
+        body = response.json()
+        assert body["success"] is True
+        assert body["data"]["effective_min_k"] == 3  # ALL sensable members
+        assert "sensing_overrides" not in profile.cluster_meta
+
+    def test_out_of_range_min_k_refused(self, client):
+        profile = self._profile()
+        with patch("millm.db.repositories.profile_repository.ProfileRepository") as MockRepo, \
+             patch("millm.db.base.async_session_factory",
+                   return_value=self._ctx()):
+            MockRepo.return_value.get = _async_return(profile)
+            response = client.put("/api/sensing/prof_s1/config",
+                                  json={"min_k": 9})
+        body = response.json()
+        assert body["success"] is False
+        assert "between 1 and 3" in body["error"]["message"]

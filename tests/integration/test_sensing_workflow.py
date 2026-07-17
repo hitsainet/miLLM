@@ -46,7 +46,9 @@ def make_profile():
             {"feature_idx": 1, "strength": 1.0, "max_activation": 10.0},
             {"feature_idx": 2, "strength": 1.0, "max_activation": 10.0},
         ],
-        "sensing": {"context_tokens": 3},
+        # min_k pinned at 2: the default quorum is now ALL sensable
+        # members (goal item 3) and this fixture co-fires 2 of 3
+        "sensing": {"context_tokens": 3, "min_k": 2},
     }
     return profile
 

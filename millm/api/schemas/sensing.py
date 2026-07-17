@@ -23,6 +23,7 @@ class SensingEventResponse(BaseModel):
     ambient_fired_count: Optional[int] = None
     context_text: Optional[str] = None
     context_token_ids: Optional[list[int]] = None
+    context_parts: Optional[dict[str, str]] = None
     summary: str
     truncated: bool
     created_at: Optional[datetime] = None
@@ -59,4 +60,21 @@ class SensingStatusResponse(BaseModel):
 class SensingToggleResult(BaseModel):
     profile_id: str
     sensing_enabled: bool
+    armed: bool
+
+
+class SensingConfigRequest(BaseModel):
+    """Runtime sensing overrides (miLLM-local; never exported)."""
+
+    min_k: Optional[int] = Field(
+        None, ge=1,
+        description="Quorum: members that must co-fire for an event. "
+                    "null clears the override (default: all sensable members)",
+    )
+
+
+class SensingConfigResult(BaseModel):
+    profile_id: str
+    min_k: Optional[int] = None
+    effective_min_k: Optional[int] = None
     armed: bool

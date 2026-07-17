@@ -1029,6 +1029,26 @@ class InferenceService:
             logger.warning("sensing_begin_failed", exc_info=False)
         return None
 
+    def _sensing_mark_history(self, sensing_ctx, prompt_ids) -> None:
+        """Set the history-dedup boundary for this request (goal item 2):
+        positions inside the longest common prefix with the previous sensed
+        request were already reported when they first occurred. Called right
+        after tokenization; never raises."""
+        if sensing_ctx is None or prompt_ids is None:
+            return
+        try:
+            import millm.api.dependencies as deps
+
+            service = deps._sensing_service
+            if service is None:
+                return
+            ids = prompt_ids[0] if prompt_ids.dim() == 2 else prompt_ids
+            boundary = service.history_boundary([int(i) for i in ids.tolist()])
+            if boundary > 0:
+                sensing_ctx[0].set_sensing_report_from(boundary)
+        except Exception:
+            logger.warning("sensing_history_boundary_failed", exc_info=False)
+
     async def _notify_sensing(self, sensing_ctx, full_ids) -> None:
         """Collect + record this request's sensing hits (post-generation,
         off the hot path). Sibling of _notify_monitoring; never raises.
@@ -1047,6 +1067,9 @@ class InferenceService:
             if service is None:
                 return
             service.note_request_overhead(sensing_sae._sensing_overhead_ms)
+            # History advances on EVERY sensed request — the next request's
+            # dedup boundary needs this sequence even when nothing fired.
+            service.note_request_ids(full_ids)
             if not hits:
                 return
             ambient = self._ambient_counts(sensing_sae, hits)
@@ -1316,6 +1339,7 @@ class InferenceService:
                 inputs = self._tokenizer(prompt, return_tensors="pt").to(self._get_input_device())
                 prompt_tokens = inputs.input_ids.shape[1]
                 _sensing_full_ids = inputs.input_ids  # prefill-only fallback
+                self._sensing_mark_history(_sensing_sae, inputs.input_ids)
 
                 # Build generation config
                 gen_config = GenerationConfig.from_request(request)
@@ -1475,6 +1499,7 @@ class InferenceService:
                 # Tokenize
                 inputs = self._tokenizer(prompt, return_tensors="pt").to(self._get_input_device())
                 prompt_tokens = inputs["input_ids"].shape[1]
+                self._sensing_mark_history(_sensing_sae, inputs["input_ids"])
 
                 # Set up streamer
                 streamer = TextIteratorStreamer(
@@ -1778,6 +1803,7 @@ class InferenceService:
                         self._get_input_device()
                     )
                     prompt_tokens = inputs.input_ids.shape[1]
+                    self._sensing_mark_history(_sensing_ctx, inputs.input_ids)
                     self._check_context_length(prompt_tokens, gen_config.max_new_tokens)
 
                     # Generate - offload to thread to avoid blocking the event loop

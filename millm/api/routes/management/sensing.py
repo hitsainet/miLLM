@@ -13,6 +13,8 @@ from fastapi import APIRouter, Depends, Path, Query
 
 from millm.api.schemas.common import ApiResponse
 from millm.api.schemas.sensing import (
+    SensingConfigRequest,
+    SensingConfigResult,
     SensingEventListResponse,
     SensingEventResponse,
     SensingStatusResponse,
@@ -196,6 +198,84 @@ async def _toggle(profile_id: str, enabled: bool) -> SensingToggleResult:
         sensing_enabled=enabled,
         armed=service.is_armed,
     )
+
+
+@router.put(
+    "/{profile_id}/config",
+    response_model=ApiResponse[SensingConfigResult],
+    summary="Adjust sensing runtime overrides (quorum etc.) for a cluster",
+)
+async def set_sensing_config(
+    profile_id: ProfileId, request: SensingConfigRequest
+) -> ApiResponse[SensingConfigResult]:
+    """Persist miLLM-local sensing overrides (stored OUTSIDE the portable
+    document — export stays lossless) and live re-arm when this cluster is
+    the armed one. min_k=null clears the override back to the default
+    (ALL sensable members)."""
+    from millm.db.base import async_session_factory
+    from millm.db.repositories.profile_repository import ProfileRepository
+    from millm.services.sae_service import AttachedSAEState
+
+    service = _sensing_service()
+    async with async_session_factory() as session:
+        repo = ProfileRepository(session)
+        profile = await repo.get(profile_id)
+        if profile is None:
+            raise ProfileNotFoundError(
+                f"Profile '{profile_id}' not found",
+                details={"profile_id": profile_id},
+            )
+        if getattr(profile, "source_kind", None) != "cluster":
+            raise ValidationError(
+                "Sensing applies to imported clusters only",
+                details={"profile_id": profile_id},
+            )
+        member_count = len((profile.cluster_meta or {}).get("members", []))
+        if request.min_k is not None and not 1 <= request.min_k <= member_count:
+            raise ValidationError(
+                f"min_k must be between 1 and {member_count} "
+                f"(this cluster's member count)",
+                details={"min_k": request.min_k,
+                         "member_count": member_count},
+            )
+        meta = dict(profile.cluster_meta or {})
+        local = dict(meta.get("sensing_overrides", {}) or {})
+        if request.min_k is None:
+            local.pop("min_k", None)
+        else:
+            local["min_k"] = int(request.min_k)
+        if local:
+            meta["sensing_overrides"] = local
+        else:
+            meta.pop("sensing_overrides", None)
+        profile.cluster_meta = meta
+        is_active_enabled = bool(profile.is_active) and bool(
+            profile.sensing_enabled)
+        await session.commit()
+
+    # Live re-arm so the new quorum applies immediately
+    effective_min_k = None
+    if is_active_enabled and service.armed_profile_id == profile_id:
+        sae = AttachedSAEState().attached_sae
+        if sae is not None:
+            try:
+                service.arm_for_profile(profile, sae)
+            except ValueError as exc:
+                raise ValidationError(
+                    f"Override saved but re-arm failed: {exc}",
+                    details={"profile_id": profile_id},
+                )
+    try:
+        effective_min_k = service.build_config(profile).min_k
+    except ValueError:
+        effective_min_k = None
+
+    return ApiResponse.ok(SensingConfigResult(
+        profile_id=profile_id,
+        min_k=request.min_k,
+        effective_min_k=effective_min_k,
+        armed=service.is_armed,
+    ))
 
 
 @router.post(

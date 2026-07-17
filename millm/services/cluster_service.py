@@ -286,6 +286,9 @@ class ClusterService:
         profile = await self._get_cluster(profile_id)
         meta = dict(profile.cluster_meta or {})
         meta.pop("warnings", None)
+        # miLLM-local runtime overrides (UI-set min_k etc.) are NOT part of
+        # the portable document — stripping keeps re-export lossless.
+        meta.pop("sensing_overrides", None)
         meta.pop("hub_ref", None)
         return meta
 

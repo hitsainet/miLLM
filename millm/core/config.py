@@ -73,6 +73,7 @@ class Settings(BaseSettings):
     SENSING_MAX_EVENTS_PER_CLUSTER: int = 1000
     SENSING_MAX_AGE_DAYS: int = 7
     SENSING_FORCE_SERIAL: bool = True         # armed sensing forces serial routing
+    SENSING_DEDUP_HISTORY: bool = True        # report re-read chat history once, not per turn
     SENSING_MAX_OVERHEAD_MS: float = 5.0      # warn threshold per request
 
     # Performance: Inference concurrency.

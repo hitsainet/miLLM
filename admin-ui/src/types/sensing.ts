@@ -17,6 +17,8 @@ export interface SensingEvent {
   /** Present on detail fetches only — WS payloads exclude context */
   context_text?: string | null;
   context_token_ids?: number[] | null;
+  /** Separately decoded segments — span = the fired position(s) */
+  context_parts?: { before: string; span: string; after: string } | null;
   summary: string;
   truncated: boolean;
   created_at: string | null;
@@ -50,5 +52,12 @@ export interface SensingEventList {
 export interface SensingToggleResult {
   profile_id: string;
   sensing_enabled: boolean;
+  armed: boolean;
+}
+
+export interface SensingConfigResult {
+  profile_id: string;
+  min_k: number | null;
+  effective_min_k: number | null;
   armed: boolean;
 }

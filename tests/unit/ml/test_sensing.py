@@ -335,3 +335,47 @@ class TestRound3MutationPins:
         _, hits, _ = sae.collect_sensing_hits()
         assert len(hits) == 1
         assert hits[0].fired_count == 4 == len(hits[0].fired)
+
+
+class TestHistoryDedup:
+    """Goal item 2: positions below the report-from boundary are re-read
+    history and must not create events."""
+
+    def test_boundary_suppresses_history_positions(self, sae):
+        sae.arm_sensing(make_config())
+        sae.begin_sensing_request("req-2")
+        sae.set_sensing_report_from(3)
+        hot = pos_row({0: 2.0, 1: 2.0})
+        # positions 0-2 are re-read history; 3-4 are new
+        sae._sense(hidden([hot, hot, hot, hot, pos_row({})]))
+        _, hits, _ = sae.collect_sensing_hits()
+        assert [(h.pos_start, h.pos_end) for h in hits] == [(3, 3)]
+
+    def test_boundary_resets_on_begin(self, sae):
+        sae.arm_sensing(make_config())
+        sae.begin_sensing_request("req-1")
+        sae.set_sensing_report_from(100)
+        sae.begin_sensing_request("req-2")  # fresh request: boundary 0
+        hot = pos_row({0: 2.0, 1: 2.0})
+        sae._sense(hidden([hot]))
+        _, hits, _ = sae.collect_sensing_hits()
+        assert len(hits) == 1
+
+    def test_boundary_ignored_without_begin(self, sae):
+        sae.arm_sensing(make_config())
+        sae.set_sensing_report_from(5)  # no open boundary — no-op
+        sae.begin_sensing_request("req-1")
+        hot = pos_row({0: 2.0, 1: 2.0})
+        sae._sense(hidden([hot]))
+        _, hits, _ = sae.collect_sensing_hits()
+        assert len(hits) == 1
+
+    def test_offsets_still_advance_through_suppressed_passes(self, sae):
+        sae.arm_sensing(make_config())
+        sae.begin_sensing_request("req-1")
+        sae.set_sensing_report_from(2)
+        hot = pos_row({0: 2.0, 1: 2.0})
+        sae._sense(hidden([hot, hot]))   # both suppressed (0,1)
+        sae._sense(hidden([hot]))        # pos 2: new -> event
+        _, hits, _ = sae.collect_sensing_hits()
+        assert [(h.pos_start, h.pos_end) for h in hits] == [(2, 2)]

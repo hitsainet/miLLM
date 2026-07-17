@@ -248,14 +248,17 @@ class TestRecord:
         assert await service.record("req-1", [make_hit()], False, None, None) == []
 
     def test_ws_payload_excludes_context(self, service):
-        """FTID pitfall 6: WS payloads carry no user content."""
+        """FTID pitfall 6: WS payloads carry no user content — including
+        ANY future context_* field (the name-list filter let context_parts
+        leak the day it was added)."""
         sent = []
         emitter = MagicMock()
         emitter.emit_sensing_event.side_effect = lambda p: sent.append(p)
         with patch("millm.sockets.progress.progress_emitter", emitter):
             service._emit_events([{"id": 1, "summary": "s",
                                    "context_text": "SECRET",
-                                   "context_token_ids": [1, 2]}])
+                                   "context_token_ids": [1, 2],
+                                   "context_parts": {"span": "SECRET"}}])
         assert sent == [{"id": 1, "summary": "s"}]
 
 

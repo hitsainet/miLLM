@@ -364,7 +364,7 @@ class SensingService:
 
             for payload in payloads:
                 slim = {key: value for key, value in payload.items()
-                        if key not in ("context_text", "context_token_ids")}
+                        if not key.startswith("context_")}
                 emitter.emit_sensing_event(slim)
         except Exception as exc:
             logger.warning("sensing_ws_emit_failed", error=str(exc))

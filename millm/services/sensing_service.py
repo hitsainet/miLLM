@@ -130,7 +130,20 @@ class SensingService:
             min_k = int(_override("min_k", max(1, sensable)))
         except (TypeError, ValueError):
             min_k = max(1, sensable)
-        min_k = max(1, min(min_k, len(indices)))
+        # Clamp to the SENSABLE ceiling, not the member count (R3 #5): a
+        # document-authored min_k above it would arm an unreachable quorum
+        # that looks healthy while never firing — the same trap the config
+        # route already refuses. sensable >= 1 here (the all-inf case
+        # raised above).
+        if min_k > sensable:
+            logger.warning(
+                "sensing_min_k_clamped_to_sensable",
+                requested=min_k,
+                sensable=sensable,
+                members=len(indices),
+            )
+            min_k = sensable
+        min_k = max(1, min_k)
         context_tokens = int(_override(
             "context_tokens", settings.SENSING_CONTEXT_TOKENS))
         context_tokens = max(0, min(context_tokens, CONTEXT_TOKENS_HARD_MAX))

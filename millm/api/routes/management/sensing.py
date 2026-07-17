@@ -239,8 +239,13 @@ async def set_sensing_config(
             probe = service.build_config(profile)
             sensable = int(sum(1 for theta in probe.thresholds.tolist()
                                if theta != float("inf")))
-        except ValueError:
-            sensable = member_count
+        except ValueError as exc:
+            # No usable thresholds at all: a quorum override would be inert
+            # and the fallback error text would name a false ceiling (R3 #6)
+            raise ValidationError(
+                f"This cluster cannot arm sensing: {exc}",
+                details={"profile_id": profile_id},
+            ) from exc
         if request.min_k is not None and not 1 <= request.min_k <= sensable:
             raise ValidationError(
                 f"min_k must be between 1 and {sensable} — this cluster has "
@@ -286,7 +291,9 @@ async def set_sensing_config(
         profile_id=profile_id,
         min_k=request.min_k,
         effective_min_k=effective_min_k,
-        armed=service.is_armed,
+        # THIS cluster's armed state — the global flag read as success for
+        # this cluster when a different one was armed (R3 #6)
+        armed=service.armed_profile_id == profile_id,
     ))
 
 

@@ -73,7 +73,7 @@ export function SensingEventDetail({ event, onClose }: SensingEventDetailProps) 
           <div className="mb-1 text-xs text-slate-500">
             Context (±K tokens around the span)
           </div>
-          <div className="rounded bg-slate-900/70 p-2 font-mono text-xs leading-relaxed text-slate-300">
+          <div className="whitespace-pre-wrap rounded bg-slate-900/70 p-2 font-mono text-xs leading-relaxed text-slate-300">
             {detail.context_parts ? (
               <>
                 {detail.context_parts.before}
@@ -86,6 +86,11 @@ export function SensingEventDetail({ event, onClose }: SensingEventDetailProps) 
               detail.context_text
             )}
           </div>
+          {!detail.context_parts && (
+            <div className="mt-1 text-[10px] text-slate-600">
+              Recorded before span highlighting — plain context only.
+            </div>
+          )}
         </div>
       )}
       {detailQuery.isSuccess && !detail.context_text && (

@@ -85,3 +85,43 @@ docs substance; WS prefix filter; export strip.
 **Already fixed mid-round:** CLAUDE.md session record (`d1a6f1e`, landed after the agent's
 snapshot). **Documented:** history LCP cost (~ms at 32k ctx, off the hot path) and ~1 MB
 worst-case history — acceptable.
+
+## Round 3 (/review, 4 perspectives) — 15 findings: 12 fixed, 3 documented · goal verdicts
+
+**Goal-item verdicts (from the user's seat):** (1) span highlighting DELIVERED (emerald mark on
+slate, unmissable; old rows fall back with an explanatory note now); (2) history dedup DELIVERED
+for the reported scenario — the user's template-anchored "prefill @ 4" duplicate was traced
+line-by-line and is suppressed on turn 2; decode-phase moments dedup only when the chat template
+re-tokenizes replies identically (documented in the manual — the token-exact caveat); (3)
+all-sensable quorum DELIVERED with the upgrade path one screen away; (4) adjustable min_k
+DELIVERED end-to-end (UI → API → re-arm → next request), MCP included.
+
+**Fixed:**
+1. `build_config` clamped an authored `min_k` to the member COUNT — a document could arm an
+   unreachable quorum that looked healthy while never firing (the config route refused it, the
+   arm path didn't) → clamps to the sensable ceiling with a warning log + pin.
+2. The end-to-end dedup test the round demanded EXISTS now — two real begin/mark/sense/flush
+   cycles through the inference wiring; the second request's re-read moment records nothing and
+   history advances. (Writing it caught a harness subtlety: armed id must equal the config
+   snapshot id, as production's arm guarantees.) The named mutation ("boundary → 0") now fails.
+3. R2's two unpinned fixes pinned at the REAL call site: destroyed-boundary flushes write no
+   history; truncated flushes cap `reported_through` at pos_end+1.
+4. `SensingRequestContext` frozen dataclass replaced the positional 3-tuple (6 touch points; a
+   test fixture had already drifted) — transposition is now impossible.
+5. Config route refuses unarmable clusters honestly (the fallback error named a false ceiling);
+   `SensingConfigResult.armed` now means THIS cluster (the global flag read as success).
+6. U+FFFD/byte-BPE guard tested (rewriting-tokenizer fixture executes the fallback branch);
+   reset-race pinned (stale draft + mousedown → exactly one null commit); non-integer drafts
+   refused instead of parseInt-truncated; `sensable_count` required in the TS type (the
+   optional+fallback shape masked R2's schema bug class); template context renders with
+   `whitespace-pre-wrap`; `millm_sensing_config` refuses the contradictory min_k+reset combo and
+   `millm_sensing_events` documents `context_parts`.
+
+**Documented:** decode-phase re-tokenization caveat (manual); PUT-config racing activate is the
+existing queue-serialized-arm-mutations debt (example added); LoadedSAE's per-request state pile
+folds into a state object opportunistically on next touch (reset paths individually pinned).
+
+## Gate
+**SHIP** — 49 findings across 3 rounds (38 fixed, 11 documented/accepted), all four goal items
+verified delivered from the user's seat. Suites: miLLM backend 1114 / admin-ui 211 /
+miStudio MCP 52; manual builds; migration 010 round-trip verified.

@@ -27,8 +27,10 @@ export function SensingPanel() {
     const value = quorumDraft.trim();
     setQuorumDraft('');
     if (value === '') return;
-    const parsed = parseInt(value, 10);
-    if (!Number.isNaN(parsed)) setMinK(status.profile_id, parsed);
+    // Integers only: parseInt would silently truncate '2.7' / '2e3' to 2
+    // and toast success for a value the user didn't type (R3 #7)
+    const parsed = Number(value);
+    if (Number.isInteger(parsed)) setMinK(status.profile_id, parsed);
   };
 
   return (
@@ -68,7 +70,7 @@ export function SensingPanel() {
               <input
                 type="number"
                 min={1}
-                max={status.sensable_count ?? status.member_count}
+                max={status.sensable_count}
                 placeholder={String(status.min_k ?? '')}
                 value={quorumDraft}
                 onChange={(e) => setQuorumDraft(e.target.value)}
@@ -82,7 +84,7 @@ export function SensingPanel() {
               />
               {/* denominator = members that CAN fire — inf-threshold
                   members never do (R1: total overstated the ceiling) */}
-              / {status.sensable_count ?? status.member_count}
+              / {status.sensable_count}
               <button
                 type="button"
                 // preventDefault on mousedown: clicking Reset must not blur

@@ -82,6 +82,21 @@ def _make_event_stopping_criteria(event: "Event"):
     return StoppingCriteriaList([_EventStoppingCriteria(event)])
 
 
+from dataclasses import dataclass
+
+
+@dataclass(frozen=True)
+class SensingRequestContext:
+    """Begin-time snapshot carried through a sensed request (R3 #10: the
+    positional 3-tuple had six touch points and a test fixture had already
+    drifted off its contract). Frozen: the whole point is that a
+    mid-request re-arm cannot rewrite it."""
+
+    sae: Any
+    profile_id: Optional[str]
+    config: Any  # SensingConfig snapshot
+
+
 def _make_id_capture_criteria():
     """Zero-copy token-id capture for streaming sensing context (Feature 11).
 
@@ -1028,7 +1043,8 @@ class InferenceService:
             # context window size or member count.
             config = sae._sensing
             profile_id = config.profile_id if config else None
-            return (sae, profile_id, config)
+            return SensingRequestContext(sae=sae, profile_id=profile_id,
+                                         config=config)
         except Exception:
             logger.warning("sensing_begin_failed", exc_info=False)
         return None
@@ -1049,7 +1065,7 @@ class InferenceService:
             ids = prompt_ids[0] if prompt_ids.dim() == 2 else prompt_ids
             boundary = service.history_boundary([int(i) for i in ids.tolist()])
             if boundary > 0:
-                sensing_ctx[0].set_sensing_report_from(boundary)
+                sensing_ctx.sae.set_sensing_report_from(boundary)
         except Exception:
             logger.warning("sensing_history_boundary_failed", exc_info=False)
 
@@ -1062,7 +1078,9 @@ class InferenceService:
         cannot mis-attribute the flush (011 R1)."""
         if sensing_ctx is None:
             return
-        sensing_sae, profile_id, config_snapshot = sensing_ctx
+        sensing_sae = sensing_ctx.sae
+        profile_id = sensing_ctx.profile_id
+        config_snapshot = sensing_ctx.config
         try:
             import millm.api.dependencies as deps
 
@@ -1561,7 +1579,7 @@ class InferenceService:
                 # would let later non-begin passes sense with garbage
                 # offsets (011 R1).
                 if _sensing_sae is not None:
-                    _sensing_sae[0].collect_sensing_hits()
+                    _sensing_sae.sae.collect_sensing_hits()
                 raise
 
             try:
@@ -1753,7 +1771,7 @@ class InferenceService:
                         try:
                             import millm.api.dependencies as _deps
 
-                            _deps.get_sensing_service().disarm(_sensing_sae[0])
+                            _deps.get_sensing_service().disarm(_sensing_sae.sae)
                         except Exception:
                             logger.warning("sensing_disarm_after_hang_failed")
                 # Restore steering to its pre-request state (Fix #1: steering race)

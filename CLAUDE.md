@@ -1,8 +1,8 @@
 # Project: miLLM - Mechanistic Interpretability LLM Server
 
 ## Current Status
-- **Phase:** **BRD-MILLM-CLUSTERS-001 increment CLOSED (2026-07-16)** — Features 008/010/011/009 all ACCEPTED (implementation + 3 deep review rounds each + live E2E)
-- **Last Session:** July 16, 2026 — **increment closeout**: 011 Coactivation_Sensing ACCEPTED (3 rounds, 56 findings/36 fixed; live E2E: real co-firing event w/ context, warm overhead 3.9ms, arm-refusal path) and 009 Unified_MCP ACCEPTED (3 rounds, 41 findings/32 fixed; deployed unified server with 15 millm_* tools live, per-product /health, MCP tools/call verified, cross-product import→activate→dial→sensing flow E2E). Live E2E also caught+fixed profiles.sae_id VARCHAR(50) truncation (migration 009). Production fixes ridden along: SAE attach 500 (stdlib-logger kwargs, user-reported), mirror CI red (sync filter stripped the public contract), MAX_CONCURRENT_REQUESTS 2→1 (serial correctness boundary), OWUI steering-tile grid. Suites: backend 1084+/frontend 205.
+- **Phase:** Sensing enhancements COMPLETE (2026-07-17) — 4 goal items delivered + 3 review rounds (49 findings / 38 fixed)
+- **Last Session:** July 17, 2026 — sensing enhancements SHIPPED + 3-round review CLOSED: span highlighting (prefix-decode context_parts, SP/BPE-safe, migration 010), history dedup (LCP boundary; any-arm clears; truncation caps at last-reported; destroyed-boundary guard; e2e test), all-sensable quorum default (arm-path clamp), min_k adjustable (UI+API+MCP, sensable ceiling, reset button). SensingRequestContext dataclass. Records: `0xcc/reviews/review_sensing_enhancements_2026-07-17.md`. Suites: backend 1114 / admin-ui 211 / miStudio MCP 52.
 - **Next Steps:** Increment complete. Backlog: sweep `manual/docs/` for model-family-specific recommendations and genericize ('latest popular offline models...'); refactor debts named in the review records (SensingRequestContext consolidation, ProfileResolver, queue-serialized steering/arm mutations, miStudio-tools gating, span-highlight context_start_pos)
 - **Active Document:** none — increment closed; review records in 0xcc/reviews/
 - **Backlog:**

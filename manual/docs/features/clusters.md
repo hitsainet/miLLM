@@ -91,7 +91,11 @@ fault. Lower the quorum from the sensing panel to taste.
 **One report per moment:** every request re-processes its full prompt (chat history included),
 so without deduplication the same co-firing moment would re-report on every subsequent turn.
 miLLM suppresses re-read history — positions inside the longest common prefix with the previous
-sensed request are skipped (`SENSING_DEDUP_HISTORY=false` restores per-turn re-reporting).
+sensed request are skipped (`SENSING_DEDUP_HISTORY=false` restores per-turn re-reporting). The
+comparison is token-exact: moments inside a previous *assistant reply* stay deduplicated only
+when the chat template re-tokenizes that reply identically — on models where it doesn't
+round-trip token-for-token, those moments may re-report once per turn (prompt/template moments,
+the common case, always dedup).
 Event detail views **highlight the fired span** inside the context window, so the prime token is
 obvious at a glance.
 

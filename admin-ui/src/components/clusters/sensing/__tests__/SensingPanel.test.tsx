@@ -212,6 +212,39 @@ describe('SensingPanel quorum control', () => {
     expect(setConfigMock).toHaveBeenCalledTimes(1); // Enter->blur = ONE commit
   });
 
+  it('reset with a stale draft commits ONLY the null-clear (R3 race)', async () => {
+    statusMock.mockResolvedValue(makeStatus());
+    eventsMock.mockResolvedValue({ events: [], total: 0 });
+    setConfigMock.mockResolvedValue({
+      profile_id: 'prof_s1', min_k: null, effective_min_k: 3, armed: true,
+    });
+    renderPanel();
+    const input = await screen.findByLabelText(
+      'Quorum (members that must co-fire)'
+    );
+    fireEvent.change(input, { target: { value: '2' } });
+    const reset = screen.getByLabelText('Reset quorum to default');
+    fireEvent.mouseDown(reset); // must not blur-commit the stale draft
+    fireEvent.click(reset);
+    await waitFor(() =>
+      expect(setConfigMock).toHaveBeenCalledWith('prof_s1', null)
+    );
+    expect(setConfigMock).toHaveBeenCalledTimes(1);
+    expect((input as HTMLInputElement).value).toBe(''); // draft cleared
+  });
+
+  it('non-integer drafts are refused, not truncated', async () => {
+    statusMock.mockResolvedValue(makeStatus());
+    eventsMock.mockResolvedValue({ events: [], total: 0 });
+    renderPanel();
+    const input = await screen.findByLabelText(
+      'Quorum (members that must co-fire)'
+    );
+    fireEvent.change(input, { target: { value: '2.7' } });
+    fireEvent.blur(input);
+    expect(setConfigMock).not.toHaveBeenCalled();
+  });
+
   it('reset button clears the override (null)', async () => {
     statusMock.mockResolvedValue(makeStatus());
     eventsMock.mockResolvedValue({ events: [], total: 0 });

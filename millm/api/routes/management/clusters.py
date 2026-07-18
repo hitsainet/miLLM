@@ -195,6 +195,20 @@ async def deactivate_cluster(
     return ApiResponse.ok(await service.deactivate(cluster_id))
 
 
+@router.delete(
+    "/{cluster_id}",
+    response_model=ApiResponse[dict[str, Any]],
+    summary="Delete a cluster profile",
+)
+async def delete_cluster(
+    cluster_id: ClusterId, service: ClusterServiceDep
+) -> ApiResponse[dict[str, Any]]:
+    """Permanently removes the cluster (and its sensing events via FK
+    cascade). Deleting the active cluster deactivates it first — live
+    steering is cleared and sensing disarmed."""
+    return ApiResponse.ok(await service.delete(cluster_id))
+
+
 @router.put(
     "/active/intensity",
     response_model=ApiResponse[dict[str, Any]],

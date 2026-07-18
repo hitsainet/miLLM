@@ -13,6 +13,7 @@ import {
   Download,
   Play,
   Square,
+  Trash2,
 } from 'lucide-react';
 import { Badge, Button } from '@components/common';
 import type { ClusterSummary } from '@/types/clusters';
@@ -23,9 +24,11 @@ interface ClusterCardProps {
   onDeactivate: () => void;
   onSetIntensity: (intensity: number) => void;
   onExport: () => void;
+  onDelete?: () => void;
   onToggleSensing?: (enabled: boolean) => void;
   isActivating?: boolean;
   isDeactivating?: boolean;
+  isDeleting?: boolean;
 }
 
 export function ClusterCard({
@@ -34,9 +37,11 @@ export function ClusterCard({
   onDeactivate,
   onSetIntensity,
   onExport,
+  onDelete,
   onToggleSensing,
   isActivating,
   isDeactivating,
+  isDeleting,
 }: ClusterCardProps) {
   const [showNarrative, setShowNarrative] = useState(false);
   const [pendingIntensity, setPendingIntensity] = useState<number | null>(null);
@@ -109,6 +114,22 @@ export function ClusterCard({
           >
             <Download className="w-4 h-4" />
           </Button>
+          {onDelete && (
+            <Button
+              variant="ghost"
+              size="sm"
+              onClick={onDelete}
+              disabled={isDeleting}
+              title={
+                cluster.is_active
+                  ? 'Delete cluster (deactivates and clears live steering first)'
+                  : 'Delete cluster'
+              }
+              aria-label={`Delete cluster ${cluster.name}`}
+            >
+              <Trash2 className="w-4 h-4 text-red-400/80" />
+            </Button>
+          )}
           {cluster.is_active ? (
             <Button
               variant="secondary"

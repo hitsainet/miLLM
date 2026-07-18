@@ -219,6 +219,13 @@ class ClusterService:
         await self._get_cluster(profile_id)
         return await self.profile_service.deactivate_profile(profile_id)
 
+    async def delete(self, profile_id: str) -> dict[str, Any]:
+        """Delete a cluster profile (deactivates + clears live steering and
+        disarms sensing first when it is the active one; sensing events
+        cascade via FK)."""
+        await self._get_cluster(profile_id)
+        return await self.profile_service.delete_profile(profile_id)
+
     async def set_intensity(
         self, profile_id: str, intensity: float, *, reapply: bool = True
     ) -> dict[str, Any]:

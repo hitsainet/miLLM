@@ -890,6 +890,12 @@ export const clusterApi = {
   deactivate: (id: string) =>
     request<{ profile_id: string }>(`/clusters/${id}/deactivate`, { method: 'POST' }),
 
+  /** Deletes a cluster (server deactivates + clears steering first if active). */
+  delete: (id: string) =>
+    request<{ profile_id: string; was_active: boolean }>(`/clusters/${id}`, {
+      method: 'DELETE',
+    }),
+
   /** Sets a cluster's lambda intensity (re-applies when active). */
   setIntensity: (id: string, intensity: number, reapply = true) =>
     request<{ profile_id: string; intensity: number; reapplied: boolean }>(

@@ -23,6 +23,8 @@ export function ClustersPage() {
     isActivating,
     deactivateCluster,
     isDeactivating,
+    deleteCluster,
+    isDeleting,
     setIntensity,
     exportCluster,
   } = useClusters();
@@ -75,9 +77,18 @@ export function ClustersPage() {
                 onDeactivate={() => deactivateCluster(c.id).catch(() => {})}
                 onSetIntensity={(intensity) => setIntensity({ id: c.id, intensity }).catch(() => {})}
                 onExport={() => void exportCluster(c.id, c.name)}
+                onDelete={() => {
+                  const detail = c.is_active
+                    ? ' It is currently ACTIVE — steering will be cleared.'
+                    : '';
+                  if (window.confirm(`Delete cluster "${c.name}"? This also removes its sensing events.${detail}`)) {
+                    deleteCluster(c.id).catch(() => {});
+                  }
+                }}
                 onToggleSensing={(enabled) => setSensingEnabled(c.id, enabled)}
                 isActivating={isActivating}
                 isDeactivating={isDeactivating}
+                isDeleting={isDeleting}
               />
             ))}
           </div>

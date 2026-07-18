@@ -68,6 +68,19 @@ export function useClusters() {
     onError: (error: Error) => toast.error(`Deactivate failed: ${error.message}`),
   });
 
+  const deleteMutation = useMutation({
+    mutationFn: (id: string) => clusterApi.delete(id),
+    onSuccess: (result) => {
+      invalidate();
+      toast.success(
+        result.was_active
+          ? 'Cluster deleted — steering cleared'
+          : 'Cluster deleted'
+      );
+    },
+    onError: (error: Error) => toast.error(`Delete failed: ${error.message}`),
+  });
+
   const intensityMutation = useMutation({
     mutationFn: ({ id, intensity }: { id: string; intensity: number }) =>
       clusterApi.setIntensity(id, intensity),
@@ -109,6 +122,8 @@ export function useClusters() {
     isActivating: activateMutation.isPending,
     deactivateCluster: deactivateMutation.mutateAsync,
     isDeactivating: deactivateMutation.isPending,
+    deleteCluster: deleteMutation.mutateAsync,
+    isDeleting: deleteMutation.isPending,
     setIntensity: intensityMutation.mutateAsync,
     exportCluster,
   };

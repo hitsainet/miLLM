@@ -513,6 +513,12 @@ class ProfileService:
 
         # Deactivate first if active
         if was_active:
+            # Deleting the active profile must also clear its LIVE steering —
+            # otherwise the model keeps steering with orphaned values that no
+            # profile owns and no UI can see or dial off.
+            attachment = self.sae_service.get_attachment_status()
+            if attachment.is_attached:
+                self.sae_service.clear_steering()
             await self.repository.deactivate(profile_id)
             # Sensing lifecycle (011 R1): deleting the armed cluster must
             # disarm — otherwise the runtime keeps sensing into a dead FK

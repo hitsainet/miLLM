@@ -271,3 +271,34 @@ class TestSharedRangeParser:
         assert declared_intensity_range(
             {"budget": {"intensity_range": [1.5, 0.5]}}) == (0.5, 1.5)
 
+
+
+class TestDelete:
+    """DELETE /api/clusters/{id}: removal, active-cleanup, kind guard."""
+
+    async def test_delete_removes_cluster(self, service):
+        with patched_state():
+            result = await service.import_definition(make_definition())
+            await service.delete(result.profile_id)
+            clusters = await service.list_clusters()
+        assert clusters == []
+
+    async def test_delete_active_cluster_clears_live_steering(
+        self, service, mock_sae_service
+    ):
+        with patched_state():
+            result = await service.import_definition(make_definition())
+            await service.activate(result.profile_id)
+            mock_sae_service.clear_steering.reset_mock()
+            out = await service.delete(result.profile_id)
+        assert out["was_active"] is True
+        # The orphaned-steering leak: deleting the active cluster must clear
+        # what it applied — no profile owns those live values afterwards.
+        mock_sae_service.clear_steering.assert_called_once()
+
+    async def test_delete_refuses_manual_profile(self, service):
+        await service.repository.create(
+            profile_id="prof_manual3", name="manual3", steering={}
+        )
+        with pytest.raises(Exception):
+            await service.delete("prof_manual3")

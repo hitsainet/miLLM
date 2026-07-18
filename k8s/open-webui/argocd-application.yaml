@@ -1,0 +1,37 @@
+# Applied by hand to the cluster (like the millm/mistudio Applications):
+#   kubectl apply -f k8s/open-webui/argocd-application.yaml
+# Image Updater tracks ghcr.io/open-webui/open-webui:latest by DIGEST and
+# writes the pin back to gitops/pilot — every upstream release auto-deploys.
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: open-webui
+  namespace: argocd
+  labels:
+    app.kubernetes.io/part-of: millm
+  annotations:
+    argocd-image-updater.argoproj.io/image-list: owui=ghcr.io/open-webui/open-webui:latest
+    argocd-image-updater.argoproj.io/owui.update-strategy: digest
+    argocd-image-updater.argoproj.io/owui.kustomize.image-name: ghcr.io/open-webui/open-webui
+    argocd-image-updater.argoproj.io/write-back-method: git
+    argocd-image-updater.argoproj.io/git-branch: gitops/pilot
+spec:
+  project: default
+  source:
+    repoURL: https://github.com/Onegaishimas/miLLM.git
+    path: k8s/open-webui
+    targetRevision: gitops/pilot
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: open-webui-ns
+  revisionHistoryLimit: 10
+  ignoreDifferences:
+    - group: apps
+      kind: Deployment
+      jsonPointers:
+        - /spec/template/metadata/annotations/kubectl.kubernetes.io~1restartedAt
+  syncPolicy:
+    automated:
+      selfHeal: true
+    syncOptions:
+      - ServerSideApply=true

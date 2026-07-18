@@ -52,8 +52,12 @@ from the miLLM repo. Enable it per model on miLLM-served models. (Only enable it
 Open WebUI talks exclusively to miLLM — strict OpenAI-compatible providers may reject the extra
 field with a 400.)
 
-**Use:** every user gets a **dial** valve (chat ⚙ → Valves) — a dropdown, so typos are
-impossible:
+**Use (v1.3.0):** the dial appears as a **toggle chip with a sliders icon in the message
+input bar** — chip off means the filter doesn't run at all (the server's stored steering
+governs); chip on applies your dial. Each reply also shows a one-line **status** ("miLLM
+steering: off for this reply" / "λ=1.5" / an idle hint) so you always see what was sent —
+operators can silence it with the `show_status` valve. The dial itself is a per-user
+**dial** valve (chat ⚙ → Valves) — a dropdown, so typos are impossible:
 
 | Dial | Effect on this user's requests |
 |------|-------------------------------|

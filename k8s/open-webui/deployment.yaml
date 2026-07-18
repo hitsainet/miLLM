@@ -34,7 +34,7 @@ spec:
             - name: WEBUI_AUTH
               value: "False"
             - name: OPENAI_API_BASE_URL
-              value: http://192.168.224.222/v1
+              value: http://192.168.244.222/v1
             - name: OPENAI_API_KEY
               value: sk-dummy-key
             - name: ENABLE_OLLAMA_API
@@ -54,8 +54,9 @@ spec:
               cpu: 250m
               memory: 512Mi
             limits:
-              cpu: 500m
-              memory: 1Gi
+              cpu: "1"
+              # v0.10.x OOMKilled at 1Gi during first-boot DB migration
+              memory: 2Gi
           volumeMounts:
             - mountPath: /app/backend/data
               name: open-webui-volume

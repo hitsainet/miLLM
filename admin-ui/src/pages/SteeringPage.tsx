@@ -223,7 +223,13 @@ export function SteeringPage() {
       <Card>
         <CardHeader
           title="Active Features"
-          subtitle={featureCount > 0 ? `${featureCount} feature${featureCount !== 1 ? 's' : ''} configured` : 'No features added yet'}
+          subtitle={
+            featureCount > 0
+              ? activeCluster
+                ? `${featureCount} feature${featureCount !== 1 ? 's' : ''} from cluster "${activeCluster.name}"`
+                : `${featureCount} feature${featureCount !== 1 ? 's' : ''} configured`
+              : 'No features added yet'
+          }
         />
 
         {featureCount > 0 ? (
@@ -250,8 +256,18 @@ export function SteeringPage() {
         ) : (
           <EmptyState
             icon={<Sliders className="w-8 h-8" />}
-            title="No features configured"
-            description="Add feature indices above to start steering model behavior"
+            title="No active steering"
+            description="These sliders show whatever steering is currently applied. Activate an imported cluster or a saved profile to populate them, or add feature indices manually above."
+            action={
+              <div className="flex gap-2">
+                <Button variant="primary" size="sm" onClick={() => navigate('/clusters')}>
+                  Go to Clusters
+                </Button>
+                <Button variant="secondary" size="sm" onClick={() => navigate('/profiles')}>
+                  Go to Profiles
+                </Button>
+              </div>
+            }
           />
         )}
       </Card>

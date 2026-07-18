@@ -1,15 +1,18 @@
 """
 title: miLLM Cluster Dial
 author: miLLM
-version: 1.2.0
+version: 1.2.1
 description: Per-chat steering-intensity dial for a miLLM backend. Injects the
   miLLM extension field `steering_intensity` (off | min | max, or a numeric
   lambda in [0, 2]) into /v1/chat/completions requests so each user can dial
   the active cluster's steering strength without touching the global state.
-requirements: none (pydantic ships with Open WebUI)
 
 Compatibility
 -------------
+- No pip requirements (pydantic ships with Open WebUI). NEVER add a
+  `requirements:` frontmatter key with prose in it — OWUI pip-installs the
+  value VERBATIM on save and at every startup; a sentence there crashed the
+  OWUI worker on save (2026-07-18). Omit the key entirely when empty.
 - Open WebUI: uses only the stable Filter surface (class Filter, Valves /
   UserValves, inlet) — no outlet, no event emitters. Verified against the
   Filter API as of OWUI 0.6.x; the surface has been stable since 0.5.

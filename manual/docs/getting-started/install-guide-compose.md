@@ -255,7 +255,7 @@ EOF
 
 If `DOMAIN` differs from `millm.hitsai.local`, update the nginx config:
 ```bash
-sed -i "s/millm\.mcslab\.io/$DOMAIN/g" nginx/nginx.conf
+sed -i "s/millm\.hitsai\.local/$DOMAIN/g" nginx/nginx.conf
 ```
 
 ### Step 4 — Pull images

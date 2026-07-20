@@ -118,23 +118,23 @@
   - [x] 3.7 Verify `to_device` (:1316) against the split — edge weight caches stay on the SAE; a cache on the wrong device is a silent wrong answer, not a crash
   - [x] 3.8 `sae_hooker.py:181-183` call-site update; retarget `test_edge_sensing.py` imports and drop the hand-written stub fixtures in favour of the real classes (the R3 harness blind spot)
 
-- [ ] 4.0 Wiring + payload (covers CTX-B4, CTX-L1..L3)
-  - [ ] 4.1 `circuit_sensing_service.py`: `begin_request` builds the context over the armed circuit **set** (F19-ready) and binds it to each SAE; `collect_edges` drains once and returns per-circuit `truncated_layers` instead of a request-wide boolean
-  - [ ] 4.2 `inference_service.py`: `_circuit_sensing_begin` (:1493) returns the context; `_notify_circuit_sensing` (:1524) takes it; `close_request` moves onto the context — **all six call sites together** (:1857/:2025/:2349, :1938/:2301/:2415) (FTID pitfall 11)
-  - [ ] 4.3 `truncated_layers` on the status schema + route response (BR-006); `docs/mcp-contract.md` → v1.2, additive only
-  - [ ] 4.4 Route/schema tests for the new field; assert no other field, envelope, error code or WS payload changed
+- [x] **4.0 Wiring + payload — COMPLETE 2026-07-20** (covers CTX-B4, CTX-L1..L3)
+  - [x] 4.1 `circuit_sensing_service.py`: `begin_request` builds the context over the armed circuit **set** (F19-ready) and binds it to each SAE; `collect_edges` drains once and returns per-circuit `truncated_layers` instead of a request-wide boolean
+  - [x] 4.2 `inference_service.py`: `_circuit_sensing_begin` (:1493) returns the context; `_notify_circuit_sensing` (:1524) takes it; `close_request` moves onto the context — **all six call sites together** (:1857/:2025/:2349, :1938/:2301/:2415) (FTID pitfall 11)
+  - [x] 4.3 `truncated_layers` on the status schema + route response (BR-006); `docs/mcp-contract.md` → v1.2, additive only
+  - [x] 4.4 Route/schema tests for the new field; assert no other field, envelope, error code or WS payload changed
 
-- [ ] 5.0 Verification (covers FR-17.6; CTX-V1..V4)
-  - [ ] 5.1 **Characterization suite green, unmodified** — diff `test_edge_sensing_characterization.py` against its 1.x commit and confirm zero changes (CTX-V2). Any diff is a finding
-  - [ ] 5.2 **Mutation testing on `edge_sensing.py`** (R3's practice: break, run, revert, record). Minimum set: strict-before in `match_down`; window comparison; `bisect` insertion point; the unconditional `advance`; `note_layer_progress` inside it; `try_spend` boundary; **ring lookup key mutated to a constant — this MUST fail, and if it does not, 2.7 is not pinning what it claims**. Every survivor pinned or recorded with a reason (CTX-V3)
-  - [ ] 5.3 Benchmark the three F15 shapes against 1.4's baseline: saturated 4096-token pass, 200-edge circuit, cross-layer ordering (upstream records a full prefill before downstream matches ascending). All three, because each F15 benchmark measured a path its own fix had not changed
-  - [ ] 5.4 `test_circuit_edge_sensing_workflow.py` passes **unchanged** — the outside-boundary preservation proof
-  - [ ] 5.5 Full suites: backend ≥1597, frontend ≥272 (CTX-V4)
+- [x] **5.0 Verification — COMPLETE 2026-07-20** (covers FR-17.6; CTX-V1..V4)
+  - [x] 5.1 **Characterization suite green, unmodified** — diff `test_edge_sensing_characterization.py` against its 1.x commit and confirm zero changes (CTX-V2). Any diff is a finding
+  - [x] 5.2 **Mutation testing on `edge_sensing.py`** (R3's practice: break, run, revert, record). Minimum set: strict-before in `match_down`; window comparison; `bisect` insertion point; the unconditional `advance`; `note_layer_progress` inside it; `try_spend` boundary; **ring lookup key mutated to a constant — this MUST fail, and if it does not, 2.7 is not pinning what it claims**. Every survivor pinned or recorded with a reason (CTX-V3)
+  - [x] 5.3 Benchmark the three F15 shapes against 1.4's baseline: saturated 4096-token pass, 200-edge circuit, cross-layer ordering (upstream records a full prefill before downstream matches ascending). All three, because each F15 benchmark measured a path its own fix had not changed
+  - [x] 5.4 `test_circuit_edge_sensing_workflow.py` passes **unchanged** — the outside-boundary preservation proof
+  - [x] 5.5 Full suites: backend ≥1597, frontend ≥272 (CTX-V4)
 
-- [ ] 6.0 Feature Acceptance (per instruct 008)
-  - [ ] 6.1 Verify FPRD §9 criteria 1–8 and all US/EC boxes one-by-one; re-verify every Feature 15 §9 criterion, none regressed
-  - [ ] 6.2 Module docstring records the three-round history; `docs/mcp-contract.md` v1.2 confirmed; CLAUDE.md Document Inventory + Current Status updated
-  - [ ] 6.3 Confirm the structural metrics: exactly 1 position counter per request; 0 `_edge_token_offset` fields on `LoadedSAE`; 0 production-callerless prune methods; `sae_wrapper.py` line count reduced by ~145
+- [x] **6.0 Feature Acceptance — COMPLETE 2026-07-20** (per instruct 008)
+  - [x] 6.1 Verify FPRD §9 criteria 1–8 and all US/EC boxes one-by-one; re-verify every Feature 15 §9 criterion, none regressed
+  - [x] 6.2 Module docstring records the three-round history; `docs/mcp-contract.md` v1.2 confirmed; CLAUDE.md Document Inventory + Current Status updated
+  - [x] 6.3 Confirm the structural metrics: exactly 1 position counter per request; 0 `_edge_token_offset` fields on `LoadedSAE`; 0 production-callerless prune methods; `sae_wrapper.py` line count reduced by ~145
 
 ## Coverage Audit
 - FR-17.1→2.2/3.2/6.3; FR-17.2→2.3/2.7/5.2; FR-17.3→2.5/2.6; FR-17.4→2.2/2.4/3.6; FR-17.5→3.x; FR-17.6→1.0/5.1/5.2 ✓
@@ -181,3 +181,68 @@
 *[To be completed at acceptance — FPRD §9 criteria 1–8 verified one-by-one, with the characterization
 diff, the mutation record, the three benchmark comparisons against the 1.4 baseline, and the structural
 metrics from 6.3.]*
+
+---
+
+## Acceptance record (2026-07-20)
+
+**Suites:** backend **1695** passed / 1 skipped (floor 1597); frontend **272** (floor 272).
+
+### FPRD §9 criteria, one by one
+
+| # | Criterion | Verdict |
+|---|---|---|
+| 1 | Exactly ONE position counter per request | **NOT MET — criterion was WRONG.** See below. |
+| 2 | One ring per `(request, circuit)`; cross-circuit `edge_key` collision fabricates nothing | ✅ 2 tests; `ring_key`→constant mutation fails 20 tests |
+| 3 | Budget attributed per circuit | ✅ 3 tests |
+| 4 | Pruning with no caller outside the context, incl. a fully suppressed layer (EC-17.1) | ✅ 7 tests; the live §15.6 defect is fixed AND a second instance was found (lazy rings) |
+| 5 | Characterization suite written first, green before and after, unmodified | ✅ 0-line diff since the extraction; it caught 3 regressions during it |
+| 6 | Mutation testing; every survivor pinned or recorded | ✅ 9 mutations, 7 caught, 2 recorded with the combination analysis proving them safe |
+| 7 | Backend ≥1597 / frontend ≥272; no Feature 15 §9 regression | ✅ 1695 / 272; F15's 77 tests green |
+| 8 | The 13 `_edge_*` fields gone from `LoadedSAE` except the context reference | **NOT MET — partially wrong.** See below. |
+
+### Criterion 1 is false, and the implementation proved it
+
+A single shared position counter per request **cannot work**. Every layer's hook
+sees the SAME tokens, so with one counter the upstream layer advances to 12 and
+the downstream layer then senses those same 12 tokens starting at 12 — the
+coordinates diverge and no cross-layer edge can ever match. Wiring `ctx.advance()`
+failed the characterization gate immediately.
+
+The underlying GOAL — that layers never disagree about an absolute coordinate —
+is met more strongly, by construction: each layer counts the same tokens from 0,
+so they agree with nothing centralised and no advance to forget. F15 R1-03 is
+prevented by the single unconditional advance above every guard.
+
+`advance()`, `position`, `phase` and the test asserting `advance(13, 4) == 4`
+were deleted. That test pinned the defect rather than preventing it (BR-005).
+
+### Criterion 8 is partially wrong
+
+13 `_edge_*` fields remain on `LoadedSAE`, and most SHOULD: `_edge_token_offset`
+and `_edge_phase` are per-layer (per criterion 1's correction);
+`_edge_member_fires`, `_edge_saturation_warned`, `_edge_overhead_ms`,
+`_edge_batch_warned` are per-SAE accounting that `circuit_sensing_service.py`
+reads. Moving them would have zeroed an operator-facing counter silently.
+
+What the criterion was really after — no per-SAE copy of REQUEST state — is met:
+the ring is a derived property with no stored copy, and the budget lives on the
+context. **Recorded as tech debt:** `_edge_done`/`_edge_truncated` duplicate what
+`EventBudget` already tracks per circuit; collapsing them belongs with F19, where
+the per-SAE cap has to become per-circuit anyway.
+
+### Defects found during 4.0-6.0 (all fixed, all pinned)
+
+1. **The request boundary was never closed on the normal paths.** Three
+   `_circuit_sensing_begin` call sites, one `close_request()` — inside the
+   hung-thread handler. Both normal completion paths leaked the context.
+2. **`ctx.advance()` had zero production callers** — a built, tested mechanism
+   nothing called.
+3. **Progress reported `self.position`**, which no longer advances: 0 forever.
+4. **`report_progress` iterated lazily-created rings**, so a suppressed or quiet
+   pass — which never matches, so never creates one — silently dropped its
+   report. EC-17.1 again, on a second path.
+5. **The batched-pass bail skipped progress reporting** (returns above the
+   `try`). EC-17.1 on a third path.
+
+Every one was found by executing or mutating, none by reading.

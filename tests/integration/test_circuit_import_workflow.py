@@ -28,6 +28,16 @@ from millm.services.sae_service import AttachedSAEState, SAEService
 FIXTURE = Path(__file__).resolve().parents[1] / "fixtures" / "real_circuit_definition.json"
 
 
+
+def _slice_import_ok(status: str = "imported", profile_id: str = "prof_slice"):
+    """A REAL ClusterImportItem — a bare MagicMock answers `.status` with a
+    truthy Mock, which is exactly what hid the ignored-status bug (R2)."""
+    from millm.api.schemas.cluster import ClusterImportItem
+
+    return ClusterImportItem(
+        name="slice", status=status, profile_id=profile_id, warnings=[]
+    )
+
 def load_fixture() -> dict:
     return json.loads(FIXTURE.read_text())
 
@@ -65,7 +75,7 @@ def sae_service():
 @pytest.fixture
 def cluster_service():
     svc = MagicMock()
-    svc.import_definition = AsyncMock(return_value=MagicMock())
+    svc.import_definition = AsyncMock(return_value=_slice_import_ok())
     svc.get_active_cluster = AsyncMock(return_value=None)
     svc.deactivate = AsyncMock()
     return svc

@@ -22,6 +22,16 @@ from millm.services.circuit_service import CircuitService
 from millm.services.sae_service import AttachedSAEState
 
 
+
+def _slice_import_ok(status: str = "imported", profile_id: str = "prof_slice"):
+    """A REAL ClusterImportItem — a bare MagicMock answers `.status` with a
+    truthy Mock, which is exactly what hid the ignored-status bug (R2)."""
+    from millm.api.schemas.cluster import ClusterImportItem
+
+    return ClusterImportItem(
+        name="slice", status=status, profile_id=profile_id, warnings=[]
+    )
+
 @pytest.fixture(autouse=True)
 def clean_registry():
     state = AttachedSAEState()
@@ -73,7 +83,7 @@ def service(test_session):
         clamp_warnings=[],
     )
     cluster_service = MagicMock()
-    cluster_service.import_definition = AsyncMock(return_value=MagicMock())
+    cluster_service.import_definition = AsyncMock(return_value=_slice_import_ok())
     cluster_service.get_active_cluster = AsyncMock(return_value=None)
     cluster_service.deactivate = AsyncMock()
     return CircuitService(repo, sae_service=sae_service, cluster_service=cluster_service)
@@ -516,3 +526,78 @@ class TestR1Fixes:
         result = await service.set_intensity(circuit.id, 0.4)
         assert result["reapplied"] is False
         assert any("not applied" in w for w in result["warnings"])
+
+
+class TestR2Fixes:
+    """Review round 2 — the slice import's STATUS was ignored, so a failed
+    slice still reported serving; and the evidence gate could be bypassed."""
+
+    async def test_unbound_slice_import_does_not_report_serving(self, service):
+        """ClusterService REPORTS its outcome (it does not raise): an
+        incompatible slice returns status='imported_unbound' with activation
+        explicitly skipped. Treating that as a serve marked the circuit active
+        while the model ran completely unsteered."""
+        attach("sae-10", 10)  # L13 missing → slice path
+        service._cluster_service.import_definition = AsyncMock(
+            return_value=_slice_import_ok(status="imported_unbound", profile_id="p1")
+        )
+        circuit = await service.import_definition(make_doc())
+        with pytest.raises(SAESetIncompleteError) as ei:
+            await service.activate(circuit.id)
+        assert "slice_import_imported_unbound" in str(ei.value.offenders)
+        refreshed = await service.repository.get(circuit.id)
+        assert refreshed.is_active is False  # never claimed to serve
+
+    async def test_errored_slice_import_does_not_report_serving(self, service):
+        attach("sae-10", 10)
+        service._cluster_service.import_definition = AsyncMock(
+            return_value=_slice_import_ok(status="error", profile_id=None)
+        )
+        circuit = await service.import_definition(make_doc())
+        with pytest.raises(SAESetIncompleteError):
+            await service.activate(circuit.id)
+
+    async def test_set_intensity_re_arm_requires_a_fresh_ack(self, service):
+        """Re-applying steering is a fresh ARM — the gate must hold by
+        construction, not just because activation checked it once (a restart
+        can leave a stale active row)."""
+        attach("sae-10", 10)
+        attach("sae-13", 13)
+        circuit = await service.import_definition(make_doc(edges=[]))  # rung 0
+        await service.activate(circuit.id, acknowledge_unvalidated=True)
+
+        with pytest.raises(UnvalidatedCircuitError):
+            await service.set_intensity(circuit.id, 1.5)
+
+        result = await service.set_intensity(
+            circuit.id, 1.5, acknowledge_unvalidated=True
+        )
+        assert result["reapplied"] is True
+
+    async def test_validated_circuit_needs_no_ack_to_dial(self, service):
+        attach("sae-10", 10)
+        attach("sae-13", 13)
+        circuit = await service.import_definition(make_doc())  # rung 2
+        await service.activate(circuit.id)
+        result = await service.set_intensity(circuit.id, 1.5)
+        assert result["reapplied"] is True
+
+    async def test_deactivate_tears_down_the_slice_cluster_profile(self, service):
+        """In slice mode the CLUSTER profile is what steers — clearing only
+        circuit steering reported success while the slice kept running."""
+        attach("sae-10", 10)
+        circuit = await service.import_definition(make_doc())
+        await service.activate(circuit.id)  # slice_fallback
+        service._cluster_service.deactivate.reset_mock()
+
+        result = await service.deactivate(circuit.id)
+        service._cluster_service.deactivate.assert_awaited_once_with("prof_slice")
+        assert result["cleared_steering"] is True
+        assert result["is_active"] is False
+
+    async def test_slice_profile_id_is_persisted_for_teardown(self, service):
+        attach("sae-10", 10)
+        circuit = await service.import_definition(make_doc())
+        await service.activate(circuit.id)
+        refreshed = await service.repository.get(circuit.id)
+        assert refreshed.provenance["slice_profile_id"] == "prof_slice"

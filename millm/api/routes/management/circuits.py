@@ -247,7 +247,16 @@ async def set_active_circuit_intensity(
             code="NO_ACTIVE_CIRCUIT",
             message="No circuit is currently serving",
         )
-    result = await service.set_intensity(active["id"], body.intensity)
+    try:
+        result = await service.set_intensity(
+            active["id"],
+            body.intensity,
+            acknowledge_unvalidated=body.acknowledge_unvalidated,
+        )
+    except UnvalidatedCircuitError as e:
+        # Same house style as activate: a handler-level refusal in the envelope
+        # so the client can surface the rung and re-send with the ack.
+        return ApiResponse.fail(code=e.code, message=e.message, details=e.details)
     return ApiResponse.ok(CircuitIntensityResponse(**result))
 
 

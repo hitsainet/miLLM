@@ -36,6 +36,7 @@ from millm.core.circuit_evidence import (
 )
 from millm.core.errors import (
     CircuitNotFoundError,
+    SAESetIncompleteError,
     UnvalidatedCircuitError,
     ValidationError,
 )
@@ -307,16 +308,30 @@ class CircuitService:
         # out of ?serveable=true queries.
         try:
             await self.repository.update(
-                circuit.id, per_sae_warnings=verdicts, serveable=all_bound
+                circuit.id,
+                per_sae_warnings=verdicts,
+                serveable=all_bound,
+                provenance={
+                    **(circuit.provenance or {}),
+                    # Remember which cluster profile backs a slice serve so
+                    # deactivate() can tear down the thing actually steering.
+                    "slice_profile_id": result.get("slice_profile_id"),
+                },
             )
             await self.repository.set_active(
                 circuit.id, serving_mode=result["serving_mode"]
             )
         except Exception:
-            # The steering is already applied; if we cannot record it, clear it
+            # The steering is already applied; if we cannot record it, undo it
             # rather than leave the model steering with no active row to stop it.
+            # For a slice serve the steering belongs to a CLUSTER profile, so
+            # clearing circuit steering alone would not undo it.
             try:
-                self._sae_service.clear_circuit_steering()
+                slice_profile_id = result.get("slice_profile_id")
+                if slice_profile_id and self._cluster_service is not None:
+                    await self._cluster_service.deactivate(slice_profile_id)
+                if self._sae_service is not None:
+                    self._sae_service.clear_circuit_steering()
             except Exception:  # pragma: no cover - defensive
                 logger.error("circuit_activate_rollback_clear_failed", circuit_id=circuit.id)
             raise
@@ -425,8 +440,6 @@ class CircuitService:
         display-only fields, so a slice can never be mistaken for the circuit.
         """
         if not bound_layers:
-            from millm.core.errors import SAESetIncompleteError
-
             offenders = [
                 {
                     "layer": v["layer"],
@@ -440,7 +453,12 @@ class CircuitService:
         # Serve the first bound layer's slice (single-active semantics: one
         # cluster profile steers at a time).
         layer = bound_layers[0]
-        slice_doc = self.to_layer_slice(definition, layer, circuit_rung_value=circuit.rung)
+        slice_doc = self.to_layer_slice(
+            definition,
+            layer,
+            circuit_rung_value=circuit.rung,
+            fallback_intensity=circuit.intensity,
+        )
         # ClusterService.import_definition takes a VALIDATED model (the raw
         # payload rides alongside for lossless storage) — passing the bare dict
         # crashed on `.name`. Validating here also means a malformed projection
@@ -461,11 +479,31 @@ class CircuitService:
             activate=True,
             on_conflict="rename",
         )
+
+        # ClusterService REPORTS its outcome, it does not raise: an incompatible
+        # slice comes back as `imported_unbound` (activation explicitly skipped)
+        # or `error`. Treating that as a successful serve would mark the circuit
+        # active while the model runs completely unsteered — exactly the failure
+        # the cluster path itself fixed in its own review. Fail closed.
+        status = getattr(item, "status", None)
+        profile_id = getattr(item, "profile_id", None)
+        if status != "imported" or not profile_id:
+            raise SAESetIncompleteError(
+                [
+                    {
+                        "layer": layer,
+                        "sae_id": None,
+                        "reason": f"slice_import_{status or 'failed'}",
+                        "detail": getattr(item, "error", None)
+                        or "; ".join(getattr(item, "warnings", []) or []),
+                    }
+                ]
+            )
         return {
             "serving_mode": "slice_fallback",
             "bound_layers": bound_layers,
             "slice_layer": layer,
-            "slice_profile_id": getattr(item, "profile_id", None),
+            "slice_profile_id": profile_id,
             "warnings": [
                 f"Only L{sorted(bound_layers)} of {definition.layers()} bound — serving "
                 f"the L{layer} slice, a PARTIAL rendering of this circuit, not the "
@@ -479,6 +517,7 @@ class CircuitService:
         layer: int,
         *,
         circuit_rung_value: int | None = None,
+        fallback_intensity: float | None = None,
     ) -> dict[str, Any]:
         """Project ONE layer of a circuit as a valid ``cluster-definition/v1``.
 
@@ -522,6 +561,11 @@ class CircuitService:
             budget = per_layer.model_dump(mode="json") if per_layer else {}
             budget["intensity"] = definition.budget.intensity
             budget["intensity_range"] = definition.budget.intensity_range
+        elif fallback_intensity is not None:
+            # No budget block at all: _serve_full would use circuit.intensity,
+            # so the slice must too — otherwise the two modes silently disagree
+            # on λ (the slice would take the cluster default of 1.0).
+            budget = {"intensity": float(fallback_intensity)}
 
         rung_value = (
             circuit_rung_value
@@ -593,18 +637,45 @@ class CircuitService:
         return out
 
     async def deactivate(self, circuit_id: str) -> dict[str, Any]:
-        """Stop serving a circuit and clear its steering."""
+        """Stop serving a circuit and clear whatever is ACTUALLY steering.
+
+        In ``slice_fallback`` mode the live steering belongs to the cluster
+        profile the slice created, not to circuit steering — clearing only the
+        latter would report success while the slice kept running.
+        """
         circuit = await self.get(circuit_id)
+        cleared = False
+
+        if circuit.serving_mode == "slice_fallback":
+            slice_profile_id = (circuit.provenance or {}).get("slice_profile_id")
+            if slice_profile_id and self._cluster_service is not None:
+                try:
+                    await self._cluster_service.deactivate(slice_profile_id)
+                    cleared = True
+                except Exception as e:
+                    logger.warning(
+                        "circuit_slice_profile_deactivate_failed",
+                        profile_id=slice_profile_id,
+                        error=str(e),
+                    )
         if self._sae_service is not None:
             try:
                 self._sae_service.clear_circuit_steering()
+                cleared = True
             except Exception as e:  # pragma: no cover - defensive
                 logger.warning("circuit_clear_steering_failed", error=str(e))
+
         await self.repository.deactivate(circuit.id)
         refreshed = await self.repository.get(circuit.id)
-        return {**self.summarize(refreshed), "cleared_steering": True}
+        return {**self.summarize(refreshed), "cleared_steering": cleared}
 
-    async def set_intensity(self, circuit_id: str, intensity: float) -> dict[str, Any]:
+    async def set_intensity(
+        self,
+        circuit_id: str,
+        intensity: float,
+        *,
+        acknowledge_unvalidated: bool = False,
+    ) -> dict[str, Any]:
         """Set the global λ for a circuit, re-applying if it is serving.
 
         The stored document is parsed BEFORE the DB write: a corrupt document
@@ -613,6 +684,24 @@ class CircuitService:
         """
         circuit = await self.get(circuit_id)
         serving_full = circuit.is_active and circuit.serving_mode == "full"
+
+        # The evidence gate must hold by CONSTRUCTION, not merely because
+        # activation checked it once: re-applying steering here is a fresh arm
+        # of the circuit (e.g. after a restart left a stale active row), so an
+        # unvalidated circuit must not reach the model without an ack.
+        if serving_full and not is_validated(circuit.rung) and not acknowledge_unvalidated:
+            raise UnvalidatedCircuitError(
+                f"Circuit '{circuit.name}' is {rung_language(circuit.rung)} "
+                f"(rung {circuit.rung}), not causally validated. Re-send with "
+                f"acknowledge_unvalidated=true to re-apply its steering.",
+                details={
+                    "circuit_id": circuit.id,
+                    "rung": circuit.rung,
+                    "rung_language": rung_language(circuit.rung),
+                    "next_step": rung_next_step(circuit.rung),
+                },
+            )
+
         definition = self._parse_stored(circuit) if serving_full else None
 
         await self.repository.update(circuit.id, intensity=float(intensity))

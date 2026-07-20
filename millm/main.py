@@ -152,6 +152,20 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
             if result.rowcount > 0:
                 logger.info("deactivated_stale_attachments", count=result.rowcount)
 
+            # Deactivate stale circuits (Feature 13). In-memory steering is lost
+            # on restart, so an is_active row would claim live influence that
+            # does not exist — and, because the evidence gate is checked at
+            # ACTIVATION, dialling intensity on that stale row would re-arm an
+            # unvalidated (rung<2) circuit without a fresh acknowledgement.
+            result = await session.execute(
+                text(
+                    "UPDATE circuits SET is_active = false, serving_mode = NULL "
+                    "WHERE is_active = true"
+                )
+            )
+            if result.rowcount > 0:
+                logger.info("deactivated_stale_circuits", count=result.rowcount)
+
             await session.commit()
     except Exception as e:
         logger.warning("failed_to_reset_stale_status", error=str(e))

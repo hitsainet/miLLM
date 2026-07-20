@@ -178,10 +178,13 @@ class CircuitDefinitionV1(BaseModel):
         """
         counts: dict[int, int] = {}
         for m in v:
-            n = 1
-            if m.member_kind == "cluster_ref" and m.expanded_members:
-                n = len(m.expanded_members)
-            counts[m.layer] = counts.get(m.layer, 0) + n
+            # Count the SAME sources the projection/serving flatten collects
+            # (expansion AND the member's own feature) — under-counting here
+            # let a contract-valid circuit project to an over-cap cluster slice.
+            n = len(m.expanded_members or [])
+            if m.feature is not None:
+                n += 1
+            counts[m.layer] = counts.get(m.layer, 0) + max(n, 1)
         for layer, n in counts.items():
             if n > MAX_MEMBERS_PER_LAYER:
                 raise ValueError(
@@ -258,6 +261,13 @@ class CircuitActivationResponse(CircuitSummary):
 class SetCircuitIntensityRequest(BaseModel):
     intensity: float = Field(..., ge=0.0, le=2.0)
     reapply: bool = True
+    acknowledge_unvalidated: bool = Field(
+        False,
+        description=(
+            "Required to re-apply steering for a circuit whose evidence rung is "
+            "below 2 — re-applying is a fresh arm, so the gate holds here too"
+        ),
+    )
 
 
 class CircuitIntensityResponse(CircuitSummary):

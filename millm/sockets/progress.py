@@ -639,3 +639,92 @@ def create_socket_io() -> socketio.AsyncServer:
     progress_emitter.set_sio(sio)
 
     return sio
+
+    def emit_circuit_sensing_event(self, payload: dict) -> None:
+        """Broadcast one observed circuit edge firing (Feature 15).
+
+        The payload carries NO decoded prompt text — callers pass
+        to_dict(include_context=False).
+        """
+        if self._sio is None:
+            return
+
+        import asyncio
+
+        try:
+            try:
+                asyncio.get_running_loop()
+                asyncio.create_task(self._sio.emit("circuit:sensing:event", payload))
+            except RuntimeError:
+                if hasattr(self, "_main_loop") and self._main_loop:
+                    asyncio.run_coroutine_threadsafe(
+                        self._sio.emit("circuit:sensing:event", payload),
+                        self._main_loop,
+                    )
+                else:
+                    logger.warning(
+                        "circuit_sensing_emit_no_loop",
+                        msg="No event loop available for WebSocket emission",
+                    )
+        except Exception as e:
+            logger.warning("sensing_emit_failed", error=str(e))
+
+    async def emit_monitoring_state_changed(
+        self,
+        enabled: bool,
+        monitored_features: Optional[list[int]] = None,
+    ) -> None:
+        """
+        Emit monitoring state changed event.
+
+        Args:
+            enabled: Whether monitoring is now enabled
+            monitored_features: List of monitored feature indices
+        """
+        if self._sio is None:
+            return
+
+        await self._sio.emit(
+            "monitoring:state",
+            {
+                "enabled": enabled,
+                "monitoredFeatures": monitored_features,
+            },
+        )
+
+
+# Global emitter instance - will be configured with sio on app startup
+progress_emitter = ProgressEmitter()
+
+
+def create_socket_io() -> socketio.AsyncServer:
+    """
+    Create and configure the Socket.IO async server.
+
+    Returns:
+        Configured Socket.IO AsyncServer instance
+    """
+    from millm.core.config import settings
+
+    # Use the same CORS_ORIGINS as the HTTP layer rather than a hardcoded wildcard.
+    # Socket.IO cors_allowed_origins accepts "*" or a list of origin strings.
+    sio_cors: str | list[str] = (
+        "*" if settings.CORS_ORIGINS == "*" else settings.cors_origins_list
+    )
+
+    sio = socketio.AsyncServer(
+        async_mode="asgi",
+        cors_allowed_origins=sio_cors,
+        logger=False,  # Use structlog instead
+        engineio_logger=False,
+        ping_timeout=60,    # Increased from 20s for Cloudflare tunnel latency
+        ping_interval=25,   # Keep default but pair with longer timeout
+    )
+
+    # Register event handlers
+    register_handlers(sio)
+
+    # Configure global emitter
+    progress_emitter.set_sio(sio)
+
+    return sio

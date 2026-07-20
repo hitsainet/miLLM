@@ -254,6 +254,20 @@ def get_sensing_service() -> "SensingService":
     return _sensing_service
 
 
+_circuit_sensing_service = None
+
+
+def get_circuit_sensing_service() -> "CircuitSensingService":
+    """Singleton circuit edge sensing service (Feature 15)."""
+    global _circuit_sensing_service
+
+    if _circuit_sensing_service is None:
+        from millm.services.circuit_sensing_service import CircuitSensingService
+
+        _circuit_sensing_service = CircuitSensingService()
+    return _circuit_sensing_service
+
+
 async def get_monitoring_service() -> "MonitoringService":
     """
     Dependency that provides a MonitoringService singleton.

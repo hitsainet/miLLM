@@ -302,6 +302,12 @@ class CircuitService:
 
         co_tenant_warnings = await self._release_co_tenants(served_layers)
 
+        # Feature 15: arm edge sensing AFTER the serve and after co-tenant
+        # release — arming earlier would arm against SAEs that a co-tenant
+        # release is about to detach. Best-effort: an observation surface must
+        # never fail an activation.
+        self._arm_edge_sensing(circuit, definition, served_layers)
+
         # Refresh `serveable` too: it was a snapshot of attachment state at
         # IMPORT time, so a circuit that became fully bindable since then kept
         # reporting "not serveable" while actively serving — and was filtered
@@ -684,9 +690,70 @@ class CircuitService:
             except Exception as e:  # pragma: no cover - defensive
                 logger.warning("circuit_clear_steering_failed", error=str(e))
 
+        self._disarm_edge_sensing()
+
         await self.repository.deactivate(circuit.id)
         refreshed = await self.repository.get(circuit.id)
         return {**self.summarize(refreshed), "cleared_steering": cleared}
+
+    @staticmethod
+    def _edge_sensing_layer_saes(layers: list[int]) -> dict:
+        """layer -> LoadedSAE for the served layers, resolved once.
+
+        ``by_layer`` returns None for an ambiguous layer (zero or more than
+        one SAE attached), so an edge on that layer is reported unsensable
+        rather than watched against a guessed basis.
+        """
+        from millm.services.sae_service import AttachedSAEState
+
+        state = AttachedSAEState()
+        out: dict = {}
+        for layer in layers:
+            entry = state.by_layer(layer)
+            if entry is not None:
+                out[layer] = entry.sae
+        return out
+
+    def _arm_edge_sensing(self, circuit, definition, served_layers: list[int]) -> None:
+        """Arm edge sensing when the operator has enabled it for this circuit."""
+        if not getattr(circuit, "sensing_enabled", False):
+            return
+        try:
+            from millm.api.dependencies import get_circuit_sensing_service
+
+            layer_saes = self._edge_sensing_layer_saes(served_layers)
+            if not layer_saes:
+                return
+            unsensable = get_circuit_sensing_service().arm_for_circuit(
+                circuit, definition, layer_saes
+            )
+            if unsensable:
+                logger.info(
+                    "circuit_edge_sensing_partial",
+                    circuit_id=circuit.id,
+                    unsensable=len(unsensable),
+                )
+        except Exception as e:  # pragma: no cover - defensive
+            logger.warning(
+                "circuit_edge_sensing_arm_failed",
+                circuit_id=getattr(circuit, "id", None),
+                error=str(e),
+            )
+
+    def _disarm_edge_sensing(self) -> None:
+        try:
+            import millm.api.dependencies as deps
+
+            service = deps._circuit_sensing_service
+            if service is None or not service.is_armed:
+                return
+            from millm.services.sae_service import AttachedSAEState
+
+            state = AttachedSAEState()
+            layer_saes = {e.layer: e.sae for e in state.entries()}
+            service.disarm(layer_saes)
+        except Exception as e:  # pragma: no cover - defensive
+            logger.warning("circuit_edge_sensing_disarm_failed", error=str(e))
 
     async def set_intensity(
         self,

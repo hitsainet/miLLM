@@ -458,6 +458,21 @@ class InferenceService:
                     reason="sensing_armed",
                 )
                 return False
+
+        # Feature 15: the same rule for circuit edge sensing. Asked of the
+        # SERVICE, not the SAE registry — a circuit's armed state spans layers
+        # and AttachedSAEState.attached_sae is only the FIRST entry, so a
+        # circuit armed on layers 10+13 would go undetected if 10 were absent.
+        if _settings.CIRCUIT_SENSING_FORCE_SERIAL:
+            import millm.api.dependencies as _deps
+
+            _circ_sensing = _deps._circuit_sensing_service
+            if _circ_sensing is not None and _circ_sensing.is_armed:
+                logger.info(
+                    "cbm_routing_fallback_to_serial",
+                    reason="circuit_sensing_armed",
+                )
+                return False
         if self._cbm_force_serial_monitoring and self._is_monitoring_enabled():
             logger.info(
                 "cbm_routing_fallback_to_serial",
@@ -1457,6 +1472,78 @@ class InferenceService:
             logger.warning("sensing_begin_failed", exc_info=False)
         return None
 
+    def _circuit_sensing_layer_saes(self) -> dict:
+        """layer -> LoadedSAE for the layers a circuit could be armed on.
+
+        Resolved ONCE per call. ``by_layer`` returns None when a layer is
+        ambiguous (zero or more than one SAE attached) so a caller can never
+        silently pick the wrong basis; re-resolving per edge inside a loop is
+        the TOCTOU wrong-basis risk set_circuit_steering warns about.
+        """
+        from millm.services.sae_service import AttachedSAEState
+
+        state = AttachedSAEState()
+        out: dict = {}
+        for entry in state.entries():
+            resolved = state.by_layer(entry.layer)
+            if resolved is not None:
+                out[entry.layer] = resolved.sae
+        return out
+
+    def _circuit_sensing_begin(self, request_id: str):
+        """Open an edge-sensing boundary across the circuit's SAEs.
+
+        Returns the layer->SAE map used, or None when not sensing. Excludes
+        speculative decoding for the same reason Feature 11 does: verification
+        passes advance the offset by a whole candidate block and rejected
+        tokens re-run, so the absolute positions the ring matches on diverge.
+        """
+        try:
+            import millm.api.dependencies as deps
+
+            service = deps._circuit_sensing_service
+            if service is None or not service.is_armed:
+                return None
+            if self._speculative_model_id:
+                logger.info(
+                    "circuit_sensing_skipped",
+                    reason="speculative_decoding_active",
+                    request_id=request_id,
+                )
+                return None
+            layer_saes = self._circuit_sensing_layer_saes()
+            if not layer_saes:
+                return None
+            if not service.begin_request(request_id, layer_saes):
+                return None
+            return layer_saes
+        except Exception:
+            logger.warning("circuit_sensing_begin_failed", exc_info=False)
+        return None
+
+    async def _notify_circuit_sensing(self, layer_saes, full_ids) -> None:
+        """Drain and persist the request's observed edges. Never raises."""
+        if not layer_saes:
+            return
+        try:
+            import millm.api.dependencies as deps
+
+            service = deps._circuit_sensing_service
+            if service is None:
+                return
+            request_id, edges, truncated = service.collect_edges(layer_saes)
+            if not request_id or not edges:
+                return
+            await service.record(
+                request_id,
+                edges,
+                truncated,
+                full_ids,
+                self._tokenizer if self.is_model_loaded() else None,
+            )
+        except Exception:
+            logger.exception("circuit_sensing_flush_failed")
+
     def _sensing_mark_history(self, sensing_ctx, prompt_ids) -> None:
         """Set the history-dedup boundary for this request (goal item 2):
         positions inside the longest common prefix with the previous sensed
@@ -1767,6 +1854,8 @@ class InferenceService:
             # generations (documented v1 limitation; such requests go
             # unsensed rather than mis-attributed).
             _sensing_sae = self._sensing_begin(completion_id) if n == 1 else None
+            _circuit_sensing = (self._circuit_sensing_begin(completion_id)
+                                if n == 1 else None)
             if n > 1:
                 from millm.services.sae_service import AttachedSAEState as _S
 
@@ -1846,6 +1935,7 @@ class InferenceService:
                 # Flush sensing hits (post-generation, inside the semaphore
                 # so the boundary can't interleave with the next request)
                 await self._notify_sensing(_sensing_sae, _sensing_full_ids)
+                await self._notify_circuit_sensing(_circuit_sensing, _sensing_full_ids)
 
         model_info = self.get_loaded_model_info()
         model_name = model_info.name if model_info else "unknown"
@@ -1932,6 +2022,7 @@ class InferenceService:
 
             # Sensing boundary (Feature 11) — serial streaming path
             _sensing_sae = self._sensing_begin(completion_id)
+            _circuit_sensing = self._circuit_sensing_begin(completion_id)
             _id_capture = None
 
             # Setup runs BEFORE the try/finally below that restores the
@@ -2191,6 +2282,7 @@ class InferenceService:
                              and _id_capture.latest_ids is not None
                              else inputs["input_ids"])
                 await self._notify_sensing(_sensing_sae, _full_ids)
+                await self._notify_circuit_sensing(_circuit_sensing, _full_ids)
 
     # =========================================================================
     # Text Completions
@@ -2238,6 +2330,8 @@ class InferenceService:
             # prompts would concatenate position accounting, like n>1.
             _sensing_ctx = (self._sensing_begin(completion_id)
                             if len(prompts) == 1 else None)
+            _circuit_sensing = (self._circuit_sensing_begin(completion_id)
+                                if len(prompts) == 1 else None)
             _sensing_full_ids = None
 
             try:
@@ -2302,6 +2396,7 @@ class InferenceService:
                     total_completion_tokens += completion_tokens
             finally:
                 await self._notify_sensing(_sensing_ctx, _sensing_full_ids)
+                await self._notify_circuit_sensing(_circuit_sensing, _sensing_full_ids)
 
         model_info = self.get_loaded_model_info()
         model_name = model_info.name if model_info else "unknown"

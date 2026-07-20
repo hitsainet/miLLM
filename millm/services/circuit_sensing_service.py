@@ -452,6 +452,147 @@ class CircuitSensingService:
     # Reporting
     # ------------------------------------------------------------------
 
+    async def record(
+        self,
+        request_id: str,
+        edges: list[Any],
+        truncated: bool,
+        full_ids: Any,
+        tokenizer: Any,
+    ) -> list[dict[str, Any]]:
+        """Persist observed edges and broadcast them (without prompt text)."""
+        from millm.db.base import async_session_factory
+        from millm.db.repositories.circuit_edge_sensing_repository import (
+            CircuitEdgeSensingRepository,
+        )
+
+        circuit_id = self._circuit_id
+        if not circuit_id or not edges:
+            return []
+        ctx_tokens = 0
+        if self._armed_layers and self._configs:
+            ctx_tokens = self._configs[self._armed_layers[0]].context_tokens
+
+        rows: list[dict[str, Any]] = []
+        for edge in edges:
+            text, window, parts = self._context(full_ids, edge, ctx_tokens, tokenizer)
+            rows.append(
+                dict(
+                    circuit_id=circuit_id,
+                    request_id=request_id,
+                    phase=edge.phase,
+                    edge_key=edge.edge_key,
+                    up_layer=edge.up_layer,
+                    up_feature_idx=edge.up_feature_idx,
+                    up_pos=edge.up_pos,
+                    up_act=edge.up_act,
+                    down_layer=edge.down_layer,
+                    down_feature_idx=edge.down_feature_idx,
+                    down_pos=edge.down_pos,
+                    down_act=edge.down_act,
+                    token_lag=edge.token_lag,
+                    edge_rung=edge.rung,
+                    # Carried verbatim from the arm-time render — NOT
+                    # re-derived, so the row keeps describing the evidence
+                    # that was true when it was observed.
+                    edge_rung_language=edge.rung_language,
+                    edge_type=edge.edge_type,
+                    context_text=text,
+                    context_token_ids=window,
+                    context_parts=parts,
+                    summary=self.summarize(edge),
+                    truncated=truncated,
+                )
+            )
+
+        payloads: list[dict[str, Any]] = []
+        try:
+            async with async_session_factory() as session:
+                repo = CircuitEdgeSensingRepository(session)
+                saved = await repo.create_many(rows)
+                payloads = [r.to_dict(include_context=False) for r in saved]
+                await repo.prune(
+                    circuit_id,
+                    cap=settings.CIRCUIT_SENSING_MAX_EVENTS_PER_CIRCUIT,
+                    max_age_days=settings.CIRCUIT_SENSING_MAX_AGE_DAYS,
+                )
+                await session.commit()
+        except Exception:
+            logger.exception("circuit_sensing_persist_failed")
+            return []
+
+        self.note_events_recorded(len(payloads))
+        self._emit(payloads)
+        return payloads
+
+    @staticmethod
+    def _context(
+        full_ids: Any, edge: Any, k: int, tokenizer: Any
+    ) -> tuple[Optional[str], Optional[list[int]], Optional[dict[str, str]]]:
+        """±K token window spanning up_pos..down_pos, with a highlight split.
+
+        Segmentation uses PREFIX decodes and length slicing. Decoding each
+        segment independently glues words on SentencePiece models (a
+        segment-leading '▁piece' loses its space) — the bug Feature 11 R1
+        found and fixed; the FTID's sketch for this method reintroduced it.
+        Specials are kept so the three prefixes stay aligned.
+        """
+        if k == 0 or full_ids is None or tokenizer is None:
+            return None, None, None
+        try:
+            ids = full_ids[0] if full_ids.dim() == 2 else full_ids
+            total = int(ids.shape[-1])
+            start, end = edge.up_pos, edge.down_pos
+            if start >= total:
+                # Span entirely beyond the available ids (decode-phase event
+                # with prompt-only fallback): an empty box with a zero-width
+                # highlight is worse than no context at all.
+                return None, None, None
+            lo = max(0, start - k)
+            hi = min(total, end + 1 + k)
+            window = ids[lo:hi].tolist()
+            text = tokenizer.decode(window, skip_special_tokens=True)
+            span_lo = max(start - lo, 0)
+            span_hi = min(end + 1 - lo, len(window))
+            d_before = tokenizer.decode(window[:span_lo], skip_special_tokens=False)
+            d_through = tokenizer.decode(window[:span_hi], skip_special_tokens=False)
+            d_all = tokenizer.decode(window, skip_special_tokens=False)
+            if not (d_through.startswith(d_before) and d_all.startswith(d_through)):
+                # Byte-level BPE can split a multi-byte character at the span
+                # boundary, so length-slicing would misplace the highlight.
+                # Plain text beats a wrong mark.
+                return text, window, None
+            return (
+                text,
+                window,
+                {
+                    "before": d_before,
+                    "span": d_through[len(d_before):],
+                    "after": d_all[len(d_through):],
+                },
+            )
+        except Exception:
+            logger.warning("circuit_sensing_context_decode_failed", exc_info=False)
+            return None, None, None
+
+    def _emit(self, payloads: list[dict[str, Any]]) -> None:
+        """Broadcast at most _WS_MAX_PER_FLUSH events, throttled."""
+        if not payloads:
+            return
+        if not self.should_emit():
+            self.note_ws_dropped(len(payloads))
+            return
+        try:
+            from millm.sockets.progress import progress_emitter
+
+            for payload in payloads[: self._WS_MAX_PER_FLUSH]:
+                progress_emitter.emit_circuit_sensing_event(payload)
+            overflow = len(payloads) - self._WS_MAX_PER_FLUSH
+            if overflow > 0:
+                self.note_ws_dropped(overflow)
+        except Exception:
+            logger.warning("circuit_sensing_emit_failed", exc_info=False)
+
     def summarize(self, edge: Any) -> str:
         """One-line human summary. The rung phrase is carried VERBATIM.
 

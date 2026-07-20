@@ -310,7 +310,15 @@ class NoActiveCircuitError(MiLLMError):
 # Error code to class mapping for lookup
 # =============================================================================
 
+class CircuitSensingEventNotFoundError(MiLLMError):
+    """A circuit edge sensing event id that does not exist (Feature 15)."""
+
+    code = "CIRCUIT_SENSING_EVENT_NOT_FOUND"
+    status_code = 404
+
+
 ERROR_CLASSES: dict[str, type[MiLLMError]] = {
+    "CIRCUIT_SENSING_EVENT_NOT_FOUND": CircuitSensingEventNotFoundError,
     "INTERNAL_ERROR": MiLLMError,
     "MODEL_NOT_FOUND": ModelNotFoundError,
     "MODEL_ALREADY_EXISTS": ModelAlreadyExistsError,

@@ -278,4 +278,26 @@ describe('AttachSetDialog', () => {
     expect(blurb).toMatch(/does not.*detach|not.*detach it/i);
     expect(blurb).not.toMatch(/replaces the attached set/i);
   });
+
+  it('presents the VRAM budget as advisory, not as a refusal', () => {
+    // The 200 MB figure was the two-SAE spike's close-out TARGET, not a
+    // capacity limit — real capacity is enforced against live free VRAM. A
+    // 5-SAE set on a 24 GB card tripped an amber "over the VRAM envelope"
+    // warning that read like a failure for an attach that had SUCCEEDED.
+    const over = makeResponse({
+      vram_warning: true,
+      total_memory_usage_mb: 640,
+      vram_envelope_mb: 4096,
+    });
+    renderDialog({ open: true, onSubmit: vi.fn().mockResolvedValue(over) });
+    return userEvent.click(screen.getByRole('button', { name: /attach set/i })).then(
+      async () => {
+        const note = await screen.findByTestId('result-vram-warning');
+        expect(note.textContent).toMatch(/succeeded/i);
+        expect(note.textContent).toMatch(/advisory/i);
+        // Must NOT read as a refusal or an error.
+        expect(note.textContent).not.toMatch(/failed|refused|cannot|error/i);
+      },
+    );
+  });
 });

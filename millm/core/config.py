@@ -72,9 +72,20 @@ class Settings(BaseSettings):
     CIRCUIT_MAX_MEMBERS_PER_LAYER: int = 20
 
     # ── Multi-SAE circuit serving (Feature 12) ─────────────────────────
-    # Documented VRAM close-out envelope for the attached SAE steering set.
-    # Measured: two Gemma-2-2B SAEs = 128 MB fp16 (within) / 256 MB fp32.
-    MULTISAE_VRAM_ENVELOPE_MB: int = 200
+    # ADVISORY budget for the attached SAE steering set — a "you may not have
+    # intended this much" hint, NOT a capacity limit. Real capacity is enforced
+    # in attach_set against live free VRAM (torch.cuda.mem_get_info) with a 10%
+    # headroom margin, which refuses with InsufficientMemoryError.
+    #
+    # This was originally 200 MB: the close-out TARGET from the two-SAE spike
+    # (two Gemma-2-2B SAEs = 128 MB fp16 / 256 MB fp32), not a capacity figure.
+    # A 5-SAE circuit on a 24 GB card sits at ~640 MB — entirely fine, but it
+    # tripped an "over the VRAM envelope" warning that read like a refusal.
+    # A documentation number must not masquerade as an operational limit.
+    #
+    # 4096 MB ≈ 32 SAEs at the measured 128 MB fp16 each, comfortably past the
+    # 16-layer contract maximum while still flagging a genuine runaway.
+    MULTISAE_VRAM_ENVELOPE_MB: int = 4096
     # Dtype for the attached steering-weight set (fp16 ≈ 64 MB/SAE measured).
     MULTISAE_ATTACH_DTYPE: str = "float16"
     # Global circuit intensity (λ) bounds — shared with the Feature 14 dial.

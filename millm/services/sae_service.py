@@ -1583,10 +1583,12 @@ class SAEService:
         total_mb = status_set.total_memory_usage_mb or 0
         vram_warning = total_mb > envelope
         if vram_warning:
-            logger.warning(
-                "multisae_vram_over_envelope",
+            # Advisory only — the attach SUCCEEDED. Real capacity was already
+            # enforced against live free VRAM above.
+            logger.info(
+                "multisae_vram_over_advisory_budget",
                 total_mb=total_mb,
-                envelope_mb=envelope,
+                advisory_budget_mb=envelope,
                 attached=status_set.count,
             )
         # Side-effect parity with attach_sae (F12 R3 finding): record the

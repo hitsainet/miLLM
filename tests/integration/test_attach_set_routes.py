@@ -8,6 +8,8 @@ registered MiLLMError handler.
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
+
+from millm.core.config import settings
 from fastapi import FastAPI
 from httpx import ASGITransport, AsyncClient
 
@@ -44,7 +46,7 @@ def mock_service():
             ],
             "attached_count": 2,
             "total_memory_usage_mb": 128,
-            "vram_envelope_mb": 200,
+            "vram_envelope_mb": settings.MULTISAE_VRAM_ENVELOPE_MB,
             "vram_warning": False,
         }
     )
@@ -70,7 +72,10 @@ class TestAttachmentsStatus:
         assert data["is_attached"] is True and data["count"] == 2
         assert {e["sae_id"] for e in data["entries"]} == {"sae-a", "sae-b"}
         assert data["total_memory_usage_mb"] == 128
-        assert data["vram_envelope_mb"] == 200
+        # Assert the CONFIGURED value, not a literal: 200 was the two-SAE
+        # spike's close-out target, and hardcoding it made the advisory budget
+        # look like a fixed capacity limit.
+        assert data["vram_envelope_mb"] == settings.MULTISAE_VRAM_ENVELOPE_MB
         assert data["vram_warning"] is False
 
     async def test_vram_warning_flag_when_over_envelope(self, client, mock_service):
@@ -81,13 +86,18 @@ class TestAttachmentsStatus:
                 AttachedEntryStatus(sae_id=f"s{i}", layer=i, memory_usage_mb=64)
                 for i in range(4)
             ],
-            total_memory_usage_mb=256,
+            total_memory_usage_mb=settings.MULTISAE_VRAM_ENVELOPE_MB + 64,
         )
         async with client:
             r = await client.get("/api/saes/attachments")
         data = r.json()["data"]
-        assert data["total_memory_usage_mb"] == 256
-        assert data["vram_warning"] is True  # 256 > 200 envelope
+        # Derived from the configured budget so the test keeps testing the
+        # BEHAVIOUR (over the budget ⇒ advisory flag) rather than a literal
+        # that silently stops exercising the branch when the budget moves.
+        assert data["total_memory_usage_mb"] == settings.MULTISAE_VRAM_ENVELOPE_MB + 64
+        # The flag is ADVISORY — it says "more than you may have intended",
+        # never "refused". Real capacity is gated against live free VRAM.
+        assert data["vram_warning"] is True  # total > the advisory budget
 
 
 class TestAttachSet:
@@ -112,7 +122,7 @@ class TestAttachSet:
             "entries": [{"sae_id": "sae-a", "layer": 10, "status": "already_attached"}],
             "attached_count": 1,
             "total_memory_usage_mb": 64,
-            "vram_envelope_mb": 200,
+            "vram_envelope_mb": settings.MULTISAE_VRAM_ENVELOPE_MB,
             "vram_warning": False,
         }
         async with client:

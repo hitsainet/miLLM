@@ -15,7 +15,7 @@
  */
 
 import { useEffect, useMemo, useState } from 'react';
-import { AlertTriangle, Layers, Info } from 'lucide-react';
+import { AlertTriangle, Info, Layers } from 'lucide-react';
 
 import { Button, Modal, Spinner } from '@components/common';
 import { ApiError } from '@/services/api';
@@ -252,7 +252,7 @@ export function AttachSetDialog({
                 {result.total_memory_usage_mb} MB
                 <span className="text-slate-500">
                   {' '}
-                  / {result.vram_envelope_mb} MB
+                  / {result.vram_envelope_mb} MB advisory
                 </span>
               </span>
             </div>
@@ -260,10 +260,11 @@ export function AttachSetDialog({
             {result.vram_warning && (
               <p
                 data-testid="result-vram-warning"
-                className="flex items-center gap-1.5 text-xs text-amber-300"
+                className="flex items-center gap-1.5 text-xs text-slate-400"
               >
-                <AlertTriangle className="h-3.5 w-3.5" />
-                Attached set is over the VRAM envelope.
+                <Info className="h-3.5 w-3.5" />
+                Above the advisory budget — the attach succeeded. Real capacity
+                is checked against free GPU memory, not this figure.
               </p>
             )}
 

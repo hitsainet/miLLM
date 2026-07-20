@@ -209,6 +209,12 @@ import type {
   SensingStatus,
   SensingToggleResult,
 } from '@/types/sensing';
+import type {
+  CircuitSensingEvent,
+  CircuitSensingEventList,
+  CircuitSensingStatus,
+  CircuitSensingToggleResult,
+} from '@/types/circuitSensing';
 
 export const modelApi = {
   /**
@@ -977,6 +983,54 @@ export const sensingApi = {
     }),
 };
 
+/**
+ * Circuit edge sensing (Feature 15) — observed up→down edge firings.
+ *
+ * Evidence phrasing (`edge_rung_language`) always arrives from the server;
+ * this client never derives or re-phrases it.
+ */
+export const circuitSensingApi = {
+  /** Runtime status: armed circuit, sensable/unsensable edges, overhead. */
+  status: () => request<CircuitSensingStatus>('/circuit-sensing/status'),
+
+  /** Newest-first events, optionally scoped to a circuit or a single edge. */
+  events: (opts?: {
+    circuitId?: string;
+    edgeKey?: string;
+    limit?: number;
+    since?: string;
+  }) => {
+    const params = new URLSearchParams();
+    if (opts?.circuitId) params.set('circuit_id', opts.circuitId);
+    if (opts?.edgeKey) params.set('edge_key', opts.edgeKey);
+    if (opts?.limit) params.set('limit', String(opts.limit));
+    if (opts?.since) params.set('since', opts.since);
+    const qs = params.toString();
+    return request<CircuitSensingEventList>(
+      `/circuit-sensing/events${qs ? `?${qs}` : ''}`
+    );
+  },
+
+  /** Event detail — the only path that carries context text. */
+  eventDetail: (id: number) =>
+    request<CircuitSensingEvent>(`/circuit-sensing/events/${id}`),
+
+  /** Clears events (all, or one circuit's). */
+  clearEvents: (circuitId?: string) => {
+    const qs = circuitId ? `?circuit_id=${encodeURIComponent(circuitId)}` : '';
+    return request<{ deleted: number }>(`/circuit-sensing/events${qs}`, {
+      method: 'DELETE',
+    });
+  },
+
+  /** Persists the per-circuit toggle and live-arms/disarms when active. */
+  setEnabled: (circuitId: string, enabled: boolean) =>
+    request<CircuitSensingToggleResult>(
+      `/circuit-sensing/${circuitId}/${enabled ? 'enable' : 'disable'}`,
+      { method: 'POST' }
+    ),
+};
+
 export const api = {
   /** Model management operations */
   models: modelApi,
@@ -991,6 +1045,8 @@ export const api = {
   /** Imported cluster operations (Feature 8) */
   clusters: clusterApi,
   sensing: sensingApi,
+  /** Circuit edge sensing operations (Feature 15) */
+  circuitSensing: circuitSensingApi,
   /** Server status operations */
   server: serverApi,
 };

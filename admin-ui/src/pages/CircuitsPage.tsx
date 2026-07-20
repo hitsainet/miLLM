@@ -10,7 +10,7 @@ import { Plus, Share2 } from 'lucide-react';
 import { useCircuits } from '@hooks/useCircuits';
 import { useToast } from '@hooks/useToast';
 import { CircuitCard, CircuitImportDialog } from '@components/circuits';
-import { AttachmentPanel } from '@components/circuits';
+import { AttachmentPanel, EdgeSensingPanel } from '@components/circuits';
 import { Button, Card, EmptyState, Spinner } from '@components/common';
 
 export function CircuitsPage() {
@@ -110,6 +110,12 @@ export function CircuitsPage() {
             ))}
           </div>
         )}
+      </Card>
+
+      {/* Observed edge firings (Feature 15) — what the armed circuit's edges
+          actually did on live traffic. */}
+      <Card>
+        <EdgeSensingPanel />
       </Card>
 
       <CircuitImportDialog

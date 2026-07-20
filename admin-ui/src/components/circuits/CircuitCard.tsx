@@ -13,6 +13,7 @@ import { AlertTriangle, Download, Play, Share2, Square, Trash2 } from 'lucide-re
 import { Badge, Button } from '@components/common';
 import type { CircuitSummary, PerSAEVerdictKind } from '@/types/circuits';
 import { CircuitActivateControl } from './CircuitActivateControl';
+import { EdgeSensingToggle } from './sensing/EdgeSensingToggle';
 
 interface CircuitCardProps {
   circuit: CircuitSummary;
@@ -104,6 +105,7 @@ export function CircuitCard({
         </div>
 
         <div className="flex items-center gap-1 shrink-0">
+          <EdgeSensingToggle circuitId={circuit.id} />
           <Button variant="ghost" size="sm" onClick={onExport} title="Export definition">
             <Download className="w-4 h-4" />
           </Button>

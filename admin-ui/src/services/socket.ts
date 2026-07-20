@@ -34,6 +34,11 @@ interface SocketEventHandlers {
   // Sensing events (Feature 11) — payload excludes context (fetched via REST)
   'sensing:event': EventCallback<import('@/types/sensing').SensingEvent>;
 
+  // Circuit edge sensing (Feature 15) — payload omits prompt text entirely
+  'circuit:sensing:event': EventCallback<
+    import('@/types/circuitSensing').CircuitSensingEvent
+  >;
+
   // System events
   'system:metrics': EventCallback<SystemMetricsEvent>;
 }

@@ -1173,7 +1173,26 @@ class LoadedSAE:
             shed=shed,
             capped=self._edge_done,
             on_cap=self._note_edge_cap,
+            # R1-01: the per-CIRCUIT budget, which was built, unit-tested and
+            # never wired — so an N-layer circuit still emitted N x its cap
+            # (measured: cap 3, three layers, nine events, `spent` 0). This is
+            # the guarantee FPRD §9 criterion 3 requires and F19 depends on.
+            try_spend=self._try_spend_circuit_budget,
         )
+
+    def _try_spend_circuit_budget(self, spec) -> bool:
+        """Claim one slot from the CIRCUIT's shared budget.
+
+        False means this event is dropped and the layer is recorded as
+        truncated — the caller CONTINUES, so upstream recording keeps feeding
+        sibling layers (R2-03/R3-02). Returns True when unbound, so an
+        unbound SAE degrades to the per-SAE cap rather than to silence.
+        """
+        ctx = self._edge_ctx
+        cfg = self._edge_sensing
+        if ctx is None or cfg is None or ctx.is_closed:
+            return True
+        return ctx.budget.try_spend(cfg.circuit_id, spec.down_layer)
 
     def _note_edge_cap(self) -> None:
         """The per-request cap was reached. Latches so later passes skip the

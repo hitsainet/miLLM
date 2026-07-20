@@ -175,7 +175,7 @@ class EdgeFireRing:
         fires = self._fires.get(edge_key)
         if not fires:
             return None
-        i = bisect.bisect_left(fires, (down_pos, float("-inf"))) - 1
+        i = len(fires) - 1
         while i >= 0:
             pos, act = fires[i]
             if (down_pos - pos) > self._max_lag:
@@ -477,6 +477,15 @@ def _match_edges_impl(
         if try_spend is not None and not try_spend(spec):
             # Budget exhausted for this circuit. CONTINUE — returning here
             # would stop this layer feeding the ring and blind its siblings.
+            #
+            # The refusal MUST be reported as truncation. Wiring the per-circuit
+            # budget initially dropped events without setting `_edge_truncated`,
+            # because `try_spend` refuses BEFORE the per-SAE latch below is
+            # reached — so the drain reported a clean, complete result while
+            # events were being discarded. That is the silent-dark failure this
+            # feature exists to remove, reintroduced by the fix for it.
+            if on_cap is not None:
+                on_cap()
             continue
         if on_cap is not None and len(out) >= config.max_events_per_request:
             # Per-SAE cap reached. Latch, then CONTINUE for the same reason.

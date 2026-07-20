@@ -88,6 +88,9 @@ class CircuitSensingService:
         self._last_request_member_fires: int = 0
         #: Layers that dropped events in the last drained request (BR-006).
         self._last_request_truncated_layers: list[int] = []
+        #: Armed layers with no usable SAE at begin time — dark for the
+        #: current request, and reported as incomplete rather than complete.
+        self._request_dark_layers: list[int] = []
         self._unsensable: list[UnsensableEdge] = []
         self._max_token_lag: int = settings.CIRCUIT_SENSING_MAX_TOKEN_LAG
         self._last_request_overhead_ms: float = 0.0
@@ -434,6 +437,12 @@ class CircuitSensingService:
         self._unsensable = []
         self._request_circuit_id = None
         self._request_context_tokens = 0
+        # R1-04: these survived disarm, so status reported `layers: []` with
+        # `truncated_layers: [13]` — accusing a layer the armed circuit does
+        # not contain, and falsifying the contract's "an empty list means every
+        # armed layer reported completely". Verified by execution.
+        self._last_request_truncated_layers = []
+        self._request_dark_layers = []
         # R2: every other field was cleared but this one, so a circuit with no
         # override silently inherited the previous circuit's lag window.
         self._max_token_lag = settings.CIRCUIT_SENSING_MAX_TOKEN_LAG
@@ -473,6 +482,32 @@ class CircuitSensingService:
             if self._armed_layers and self._configs
             else 0
         )
+        # R1-03: an already-open boundary means two generations interleaved.
+        # `MAX_CONCURRENT_REQUESTS` MUST be 1 for this service to attribute
+        # observations correctly, and that was enforced only by a comment in
+        # config.py. Verified by execution with a second begin: the first
+        # request's context was orphaned (its rings leaked, nothing would ever
+        # close them), its edges were never drained, and `collect_edges` then
+        # reported BOTH requests' events under the second request's id.
+        #
+        # Fabricated attribution on an evidence surface is categorically worse
+        # than lost observations, so the second boundary is refused and the
+        # reason is surfaced. Sensing degrades to "not observing, and here is
+        # why", never to confidently wrong data.
+        if self._ctx is not None and not self._ctx.is_closed:
+            logger.warning(
+                "circuit_sensing_concurrent_request_refused",
+                open_request=self._request_circuit_id,
+                new_request=request_id,
+                detail=(
+                    "a request boundary is already open — MAX_CONCURRENT_"
+                    "REQUESTS must be 1 for circuit sensing to attribute "
+                    "observations correctly"
+                ),
+            )
+            self.note_paused("concurrent_request")
+            return False
+
         # One context for this request, shared by every armed layer. Built over
         # the armed circuit SET rather than a single id: Feature 19 lifts the
         # single-active invariant, and building for one circuit now would
@@ -491,13 +526,40 @@ class CircuitSensingService:
         )
         self._ctx = ctx
         began = False
+        # R1-02: a layer that cannot be bound is DARK for this request, and
+        # `began` used to be True if ANY layer began. Verified by execution
+        # with one layer absent from `layer_saes`: it was never bound, never
+        # begun, observed nothing — and the drain reported
+        # `truncated_layers: []`, which this service's own status contract
+        # defines as "every armed layer reported completely". The operator was
+        # told the circuit was quiet while half of it was blind.
+        #
+        # Reachable whenever `_circuit_sensing_layer_saes()` drops a layer:
+        # two SAEs on one layer (ambiguous), or a detach between arm and
+        # request. A false completeness claim is worse than a missing one, so
+        # the dark layers are named in `truncated_layers` and the reason is
+        # surfaced.
+        dark: list[int] = []
         for layer in self._armed_layers:
             sae = layer_saes.get(layer)
             if sae is None or not sae.is_edge_sensing_armed:
+                dark.append(layer)
                 continue
             sae.bind_context(ctx)
             sae.begin_edge_sensing_request(request_id)
             began = True
+        self._request_dark_layers = sorted(dark)
+        if dark:
+            logger.warning(
+                "circuit_sensing_layer_unavailable",
+                layers=self._request_dark_layers,
+                request=request_id,
+                detail=(
+                    "armed layers had no usable SAE at request time; their "
+                    "view of this request is incomplete"
+                ),
+            )
+            self.note_paused("layer_unavailable")
         return began
 
     def collect_edges(
@@ -552,7 +614,13 @@ class CircuitSensingService:
         # workflow to pass unchanged as the outside-boundary preservation
         # proof. The per-layer detail rides alongside instead, read by the
         # status route.
-        self._last_request_truncated_layers = sorted(truncated_layers)
+        # A layer that was DARK for this request is incomplete for exactly the
+        # same operator-facing reason as one that shed: its view is partial.
+        # Merging them here keeps `truncated_layers` a single honest answer to
+        # "which layers should I not trust for this request".
+        self._last_request_truncated_layers = sorted(
+            set(truncated_layers) | set(self._request_dark_layers)
+        )
         return request_id, merged, truncated
 
     @property

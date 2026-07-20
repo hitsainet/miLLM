@@ -12,6 +12,19 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
+from tests.support.attached_state import FakeAttachedState
+from tests.support.attached_state import patched_state as _patched_state
+
+#: The real cluster fixture in this module declares a 32768-wide SAE, so the
+#: default attached width must match it for a BOUND import.
+FIXTURE_D_SAE = 32768
+
+
+def patched_state(**kw):
+    kw.setdefault('d_sae', FIXTURE_D_SAE)
+    return _patched_state(**kw)
+
+
 from millm.api.schemas.cluster import ClusterBundleV1, ClusterDefinitionV1
 from millm.core.steering_range import STEERING_RANGE
 from millm.db.repositories.profile_repository import ProfileRepository
@@ -21,28 +34,7 @@ from millm.services.profile_service import ProfileService
 FIXTURE = Path(__file__).resolve().parents[1] / "fixtures" / "mistudio_export.cluster.json"
 
 
-class FakeAttachedState:
-    def __init__(self, d_sae=32768, sae_id="sae_local", layer=12, attached=True):
-        self.attached_sae = MagicMock(d_sae=d_sae) if attached else None
-        self.attached_sae_id = sae_id if attached else None
-        self.attached_layer = layer if attached else None
 
-
-def patched_state(**kw):
-    """Patch the singleton at BOTH import sites: ClusterService (compat
-    assessment) and ProfileService._validate_activation (the shared gate)."""
-    import contextlib
-
-    @contextlib.contextmanager
-    def _both():
-        state = FakeAttachedState(**kw)
-        with patch("millm.services.cluster_service.AttachedSAEState",
-                   return_value=state), \
-             patch("millm.services.sae_service.AttachedSAEState",
-                   return_value=state):
-            yield state
-
-    return _both()
 
 
 @pytest.fixture

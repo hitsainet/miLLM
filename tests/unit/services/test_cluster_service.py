@@ -9,6 +9,8 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
+from tests.support.attached_state import FakeAttachedState, patched_state
+
 from millm.api.schemas.cluster import ClusterBundleV1, ClusterDefinitionV1
 from millm.core.errors import ValidationError
 from millm.db.repositories.profile_repository import ProfileRepository
@@ -35,52 +37,6 @@ def make_definition(**overrides) -> ClusterDefinitionV1:
     return ClusterDefinitionV1.model_validate(base)
 
 
-class FakeAttachedState:
-    """Stands in for the AttachedSAEState singleton.
-
-    Mirrors the multi-SAE registry surface (Feature 12) the cluster
-    compatibility check now uses: ``by_layer`` resolves a layer to its unique
-    entry, ``count``/``entries`` describe the whole attached set. The singular
-    properties remain the first-entry view for back-compat.
-    """
-
-    def __init__(self, d_sae=16384, sae_id="sae_local", layer=12, attached=True,
-                 extra_entries=()):
-        self.attached_sae = MagicMock(d_sae=d_sae) if attached else None
-        self.attached_sae_id = sae_id if attached else None
-        self.attached_layer = layer if attached else None
-        self._entries = []
-        if attached:
-            self._entries.append(
-                SimpleNamespace(sae=self.attached_sae, sae_id=sae_id, layer=layer)
-            )
-        # extra_entries: iterable of (sae_id, layer, d_sae) for multi-SAE cases.
-        for extra_sae_id, extra_layer, extra_d_sae in extra_entries:
-            self._entries.append(
-                SimpleNamespace(
-                    sae=MagicMock(d_sae=extra_d_sae),
-                    sae_id=extra_sae_id,
-                    layer=extra_layer,
-                )
-            )
-
-    @property
-    def count(self):
-        return len(self._entries)
-
-    def entries(self):
-        return list(self._entries)
-
-    def by_layer(self, layer):
-        matches = [e for e in self._entries if e.layer == int(layer)]
-        return matches[0] if len(matches) == 1 else None
-
-    def get(self, sae_id, layer):
-        for e in self._entries:
-            if e.sae_id == sae_id and e.layer == int(layer):
-                return e
-        return None
-
 
 @pytest.fixture
 def mock_sae_service():
@@ -98,21 +54,6 @@ async def service(test_session, mock_sae_service):
     return ClusterService(profile_service, repo, mock_sae_service)
 
 
-def patched_state(**kw):
-    """Patch the singleton at BOTH import sites: ClusterService (compat
-    assessment) and ProfileService._validate_activation (the shared gate)."""
-    import contextlib
-
-    @contextlib.contextmanager
-    def _both():
-        state = FakeAttachedState(**kw)
-        with patch("millm.services.cluster_service.AttachedSAEState",
-                   return_value=state), \
-             patch("millm.services.sae_service.AttachedSAEState",
-                   return_value=state):
-            yield state
-
-    return _both()
 
 
 class TestImportMapping:

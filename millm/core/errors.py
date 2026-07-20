@@ -206,6 +206,29 @@ class InvalidFeatureIndexError(MiLLMError):
     status_code = 400
 
 
+class SAESetIncompleteError(MiLLMError):
+    """A circuit member's layer has no (unique) attached SAE.
+
+    Feature 12: a cross-layer circuit is only serveable when every member's
+    layer resolves to exactly one attached SAE. If any member's layer has no
+    attached SAE — or an ambiguous one, or the member index is out of that
+    layer's range — serving is refused rather than steering through the wrong
+    basis. The offenders list names each ``{feature_idx, layer, sae_id?,
+    reason?}`` so the caller can fall back to the per-layer cluster slice.
+    """
+
+    code = "SAE_SET_INCOMPLETE"
+    status_code = 422
+
+    def __init__(self, offenders: list[dict[str, Any]]) -> None:
+        self.offenders = offenders
+        super().__init__(
+            f"SAE set incomplete: {len(offenders)} member(s) have no attached "
+            f"SAE for their layer",
+            details={"offenders": offenders},
+        )
+
+
 # =============================================================================
 # Profile Errors
 # =============================================================================

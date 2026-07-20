@@ -1,0 +1,246 @@
+"""Unit tests for circuit serving (Feature 12, task 3.0).
+
+Pins the multi-SAE serving contract: group-by-layer application through each
+layer's own SAE, per-layer budgets under one global λ with the shared ±200
+clamp (γ=0 ⇒ B=B_dir), SAE_SET_INCOMPLETE on any unresolved/ambiguous/out-of-
+range member (nothing applied), cross-layer hazard labeling, config never
+mutated by hazard detection, and per-layer clear.
+"""
+
+from unittest.mock import MagicMock
+
+import pytest
+
+from millm.api.schemas.circuit import CircuitMember
+from millm.core.errors import SAESetIncompleteError
+from millm.services.sae_service import AttachedSAEState, SAEService
+
+
+@pytest.fixture(autouse=True)
+def reset_registry():
+    state = AttachedSAEState()
+    state._entries.clear()
+    yield
+    state._entries.clear()
+
+
+def _sae(d_sae: int = 8192):
+    sae = MagicMock()
+    sae.d_sae = d_sae
+    applied: dict[int, float] = {}
+
+    def _set_batch(steering: dict[int, float]) -> None:
+        for idx in steering:
+            if not 0 <= idx < d_sae:
+                raise ValueError(f"idx {idx} out of range")
+        applied.update(steering)
+
+    sae.set_steering_batch.side_effect = _set_batch
+    sae.get_steering_values.side_effect = lambda: dict(applied)
+    sae._applied = applied
+    return sae
+
+
+def _service() -> SAEService:
+    svc = SAEService.__new__(SAEService)
+    svc._sae_state = AttachedSAEState()
+    return svc
+
+
+def _attach(state, sae, sae_id, layer):
+    state.set(sae, sae_id, layer, MagicMock())
+
+
+class TestGroupByLayer:
+    def test_each_member_applied_through_its_own_layer_sae(self):
+        svc = _service()
+        s10, s13 = _sae(), _sae()
+        _attach(svc._sae_state, s10, "sae-10", 10)
+        _attach(svc._sae_state, s13, "sae-13", 13)
+        members = [
+            CircuitMember(feature_idx=5, layer=10, budget=50.0, sign=1),
+            CircuitMember(feature_idx=9, layer=13, budget=40.0, sign=-1),
+        ]
+        result = svc.set_circuit_steering(members, intensity=1.0)
+        # L10 member on s10 only; L13 member on s13 only.
+        assert s10._applied == {5: 50.0}
+        assert s13._applied == {9: -40.0}
+        assert result.applied_per_layer == {10: {5: 50.0}, 13: {9: -40.0}}
+
+    def test_multiple_members_same_layer(self):
+        svc = _service()
+        s10 = _sae()
+        _attach(svc._sae_state, s10, "sae-10", 10)
+        members = [
+            CircuitMember(feature_idx=1, layer=10, budget=30.0, sign=1),
+            CircuitMember(feature_idx=2, layer=10, budget=20.0, sign=1),
+        ]
+        svc.set_circuit_steering(members, intensity=1.0)
+        assert s10._applied == {1: 30.0, 2: 20.0}
+
+
+class TestBudgetLambdaClamp:
+    def test_lambda_scales_all_layers(self):
+        svc = _service()
+        s10, s13 = _sae(), _sae()
+        _attach(svc._sae_state, s10, "sae-10", 10)
+        _attach(svc._sae_state, s13, "sae-13", 13)
+        members = [
+            CircuitMember(feature_idx=1, layer=10, budget=50.0, sign=1),
+            CircuitMember(feature_idx=2, layer=13, budget=30.0, sign=1),
+        ]
+        svc.set_circuit_steering(members, intensity=2.0)
+        assert s10._applied == {1: 100.0}  # 50*1*2
+        assert s13._applied == {2: 60.0}   # 30*1*2
+
+    def test_effective_value_clamped_to_range_with_warning(self):
+        svc = _service()
+        s10 = _sae()
+        _attach(svc._sae_state, s10, "sae-10", 10)
+        members = [CircuitMember(feature_idx=1, layer=10, budget=200.0, sign=1)]
+        result = svc.set_circuit_steering(members, intensity=2.0)  # 400 → clamp 200
+        assert s10._applied == {1: 200.0}
+        assert len(result.clamp_warnings) == 1
+        assert "clamped" in result.clamp_warnings[0]
+
+    def test_gamma_zero_budget_is_bdir(self):
+        """No re-derivation: budget is applied directly (× sign × λ)."""
+        svc = _service()
+        s10 = _sae()
+        _attach(svc._sae_state, s10, "sae-10", 10)
+        members = [CircuitMember(feature_idx=1, layer=10, budget=17.5, sign=1)]
+        svc.set_circuit_steering(members, intensity=1.0)
+        assert s10._applied == {1: 17.5}
+
+    def test_intensity_zero_disables(self):
+        svc = _service()
+        s10 = _sae()
+        _attach(svc._sae_state, s10, "sae-10", 10)
+        members = [CircuitMember(feature_idx=1, layer=10, budget=50.0, sign=1)]
+        result = svc.set_circuit_steering(members, intensity=0.0)
+        assert s10._applied == {1: 0.0}
+        assert result.hazards == []  # λ=0 → no hazards
+
+
+class TestSAESetIncomplete:
+    def test_missing_layer_raises_with_offenders(self):
+        svc = _service()
+        _attach(svc._sae_state, _sae(), "sae-10", 10)
+        members = [
+            CircuitMember(feature_idx=1, layer=10, budget=50.0, sign=1),
+            CircuitMember(feature_idx=2, layer=13, budget=40.0, sign=1, sae_id="sae-13"),
+        ]
+        with pytest.raises(SAESetIncompleteError) as ei:
+            svc.set_circuit_steering(members, intensity=1.0)
+        offenders = ei.value.offenders
+        assert len(offenders) == 1
+        assert offenders[0]["layer"] == 13 and offenders[0]["feature_idx"] == 2
+
+    def test_nothing_applied_when_incomplete(self):
+        svc = _service()
+        s10 = _sae()
+        _attach(svc._sae_state, s10, "sae-10", 10)
+        members = [
+            CircuitMember(feature_idx=1, layer=10, budget=50.0, sign=1),
+            CircuitMember(feature_idx=2, layer=13, budget=40.0, sign=1),
+        ]
+        with pytest.raises(SAESetIncompleteError):
+            svc.set_circuit_steering(members, intensity=1.0)
+        assert s10._applied == {}  # fail-closed: NOTHING applied
+
+    def test_ambiguous_layer_is_incomplete(self):
+        """Two SAEs on the same layer → by_layer None → offender."""
+        svc = _service()
+        _attach(svc._sae_state, _sae(), "sae-a", 10)
+        _attach(svc._sae_state, _sae(), "sae-b", 10)
+        members = [CircuitMember(feature_idx=1, layer=10, budget=50.0, sign=1)]
+        with pytest.raises(SAESetIncompleteError):
+            svc.set_circuit_steering(members, intensity=1.0)
+
+    def test_out_of_bounds_index_is_incomplete_not_500(self):
+        svc = _service()
+        _attach(svc._sae_state, _sae(d_sae=100), "sae-10", 10)
+        members = [CircuitMember(feature_idx=500, layer=10, budget=50.0, sign=1)]
+        with pytest.raises(SAESetIncompleteError) as ei:
+            svc.set_circuit_steering(members, intensity=1.0)
+        assert ei.value.offenders[0]["reason"] == "index_out_of_bounds"
+
+
+class TestHazards:
+    def _two_layer(self, svc):
+        _attach(svc._sae_state, _sae(), "sae-10", 10)
+        _attach(svc._sae_state, _sae(), "sae-13", 13)
+
+    def test_same_sign_is_compounding(self):
+        svc = _service()
+        self._two_layer(svc)
+        members = [
+            CircuitMember(feature_idx=1, layer=10, budget=50.0, sign=1),
+            CircuitMember(feature_idx=2, layer=13, budget=50.0, sign=1),
+        ]
+        result = svc.set_circuit_steering(members, intensity=1.0)
+        assert len(result.hazards) == 1
+        assert result.hazards[0]["kind"] == "compounding"
+        assert result.hazards[0]["label"] == "heuristic:co-steer-sign"
+
+    def test_opposite_sign_is_cancellation(self):
+        svc = _service()
+        self._two_layer(svc)
+        members = [
+            CircuitMember(feature_idx=1, layer=10, budget=50.0, sign=1),
+            CircuitMember(feature_idx=2, layer=13, budget=50.0, sign=-1),
+        ]
+        result = svc.set_circuit_steering(members, intensity=1.0)
+        assert result.hazards[0]["kind"] == "cancellation"
+
+    def test_validated_edge_quantifies_and_flips_on_negative_es(self):
+        svc = _service()
+        self._two_layer(svc)
+        members = [
+            CircuitMember(feature_idx=1, layer=10, budget=50.0, sign=1),
+            CircuitMember(feature_idx=2, layer=13, budget=50.0, sign=1),  # same sign
+        ]
+        # A validated NEGATIVE-ES edge flips same-sign compounding → cancellation.
+        edges = [{
+            "up": {"layer": 10, "feature_idx": 1},
+            "down": {"layer": 13, "feature_idx": 2},
+            "effect_size": -0.42, "rung": 2,
+        }]
+        result = svc.set_circuit_steering(members, intensity=1.0, edges=edges)
+        h = result.hazards[0]
+        assert h["label"] == "validated:ES=-0.42"
+        assert h["rung"] == 2
+        assert h["kind"] == "cancellation"  # flipped by negative ES
+
+    def test_config_not_mutated_by_hazards(self):
+        """Hazard detection must not change what was applied."""
+        svc = _service()
+        s10 = _sae()
+        s13 = _sae()
+        _attach(svc._sae_state, s10, "sae-10", 10)
+        _attach(svc._sae_state, s13, "sae-13", 13)
+        members = [
+            CircuitMember(feature_idx=1, layer=10, budget=50.0, sign=1),
+            CircuitMember(feature_idx=2, layer=13, budget=50.0, sign=1),
+        ]
+        svc.set_circuit_steering(members, intensity=1.0)
+        # Applied values are exactly the clamped budgets — hazards changed nothing.
+        assert s10._applied == {1: 50.0}
+        assert s13._applied == {2: 50.0}
+
+
+class TestClearCircuitSteering:
+    def test_clear_all_participating_layers(self):
+        svc = _service()
+        s10, s13 = _sae(), _sae()
+        _attach(svc._sae_state, s10, "sae-10", 10)
+        _attach(svc._sae_state, s13, "sae-13", 13)
+        members = [
+            CircuitMember(feature_idx=1, layer=10, budget=50.0, sign=1),
+            CircuitMember(feature_idx=2, layer=13, budget=50.0, sign=1),
+        ]
+        svc.set_circuit_steering(members, intensity=1.0)
+        cleared = svc.clear_circuit_steering()
+        assert sorted(cleared) == [10, 13]
+        s10.clear_steering.assert_called()
+        s13.clear_steering.assert_called()

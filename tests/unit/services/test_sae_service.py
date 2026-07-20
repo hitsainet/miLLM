@@ -97,17 +97,11 @@ def sample_sae():
 def reset_sae_state():
     """Reset the AttachedSAEState singleton before each test."""
     state = AttachedSAEState()
-    # Force clear without calling hook_handle.remove()
-    state._attached_sae = None
-    state._attached_sae_id = None
-    state._attached_layer = None
-    state._hook_handle = None
+    # Force clear without calling hook_handle.remove() on mock handles
+    state._entries.clear()
     yield
     # Cleanup after test
-    state._attached_sae = None
-    state._attached_sae_id = None
-    state._attached_layer = None
-    state._hook_handle = None
+    state._entries.clear()
 
 
 @pytest.fixture
@@ -785,13 +779,32 @@ class TestAttachedSAEStateDoubleAttachProtection:
         new_handle = MagicMock()
         sae = MagicMock()
 
+        # Re-attaching the SAME (sae_id, layer) key must remove the old hook
+        # before overwriting — the genuine double-attach protection.
         state.set(sae, "sae-1", 5, old_handle)
-        assert state._hook_handle is old_handle
+        assert state.get("sae-1", 5).hook_handle is old_handle
 
-        state.set(sae, "sae-2", 5, new_handle)
-        # Old hook must have been removed
+        state.set(sae, "sae-1", 5, new_handle)
         old_handle.remove.assert_called_once()
-        assert state._hook_handle is new_handle
+        assert state.get("sae-1", 5).hook_handle is new_handle
+        assert state.count == 1  # still one entry — same key overwritten
+
+    def test_set_different_keys_coexist(self, reset_sae_state):
+        """Distinct (sae_id, layer) keys attach side-by-side (multi-SAE); one
+        key's hook is never removed by attaching a different key."""
+        from millm.services.sae_service import AttachedSAEState
+        from unittest.mock import MagicMock
+
+        state = AttachedSAEState()
+        h1, h2 = MagicMock(), MagicMock()
+        sae = MagicMock()
+
+        state.set(sae, "sae-1", 5, h1)
+        state.set(sae, "sae-2", 8, h2)
+        h1.remove.assert_not_called()
+        assert state.count == 2
+        assert state.get("sae-1", 5).hook_handle is h1
+        assert state.get("sae-2", 8).hook_handle is h2
 
     def test_set_on_empty_state_does_not_crash(self, reset_sae_state):
         """First set() with no existing hook runs cleanly."""

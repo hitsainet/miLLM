@@ -10,7 +10,10 @@ import os
 import re
 import threading
 from dataclasses import dataclass
-from typing import Any, Optional
+from typing import TYPE_CHECKING, Any, Optional
+
+if TYPE_CHECKING:
+    from millm.api.schemas.circuit import CircuitMember
 
 import structlog
 import torch
@@ -22,7 +25,9 @@ from millm.core.errors import (
     SAEIncompatibleError,
     SAENotAttachedError,
     SAENotFoundError,
+    SAESetIncompleteError,
 )
+from millm.core.steering_range import STEERING_RANGE, clamp_steering
 from millm.db.models.sae import SAE, SAEStatus
 from millm.db.repositories.sae_repository import SAERepository
 from millm.ml.model_loader import LoadedModelState
@@ -38,7 +43,13 @@ logger = structlog.get_logger()
 
 @dataclass
 class AttachmentStatus:
-    """Current SAE attachment status."""
+    """Current SAE attachment status.
+
+    Back-compat singular view. When several SAEs are attached (Feature 12
+    multi-SAE), the singular ``sae_id``/``layer`` reflect the first attached
+    entry; callers that need the full set use ``AttachmentStatusSet`` /
+    ``SAEService.get_attachment_status_set()``.
+    """
 
     is_attached: bool
     sae_id: Optional[str] = None
@@ -49,6 +60,53 @@ class AttachmentStatus:
     # Diagnostic: number of forward passes in which the steering delta was
     # applied.  Stays 0 if the hook never fires (e.g. compiled graph bypass).
     steering_apply_count: int = 0
+
+
+@dataclass
+class AttachedEntry:
+    """One attached SAE, keyed by ``(sae_id, layer)`` in the registry."""
+
+    sae: LoadedSAE
+    sae_id: str
+    layer: int
+    hook_handle: Any
+
+
+@dataclass
+class AttachedEntryStatus:
+    """Serializable per-entry attachment status (no live tensors)."""
+
+    sae_id: str
+    layer: int
+    memory_usage_mb: Optional[int] = None
+    steering_enabled: bool = False
+    monitoring_enabled: bool = False
+    steering_apply_count: int = 0
+
+
+@dataclass
+class AttachmentStatusSet:
+    """Plural attachment status across all attached ``(sae_id, layer)`` entries."""
+
+    is_attached: bool
+    count: int
+    entries: list[AttachedEntryStatus]
+    total_memory_usage_mb: Optional[int] = None
+
+
+@dataclass
+class CircuitSteeringResult:
+    """Outcome of applying a circuit's members across layers (Feature 12).
+
+    ``applied_per_layer`` maps ``layer -> {feature_idx: effective_strength}``
+    actually written to each layer's SAE. ``hazards`` are cross-layer
+    compounding/cancellation warnings — SURFACED, never applied.
+    ``clamp_warnings`` note members whose ``budget·sign·λ`` exceeded ±200.
+    """
+
+    applied_per_layer: dict[int, dict[int, float]]
+    hazards: list[dict[str, Any]]
+    clamp_warnings: list[str]
 
 
 @dataclass
@@ -71,10 +129,17 @@ class CompatibilityResult:
 
 class AttachedSAEState:
     """
-    Singleton managing the currently attached SAE.
+    Singleton managing the currently attached SAE(s).
 
     This persists SAE attachment state across request boundaries since
     SAEService instances are created per-request via dependency injection.
+
+    Feature 12 (multi-SAE): state is a registry keyed by ``(sae_id, layer)``
+    so a cross-layer circuit can attach one SAE per referenced layer, each
+    steering through its own decoder. Insertion order is preserved (dict
+    ordering). The single-SAE consumers (cluster/monitoring/sensing/health)
+    use the back-compat singular properties, which reflect the FIRST attached
+    entry — byte-identical behavior when exactly one SAE is attached.
 
     Thread-safe for access from executor threads.
     """
@@ -87,36 +152,67 @@ class AttachedSAEState:
             with cls._lock:
                 if cls._instance is None:
                     cls._instance = super().__new__(cls)
-                    cls._instance._attached_sae: Optional[LoadedSAE] = None
-                    cls._instance._attached_sae_id: Optional[str] = None
-                    cls._instance._attached_layer: Optional[int] = None
-                    cls._instance._hook_handle: Optional[Any] = None
+                    cls._instance._entries: dict[tuple[str, int], AttachedEntry] = {}
         return cls._instance
+
+    def _first(self) -> Optional[AttachedEntry]:
+        """First attached entry (insertion order), or None. Not locked —
+        callers hold the lock or accept a point-in-time read."""
+        return next(iter(self._entries.values()), None)
 
     @property
     def attached_sae(self) -> Optional[LoadedSAE]:
-        """Get the currently attached SAE."""
-        return self._attached_sae
+        """Get the first attached SAE (back-compat singular view)."""
+        entry = self._first()
+        return entry.sae if entry else None
 
     @property
     def attached_sae_id(self) -> Optional[str]:
-        """Get the ID of the attached SAE."""
-        return self._attached_sae_id
+        """Get the ID of the first attached SAE (back-compat singular view)."""
+        entry = self._first()
+        return entry.sae_id if entry else None
 
     @property
     def attached_layer(self) -> Optional[int]:
-        """Get the layer the SAE is attached to."""
-        return self._attached_layer
+        """Get the layer of the first attached SAE (back-compat singular view)."""
+        entry = self._first()
+        return entry.layer if entry else None
 
     @property
     def hook_handle(self) -> Optional[Any]:
-        """Get the hook handle for the attached SAE."""
-        return self._hook_handle
+        """Get the hook handle of the first attached SAE (back-compat)."""
+        entry = self._first()
+        return entry.hook_handle if entry else None
 
     @property
     def is_attached(self) -> bool:
-        """Check if an SAE is currently attached."""
-        return self._attached_sae is not None
+        """Check if at least one SAE is currently attached."""
+        return bool(self._entries)
+
+    @property
+    def count(self) -> int:
+        """Number of attached ``(sae_id, layer)`` entries."""
+        return len(self._entries)
+
+    def entries(self) -> list[AttachedEntry]:
+        """Snapshot list of all attached entries, in insertion order."""
+        with self._lock:
+            return list(self._entries.values())
+
+    def get(self, sae_id: str, layer: int) -> Optional[AttachedEntry]:
+        """Fetch the entry attached at ``(sae_id, layer)``, or None."""
+        return self._entries.get((sae_id, int(layer)))
+
+    def by_layer(self, layer: int) -> Optional[AttachedEntry]:
+        """Fetch the unique entry attached at ``layer``.
+
+        Returns None when no SAE — or *more than one* SAE — is attached to
+        that layer, so a caller can never silently pick the wrong basis when
+        the layer is ambiguous.
+        """
+        layer = int(layer)
+        matches = [e for e in self._entries.values() if e.layer == layer]
+        return matches[0] if len(matches) == 1 else None
 
     def set(
         self,
@@ -125,39 +221,57 @@ class AttachedSAEState:
         layer: int,
         hook_handle: Any,
     ) -> None:
-        """Set the attached SAE state.
+        """Attach (or re-attach) the SAE at ``(sae_id, layer)``.
 
-        Removes any existing hook before overwriting so that a programming error
-        (or a race that bypasses the is_attached guard) never leaves an orphaned
-        hook firing on every forward pass.
+        Removes any existing hook for that SAME key before overwriting so a
+        re-attach — or a race that bypasses the is_attached guard — never
+        leaves an orphaned hook firing on every forward pass. Other keys are
+        untouched.
         """
+        key = (sae_id, int(layer))
         with self._lock:
-            if self._hook_handle is not None:
+            existing = self._entries.get(key)
+            if existing is not None and existing.hook_handle is not None:
                 try:
-                    self._hook_handle.remove()
+                    existing.hook_handle.remove()
                     logger.warning(
                         "orphaned_hook_removed_before_overwrite",
-                        previous_sae_id=self._attached_sae_id,
+                        previous_sae_id=sae_id,
+                        layer=int(layer),
                     )
                 except Exception as e:
                     logger.warning("error_removing_orphaned_hook", error=str(e))
-            self._attached_sae = sae
-            self._attached_sae_id = sae_id
-            self._attached_layer = layer
-            self._hook_handle = hook_handle
+            self._entries[key] = AttachedEntry(
+                sae=sae, sae_id=sae_id, layer=int(layer), hook_handle=hook_handle
+            )
 
-    def clear(self) -> None:
-        """Clear the attached SAE state."""
+    def clear(self, sae_id: Optional[str] = None, layer: Optional[int] = None) -> None:
+        """Detach attached SAEs.
+
+        With no arguments, detaches ALL entries (back-compat with the
+        single-SAE ``clear()``). With both ``sae_id`` and ``layer``, detaches
+        only that one entry. Each removed entry's hook is removed first.
+        """
         with self._lock:
-            if self._hook_handle is not None:
-                try:
-                    self._hook_handle.remove()
-                except Exception as e:
-                    logger.warning("error_removing_hook", error=str(e))
-            self._attached_sae = None
-            self._attached_sae_id = None
-            self._attached_layer = None
-            self._hook_handle = None
+            if sae_id is not None and layer is not None:
+                keys = [(sae_id, int(layer))]
+            elif sae_id is not None or layer is not None:
+                # Partial key: match all entries with that sae_id OR layer.
+                keys = [
+                    k
+                    for k in self._entries
+                    if (sae_id is None or k[0] == sae_id)
+                    and (layer is None or k[1] == int(layer))
+                ]
+            else:
+                keys = list(self._entries.keys())
+            for key in keys:
+                entry = self._entries.pop(key, None)
+                if entry is not None and entry.hook_handle is not None:
+                    try:
+                        entry.hook_handle.remove()
+                    except Exception as e:
+                        logger.warning("error_removing_hook", error=str(e))
 
 
 class SAEService:
@@ -262,6 +376,237 @@ class SAEService:
             monitoring_enabled=sae.is_monitoring_enabled if sae else False,
             steering_apply_count=sae.steering_apply_count if sae else 0,
         )
+
+    def get_attachment_status_set(self) -> AttachmentStatusSet:
+        """
+        Get the plural attachment status across all attached ``(sae_id, layer)``
+        entries (Feature 12 multi-SAE).
+
+        Returns:
+            AttachmentStatusSet with one AttachedEntryStatus per attached SAE
+            and the summed memory footprint.
+        """
+        entries = self._sae_state.entries()
+        if not entries:
+            return AttachmentStatusSet(
+                is_attached=False, count=0, entries=[], total_memory_usage_mb=None
+            )
+        statuses: list[AttachedEntryStatus] = []
+        total_mb = 0
+        for entry in entries:
+            sae = entry.sae
+            mb = int(sae.estimate_memory_mb()) if sae else None
+            if mb is not None:
+                total_mb += mb
+            statuses.append(
+                AttachedEntryStatus(
+                    sae_id=entry.sae_id,
+                    layer=entry.layer,
+                    memory_usage_mb=mb,
+                    steering_enabled=sae.is_steering_enabled if sae else False,
+                    monitoring_enabled=sae.is_monitoring_enabled if sae else False,
+                    steering_apply_count=sae.steering_apply_count if sae else 0,
+                )
+            )
+        return AttachmentStatusSet(
+            is_attached=True,
+            count=len(statuses),
+            entries=statuses,
+            total_memory_usage_mb=total_mb,
+        )
+
+    # =========================================================================
+    # Circuit serving (Feature 12): apply members across layers under one λ
+    # =========================================================================
+
+    def set_circuit_steering(
+        self,
+        members: list["CircuitMember"],
+        intensity: float,
+        *,
+        edges: Optional[list[dict[str, Any]]] = None,
+    ) -> CircuitSteeringResult:
+        """Serve a circuit: apply every member through ITS OWN layer's SAE at
+        the member's frozen budget scaled by one global intensity (λ).
+
+        Each member's layer must resolve to exactly one attached SAE (via
+        ``by_layer``); otherwise ``SAESetIncompleteError`` (422) is raised with
+        the full offender list and NOTHING is applied — a member is never
+        steered through a mismatched SAE. Effective strengths are clamped
+        through the shared ±200 gate. Cross-layer hazards are detected and
+        returned but never applied (detection, not correction).
+
+        Args:
+            members: circuit members to serve.
+            intensity: global λ (dial); typically clamped to [0, 2] upstream.
+            edges: optional circuit edges carrying validated effect sizes /
+                weight priors, used to quantify hazards (Feature 13 supplies
+                these; absent here means heuristic sign-only hazards).
+
+        Returns:
+            CircuitSteeringResult with per-layer applied strengths, hazards,
+            and clamp warnings.
+        """
+        # 1. Resolve every member's layer to a UNIQUE attached SAE; collect all
+        #    offenders first so the error reports the complete set (fail-closed).
+        offenders: list[dict[str, Any]] = []
+        for m in members:
+            entry = self._sae_state.by_layer(m.layer)
+            if entry is None:
+                offenders.append(
+                    {"feature_idx": m.feature_idx, "layer": m.layer, "sae_id": m.sae_id}
+                )
+            elif not (0 <= m.feature_idx < entry.sae.d_sae):
+                offenders.append(
+                    {
+                        "feature_idx": m.feature_idx,
+                        "layer": m.layer,
+                        "sae_id": entry.sae_id,
+                        "reason": "index_out_of_bounds",
+                        "d_sae": entry.sae.d_sae,
+                    }
+                )
+        if offenders:
+            raise SAESetIncompleteError(offenders)
+
+        # 2. Group by layer; compute effective (clamped) strengths under one λ.
+        #    γ=0 ⇒ B = B_dir, so serving only clamps budget·sign·λ.
+        per_layer: dict[int, dict[int, float]] = {}
+        clamp_warnings: list[str] = []
+        for m in members:
+            raw = m.budget * m.sign * intensity
+            eff = clamp_steering(raw)
+            if abs(raw) > STEERING_RANGE:
+                clamp_warnings.append(
+                    f"feature {m.feature_idx}@L{m.layer} clamped "
+                    f"{raw:+.3g}→{eff:+.3g} (±{STEERING_RANGE:g})"
+                )
+            per_layer.setdefault(m.layer, {})[m.feature_idx] = eff
+
+        # 3. Apply each layer's members through THAT layer's SAE only.
+        for layer, steering in per_layer.items():
+            sae = self._sae_state.by_layer(layer).sae
+            sae.set_steering_batch(steering)  # bounds already gated in step 1
+            sae.enable_steering(True)
+
+        hazards = self._cross_layer_hazards(members, intensity, edges=edges)
+        logger.info(
+            "circuit_steering_applied",
+            layers=sorted(per_layer.keys()),
+            member_count=len(members),
+            intensity=intensity,
+            hazard_count=len(hazards),
+            clamped=len(clamp_warnings),
+        )
+        return CircuitSteeringResult(
+            applied_per_layer=per_layer,
+            hazards=hazards,
+            clamp_warnings=clamp_warnings,
+        )
+
+    def clear_circuit_steering(self, layers: Optional[list[int]] = None) -> list[int]:
+        """Clear steering on every participating layer (or all attached layers).
+
+        Returns the list of layers actually cleared.
+        """
+        if layers is None:
+            targets = [e.layer for e in self._sae_state.entries()]
+        else:
+            targets = list(dict.fromkeys(int(l) for l in layers))
+        cleared: list[int] = []
+        for layer in targets:
+            entry = self._sae_state.by_layer(layer)
+            if entry is not None:
+                entry.sae.clear_steering()
+                entry.sae.enable_steering(False)
+                cleared.append(layer)
+        return cleared
+
+    def _cross_layer_hazards(
+        self,
+        members: list["CircuitMember"],
+        intensity: float,
+        *,
+        edges: Optional[list[dict[str, Any]]] = None,
+    ) -> list[dict[str, Any]]:
+        """Detect cross-layer compounding/cancellation hazards.
+
+        For every upstream→downstream feature-member pair (up.layer <
+        down.layer) that is co-steered, emit a hazard: same effective sign ⇒
+        compounding, opposite ⇒ cancellation. When a matching circuit edge at
+        rung ≥ 2 with an effect_size is supplied, the hazard is QUANTIFIED and
+        labeled ``validated:ES=…`` (a validated negative edge flips
+        compounding↔cancellation); otherwise it is labeled ``heuristic`` from
+        the edge weight_prior if present, else a plain sign heuristic. Warnings
+        are SURFACED only — the steering config is never mutated here.
+        """
+        if intensity == 0:
+            return []
+        # Index edges by (up_layer, up_idx, down_layer, down_idx) for lookup.
+        edge_index: dict[tuple, dict[str, Any]] = {}
+        for e in edges or []:
+            try:
+                up = e["up"]
+                down = e["down"]
+                key = (
+                    int(up["layer"]),
+                    int(up["feature_idx"]),
+                    int(down["layer"]),
+                    int(down["feature_idx"]),
+                )
+            except (KeyError, TypeError, ValueError):
+                continue
+            edge_index[key] = e
+
+        hazards: list[dict[str, Any]] = []
+        seen: set[tuple] = set()
+        for up in members:
+            for down in members:
+                if up.layer >= down.layer:
+                    continue
+                pair = (up.layer, up.feature_idx, down.layer, down.feature_idx)
+                if pair in seen:
+                    continue
+                seen.add(pair)
+
+                up_sign = 1 if (up.budget * up.sign) >= 0 else -1
+                down_sign = 1 if (down.budget * down.sign) >= 0 else -1
+                same_sign = up_sign == down_sign
+
+                edge = edge_index.get(pair)
+                es = None
+                weight_prior = None
+                rung = 0
+                if edge is not None:
+                    es = edge.get("effect_size")
+                    weight_prior = edge.get("weight_prior")
+                    rung = int(edge.get("rung", 0) or 0)
+
+                if es is not None and rung >= 2:
+                    # A validated NEGATIVE edge flips the interaction sense.
+                    effective_same = same_sign if es >= 0 else (not same_sign)
+                    label = f"validated:ES={float(es):.3g}"
+                    hazard_rung = rung
+                elif weight_prior is not None:
+                    effective_same = same_sign
+                    label = f"heuristic:weight_prior={float(weight_prior):.3g}"
+                    hazard_rung = rung
+                else:
+                    effective_same = same_sign
+                    label = "heuristic:co-steer-sign"
+                    hazard_rung = 0
+
+                kind = "compounding" if effective_same else "cancellation"
+                hazards.append(
+                    {
+                        "kind": kind,
+                        "up": {"layer": up.layer, "feature_idx": up.feature_idx},
+                        "down": {"layer": down.layer, "feature_idx": down.feature_idx},
+                        "label": label,
+                        "rung": hazard_rung,
+                    }
+                )
+        return hazards
 
     async def preview_repository(
         self,
@@ -895,10 +1240,13 @@ class SAEService:
         """
         sae = await self.get_sae(sae_id)
 
-        if self._sae_state.attached_sae_id != sae_id:
+        # Multi-SAE aware: the SAE is attached if ANY registry entry carries
+        # this sae_id (not only when it is the first/singular entry).
+        attached_ids = {e.sae_id for e in self._sae_state.entries()}
+        if sae_id not in attached_ids:
             raise SAENotAttachedError(
                 f"SAE '{sae_id}' is not attached",
-                details={"attached_sae_id": self._sae_state.attached_sae_id},
+                details={"attached_sae_ids": sorted(attached_ids)},
             )
 
         # Drain in-flight inference requests before removing the hook.
@@ -940,14 +1288,21 @@ class SAEService:
         except Exception:
             pass  # Don't block detach if queue check fails
 
-        # Get memory before cleanup
-        attached_sae = self._sae_state.attached_sae
-        memory_freed_mb = int(attached_sae.estimate_memory_mb()) if attached_sae else 0
+        # Resolve THIS sae_id's registry entries (multi-SAE aware — a sae_id
+        # may be attached on more than one layer). Fall back to the singular
+        # view for the single-SAE case where the registry has one entry.
+        own_entries = [e for e in self._sae_state.entries() if e.sae_id == sae_id]
+        attached_sae = own_entries[0].sae if own_entries else self._sae_state.attached_sae
 
-        # Remove hook
-        hook_handle = self._sae_state.hook_handle
-        if hook_handle:
-            self._hooker.remove(hook_handle)
+        # Get memory before cleanup (sum across this sae_id's layers)
+        memory_freed_mb = sum(
+            int(e.sae.estimate_memory_mb()) for e in own_entries if e.sae
+        ) or (int(attached_sae.estimate_memory_mb()) if attached_sae else 0)
+
+        # Remove this sae_id's hook(s)
+        for e in own_entries:
+            if e.hook_handle:
+                self._hooker.remove(e.hook_handle)
 
         # Reset Dynamo so any compiled graph that captured the hooked path is
         # invalidated — otherwise a stale cached graph could keep applying the
@@ -975,8 +1330,9 @@ class SAEService:
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
 
-        # Clear state in singleton (this also removes hook if not already done)
-        self._sae_state.clear()
+        # Clear this sae_id's entries in the singleton (also removes any hook
+        # not already removed above). Other attached SAEs are untouched.
+        self._sae_state.clear(sae_id=sae_id)
 
         # Capture model_id before clearing state
         model_state = LoadedModelState()
@@ -1227,12 +1583,13 @@ class SAEService:
     def shutdown(self) -> None:
         """Clean up resources on application shutdown."""
         if self._sae_state.is_attached:
-            attached_sae = self._sae_state.attached_sae
-            hook_handle = self._sae_state.hook_handle
-            if hook_handle:
-                self._hooker.remove(hook_handle)
-            if attached_sae:
-                attached_sae.to_cpu()
+            # Detach every attached SAE (multi-SAE aware), each hook removed and
+            # each SAE moved to CPU before the registry is cleared.
+            for entry in self._sae_state.entries():
+                if entry.hook_handle:
+                    self._hooker.remove(entry.hook_handle)
+                if entry.sae:
+                    entry.sae.to_cpu()
             self._sae_state.clear()
 
             if torch.cuda.is_available():

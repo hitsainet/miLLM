@@ -166,14 +166,21 @@ class TestCopyAudit:
             if any(
                 marker in lowered
                 for marker in (
+                    # Negations / prohibitions — these DENY a causal claim.
                     "never",
-                    "forbidden",
+                    "forbid",
                     "must not",
+                    "not causal",
+                    "no causal",
+                    "isn't causal",
+                    "is not causal",
+                    # Explicit rung-gating context.
                     "rung >= 2",
                     "rung>=2",
                     "rung < 2",
                     "rung<2",
                     "below rung 2",
+                    # References to the vocabulary itself, not hand-written copy.
                     "causally_validated",   # the enum member name
                     "rung_language",        # rendering through the vocabulary
                     "causal_language_min_rung",

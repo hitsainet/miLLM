@@ -275,6 +275,38 @@ class ValidationError(MiLLMError):
 
 
 # =============================================================================
+# Circuit Errors (Feature 13)
+# =============================================================================
+
+
+class CircuitNotFoundError(MiLLMError):
+    """Raised when a requested circuit does not exist."""
+
+    code = "CIRCUIT_NOT_FOUND"
+    status_code = 404
+
+
+class UnvalidatedCircuitError(MiLLMError):
+    """Activating a circuit whose evidence rung is below CAUSALLY_VALIDATED (2)
+    without an explicit acknowledgement.
+
+    The evidence ladder forbids describing such a circuit as causal; steering
+    live traffic with one is allowed, but only deliberately — the caller must
+    re-send with ``acknowledge_unvalidated=true``.
+    """
+
+    code = "UNVALIDATED_CIRCUIT"
+    status_code = 200  # house style: handler-level refusal in the envelope
+
+
+class NoActiveCircuitError(MiLLMError):
+    """An operation needing an active circuit was called with none serving."""
+
+    code = "NO_ACTIVE_CIRCUIT"
+    status_code = 200  # house style: handler-level refusal in the envelope
+
+
+# =============================================================================
 # Error code to class mapping for lookup
 # =============================================================================
 
@@ -306,4 +338,8 @@ ERROR_CLASSES: dict[str, type[MiLLMError]] = {
     "PROFILE_INCOMPATIBLE": ProfileCompatibilityError,
     "INVALID_PROFILE_FORMAT": InvalidProfileFormatError,
     "VALIDATION_ERROR": ValidationError,
+    "SAE_SET_INCOMPLETE": SAESetIncompleteError,
+    "CIRCUIT_NOT_FOUND": CircuitNotFoundError,
+    "UNVALIDATED_CIRCUIT": UnvalidatedCircuitError,
+    "NO_ACTIVE_CIRCUIT": NoActiveCircuitError,
 }

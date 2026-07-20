@@ -144,12 +144,18 @@ refactor(services): extract HuggingFace logic
 - ✅ 0xcc/docs/miLLM_BRD_v1.0.md (original v1.0 BRD)
 - ✅ 0xcc/prds/BRD-MILLM-CLUSTERS-001.md (Incremental BRD — Cluster Runtime: import / unified MCP / OWUI dial / sensing, drafted 2026-07-16)
 - ✅ 0xcc/prds/BRD-MILLM-CIRCUITS-001.md (Incremental BRD — Circuit Runtime: multi-SAE serving / live circuit steering / circuit-aware OWUI dial / edge sensing, drafted 2026-07-20; successor to BRD-MILLM-CLUSTERS-001, consumes miStudio's circuit-definition/v1 + EvidenceRung ladder)
-- ✅ 0xcc/prds/000_PPRD|miLLM.md (Project PRD v1.1 — Features 8–11 added 2026-07-16)
-- ✅ 0xcc/adrs/000_PADR|miLLM.md (Architecture Decision Record v1.1 — increment decisions 2026-07-16)
+- ✅ 0xcc/prds/000_PPRD|miLLM.md (Project PRD v1.2 — Features 12–15 added 2026-07-20; Features 8–11 added 2026-07-16)
+- ✅ 0xcc/adrs/000_PADR|miLLM.md (Architecture Decision Record v1.2 — Circuit Runtime decisions 2026-07-20; Cluster Runtime 2026-07-16)
+- ✅ docs/mcp-contract.md v1.1 (additive `millm_circuits` category + edge-sensing routes + circuit error codes, 2026-07-20)
 
 **Increment: Cluster Runtime (BRD-MILLM-CLUSTERS-001) — docs complete 2026-07-16, IMPLEMENTED & SHIPPED** (cluster import/activate, unified miStudio-hosted MCP, OWUI dial filter, co-activation sensing all live; single-SAE runtime)
 
-**Next increment: Circuit Runtime (BRD-MILLM-CIRCUITS-001) — BRD drafted 2026-07-20, PPRD/feature chain not started.** Multi-SAE attach + live circuit serving (circuit-definition/v1), circuit-aware OWUI dial, edge-level sensing; surfaces the EvidenceRung verbatim ("causal" forbidden <rung 2). Next step: PPRD update via `0xcc/instruct/002_create-project-prd.md`.
+**Increment: Circuit Runtime (BRD-MILLM-CIRCUITS-001) — DOCS COMPLETE 2026-07-20 (PPRD v1.2 + PADR v1.2 + mcp-contract v1.1 + Features 12–15 chain), implementation not started.** Multi-SAE attach + live circuit serving (`mistudio.circuit-definition/v1`, each member through its own layer's SAE, per-layer budgets under one λ), per-layer cluster-slice fallback, circuit-aware OWUI dial, edge-level sensing; surfaces the EvidenceRung verbatim ("causal" forbidden <rung 2, unvalidated-activation ack). **VRAM spike DONE** (RTX 3090, two Gemma-2-2B SAEs): 128 MB fp16 (within <200 MB envelope) / 256 MB fp32 — attach steering weights in fp16; dtype-conditional, not a blocker. Retired the former "Multi-SAE Support" future stub (now Feature 12); future stubs renumbered 16+. Next step: execute the feature chain via `0xcc/instruct/007_generate-tasks.md` → `008_process-task-list.md` (F12 first — VRAM spike already done as task 1.0).
+
+**Feature 12: Multi-SAE Attach & Circuit Serving** — ✅ 012_FPRD/FTDD/FTID/FTASKS (VRAM spike run; `AttachedSAEState` singleton → `(sae_id,layer)` registry; one hook per referenced SAE)
+**Feature 13: Circuit Import, Slice-Fallback & Evidence Ladder** — ✅ 013_FPRD/FTDD/FTID/FTASKS (new `circuits` table migration 011; reuses cluster path for slices; rung verbatim + unvalidated-ack)
+**Feature 14: Circuit-Aware OWUI Dial** — ✅ 014_FPRD/FTDD/FTID/FTASKS (extends `millm_dial_filter.py` v1.3→v1.4 + `steering_intensity`; whole-circuit dial under one λ; rung on the dial)
+**Feature 15: Circuit Edge Sensing** — ✅ 015_FPRD/FTDD/FTID/FTASKS (extends `sensing_service.py` to edge-scoped up→down; migration 012; `/api/circuits/*` + `millm_circuits` MCP)
 
 **Feature 8: Cluster Import**
 - ✅ 0xcc/prds/008_FPRD|Cluster_Import.md

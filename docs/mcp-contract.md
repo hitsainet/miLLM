@@ -1,9 +1,9 @@
 # miLLM ↔ Unified MCP Server Contract
 
-**Status:** Normative for miLLM Feature 9 (Unified MCP). **Version:** 1.0 (2026-07-16)
+**Status:** Normative for miLLM Feature 9 (Unified MCP) and Feature 15 (Circuit Edge Sensing / circuit MCP surface). **Version:** 1.1 (2026-07-20)
 **Consumer:** the unified MCP server that ships in the miStudio repo
 (`backend/src/mcp_server/`), exposing `millm_runtime` / `millm_clusters` /
-`millm_sensing` tool categories against a miLLM deployment.
+`millm_sensing` / `millm_circuits` tool categories against a miLLM deployment.
 
 ## 1. Versioning rule
 
@@ -11,6 +11,12 @@ This contract is **additive-only**: miLLM may add endpoints, response fields, an
 error codes; it must not rename or remove anything listed here, change field
 types, or change status-code semantics without a new contract version. The MCP
 server must tolerate unknown fields everywhere.
+
+**v1.1 (2026-07-20)** is a strict additive superset of v1.0 (Circuit Runtime,
+BRD-MILLM-CIRCUITS-001): it adds the `millm_circuits` tool category (§4), the
+`/api/circuits/*` endpoints and circuit edge-sensing routes, the circuit error
+codes (§5), and the rung-vocabulary rule (§4a). No v1.0 endpoint, field, or
+error code changed. A v1.0 client that ignores the circuit surface is unaffected.
 
 ## 2. Response envelope
 
@@ -85,6 +91,40 @@ healthy) mark the product unavailable; tools then return a structured
 | `millm_sensing_enable` / `_disable` | `POST /api/sensing/{profile_id}/enable` / `/disable` |
 | `millm_sensing_config` | `PUT /api/sensing/{profile_id}/config` (`{min_k}`; null restores the all-sensable default) |
 
+### `millm_circuits` (v1.1 — Circuit Runtime)
+| Tool | Endpoint |
+|---|---|
+| `millm_circuit_status` | `GET /api/circuits/active` (active circuit + attached-SAE set + rung; `null` when none) |
+| `millm_list_circuits` | `GET /api/circuits?promoted=&min_rung=&limit=&offset=` (slim rows carry `rung`, `rung_language`, layers, edge_count) |
+| `millm_import_circuit` (inline) | `POST /api/circuits/import?activate=&on_conflict=&acknowledge_unvalidated=` (body = raw `mistudio.circuit-definition/v1` document) |
+| `millm_import_circuit` (hub) | `POST /api/circuits/hub/import` (`{repo_id, filename, revision?, activate?, on_conflict?, acknowledge_unvalidated?}`) |
+| `millm_circuit_hub_search` | `GET /api/circuits/hub/search?q=&base_model=&limit=` (tag `mistudio-circuit-definition`) |
+| `millm_activate_circuit` | `POST /api/circuits/{id}/activate?acknowledge_unvalidated=` (fully serveable, or slice-fallback when the SAE set is incomplete) |
+| `millm_deactivate_circuit` | `POST /api/circuits/{id}/deactivate` |
+| `millm_export_circuit` | `GET /api/circuits/{id}/export` (raw circuit document — no envelope) |
+| `millm_set_circuit_intensity` | `PUT /api/circuits/active/intensity` (`{intensity, reapply}`; one global λ scales all layers) |
+| `millm_circuit_sensing_status` | `GET /api/circuits/sensing/status` |
+| `millm_circuit_sensing_events` | `GET /api/circuits/sensing/events?circuit_id=&limit=&since=` (edge co-fire rows: up/down member, activations, alone/within, ±K context, edge rung) |
+| `millm_circuit_sensing_enable` / `_disable` | `POST /api/circuits/{circuit_id}/sensing/enable` / `/disable` (edge sensing; off by default, opt-in) |
+
+### 4a. Circuit evidence-rung rule (v1.1)
+Every circuit and edge field carries `rung` (0–3 int) and `rung_language`
+(server-rendered phrase), mirrored VERBATIM from miStudio's evidence ladder:
+`0 → "associated"`, `1 → "suggested (attribution-supported)"`,
+`2 → "causally validated (edge)"`, `3 → "faithfulness-tested (circuit)"`.
+The circuit's rung is the MIN over its edges (empty → 0). The word **"causal"
+must never appear for a rung below 2** — clients surface `rung_language`
+verbatim, never re-phrase. Activating a circuit whose rung < 2 requires
+`acknowledge_unvalidated=true`; without it the route refuses with
+`UNVALIDATED_CIRCUIT` (200 + `success:false`, house style).
+
+### 4b. Circuit slice-fallback (v1.1)
+When not all of a circuit's referenced SAEs are attached, activation degrades
+to the per-layer `cluster-definition/v1` slice (a valid v1 cluster document;
+the partial-rendering marker rides in the slice name + `provenance.source_note`).
+`GET /api/circuits/active` reports `serving_mode: "full" | "slice_fallback"` and,
+in fallback, the bound layer(s) — a slice is never presented as the whole circuit.
+
 Notes:
 - **Member `meta` (contract rev 2026-07-17):** each member may carry an
   optional, extensible `meta` object — display/reference data only
@@ -119,6 +159,15 @@ Notes:
 MCP tool currently consumes.) Unknown codes: surface `error.message`
 verbatim — messages are written to be user/agent-safe.
 
+**v1.1 circuit codes:** `CIRCUIT_NOT_FOUND` (404), `SAE_SET_INCOMPLETE`
+(422 — a referenced SAE is not attached; carries the offending
+`{feature_idx, layer, sae_id}` list; activation degrades to slice-fallback),
+`INCOMPATIBLE_FEATURE_SPACE` (422 — a referenced SAE's feature space does not
+match the attached SAE at that layer), `UNVALIDATED_CIRCUIT` (200+envelope —
+rung < 2 activation without `acknowledge_unvalidated=true`), `NO_ACTIVE_CIRCUIT`
+(200+envelope — intensity/sensing call with no active circuit). Reused as-is:
+`UNKNOWN_KIND`, `PAYLOAD_TOO_LARGE`, `HUB_UNAVAILABLE`.
+
 ## 6. Auth posture & deployment guidance (Task 1.3)
 
 miLLM's management API is **unauthenticated by design** in the current
@@ -145,4 +194,16 @@ miLLM:    millm_import_cluster(definition=…, activate=true)
 miLLM:    millm_set_intensity(1.2)
 miLLM:    millm_sensing_enable(profile_id)
 miLLM:    millm_sensing_events(profile_id, limit=20)
+```
+
+Circuit flow (v1.1) — discover/validate in miStudio, serve/sense in miLLM:
+
+```
+miStudio: export circuit               → circuit-definition/v1 (multi-SAE, edges, rungs)
+miLLM:    millm_import_circuit(definition=…, activate=true,
+                               acknowledge_unvalidated=<true if rung<2>)
+          → serving_mode "full" (all SAEs attached) or "slice_fallback"
+miLLM:    millm_set_circuit_intensity(1.2)          → one λ scales all layers
+miLLM:    millm_circuit_sensing_enable(circuit_id)  → watch EDGES fire (up→down)
+miLLM:    millm_circuit_sensing_events(circuit_id, limit=20)
 ```

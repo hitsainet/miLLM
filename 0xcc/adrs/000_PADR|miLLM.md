@@ -2,11 +2,11 @@
 
 ## Mechanistic Interpretability LLM Server
 
-**Document Version:** 1.1
+**Document Version:** 1.2
 **Created:** January 30, 2026
-**Updated:** July 16, 2026 (Cluster Runtime increment — BRD-MILLM-CLUSTERS-001)
+**Updated:** July 20, 2026 (Circuit Runtime increment — BRD-MILLM-CIRCUITS-001)
 **Status:** Approved
-**Reference:** Project PRD (000_PPRD|miLLM.md v1.1) · BRD-MILLM-CLUSTERS-001
+**Reference:** Project PRD (000_PPRD|miLLM.md v1.2) · BRD-MILLM-CLUSTERS-001 · BRD-MILLM-CIRCUITS-001
 
 ---
 
@@ -34,6 +34,10 @@
 | Unified MCP home (v1.1) | Evolve the miStudio MCP server (cross-repo) | Proven auth/gating/audit infra; miLLM ships the API contract |
 | OWUI dial (v1.1) | Per-request `steering_intensity` + OWUI Filter Function | Concurrency-safe (request-scoped apply/restore); no OpenAI-API contamination |
 | Sensing (v1.1) | Member-only encode per forward pass; DB-persisted bounded events | Decoupled from monitoring; observable overhead; serial-only v1 |
+| Multi-SAE attach (v1.2) | Relax the single `AttachedSAEState` to a `{(sae_id, layer) → (LoadedSAE, hook_handle)}` registry; fp16 steering weights | One hook per referenced SAE bound to its own decoder; ~64 MB/SAE fp16 (two-SAE=128 MB, within the <200 MB envelope — measured) |
+| Circuit interchange (v1.2) | `mistudio.circuit-definition/v1`, frozen, new kind; consumed live | Multi-SAE + typed edges + per-layer budgets + evidence rungs; miLLM consumes, never mutates |
+| Circuit slice-fallback (v1.2) | Consume the per-layer `cluster-definition/v1` slice on single-SAE/incomplete hosts | A slice is a valid v1 cluster def — imports unchanged through the cluster path; never a wrong-basis serve |
+| Evidence-rung surfacing (v1.2) | Carry the EvidenceRung ladder vocabulary verbatim to API/MCP/OWUI/UI | "causal" forbidden <rung 2; single source of truth is miStudio's ladder — no local re-authoring |
 
 ### Decision-Making Criteria
 1. **miStudio Compatibility:** Align architecture for future integration
@@ -308,6 +312,8 @@ millm/
 │   └── resilience.py       # Circuit breaker pattern
 └── main.py                 # Application entry point
 ```
+
+> **Increment additions (not re-drawn above):** Cluster Runtime (v1.1) added `api/routes/management/clusters.py` + `sensing.py`, `services/cluster_service.py` + `cluster_hub_service.py` + `sensing_service.py`, and `db/models/sensing_event.py`. Circuit Runtime (v1.2) adds `api/routes/management/circuits.py` (additive `/api/circuits/*` + edge-sensing routes, mirroring `clusters.py`/`sensing.py`), `services/circuit_service.py` (import/compat/slice-fallback/activate) + `circuit_sensing_service.py` (edge co-activation), and generalizes `services/sae_service.py` (`AttachedSAEState` → `(sae_id, layer)` registry) + `ml/sae_hooker.py` (one hook per referenced SAE). The `mistudio.circuit-definition/v1` schema is vendored under `docs/schemas/` with a pydantic sync test, alongside the cluster schema.
 
 #### Frontend Directory Structure
 ```
@@ -1152,6 +1158,33 @@ SAE_CACHE_DIR=./data/saes
 **Trade-off:** A second (tiny) encode vs entanglement with monitoring
 **Rationale:** Monitoring compacts positionally and only the last forward pass survives to `on_activation` — reusing it would miss mid-generation co-activations and mis-index features. A ≤20-column matmul per pass is microseconds; decoupling means sensing cannot change monitoring behavior. CBM rows cannot be attributed to requests, so sensing-armed requests route serial (never approximated).
 
+#### Circuit Runtime increment (v1.2, 2026-07-20)
+
+#### Relax `AttachedSAEState` singleton vs one-SAE swap-on-load
+**Decision:** Replace the single-attachment `AttachedSAEState` (`millm/services/sae_service.py`) with a registry keyed by `(sae_id, layer)` holding one `(LoadedSAE, hook_handle)` per referenced SAE; install one forward hook per referenced SAE/layer, each bound to its own `W_dec`
+**Trade-off:** More resident SAEs + multiple hooks vs the simplicity of exactly one attached SAE
+**Rationale:** A cross-layer circuit is only meaningful if a feature on layer L is steered by the SAE trained on layer L — the pre-existing swap-on-load model can only serve one layer at a time, so it would silently steer other layers through the wrong basis. This mirrors miStudio's `_register_steering_hooks`, which groups by `(sae_id, layer)` and gives each group its own `LoadedSAE`; a single-SAE circuit collapses to today's behavior byte-identically. Referenced-only loading + fp16 keeps the VRAM cost bounded (measured 64 MB/SAE fp16). `AttachmentStatus` becomes plural.
+
+#### Steering-weight dtype: fp16 vs fp32 for the attached set
+**Decision:** Attach the multi-SAE steering weights (`W_dec`, and `W_enc` for the hazard prior) in fp16 on the GPU
+**Trade-off:** A tiny precision loss in the residual-add direction vs fitting the VRAM envelope
+**Rationale:** The two-SAE spike (RTX 3090, real Gemma-2-2B SAEs d_in=2048/d_sae=8192) measured **256 MB in fp32 (exceeds the <200 MB close-out target) but 128 MB in fp16 (within it)** — footprint is linear at ~128 MB/SAE fp32, ~64 MB/SAE fp16. `SAELoader.load` already casts to a `target_dtype`, so fp16 attach is a config choice, not new machinery; steering is an additive direction where fp16 is ample. The envelope is therefore a **dtype-conditional** constraint, not a blocker for realistic (2–3 layer) circuits.
+
+#### Incomplete SAE set: slice-fallback vs reject the circuit
+**Decision:** When not all referenced SAEs bind, do not serve the full circuit; fall back to the circuit's per-layer `cluster-definition/v1` slice (consumed unchanged through the existing cluster import path); surface `SAE_SET_INCOMPLETE`
+**Trade-off:** A partial (per-layer) rendering vs an all-or-nothing rejection
+**Rationale:** A slice is a schema-valid v1 cluster definition (miStudio's `to_layer_slice` carries the parent-rung/partial-rendering marker only in display fields), so a single-SAE host stays useful without any new consumption code. Serving a member through a mismatched SAE is never an option — that is the wrong-basis bug the whole increment exists to prevent.
+
+#### Evidence rung: carry miStudio's ladder verbatim vs re-author locally
+**Decision:** Surface `EvidenceRung` phrasing (`RUNG_LANGUAGE`/`RUNG_NEXT_STEP`, circuit rung = MIN over edges) verbatim from the ladder; forbid "causal" below rung 2; gate rung<2 activation behind an explicit acknowledgement
+**Trade-off:** Coupling miLLM's UI copy to miStudio's vocabulary vs independent local phrasing
+**Rationale:** The honesty contract only holds if the runtime, where influence actually happens, uses the same words as the authoring tool. Re-authoring risks drift and overclaiming at the frontend. A copy-audit test (mirroring miStudio's) enforces the language rule.
+
+#### New `/api/circuits/*` + MCP `millm_circuits`: additive vs contract bump
+**Decision:** Add circuit endpoints and a `millm_circuits` MCP tool category as a strict additive superset; advance `docs/mcp-contract.md` to v1.1; new error codes `CIRCUIT_NOT_FOUND`, `SAE_SET_INCOMPLETE`, `INCOMPATIBLE_FEATURE_SPACE`
+**Trade-off:** A wider contract surface vs any risk to the shipped cluster/profile/sensing tools
+**Rationale:** Cluster consumers must not break; additive-only (new endpoints/fields/error-codes, never rename/remove) keeps v1.0 clients working and lets the unified MCP degrade gracefully via per-category health gating. Route shapes mirror `management/clusters.py` and `management/sensing.py`.
+
 
 **Decision:** PostgreSQL
 **Trade-off:** More setup complexity vs miStudio alignment and production readiness
@@ -1181,6 +1214,10 @@ SAE_CACHE_DIR=./data/saes
 | OWUI Filter Function (v1.1) | Synthetic model variants in /v1/models | Model-list clutter; coarse; no per-user isolation |
 | Per-request λ (v1.1) | Global-only live mutation | Alters other users' in-flight generations mid-stream |
 | Member-only sense encode (v1.1) | Reuse monitoring capture | Positional compaction + last-pass-only semantics miss/mislabel events |
+| `(sae_id, layer)` registry (v1.2) | Keep single `AttachedSAEState`, swap on load | Can only serve one layer at a time; a cross-layer circuit steers other layers through the wrong basis |
+| fp16 steering weights (v1.2) | fp32 attach | Two SAEs = 256 MB fp32, exceeds the <200 MB envelope; fp16 = 128 MB with headroom |
+| Slice-fallback on incomplete set (v1.2) | Reject the circuit outright | A per-layer slice keeps single-SAE hosts useful with zero new consumption code |
+| Rung vocabulary verbatim (v1.2) | Local phrasing in miLLM UI | Risks drift + overclaiming at the frontend; breaks the ecosystem honesty contract |
 
 ### Risk Assessment
 
@@ -1194,6 +1231,11 @@ SAE_CACHE_DIR=./data/saes
 | Cross-repo MCP coupling (v1.1) | Medium | Medium | Contract-first tools; health-gated categories degrade to structured "unavailable" |
 | Unauthenticated miLLM management API reachable by MCP server (v1.1) | Medium | Medium | Same-segment deployment; optional bearer token as follow-up |
 | Schema drift between repos (v1.1) | Low | High | Vendored `cluster-definition-v1.json` + pydantic sync test in miLLM |
+| Multi-SAE VRAM ceiling (v1.2) | Low | High | fp16 attach (measured 64 MB/SAE; two-SAE=128 MB < 200 MB envelope); load only referenced SAEs; the ceiling only bites for large fp32 sets |
+| Wrong-basis steering on incomplete SAE set (v1.2) | Low | High | Per-referenced-SAE compat check at import AND activation; `SAE_SET_INCOMPLETE` → slice-fallback, never a silent mismatched serve |
+| Evidence-rung overclaim at the frontend (v1.2) | Medium | High | Rung surfaced verbatim; "causal" forbidden <rung 2 (copy-audit test); unvalidated-activation acknowledgement |
+| Cross-layer over-steering (compounding/cancellation) (v1.2) | Medium | Medium | Hazards surfaced at activation, quantified from validated ES where present; conservative default λ; dial always reaches off |
+| Circuit contract drift between repos (v1.2) | Low | High | Vendored `circuit-definition-v1.json` + pydantic sync test; additive-only `mcp-contract.md` v1.1 |
 
 ---
 

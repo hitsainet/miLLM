@@ -2,10 +2,10 @@
 
 ## Mechanistic Interpretability LLM Server
 
-**Document Version:** 1.1
+**Document Version:** 1.2
 **Created:** January 30, 2026
 **Status:** Draft
-**Reference:** BRD v1.0 (January 29, 2026) · BRD-MILLM-CLUSTERS-001 (July 16, 2026)
+**Reference:** BRD v1.0 (January 29, 2026) · BRD-MILLM-CLUSTERS-001 (July 16, 2026) · BRD-MILLM-CIRCUITS-001 (July 20, 2026)
 
 ### Document Revision History
 
@@ -13,6 +13,7 @@
 |---------|------|---------|
 | 1.0 | 2026-01-30 | Initial project PRD (Features 1–7, from BRD v1.0) |
 | 1.1 | 2026-07-16 | Cluster Runtime increment (BRD-MILLM-CLUSTERS-001): Features 8–11 (Cluster Import, Unified MCP, OWUI Cluster Dial, Co-Activation Sensing), FR-8.x–FR-11.x, NFR-1.4, matrix extension; former future stubs renumbered 12–14 |
+| 1.2 | 2026-07-20 | Circuit Runtime increment (BRD-MILLM-CIRCUITS-001): Features 12–15 (Multi-SAE Attach & Circuit Serving, Circuit Import + Slice-Fallback + Evidence Ladder, Circuit-Aware OWUI Dial, Circuit Edge Sensing), FR-12.x–FR-15.x, NFR-1.5, matrix extension; retired the former "Multi-SAE Support" future stub (now specified as Feature 12); remaining future stubs renumbered 16+ |
 
 ---
 
@@ -327,6 +328,37 @@ Organized by logical workflow (matching UI structure):
 - FR-11.4: Events persist with bounded retention (per-cluster cap + age pruning) and are retrievable via API, UI, and WebSocket
 - FR-11.5: Sensing overhead is observable (`sensing_overhead_ms`) and bounded; sensing-armed requests route serial (never approximated on the batching path)
 
+#### Multi-SAE Attach & Circuit Serving (FR-12.x) — Increment: Circuit Runtime
+- FR-12.1: Attach multiple SAEs simultaneously, keyed by `(sae_id, layer)`, loading only the SAEs an imported circuit references (referenced-only loading)
+- FR-12.2: Serve a circuit live so every member feature is steered through ITS OWN layer's SAE decoder — a feature on layer L is never steered through another layer's basis
+- FR-12.3: Apply the circuit's per-layer strength budgets under a single global intensity (λ), reusing the validated per-layer allocation (`freq-budget/sim-alloc/per-layer@1`); joint cross-layer calibration is explicitly deferred
+- FR-12.4: Reject at submit/activation time (422) any member whose layer has no attached SAE (`SAE_SET_INCOMPLETE`), listing the offenders — never silently steer through a wrong-layer SAE
+- FR-12.5: Attach the steering weight set in fp16 within a documented VRAM envelope (measured: ~64 MB/SAE fp16; the two-SAE case is 128 MB, within the <200 MB close-out target)
+- FR-12.6: Surface cross-layer over-steering hazards (compounding/cancellation) at activation, quantified from a validated effect size where present and labeled `heuristic` otherwise — detection, not auto-correction
+- FR-12.7: Report the attached-SAE set (plural attachment status) wherever attachment state is surfaced (API, MCP status, Admin UI)
+
+#### Circuit Import, Slice-Fallback & Evidence Ladder (FR-13.x) — Increment: Circuit Runtime
+- FR-13.1: Import `mistudio.circuit-definition/v1` documents from JSON with strict schema validation, rejecting unknown kinds and incompatible schema major versions
+- FR-13.2: Evaluate compatibility per referenced SAE (bind / warn-bind / block / unbound) and treat a circuit as fully serveable only when all referenced SAEs bind
+- FR-13.3: On an incomplete/single-SAE deployment, fall back to the circuit's per-layer `mistudio.cluster-definition/v1` slice (consumed unchanged through the existing cluster import path) rather than serving any member through a mismatched SAE
+- FR-13.4: Surface each circuit's and edge's EvidenceRung verbatim from the ladder (`associated` / `suggested (attribution-supported)` / `causally validated (edge)` / `faithfulness-tested (circuit)`) wherever steering state is shown; the circuit rung is the MIN over its edges
+- FR-13.5: Never describe rung-below-2 steering as "causal"; require an explicit unvalidated acknowledgement to activate a circuit whose rung is below 2
+- FR-13.6: Treat imported circuit definitions strictly as data (size/count caps; no paths, no credentials, no execution) — reusing the cluster-import posture
+- FR-13.7: Circuits surfaced in the Admin UI (list with rung/layers/edge count, import dialog, activation with the unvalidated-rung gate, slice-fallback disclosure)
+
+#### Circuit-Aware OWUI Dial (FR-14.x) — Increment: Circuit Runtime
+- FR-14.1: Extend the per-request `steering_intensity` extension so it dials a whole active circuit (all layers scale together under one λ) off/min/max or numeric
+- FR-14.2: Per-request circuit intensity is isolated (apply/restore within the request boundary, incl. client disconnect) and concurrency-safe
+- FR-14.3: The Open WebUI Filter Function surfaces the active circuit's identity and evidence rung alongside the dial (a rung<2 circuit is visibly marked unvalidated)
+- FR-14.4: A user can compare identical prompts at circuit influence off/min/max within one chat session
+
+#### Circuit Edge Sensing (FR-15.x) — Increment: Circuit Runtime
+- FR-15.1: Detect, per forward pass, circuit EDGE co-activation — an upstream member firing followed by its downstream partner firing within a configurable token-lag window — opt-in per circuit and off by default
+- FR-15.2: Each edge event records the alone-vs-within-larger-set distinction and the upstream/downstream member activations
+- FR-15.3: Each edge event captures a configurable window of token context (±K tokens, decoded off the hot path)
+- FR-15.4: Edge events persist with bounded retention and are retrievable via API, UI, and WebSocket, carrying the edge's evidence rung
+- FR-15.5: New additive `/api/circuits/*` endpoints and a `millm_circuits` MCP tool category (import, activate/deactivate, status, list, edge-sensing readout), tracked in `docs/mcp-contract.md` (v1.1, additive-only)
+
 ### Non-Functional Requirements
 
 #### Performance (NFR-1.x)
@@ -334,6 +366,7 @@ Organized by logical workflow (matching UI structure):
 - NFR-1.2: Graceful request queuing for 5+ pending requests
 - NFR-1.3: Time to first token <500ms after model loaded
 - NFR-1.4: Sensing (armed) adds no user-perceivable latency — overhead observable and warned above 5 ms/request (Increment: Cluster Runtime)
+- NFR-1.5: Multi-SAE attach + edge sensing keep the OpenAI-compatible path within the CBM latency budget; attached-SAE VRAM scales linearly (~64 MB/SAE fp16) and only referenced SAEs are loaded (Increment: Circuit Runtime)
 
 #### Reliability (NFR-2.x)
 - NFR-2.1: Configuration errors fail fast with clear messages
@@ -368,6 +401,7 @@ Organized by logical workflow (matching UI structure):
 - Profile import with validation
 - Management API designed for miStudio direct integration
 - Increment (Cluster Runtime): `mistudio.cluster-definition/v1` + bundle as the sole cluster interchange (kind-keyed, frozen v1 schema; vendored copy + sync test); unified MCP server contract; Hugging Face tag convention (consume-only)
+- Increment (Circuit Runtime): `mistudio.circuit-definition/v1` (new kind; per-layer SAE refs, typed edges, per-layer budgets, evidence rungs) consumed live, plus its per-layer `mistudio.cluster-definition/v1` slice projection as the single-SAE fallback; the EvidenceRung ladder vocabulary carried verbatim; `docs/mcp-contract.md` advanced to v1.1 (additive `millm_circuits` category)
 
 ---
 
@@ -576,23 +610,88 @@ Features organized by UI workflow tabs, with requirements matrix:
 
 ---
 
+### Increment: Circuit Runtime (BRD-MILLM-CIRCUITS-001)
+
+#### Feature 12: Multi-SAE Attach & Circuit Serving
+**User Value:** A cross-layer circuit discovered and validated in miStudio runs live in miLLM — every member steered through its own layer's SAE, at its tuned per-layer budget, under one dial — instead of being trapped as a single-SAE approximation.
+
+**UI Tab:** Circuits (attachment status shows the plural SAE set)
+
+**Requirements Covered:** FR-12.1 through FR-12.7
+
+**Key Capabilities:**
+- Multi-SAE attachment keyed by `(sae_id, layer)`; only referenced SAEs loaded (fp16, ~64 MB/SAE; two-SAE = 128 MB, within the <200 MB envelope — measured)
+- One hook per referenced SAE/layer, each bound to its own decoder — a feature on layer L is never steered through another layer's basis
+- Per-layer strength budgets under a single global λ (`freq-budget/sim-alloc/per-layer@1`); joint calibration deferred
+- Submit/activation-time rejection (422, `SAE_SET_INCOMPLETE`) when a member's layer has no attached SAE — never a silent wrong-basis path
+- Cross-layer over-steering hazards (compounding/cancellation) surfaced at activation, quantified from validated effect size where present (else `heuristic`)
+
+**Dependencies:** Feature 2 (SAE Management), Feature 3 (Feature Steering), Feature 13 (circuit import)
+
+---
+
+#### Feature 13: Circuit Import, Slice-Fallback & Evidence Ladder
+**User Value:** miLLM imports the portable circuit artifact and always tells the truth about how much to trust it — a mined circuit is never presented as causal, and a single-SAE host still gets a usable per-layer projection.
+
+**UI Tab:** Circuits (new)
+
+**Requirements Covered:** FR-13.1 through FR-13.7
+
+**Key Capabilities:**
+- `mistudio.circuit-definition/v1` import with strict schema validation (unknown kind / major-version rejected)
+- Per-referenced-SAE compatibility matrix (bind / warn-bind / block / unbound); serveable only when all bind
+- Per-layer `mistudio.cluster-definition/v1` slice fallback on single-SAE/incomplete deployments (consumed unchanged through the cluster path)
+- EvidenceRung surfaced verbatim (circuit rung = MIN over edges); "causal" forbidden below rung 2; unvalidated (rung<2) activation gated behind an explicit acknowledgement
+- Definitions treated strictly as data (caps, no paths/credentials/execution)
+
+**Dependencies:** Feature 8 (cluster import path — reused for slices), Feature 12 (multi-SAE serving)
+
+---
+
+#### Feature 14: Circuit-Aware OWUI Dial
+**User Value:** End users dial a whole circuit's influence live in real chat — off/min/max on identical prompts — and see whether the circuit is validated, without leaving Open WebUI.
+
+**UI Tab:** None (OWUI-side Filter Function + OpenAI-API extension)
+
+**Requirements Covered:** FR-14.1 through FR-14.4
+
+**Key Capabilities:**
+- `steering_intensity` extension dials a whole active circuit (all layers scale together under one λ)
+- Request-scoped apply/restore (incl. client disconnect), concurrency-safe
+- OWUI Filter surfaces the active circuit's identity and evidence rung (rung<2 visibly marked unvalidated)
+
+**Dependencies:** Feature 10 (OWUI dial filter — extended), Feature 12/13 (active circuit)
+
+---
+
+#### Feature 15: Circuit Edge Sensing
+**User Value:** Turn a validated circuit into a live monitor — observe when its EDGES actually fire in production (upstream member firing followed by its downstream partner), closing the loop back to authoring.
+
+**UI Tab:** Circuits (edge-sensing panel)
+
+**Requirements Covered:** FR-15.1 through FR-15.5
+
+**Key Capabilities:**
+- Per-forward-pass edge detection (upstream→downstream within a token-lag window), opt-in, off by default
+- Alone-vs-within side channel + upstream/downstream member activations
+- ±K token context per event (off-hot-path decode)
+- Bounded persistence + API/UI/WS readout carrying the edge's rung
+- New additive `/api/circuits/*` endpoints + `millm_circuits` MCP category (`docs/mcp-contract.md` v1.1)
+
+**Dependencies:** Feature 11 (sensing hook path — extended), Feature 13 (circuit edges)
+
+---
+
 ### Future Features (Post v1.0)
 
-#### Feature 12: Multi-User Authentication
+#### Feature 16: Multi-User Authentication
 **User Value:** Enable secure access for team environments and non-local deployments.
 
 **Priority:** v1.1+
 
 ---
 
-#### Feature 13: Multi-SAE Support
-**User Value:** Attach SAEs to multiple layers for more sophisticated steering.
-
-**Priority:** v2.0
-
----
-
-#### Feature 14: Neuronpedia Integration
+#### Feature 17: Neuronpedia Integration
 **User Value:** Browse and search features with human-readable labels from Neuronpedia.
 
 **Priority:** v1.1+ (partially delivered post-v1.0: probe feature links derive from attached SAE metadata)
@@ -601,19 +700,23 @@ Features organized by UI workflow tabs, with requirements matrix:
 
 ### Feature-Requirements Matrix
 
-| Feature | FR-1.x | FR-2.x | FR-3.x | FR-4.x | FR-5.x | FR-6.x | FR-7.x | FR-8.x | FR-9.x | FR-10.x | FR-11.x |
-|---------|--------|--------|--------|--------|--------|--------|--------|--------|--------|---------|---------|
-| 1. Model Management | ✓ | | | | | | ✓ | | | | |
-| 2. SAE Management | | ✓ | | | | | ✓ | | | | |
-| 3. Feature Steering | | | ✓ | | | | ✓ | | | | |
-| 4. OpenAI API | ✓ | | ✓ | | ✓ | | | | | | |
-| 5. Admin UI | | | | | | | ✓ | | | | |
-| 6. Profile Management | | | ✓ | | | ✓ | ✓ | | | | |
-| 7. Feature Monitoring | | ✓ | | ✓ | | | ✓ | | | | |
-| 8. Cluster Import | | | ✓ | | | ✓ | | ✓ | | | |
-| 9. Unified MCP | | | | | | | | ✓ | ✓ | ✓ | ✓ |
-| 10. OWUI Cluster Dial | | | ✓ | | ✓ | | | ✓ | | ✓ | |
-| 11. Co-Activation Sensing | | | | ✓ | | | | ✓ | | | ✓ |
+| Feature | FR-1.x | FR-2.x | FR-3.x | FR-4.x | FR-5.x | FR-6.x | FR-7.x | FR-8.x | FR-9.x | FR-10.x | FR-11.x | FR-12.x | FR-13.x | FR-14.x | FR-15.x |
+|---------|--------|--------|--------|--------|--------|--------|--------|--------|--------|---------|---------|---------|---------|---------|---------|
+| 1. Model Management | ✓ | | | | | | ✓ | | | | | | | | |
+| 2. SAE Management | | ✓ | | | | | ✓ | | | | | ✓ | | | |
+| 3. Feature Steering | | | ✓ | | | | ✓ | | | | | ✓ | | | |
+| 4. OpenAI API | ✓ | | ✓ | | ✓ | | | | | | | | | ✓ | |
+| 5. Admin UI | | | | | | | ✓ | | | | | | ✓ | | |
+| 6. Profile Management | | | ✓ | | | ✓ | ✓ | | | | | | | | |
+| 7. Feature Monitoring | | ✓ | | ✓ | | | ✓ | | | | | | | | |
+| 8. Cluster Import | | | ✓ | | | ✓ | | ✓ | | | | | ✓ | | |
+| 9. Unified MCP | | | | | | | | ✓ | ✓ | ✓ | ✓ | | | | ✓ |
+| 10. OWUI Cluster Dial | | | ✓ | | ✓ | | | ✓ | | ✓ | | | | | |
+| 11. Co-Activation Sensing | | | | ✓ | | | | ✓ | | | ✓ | | | | |
+| 12. Multi-SAE Attach & Circuit Serving | | ✓ | ✓ | | | | | | | | | ✓ | | | |
+| 13. Circuit Import, Slice-Fallback & Evidence Ladder | | | ✓ | | | ✓ | | ✓ | | | | ✓ | ✓ | | |
+| 14. Circuit-Aware OWUI Dial | | | ✓ | | ✓ | | | | | ✓ | | ✓ | | ✓ | |
+| 15. Circuit Edge Sensing | | | | ✓ | | | | | ✓ | | ✓ | | ✓ | | ✓ |
 
 ---
 

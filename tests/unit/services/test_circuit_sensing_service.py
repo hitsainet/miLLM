@@ -735,3 +735,121 @@ class TestTruncatedLayersNamesTheLayer:
         assert model.model_dump()["truncated_layers"] == [13], (
             "declared on the model but dropped on serialization"
         )
+
+
+class TestR1ConcurrentRequestsAreRefusedNotInterleaved:
+    """F17 R1-03. `MAX_CONCURRENT_REQUESTS` must be 1 for this service to
+    attribute observations correctly, and config.py enforced that with a
+    COMMENT. Setting it to 2 was measured to corrupt sensing silently: the first
+    request's context was orphaned (rings leaked, nothing would ever close
+    them), its edges were never drained, and the drain reported BOTH requests'
+    events under the second request's id.
+
+    Fabricated attribution on an evidence surface is categorically worse than
+    lost observations, so the second boundary is refused."""
+
+    def _armed(self):
+        svc = CircuitSensingService()
+        saes = two_saes()
+        svc.arm_for_circuit(circuit(), definition(), saes)
+        return svc, saes
+
+    def test_a_second_boundary_is_refused_while_one_is_open(self):
+        svc, saes = self._armed()
+        assert svc.begin_request("A", saes) is True
+        assert svc.begin_request("B", saes) is False
+
+    def test_the_first_request_keeps_its_context_and_its_attribution(self):
+        """The refusal must protect A, not merely reject B."""
+        svc, saes = self._armed()
+        svc.begin_request("A", saes)
+        ctx_a = svc._ctx
+        svc.begin_request("B", saes)
+        assert svc._ctx is ctx_a, "B replaced A's context anyway"
+        request_id, _, _ = svc.collect_edges(saes)
+        assert request_id == "A", (
+            f"drained A's observations under {request_id!r} — fabricated "
+            "attribution, the failure ring isolation exists to prevent"
+        )
+
+    def test_the_refusal_says_why(self):
+        svc, saes = self._armed()
+        svc.begin_request("A", saes)
+        svc.begin_request("B", saes)
+        assert svc.status(saes)["paused_reason"] == "concurrent_request"
+
+    def test_the_guard_does_not_latch(self):
+        """A guard that latched would refuse every later request — turning a
+        race fix into a total sensing outage."""
+        svc, saes = self._armed()
+        svc.begin_request("A", saes)
+        svc.collect_edges(saes)
+        svc.close_request()
+        assert svc.begin_request("B", saes) is True
+
+
+class TestR1ADarkLayerIsNeverReportedAsComplete:
+    """F17 R1-02. `begin_request` returned True if ANY layer began, so a layer
+    absent from `layer_saes` was skipped, never bound, never begun — and the
+    drain reported `truncated_layers: []`, which the status contract defines as
+    'every armed layer reported completely'. Half the circuit was blind and the
+    operator was told it was quiet."""
+
+    def test_a_layer_with_no_sae_is_named_not_hidden(self):
+        svc = CircuitSensingService()
+        saes = two_saes()
+        svc.arm_for_circuit(circuit(), definition(), saes)
+        svc.begin_request("r1", {10: saes[10]})     # layer 13 absent
+        svc.collect_edges(saes)
+        assert 13 in svc.last_request_truncated_layers, (
+            "a dark layer reported as complete — a false completeness claim"
+        )
+
+    def test_the_operator_is_told_why(self):
+        svc = CircuitSensingService()
+        saes = two_saes()
+        svc.arm_for_circuit(circuit(), definition(), saes)
+        svc.begin_request("r1", {10: saes[10]})
+        assert svc.status(saes)["paused_reason"] == "layer_unavailable"
+
+    def test_a_complete_request_still_claims_completeness(self):
+        """The positive claim must survive: this must not flag every request."""
+        svc = CircuitSensingService()
+        saes = two_saes()
+        svc.arm_for_circuit(circuit(), definition(), saes)
+        svc.begin_request("r1", saes)
+        svc.collect_edges(saes)
+        assert svc.last_request_truncated_layers == []
+
+
+class TestR1StaleTruncationDoesNotSurviveDisarm:
+    """F17 R1-04. Measured after disarm: `layers: []` with
+    `truncated_layers: [13]` — accusing a layer the armed circuit does not
+    contain."""
+
+    def test_disarm_clears_the_truncation_report(self):
+        svc = CircuitSensingService()
+        saes = two_saes()
+        svc.arm_for_circuit(circuit(), definition(), saes)
+        svc.begin_request("r1", saes)
+        saes[13]._edge_truncated = True
+        svc.collect_edges(saes)
+        assert svc.last_request_truncated_layers == [13]
+        svc.close_request()
+        svc.disarm(saes)
+        assert svc.last_request_truncated_layers == []
+
+    def test_status_never_names_an_unarmed_layer(self):
+        """The invariant behind the contract's 'positive claim' language."""
+        svc = CircuitSensingService()
+        saes = two_saes()
+        svc.arm_for_circuit(circuit(), definition(), saes)
+        svc.begin_request("r1", saes)
+        saes[13]._edge_truncated = True
+        svc.collect_edges(saes)
+        svc.close_request()
+        svc.disarm(saes)
+        st = svc.status(saes)
+        assert set(st["truncated_layers"]) <= set(st["layers"]), (
+            f"named {st['truncated_layers']} while armed on {st['layers']}"
+        )

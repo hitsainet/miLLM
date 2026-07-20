@@ -474,3 +474,104 @@ class TestPositionAdvancesBeforeGuardsProgressReportsAfterWork:
         layer = sae._edge_sensing.layer
         sae._sense_edges(hidden({}, {}, {}))
         assert sae._edge_ring._progress.get(layer) == 3
+
+
+# ─────────────────────────────────────────────────────────────────────────
+# R1-01 — the per-circuit budget, asserted THROUGH THE MATCHER
+#
+# EventBudget was written, unit-tested, and never wired: `try_spend` had no
+# production supplier, so an N-layer circuit still emitted N x its cap. Its
+# tests passed forever because they drove EventBudget directly instead of
+# through a real LoadedSAE — asserting the mechanism EXISTS rather than that
+# it is CALLED, which is the anti-pattern BR-005 forbids by name.
+#
+# These drive real SAEs through the real entry point. A test that touches
+# EventBudget directly cannot catch the wiring coming undone; these can.
+# ─────────────────────────────────────────────────────────────────────────
+
+
+class TestThePerCircuitBudgetIsWiredNotJustDeclared:
+
+    def _circuit(self, cap, layers=(10, 11, 12)):
+        cfgs = {}
+        for L in layers:
+            c = config(
+                edges=[spec(up_layer=L, down_layer=L, key=f"1@{L}->2@{L}")],
+                max_lag=8, cap=cap, layer=L,
+            )
+            c.circuit_id = "circ_1"
+            cfgs[L] = c
+        ctx = ctx_for(cfgs[layers[0]], "r")
+        saes = []
+        for L, c in cfgs.items():
+            s = real_sae()
+            s.arm_edge_sensing(c)
+            s.bind_context(ctx)
+            s.begin_edge_sensing_request("r")
+            saes.append(s)
+        return ctx, saes
+
+    def _fire(self, sae, pairs=10):
+        rows = []
+        for _ in range(pairs):
+            rows += [{1: 2.0}, {2: 2.0}]
+        sae._sense_edges(hidden(*rows))
+
+    def test_an_N_layer_circuit_emits_at_most_the_CIRCUIT_cap(self):
+        """The defect: cap 3 over three layers emitted NINE events, because the
+        live cap was per-SAE. Measured before the fix; this pins the after."""
+        ctx, saes = self._circuit(cap=3)
+        for s in saes:
+            self._fire(s)
+        total = sum(len(s._sensed_edges) for s in saes)
+        assert total <= 3, (
+            f"{total} events emitted against a per-circuit cap of 3 — the "
+            "budget is not wired and each layer is spending its own"
+        )
+
+    def test_the_budget_actually_RECORDS_the_spend(self):
+        """`spent` stayed 0 while nine events were emitted — the tell that
+        nothing was calling try_spend."""
+        ctx, saes = self._circuit(cap=3)
+        for s in saes:
+            self._fire(s)
+        assert ctx.budget.spent("circ_1") == 3
+
+    def test_a_budget_refusal_is_REPORTED_as_truncation(self):
+        """Wiring the budget initially dropped events without setting
+        `_edge_truncated`, because try_spend refuses before the per-SAE latch
+        is reached. The drain then reported a clean, complete result while
+        events were being discarded — silent-dark, reintroduced by the fix
+        for silent-dark."""
+        ctx, saes = self._circuit(cap=1)
+        for s in saes:
+            self._fire(s)
+        starved = [s for s in saes if not s._sensed_edges]
+        assert starved, "precondition: some layer must have been refused"
+        assert all(s._edge_truncated for s in starved), (
+            "a layer whose events were dropped reported itself complete"
+        )
+
+    def test_a_refused_layer_still_feeds_its_siblings(self):
+        """R2-03/R3-02 through the budget path: refusal must CONTINUE, never
+        return, or a starved layer blinds every layer downstream of it."""
+        ctx, saes = self._circuit(cap=1)
+        for s in saes:
+            self._fire(s)
+        ring = ctx.ring("circ_1", 8)
+        assert any(ring._fires.get(f"1@{L}->2@{L}") for L in (10, 11, 12)), (
+            "no upstream fires reached the ring — a refused layer returned "
+            "instead of continuing"
+        )
+
+    def test_one_circuit_saturating_does_not_spend_another_s_budget(self):
+        """FPRD §9 criterion 3 verbatim: a saturating circuit must not reduce
+        another circuit's recorded observations."""
+        ctx, saes = self._circuit(cap=2)
+        for s in saes:
+            self._fire(s)
+        assert ctx.budget.spent("circ_1") == 2
+        assert ctx.budget.spent("circ_OTHER") == 0, (
+            "a second circuit's budget was consumed by the first"
+        )
+        assert ctx.budget.try_spend("circ_OTHER", 10) is True

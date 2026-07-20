@@ -114,6 +114,39 @@ export interface SAEListResponse {
   attachment: AttachmentStatus;
 }
 
+// Multi-SAE attachment (Feature 12: circuit serving)
+export interface AttachedEntry {
+  sae_id: string;
+  layer: number;
+  memory_usage_mb: number | null;
+  steering_enabled: boolean;
+  monitoring_enabled: boolean;
+  steering_apply_count: number;
+}
+
+export interface AttachmentStatusSet {
+  is_attached: boolean;
+  count: number;
+  entries: AttachedEntry[];
+  total_memory_usage_mb: number | null;
+  vram_envelope_mb: number | null;
+  vram_warning: boolean;
+}
+
+export interface AttachSetItem {
+  sae_id: string;
+  layer: number;
+}
+
+export interface AttachSetResponse {
+  status: string;
+  entries: Array<Record<string, unknown>>;
+  attached_count: number;
+  total_memory_usage_mb: number;
+  vram_envelope_mb: number;
+  vram_warning: boolean;
+}
+
 export interface DownloadSAERequest {
   repository_id: string;
   revision?: string;

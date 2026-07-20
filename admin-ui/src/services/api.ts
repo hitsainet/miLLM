@@ -25,6 +25,9 @@ import type {
   PreviewSAERequest,
   PreviewSAEResponse,
   AttachSAERequest,
+  AttachmentStatusSet,
+  AttachSetItem,
+  AttachSetResponse,
   SteeringState,
   SetSteeringRequest,
   BatchSteeringRequest,
@@ -386,6 +389,26 @@ export const saeApi = {
         body: JSON.stringify({ layer: req.layer }),
       }
     ),
+
+  /**
+   * Gets the plural (multi-SAE) attachment status across all attached
+   * (sae_id, layer) entries — Feature 12 circuit serving.
+   * @returns Promise resolving to the attachment set status
+   */
+  attachments: () => request<AttachmentStatusSet>('/saes/attachments'),
+
+  /**
+   * Attaches a set of SAEs at once for cross-layer circuit serving.
+   * Loads only the referenced SAEs (fp16) and installs one hook per
+   * (sae_id, layer). Idempotent per key.
+   * @param saes - list of {sae_id, layer} pairs (1–16)
+   * @returns Promise resolving to the attach-set response
+   */
+  attachSet: (saes: AttachSetItem[]) =>
+    request<AttachSetResponse>('/saes/attach-set', {
+      method: 'POST',
+      body: JSON.stringify({ saes }),
+    }),
 
   /**
    * Detaches the currently attached SAE.

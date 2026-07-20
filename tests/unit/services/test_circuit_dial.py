@@ -47,7 +47,29 @@ def attach(sae, sae_id: str, layer: int):
     AttachedSAEState().set(sae, sae_id, layer, None)
 
 
+def make_meta(members=((10, 1, 40.0), (13, 2, 30.0)), intensity=1.0):
+    """A REAL circuit-definition/v1 document — the dial re-derives the authored
+    basis from it, so an empty stub would not exercise the real path."""
+    layers = sorted({layer for layer, _, _ in members})
+    return {
+        "kind": "mistudio.circuit-definition",
+        "schema_version": "1",
+        "name": "fear→threat",
+        "saes": [
+            {"layer": layer, "n_features": 8192, "mistudio_sae_id": f"sae-{layer}"}
+            for layer in layers
+        ],
+        "members": [
+            {"layer": layer, "feature": {"feature_idx": idx, "strength": strength}}
+            for layer, idx, strength in members
+        ],
+        "edges": [],
+        "budget": {"layers": {}, "intensity": intensity, "intensity_range": [0.0, 2.0]},
+    }
+
+
 def make_circuit(**overrides):
+    meta = overrides.pop("circuit_meta", None)
     base = dict(
         id="circ_1",
         name="fear→threat",
@@ -55,9 +77,9 @@ def make_circuit(**overrides):
         serving_mode="full",
         intensity=1.0,
         rung=2,
-        circuit_meta={},
     )
     base.update(overrides)
+    base["circuit_meta"] = meta if meta is not None else make_meta()
     return SimpleNamespace(**base)
 
 
@@ -84,14 +106,30 @@ class TestAllLayersScaleTogether:
         assert s13._applied == {2: 60.0}   # 30 × 2
 
     async def test_dial_is_absolute_not_a_multiplier_of_the_stored_dial(self):
-        """A circuit already serving at λ=1.5 dialled to 2.0 must end at 2.0×
-        the AUTHORED basis, not 3.0× (the stored λ is divided out first)."""
-        s10 = make_sae({1: 60.0})  # authored 40 × stored λ 1.5
+        """A circuit serving at λ=1.5 dialled to 2.0 must end at 2.0× the
+        AUTHORED basis, not 3.0×. R1: rescaling the LIVE values could not
+        recover the basis (clamping is lossy and the stored-λ column differs
+        from the document's), so the dial re-derives from the definition."""
+        s10 = make_sae({1: 60.0})  # authored 40 × document λ 1.5
         attach(s10, "sae-10", 10)
-        svc = service_with_circuit(make_circuit(layers=[10], intensity=1.5))
-
+        svc = service_with_circuit(
+            make_circuit(layers=[10], intensity=1.5,
+                         circuit_meta=make_meta(members=((10, 1, 40.0),), intensity=1.5))
+        )
         await svc._apply_request_circuit_steering(2.0)
         assert s10._applied == {1: 80.0}   # 40 × 2, NOT 60 × 2
+
+    async def test_clamped_members_recover_their_authored_basis(self):
+        """R1: authored 150 at λ=2 stores clamp(300)=200; dialling back to 1.0
+        must give 150, which rescaling the clamped live value cannot do."""
+        s10 = make_sae({1: 200.0})
+        attach(s10, "sae-10", 10)
+        svc = service_with_circuit(
+            make_circuit(layers=[10], intensity=2.0,
+                         circuit_meta=make_meta(members=((10, 1, 150.0),), intensity=2.0))
+        )
+        await svc._apply_request_circuit_steering(1.0)
+        assert s10._applied == {1: 150.0}   # NOT 200/2*1 = 100
 
     async def test_lambda_zero_disables_every_layer(self):
         s10, s13 = make_sae({1: 40.0}), make_sae({2: 30.0})
@@ -107,7 +145,10 @@ class TestAllLayersScaleTogether:
     async def test_values_are_clamped_per_member(self):
         s10 = make_sae({1: 150.0})
         attach(s10, "sae-10", 10)
-        svc = service_with_circuit(make_circuit(layers=[10]))
+        svc = service_with_circuit(
+            make_circuit(layers=[10],
+                         circuit_meta=make_meta(members=((10, 1, 150.0),)))
+        )
         await svc._apply_request_circuit_steering(2.0)   # 300 → clamp 200
         assert s10._applied == {1: 200.0}
 

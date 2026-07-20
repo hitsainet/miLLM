@@ -681,6 +681,33 @@ class InferenceService:
             )
             return None
 
+    @staticmethod
+    def _circuit_serving_members(definition: Any) -> list:
+        """Flatten a circuit definition to Feature 12 serving members.
+
+        Delegates to CircuitService so the dial and circuit activation flatten
+        members by exactly the same rules (both-sources collection, dedupe) —
+        a second implementation here would drift.
+        """
+        from millm.services.circuit_service import CircuitService
+
+        # _serving_members is pure (no repository access) — call it unbound.
+        return CircuitService._serving_members(None, definition)
+
+    @staticmethod
+    def _sae_service_for_dial() -> Any:
+        """An SAEService bound only to the attachment registry.
+
+        ``set_circuit_steering`` touches nothing but the singleton registry and
+        the attached SAEs, so a repository-free instance is sufficient — and
+        avoids pulling request-scoped DI into the inference hot path.
+        """
+        from millm.services.sae_service import AttachedSAEState, SAEService
+
+        svc = SAEService.__new__(SAEService)
+        svc._sae_state = AttachedSAEState()
+        return svc
+
     async def _active_full_circuit(self) -> Optional[Any]:
         """The active circuit when it is serving in FULL multi-SAE mode.
 
@@ -711,11 +738,22 @@ class InferenceService:
         circuit = await self._active_full_circuit()
         if circuit is None:
             return None
+        from millm.api.schemas.circuit import CircuitDefinitionV1
         from millm.services.sae_service import AttachedSAEState
 
         state = AttachedSAEState()
         if not [e for e in state.entries() if e.layer in (circuit.layers or [])]:
             return None  # apply will no-op; an echoed lambda would lie
+        # Mirror apply's remaining no-op rules EXACTLY (R1: the echo checked
+        # attached layers but not serveable members, so an attached-but-empty
+        # circuit emitted a λ header for a request that no-ops — the very
+        # echo/apply drift Feature 10 R3 eliminated for the profile path).
+        try:
+            definition = CircuitDefinitionV1.model_validate(circuit.circuit_meta)
+        except Exception:
+            return None
+        if not self._circuit_serving_members(definition):
+            return None
         return self._resolve_circuit_intensity(raw, circuit)
 
     async def active_circuit_rung(self) -> Optional[tuple[int, str]]:
@@ -751,6 +789,7 @@ class InferenceService:
         is steered by a cluster PROFILE, which the ordinary profile path
         already handles correctly — dialling it here would double-apply.
         """
+        from millm.api.schemas.circuit import CircuitDefinitionV1
         from millm.services.sae_service import AttachedSAEState
 
         circuit = await self._active_full_circuit()
@@ -787,29 +826,45 @@ class InferenceService:
                         layers=[e.layer for e in entries])
             return {"circuit": True, "layers": saved_layers}
 
-        # Scale each layer's CURRENT (λ=1-basis) values by the one dial. The
-        # active circuit already applied its authored budgets at activation, so
-        # the live values ARE the base — mirroring the live-values branch of
-        # the single-SAE path.
-        from millm.core.steering_range import clamp_steering
+        # Re-derive from the AUTHORED basis rather than rescaling the live
+        # values. Dividing live values by a stored λ cannot recover the basis:
+        # (a) activation CLAMPS each member at ±200, and the overflow is gone —
+        #     authored 150 at λ=2 stores clamp(300)=200, so 200/2×1 = 100, not
+        #     the correct 150; and
+        # (b) _serve_full applies `definition.budget.intensity`, which is a
+        #     DIFFERENT field from `circuit.intensity` (the DB dial column), so
+        #     the divisor was wrong for any circuit whose document declares a
+        #     non-1.0 budget intensity.
+        # Re-serving from the stored definition is the same path set_intensity
+        # uses, so the dial and the management API agree by construction.
+        try:
+            definition = CircuitDefinitionV1.model_validate(circuit.circuit_meta)
+        except Exception as e:
+            logger.warning(
+                "circuit_dial_definition_unparseable",
+                circuit_id=circuit.id,
+                error=str(e),
+            )
+            return None
 
-        applied_any = False
-        for e in entries:
-            live = e.sae.get_steering_values()
-            if not live:
-                continue
-            base_lam = circuit.intensity if circuit.intensity else 1.0
-            scaled = {
-                int(i): clamp_steering(float(v) / base_lam * lam)
-                for i, v in live.items()
-            }
-            e.sae.clear_steering()
-            e.sae.set_steering_batch(scaled)
-            e.sae.enable_steering(True)
-            applied_any = True
+        members = self._circuit_serving_members(definition)
+        if not members:
+            logger.info("circuit_dial_noop_no_members", circuit_id=circuit.id)
+            return None
 
-        if not applied_any:
-            logger.info("circuit_dial_noop_no_live_values", circuit_id=circuit.id)
+        try:
+            self._sae_service_for_dial().set_circuit_steering(
+                members,
+                lam,
+                edges=[e.model_dump(mode="json") for e in definition.edges],
+            )
+        except Exception as e:
+            # The dial must never fail a chat request: restore what we saved
+            # and fall through unsteered-by-this-dial.
+            logger.warning(
+                "circuit_dial_apply_failed", circuit_id=circuit.id, error=str(e)
+            )
+            self._restore_request_profile({"circuit": True, "layers": saved_layers})
             return None
 
         logger.info(
@@ -1092,14 +1147,26 @@ class InferenceService:
             # into global state.
             if saved.get("circuit"):
                 for entry_state in saved.get("layers", []):
-                    entry = state.get(entry_state["sae_id"], entry_state["layer"])
-                    if entry is None or entry.sae is None:
-                        # Detached mid-request; nothing to restore on that layer.
-                        continue
-                    entry.sae.clear_steering()
-                    if entry_state["values"]:
-                        entry.sae.set_steering_batch(entry_state["values"])
-                    entry.sae.enable_steering(entry_state["enabled"])
+                    # Each layer restores INDEPENDENTLY: without this, one
+                    # failing layer aborted the loop and left the remaining
+                    # layers permanently dialled — a per-request override
+                    # leaking into global state, the exact thing restore exists
+                    # to prevent.
+                    try:
+                        entry = state.get(entry_state["sae_id"], entry_state["layer"])
+                        if entry is None or entry.sae is None:
+                            # Detached mid-request; nothing to restore there.
+                            continue
+                        entry.sae.clear_steering()
+                        if entry_state["values"]:
+                            entry.sae.set_steering_batch(entry_state["values"])
+                        entry.sae.enable_steering(entry_state["enabled"])
+                    except Exception as layer_error:
+                        logger.warning(
+                            "request_circuit_layer_restore_failed",
+                            layer=entry_state.get("layer"),
+                            error=str(layer_error),
+                        )
                 logger.debug(
                     "request_circuit_steering_restored",
                     layers=[s["layer"] for s in saved.get("layers", [])],

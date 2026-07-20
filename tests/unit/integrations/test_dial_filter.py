@@ -216,12 +216,22 @@ class TestCircuitRungStatus:
         assert "[UNVALIDATED]" in s
         assert "causal" not in s.lower()
 
-    def test_server_phrase_wins_over_the_local_mirror(self, filter_module):
-        """The server is the source of truth for evidence language."""
+    def test_server_phrase_used_when_it_matches_the_mirror(self, filter_module):
         s = self._mk(filter_module)._circuit_suffix(
-            {"name": "c", "rung": 0, "rung_language": "associated (server wording)"}
+            {"name": "c", "rung": 0, "rung_language": "associated"}
         )
-        assert "associated (server wording)" in s
+        assert "associated" in s
+
+    def test_a_spoofed_server_phrase_cannot_inject_causal_language(self, filter_module):
+        """R1 security: the filter renders server text verbatim into the chat,
+        so a spoofed/MITM'd endpoint could claim a rung-0 circuit is causal.
+        The phrase is now validated against the mirrored vocabulary."""
+        s = self._mk(filter_module)._circuit_suffix(
+            {"name": "c", "rung": 0, "rung_language": "causally validated (edge)"}
+        )
+        assert "causal" not in s.lower()
+        assert "associated" in s
+        assert "[UNVALIDATED]" in s
 
     def test_missing_rung_language_falls_back_to_the_mirror(self, filter_module):
         s = self._mk(filter_module)._circuit_suffix({"name": "c", "rung": 1})

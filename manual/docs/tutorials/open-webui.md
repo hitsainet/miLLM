@@ -89,9 +89,16 @@ is safe and has no effect.
 
 When a **circuit** is serving (Circuits page → Activate), the same dial scales
 **every layer of the circuit together** under one λ. You do not dial layers
-individually — a circuit is one intervention spanning several SAEs, and the
-budgets it was authored with keep their relative proportions as you move the
-dial.
+individually — a circuit is one intervention spanning several SAEs, and each
+member is re-derived from the strength it was authored with, so the dial is
+absolute rather than compounding on the circuit's stored setting.
+
+:::note
+Individual members are clamped to miLLM's ±200 steering range at apply time, so
+at a high λ a very strong member can reach the ceiling while weaker ones keep
+scaling — compressing their relative proportions. The Circuits page reports
+which members clamped.
+:::
 
 Nothing changes in how you use it: pick `off` / `min` / `max` / `custom` in
 ⚙ Valves exactly as with a cluster. What changes is what the status line tells
@@ -130,7 +137,7 @@ Every reply also carries the rung as a header, so scripted clients can read it
 without the status line:
 
 ```
-X-miLLM-Circuit-Rung: 2 causally validated (edge)
+X-miLLM-Circuit-Rung: 2; language="causally validated (edge)"
 X-miLLM-Steering-Intensity: 1.5
 ```
 
@@ -139,8 +146,12 @@ X-miLLM-Steering-Intensity: 1.5
 The circuit probe is read-only and optional. In the Filter's operator valves:
 
 - `show_circuit_rung` (default on) — show the rung in the status line.
-- `millm_base_url` (default `http://localhost:8000`) — used **only** for the
-  `GET /api/circuits/active` probe.
+- `millm_base_url` (**empty by default — the probe is off until you set it**)
+  — used **only** for the read-only `GET /api/circuits/active` probe. Note that
+  `localhost` inside the Open WebUI container is Open WebUI itself, not miLLM
+  (the same trap as Step 1):
+  - Docker: `http://host.docker.internal:8000`
+  - Kubernetes: `http://millm-backend.millm.svc.cluster.local:8000`
 
 If miLLM is unreachable or running an older build without the route, the probe
 degrades silently and the dial behaves exactly as it did for clusters — it

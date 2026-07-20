@@ -91,7 +91,10 @@ async def create_chat_completion(
     try:
         rung_info = await inference.active_circuit_rung()
         if rung_info is not None:
-            echo_circuit_rung = f"{rung_info[0]} {rung_info[1]}"
+            # Structured (RFC 8941): the rung stays trivially parseable as an
+            # int and the phrase is a quoted-string, so punctuation in the
+            # ladder vocabulary can never break a naive parser.
+            echo_circuit_rung = f'{rung_info[0]}; language="{rung_info[1]}"' 
     except Exception:  # observability must never fail a chat request
         echo_circuit_rung = None
 

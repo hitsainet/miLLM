@@ -82,8 +82,14 @@ class Filter:
             ),
         )
         millm_base_url: str = Field(
-            default="http://localhost:8000",
-            description="miLLM base URL used only for the read-only circuit-status probe.",
+            default="",
+            description=(
+                "miLLM base URL for the read-only circuit-status probe. EMPTY BY "
+                "DEFAULT — the probe is off until you set it, because 'localhost' "
+                "inside the Open WebUI container is Open WebUI itself, not miLLM. "
+                "Docker: http://host.docker.internal:8000 · "
+                "k8s: http://millm-backend.millm.svc.cluster.local:8000"
+            ),
         )
 
     class UserValves(BaseModel):
@@ -147,32 +153,64 @@ class Filter:
         3: "faithfulness-tested (circuit)",
     }
 
+    #: Probe cache: the active circuit changes far less often than once per
+    #: message, so a short TTL keeps steady-state messaging free.
+    _CACHE_TTL_S = 10.0
+    _MAX_PROBE_BYTES = 64 * 1024
+
+    def _probe_sync(self, base: str) -> Optional[dict]:
+        """Blocking probe body — always run OFF the event loop."""
+        import json as _json
+        import urllib.request
+        from urllib.parse import urlparse
+
+        if urlparse(base).scheme not in ("http", "https"):
+            return None  # no file://, gopher://, … from an operator valve
+
+        class _NoRedirect(urllib.request.HTTPRedirectHandler):
+            # A compromised or spoofed endpoint must not redirect this
+            # server-side request at an arbitrary internal address.
+            def redirect_request(self, *args, **kwargs):
+                return None
+
+        opener = urllib.request.build_opener(_NoRedirect)
+        req = urllib.request.Request(
+            f"{base}/api/circuits/active", headers={"Accept": "application/json"}
+        )
+        with opener.open(req, timeout=0.8) as resp:
+            payload = _json.loads(resp.read(self._MAX_PROBE_BYTES).decode("utf-8"))
+        data = payload.get("data") if isinstance(payload, dict) else None
+        return data if isinstance(data, dict) else None
+
     async def _circuit_status(self) -> Optional[dict]:
         """Read-only probe of GET /api/circuits/active.
 
-        Best-effort and STRICTLY optional: a short timeout, and any failure
-        (miLLM down, older build without the route, bad JSON) returns None so
-        the dial degrades to the Feature 10 copy rather than blocking the
-        user's message.
+        Best-effort and STRICTLY optional: it runs OFF the event loop (a
+        blocking urlopen in `inlet` would stall every concurrent chat on the
+        worker), is cached for a few seconds, and any failure (miLLM down,
+        older build without the route, bad JSON) returns None so the dial
+        degrades to the Feature 10 copy rather than blocking the message.
         """
         if not self.valves.show_circuit_rung:
             return None
         base = (self.valves.millm_base_url or "").rstrip("/")
         if not base:
-            return None
-        try:
-            import json as _json
-            import urllib.request
+            return None  # off until configured — see millm_base_url
 
-            req = urllib.request.Request(
-                f"{base}/api/circuits/active", headers={"Accept": "application/json"}
-            )
-            with urllib.request.urlopen(req, timeout=1.5) as resp:
-                payload = _json.loads(resp.read().decode("utf-8"))
-            data = payload.get("data") if isinstance(payload, dict) else None
-            return data if isinstance(data, dict) else None
+        import asyncio
+        import time
+
+        now = time.monotonic()
+        cached = getattr(self, "_probe_cache", None)
+        if cached and cached[0] == base and (now - cached[1]) < self._CACHE_TTL_S:
+            return cached[2]
+
+        try:
+            data = await asyncio.to_thread(self._probe_sync, base)
         except Exception:
-            return None
+            data = None
+        self._probe_cache = (base, now, data)
+        return data
 
     def _circuit_suffix(self, circuit: Optional[dict]) -> str:
         """' · circuit "X" — <rung phrase> [UNVALIDATED]' or ''.
@@ -187,9 +225,12 @@ class Filter:
             rung = int(circuit.get("rung", 0))
         except (TypeError, ValueError):
             rung = 0
-        phrase = circuit.get("rung_language") or self.RUNG_LANGUAGE.get(
-            rung, self.RUNG_LANGUAGE[0]
-        )
+        # Prefer the server's phrase, but only when it MATCHES the mirrored
+        # vocabulary for that rung: a spoofed or MITM'd endpoint must not be
+        # able to inject "causal" for a rung-0 circuit and defeat the guarantee.
+        expected = self.RUNG_LANGUAGE.get(rung, self.RUNG_LANGUAGE[0])
+        server_phrase = circuit.get("rung_language")
+        phrase = server_phrase if server_phrase == expected else expected
         name = circuit.get("name") or "circuit"
         mark = "" if rung >= 2 else " [UNVALIDATED]"
         mode = circuit.get("serving_mode")
@@ -245,8 +286,10 @@ class Filter:
             if dial == "off" or dial == 0.0:
                 text = "miLLM steering: off for this reply"
             elif dial in ("min", "max"):
-                bound = "circuit's" if circuit else "cluster's"
-                text = f"miLLM steering: {dial} ({bound} declared bound)"
+                # Only name the source we actually observed — a failed probe
+                # must not assert "cluster's" about an active circuit.
+                bound = "circuit's declared bound" if circuit else "declared bound"
+                text = f"miLLM steering: {dial} ({bound})"
             else:
                 text = f"miLLM steering: λ={dial:g}"
             await self._status(__event_emitter__, text + suffix)

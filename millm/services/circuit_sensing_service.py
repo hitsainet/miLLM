@@ -95,6 +95,11 @@ class CircuitSensingService:
         self._max_token_lag: int = settings.CIRCUIT_SENSING_MAX_TOKEN_LAG
         self._last_request_overhead_ms: float = 0.0
         self._events_recorded: int = 0
+        #: R1-06: how many request boundaries this armed circuit has actually
+        #: observed. Without it, "quiet traffic" and "no request ever reached
+        #: sensing" are the same reading — armed, zero events, no reason — and
+        #: the second is a wiring failure the operator cannot see.
+        self._requests_sensed: int = 0
         #: -inf, not 0.0 — the FIRST flush must be allowed to emit.
         self._last_ws_emit_ts: float = float("-inf")
         self._ws_dropped: int = 0
@@ -443,6 +448,7 @@ class CircuitSensingService:
         # armed layer reported completely". Verified by execution.
         self._last_request_truncated_layers = []
         self._request_dark_layers = []
+        self._requests_sensed = 0
         # R2: every other field was cleared but this one, so a circuit with no
         # override silently inherited the previous circuit's lag window.
         self._max_token_lag = settings.CIRCUIT_SENSING_MAX_TOKEN_LAG
@@ -525,6 +531,7 @@ class CircuitSensingService:
             cap=cap,
         )
         self._ctx = ctx
+        self._requests_sensed += 1
         began = False
         # R1-02: a layer that cannot be bound is DARK for this request, and
         # `began` used to be True if ANY layer began. Verified by execution
@@ -924,6 +931,10 @@ class CircuitSensingService:
             # layers let an operator tell "the circuit was quiet" from "this
             # layer's view is incomplete".
             "truncated_layers": list(self._last_request_truncated_layers),
+            # R1-06: distinguishes "quiet traffic" from "sensing never ran".
+            # Zero while armed means no request reached the boundary at all —
+            # check `paused_reason`.
+            "requests_sensed": self._requests_sensed,
             "events_recorded": self._events_recorded,
             "ws_dropped": self._ws_dropped,
         }

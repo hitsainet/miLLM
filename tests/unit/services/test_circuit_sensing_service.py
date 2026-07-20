@@ -853,3 +853,125 @@ class TestR1StaleTruncationDoesNotSurviveDisarm:
         assert set(st["truncated_layers"]) <= set(st["layers"]), (
             f"named {st['truncated_layers']} while armed on {st['layers']}"
         )
+
+
+class TestR1SilentSkipsAreVisibleToTheOperator:
+    """F17 R1-06. `_circuit_sensing_begin` had three silent `return None`
+    paths. A deployment with `speculative_model` set senses NOTHING, FOREVER,
+    while status reported:
+
+        armed: true | paused_reason: null | events_recorded: 0
+
+    — indistinguishable from quiet traffic. That is the "armed but silently
+    dark" mode F15 R1-01 existed to kill, surviving on the skip path because
+    the skip lives in inference_service and the status lives here."""
+
+    def _wire(self, monkeypatch, speculative=None, saes_for_begin=None):
+        import millm.api.dependencies as deps
+        from millm.services.inference_service import InferenceService
+
+        svc = CircuitSensingService()
+        saes = two_saes()
+        svc.arm_for_circuit(circuit(), definition(), saes)
+        monkeypatch.setattr(deps, "_circuit_sensing_service", svc, raising=False)
+
+        chosen = saes if saes_for_begin is None else saes_for_begin
+
+        class Stub(InferenceService):
+            _tokenizer = None
+
+            def __init__(self):
+                self._speculative_model_id = speculative
+
+            def is_model_loaded(self):
+                return False
+
+            def _circuit_sensing_layer_saes(self):
+                return chosen
+
+        return svc, saes, Stub()
+
+    def test_speculative_decoding_is_named(self, monkeypatch):
+        svc, saes, stub = self._wire(monkeypatch, speculative="draft-model")
+        assert stub._circuit_sensing_begin("r1") is None
+        assert svc.status(saes)["paused_reason"] == "speculative_decoding"
+
+    def test_no_attached_saes_is_named(self, monkeypatch):
+        svc, saes, stub = self._wire(monkeypatch, saes_for_begin={})
+        assert stub._circuit_sensing_begin("r1") is None
+        assert svc.status(saes)["paused_reason"] == "no_attached_saes"
+
+    def test_a_resumed_request_CLEARS_the_stale_reason(self, monkeypatch):
+        """A reason that outlives its cause is its own lie — the operator
+        keeps seeing why sensing was paused after it has resumed."""
+        svc, saes, stub = self._wire(monkeypatch)
+        svc.note_paused("speculative_decoding")
+        assert stub._circuit_sensing_begin("r1") is not None
+        assert svc.status(saes)["paused_reason"] is None
+
+    def test_begin_requests_own_reason_is_not_overwritten(self, monkeypatch):
+        """`begin_request` records the more specific reason
+        (concurrent_request / layer_unavailable); the caller must not clobber
+        it with a generic one."""
+        svc, saes, stub = self._wire(monkeypatch)
+        svc.begin_request("A", saes)             # holds the boundary open
+        assert stub._circuit_sensing_begin("B") is None
+        assert svc.status(saes)["paused_reason"] == "concurrent_request"
+
+
+class TestR1RequestsSensedDistinguishesQuietFromDark:
+    """F17 R1-06 second half. `armed + zero events` had two very different
+    meanings — 'traffic was quiet' and 'no request ever reached sensing' — and
+    the status could not tell them apart. The second is a wiring failure."""
+
+    def test_zero_while_armed_means_sensing_never_ran(self):
+        svc = CircuitSensingService()
+        saes = two_saes()
+        svc.arm_for_circuit(circuit(), definition(), saes)
+        assert svc.status(saes)["requests_sensed"] == 0
+
+    def test_it_counts_boundaries_actually_opened(self):
+        svc = CircuitSensingService()
+        saes = two_saes()
+        svc.arm_for_circuit(circuit(), definition(), saes)
+        for rid in ("r1", "r2"):
+            svc.begin_request(rid, saes)
+            svc.collect_edges(saes)
+            svc.close_request()
+        assert svc.status(saes)["requests_sensed"] == 2
+
+    def test_a_refused_boundary_is_not_counted(self):
+        """Counting a refused request would restore the ambiguity: the
+        operator would see activity that never observed anything."""
+        svc = CircuitSensingService()
+        saes = two_saes()
+        svc.arm_for_circuit(circuit(), definition(), saes)
+        svc.begin_request("A", saes)
+        svc.begin_request("B", saes)          # refused
+        assert svc.status(saes)["requests_sensed"] == 1
+
+    def test_the_count_resets_on_disarm(self):
+        """The count belongs to the CURRENT arming; carrying it over would
+        report the previous circuit's activity against this one."""
+        svc = CircuitSensingService()
+        saes = two_saes()
+        svc.arm_for_circuit(circuit(), definition(), saes)
+        svc.begin_request("r1", saes)
+        svc.collect_edges(saes)
+        svc.close_request()
+        svc.disarm(saes)
+        assert svc.status(saes)["requests_sensed"] == 0
+
+    def test_it_reaches_the_STATUS_PAYLOAD(self):
+        """The F16 R1 failure mode: computed by the service, undeclared on the
+        response model, silently dropped by Pydantic."""
+        from millm.api.schemas.circuit_sensing import CircuitSensingStatusResponse
+
+        svc = CircuitSensingService()
+        saes = two_saes()
+        svc.arm_for_circuit(circuit(), definition(), saes)
+        svc.begin_request("r1", saes)
+        svc.collect_edges(saes)
+        payload = svc.status(saes)
+        model = CircuitSensingStatusResponse(**payload)
+        assert model.model_dump()["requests_sensed"] == 1

@@ -67,6 +67,15 @@ class CircuitSensingStatusResponse(BaseModel):
             "they are looking."
         ),
     )
+    requests_sensed: int = Field(
+        default=0,
+        description=(
+            "Request boundaries this armed circuit has actually observed since "
+            "arming. ZERO while armed means no request reached sensing at all "
+            "— a wiring or skip condition, not quiet traffic; check "
+            "`paused_reason`. Without this the two readings are identical."
+        ),
+    )
     events_recorded: int = 0
     ws_dropped: int = 0
     #: Persistent operator intent, distinct from runtime `armed`.

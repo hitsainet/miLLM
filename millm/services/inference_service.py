@@ -1567,18 +1567,38 @@ class InferenceService:
             service = deps._circuit_sensing_service
             if service is None or not service.is_armed:
                 return None
+            # R1-06: every skip must reach the operator. These paths returned
+            # None silently (one of them merely logged), so a deployment with
+            # `speculative_model` set senses NOTHING, FOREVER, while status
+            # reports `armed: true, paused_reason: null, events_recorded: 0` —
+            # indistinguishable from quiet traffic. That is the "armed but
+            # silently dark" mode F15 R1-01 existed to kill, surviving on the
+            # skip path because the skip lives here and the status lives there.
             if self._speculative_model_id:
                 logger.info(
                     "circuit_sensing_skipped",
                     reason="speculative_decoding_active",
                     request_id=request_id,
                 )
+                service.note_paused("speculative_decoding")
                 return None
             layer_saes = self._circuit_sensing_layer_saes()
             if not layer_saes:
+                logger.info(
+                    "circuit_sensing_skipped",
+                    reason="no_layer_saes",
+                    request_id=request_id,
+                )
+                service.note_paused("no_attached_saes")
                 return None
             if not service.begin_request(request_id, layer_saes):
+                # begin_request records its own, more specific reason
+                # (concurrent_request / layer_unavailable) — do not overwrite it.
                 return None
+            # Observing normally: clear any stale reason from a previous
+            # request, or the operator keeps seeing why sensing was paused
+            # after it has resumed.
+            service.note_paused(None)
             return layer_saes
         except Exception:
             logger.warning("circuit_sensing_begin_failed", exc_info=False)

@@ -69,30 +69,54 @@
 
   From here on, an edit to 1.1/1.2 is a behaviour change requiring justification in the review
   record (CTX-V2).
-  - [ ] 1.1 `tests/unit/ml/test_edge_sensing_characterization.py` against the CURRENT code: strict up→down ordering; lag boundary at exactly L and L+1; same-position co-fire does NOT match; newest-antecedent selection; non-destructive read (one upstream fathers several events); `_MAX_FIRES_PER_EDGE` evicts oldest; prefill→decode phase flips exactly once
-  - [ ] 1.2 Characterize the eight fixed criticals by behaviour, one test each: R1-01 cross-layer survives a noisy upstream; R1-02/R2-02/R3-03 latency shapes; R1-03 offset advances on EVERY return path (suppressed, batched, raising); R1-04 out-of-range column is a clean arm-time error; R2-03 shed still feeds siblings; R3-02 cap still feeds siblings; R2-04/R3-04 identity snapshotted and released
-  - [ ] 1.3 Run against current code — **all green**. Record the count in the task list. A failure here is a live defect found before the refactor, not a test bug
-  - [ ] 1.4 Record the baseline: backend/frontend suite counts, and the three benchmark measurements (saturated 4096-token pass, 200-edge circuit, cross-layer ordering) — these are the parity targets
-  - [ ] 1.5 **Gate:** do not start 2.0 until 1.1–1.4 are done. From here on, an edit to 1.1/1.2 is a behaviour change requiring justification in the review record (CTX-V2)
+  - [x] 1.1 `tests/unit/ml/test_edge_sensing_characterization.py` against the CURRENT code: strict up→down ordering; lag boundary at exactly L and L+1; same-position co-fire does NOT match; newest-antecedent selection; non-destructive read (one upstream fathers several events); `_MAX_FIRES_PER_EDGE` evicts oldest; prefill→decode phase flips exactly once
+  - [x] 1.2 Characterize the eight fixed criticals by behaviour, one test each: R1-01 cross-layer survives a noisy upstream; R1-02/R2-02/R3-03 latency shapes; R1-03 offset advances on EVERY return path (suppressed, batched, raising); R1-04 out-of-range column is a clean arm-time error; R2-03 shed still feeds siblings; R3-02 cap still feeds siblings; R2-04/R3-04 identity snapshotted and released
+  - [x] 1.3 Run against current code — **all green**. Record the count in the task list. A failure here is a live defect found before the refactor, not a test bug
+  - [x] 1.4 Record the baseline: backend/frontend suite counts, and the three benchmark measurements (saturated 4096-token pass, 200-edge circuit, cross-layer ordering) — these are the parity targets
+  - [x] 1.5 **Gate:** do not start 2.0 until 1.1–1.4 are done. From here on, an edit to 1.1/1.2 is a behaviour change requiring justification in the review record (CTX-V2)
 
-- [ ] 2.0 The context (covers FR-17.1, FR-17.3, FR-17.4; CTX-C1..C3, CTX-B1..B4, CTX-L1..L3)
-  - [ ] 2.1 `millm/ml/edge_sensing.py` skeleton: module docstring recording WHY the context owns position/rings/budget, citing the three rounds (CTX-E1, no `sae_wrapper` import)
-  - [ ] 2.2 `SensingRequestContext` (name resolved vs Feature 11's at `inference_service.py:110` — decide and record): `position`, `phase`, `circuit_ids` frozenset snapshot, `advance(layer, seq)` advancing position+phase AND calling `note_layer_progress` on every ring unconditionally (CTX-C1..C3, closes FPRD §15.6 / EC-17.1)
-  - [ ] 2.3 `rings: dict[circuit_id → EdgeFireRing]` — **one per (request, circuit)** — with `ring(circuit_id)`; docstring carrying the fabrication rationale verbatim (CTX-R1, CTX-R2)
-  - [ ] 2.4 `close()` + write-after-close: `advance` returns -1 and logs; a late write never lands in the next request (CTX-L2, EC-17.5)
-  - [ ] 2.5 `EventBudget` with `try_spend(circuit_id, layer)` per-circuit attribution and `truncated_layers(circuit_id)`; False means the CALLER continues, never returns (CTX-B1..B4, EC-17.3)
-  - [ ] 2.6 Unit tests `test_sensing_request_context.py`: advance/close/double-close/write-after-close; progress reported on suppressed passes (§15.6 regression pin); budget isolation across two circuits; `try_spend` False never suppresses upstream recording; `truncated_layers` names only the shedding layer
-  - [ ] 2.7 Unit tests `test_edge_sensing_ring_isolation.py`: two circuits with the SAME `edge_key`, A fires upstream, B fires downstream in window → **zero** cross matches; negative control against a single shared ring documented and run once by hand (CTX-R2, US-17.2)
+- [x] **2.0 The context — COMPLETE** (covers FR-17.1, FR-17.3, FR-17.4; CTX-C1..C3, CTX-B1..B4, CTX-L1..L3)
+  - [x] 2.1 `millm/ml/edge_sensing.py` skeleton: module docstring recording WHY the context owns position/rings/budget, citing the three rounds (CTX-E1, no `sae_wrapper` import)
+  - [x] 2.2 `SensingRequestContext` (name resolved vs Feature 11's at `inference_service.py:110` — decide and record): `position`, `phase`, `circuit_ids` frozenset snapshot, `advance(layer, seq)` advancing position+phase AND calling `note_layer_progress` on every ring unconditionally (CTX-C1..C3, closes FPRD §15.6 / EC-17.1)
+  - [x] 2.3 `rings: dict[circuit_id → EdgeFireRing]` — **one per (request, circuit)** — with `ring(circuit_id)`; docstring carrying the fabrication rationale verbatim (CTX-R1, CTX-R2)
+  - [x] 2.4 `close()` + write-after-close: `advance` returns -1 and logs; a late write never lands in the next request (CTX-L2, EC-17.5)
+  - [x] 2.5 `EventBudget` with `try_spend(circuit_id, layer)` per-circuit attribution and `truncated_layers(circuit_id)`; False means the CALLER continues, never returns (CTX-B1..B4, EC-17.3)
+  - [x] 2.6 Unit tests `test_sensing_request_context.py`: advance/close/double-close/write-after-close; progress reported on suppressed passes (§15.6 regression pin); budget isolation across two circuits; `try_spend` False never suppresses upstream recording; `truncated_layers` names only the shedding layer
+  - [x] 2.7 Unit tests `test_edge_sensing_ring_isolation.py`: two circuits with the SAME `edge_key`, A fires upstream, B fires downstream in window → **zero** cross matches; negative control against a single shared ring documented and run once by hand (CTX-R2, US-17.2)
 
-- [ ] 3.0 Extraction (covers FR-17.5; CTX-E1..E5)
-  - [ ] 3.1 Move `EdgeSpec` (:51), `CircuitSensingConfig` (:78), `SensedEdge` (:98), `EdgeFireRing` (:123 incl. `record_up`, `match_down`, `prune_before`, `note_layer_progress`, `clear`, `_MAX_FIRES_PER_EDGE`) into the new module **with their docstrings intact** (FTID pitfall 5); hoist `import bisect` to module scope
-  - [ ] 3.2 Move the matcher (`_match_edges` :1137) and the sensing body (`_sense_edges` :1050) into module-level functions taking the context; delete the triplicated offset advance (:1072/:1093/:1123) in favour of one `ctx.advance()` above the guards
-  - [ ] 3.3 `LoadedSAE`: thin `sense_edges` wrapper + `bind_context`; `arm_edge_sensing` (:938) drops the `ring` parameter; retain the `d_sae` bounds check (:947-957) and R2-07's `-1 <= col < width` verbatim; keep `is_edge_sensing_armed` a plain boolean (EDGE-S3)
-  - [ ] 3.4 Reduce the 13 `_edge_*` fields to the four the FTDD §4 table retains; **delete `_edge_thresholds_cpu`** (dead since R1-14, re-recorded R2-E/R3-G) rather than moving it (CTX-E3)
-  - [ ] 3.5 **Delete** `prune_ring` (:526), `safe_prune_boundary` (:538), `prune_between_passes` (:550) from `circuit_sensing_service.py` and their tests (`test_circuit_sensing_service.py:412/:423/:437`) — zero production callers, R2's superseded design (CTX-E5)
-  - [ ] 3.6 Absorb `begin_edge_sensing_request`'s caller-clears-the-ring convention (:1028 docstring) into context construction; no participant clears anything
-  - [ ] 3.7 Verify `to_device` (:1316) against the split — edge weight caches stay on the SAE; a cache on the wrong device is a silent wrong answer, not a crash
-  - [ ] 3.8 `sae_hooker.py:181-183` call-site update; retarget `test_edge_sensing.py` imports and drop the hand-written stub fixtures in favour of the real classes (the R3 harness blind spot)
+- [x] **3.0 Extraction — COMPLETE 2026-07-20 (covers FR-17.5; CTX-E1..E5)**
+
+  Landed as five commits: 3.4/3.5 (dead-code deletion), 3.2 (single offset advance),
+  a batched-path fix the extraction surfaced, 3.1 (one definition of the primitives),
+  and 3.2/3.3/3.6-3.8 (delegation + per-request ring).
+
+  **The gate did its job twice.** Hoisting the ring progress report alongside the offset
+  advance — the obvious simplification — resurrected F15 R1-01 (an upstream layer pruning
+  the ring before a downstream sibling read it). Caught in seconds by
+  `test_F15R1_01_cross_layer_survives_a_noisy_upstream`. Position must advance BEFORE the
+  guards; progress must be reported AFTER the work.
+
+  **Two live defects found, neither by reading.** (1) The batched-pass bail returns above
+  the `try`, so it reported no ring progress at all — offset advanced to 5 while `_progress`
+  stayed `{}`, stalling pruning for the rest of the request (EC-17.1 on a third path).
+  (2) Mutation testing found `ctx.close()`, the unbind, and the `is_closed` half of the
+  auto-bind guard were EACH deletable with the full suite green.
+
+  **A comparison of the two matcher implementations before deleting either** found five
+  state mutations with no counterpart in the extracted version, including
+  `_edge_member_fires` (read by `circuit_sensing_service.py:503` for an operator-facing
+  counter). A straight delete-and-delegate would have zeroed it silently.
+
+  Suite 1659 → 1680. Parity held: 29/29 characterization green, all four performance
+  baselines still under target.
+  - [x] 3.1 Move `EdgeSpec` (:51), `CircuitSensingConfig` (:78), `SensedEdge` (:98), `EdgeFireRing` (:123 incl. `record_up`, `match_down`, `prune_before`, `note_layer_progress`, `clear`, `_MAX_FIRES_PER_EDGE`) into the new module **with their docstrings intact** (FTID pitfall 5); hoist `import bisect` to module scope
+  - [x] 3.2 Move the matcher (`_match_edges` :1137) and the sensing body (`_sense_edges` :1050) into module-level functions taking the context; delete the triplicated offset advance (:1072/:1093/:1123) in favour of one `ctx.advance()` above the guards
+  - [x] 3.3 `LoadedSAE`: thin `sense_edges` wrapper + `bind_context`; `arm_edge_sensing` (:938) drops the `ring` parameter; retain the `d_sae` bounds check (:947-957) and R2-07's `-1 <= col < width` verbatim; keep `is_edge_sensing_armed` a plain boolean (EDGE-S3)
+  - [x] 3.4 Reduce the 13 `_edge_*` fields to the four the FTDD §4 table retains; **delete `_edge_thresholds_cpu`** (dead since R1-14, re-recorded R2-E/R3-G) rather than moving it (CTX-E3)
+  - [x] 3.5 **Delete** `prune_ring` (:526), `safe_prune_boundary` (:538), `prune_between_passes` (:550) from `circuit_sensing_service.py` and their tests (`test_circuit_sensing_service.py:412/:423/:437`) — zero production callers, R2's superseded design (CTX-E5)
+  - [x] 3.6 Absorb `begin_edge_sensing_request`'s caller-clears-the-ring convention (:1028 docstring) into context construction; no participant clears anything
+  - [x] 3.7 Verify `to_device` (:1316) against the split — edge weight caches stay on the SAE; a cache on the wrong device is a silent wrong answer, not a crash
+  - [x] 3.8 `sae_hooker.py:181-183` call-site update; retarget `test_edge_sensing.py` imports and drop the hand-written stub fixtures in favour of the real classes (the R3 harness blind spot)
 
 - [ ] 4.0 Wiring + payload (covers CTX-B4, CTX-L1..L3)
   - [ ] 4.1 `circuit_sensing_service.py`: `begin_request` builds the context over the armed circuit **set** (F19-ready) and binds it to each SAE; `collect_edges` drains once and returns per-circuit `truncated_layers` instead of a request-wide boolean

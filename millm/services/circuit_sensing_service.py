@@ -523,6 +523,26 @@ class CircuitSensingService:
         """
         if not self.is_armed:
             return False
+        # R3-14: `_armed_layers` without `_configs` is an inconsistent state,
+        # and it began SUCCESSFULLY with context capture silently off
+        # (ctx_tokens falls back to 0) and the budget on a magic literal (20,
+        # not the configured value). Two silent degradations at once with
+        # `paused_reason` null — an operator sees a healthy armed circuit
+        # producing context-free events against a cap nobody chose.
+        #
+        # Refuse and say why. Sensing that cannot be configured correctly must
+        # not run in a half-state.
+        if self._armed_layers and not self._configs:
+            logger.warning(
+                "circuit_sensing_config_missing",
+                layers=self._armed_layers,
+                detail=(
+                    "armed layers have no configs; refusing rather than "
+                    "sensing with context capture off and a default cap"
+                ),
+            )
+            self.note_paused("config_missing")
+            return False
         # Snapshot the circuit this boundary belongs to. R2: record() read
         # self._circuit_id at DRAIN time, so a re-arm between begin and flush
         # persisted circuit A's observations under circuit B's id — confidently
@@ -544,6 +564,16 @@ class CircuitSensingService:
         # taking the min would let a single layer configured to 0 silence the
         # whole circuit. The hard ceiling still applies per config at build
         # time.
+        #
+        # R3-15, recorded rather than fixed: NEITHER aggregate is right in
+        # principle. `context_tokens` is a per-layer setting being collapsed to
+        # one request-scoped scalar, so a layer that opted out with 0 has its
+        # opt-out overridden by a sibling. Not reachable today — `build_configs`
+        # derives ONE `ctx` from a single circuit-level override and gives it to
+        # every layer, so the values cannot diverge — but F19's per-circuit
+        # configs make it live, and the honest fix is to carry the value
+        # per-layer into `_context` rather than to pick a better aggregate.
+        # Tracked as F19 debt; changing the shape now would be speculative.
         ctx_tokens = [
             c.context_tokens
             for c in (self._configs or {}).values()

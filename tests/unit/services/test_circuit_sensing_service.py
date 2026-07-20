@@ -2374,3 +2374,32 @@ class TestR3TheBudgetIsAnActualTruncationSource:
         svc.begin_request("r", saes)
         svc.collect_edges(saes)
         assert svc.last_request_truncated_layers == []
+
+
+class TestR3AnInconsistentArmingIsRefusedNotDegraded:
+    """F17 R3-14. `_armed_layers` set with `_configs` empty began SUCCESSFULLY,
+    with context capture silently off (`ctx_tokens` falls back to 0) and the
+    budget on a magic literal (20, not the configured value). Two silent
+    degradations at once, `paused_reason` null — an operator sees a healthy
+    armed circuit producing context-free events against a cap nobody chose."""
+
+    def test_armed_layers_without_configs_is_refused(self):
+        svc = CircuitSensingService()
+        saes = two_saes()
+        svc.arm_for_circuit(circuit(), definition(), saes)
+        svc._configs = {}
+        assert svc.begin_request("r", saes) is False
+
+    def test_the_refusal_says_why(self):
+        svc = CircuitSensingService()
+        saes = two_saes()
+        svc.arm_for_circuit(circuit(), definition(), saes)
+        svc._configs = {}
+        svc.begin_request("r", saes)
+        assert svc.status(saes)["paused_reason"] == "config_missing"
+
+    def test_a_properly_configured_circuit_still_begins(self):
+        svc = CircuitSensingService()
+        saes = two_saes()
+        svc.arm_for_circuit(circuit(), definition(), saes)
+        assert svc.begin_request("r", saes) is True

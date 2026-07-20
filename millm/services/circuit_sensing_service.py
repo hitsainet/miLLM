@@ -611,13 +611,7 @@ class CircuitSensingService:
         # circuit never pruned (512 retained fires per edge instead of 4), and
         # naively dropping the old `len < 2` guard let the FIRST layer to
         # report prune past fires the second still needed — R1-01 again.
-        if self._request_circuit_id and self._armed_layers:
-            try:
-                ctx.ring(
-                    self._request_circuit_id, self._max_token_lag
-                ).expect_layers(len(self._armed_layers))
-            except Exception:
-                logger.exception("circuit_sensing_expect_layers_failed")
+
         # A new boundary: reasons from earlier requests are stale from here.
         self._pause_is_current = False
         # R2-06: and so is the previous request's truncation report. It was
@@ -664,6 +658,18 @@ class CircuitSensingService:
                 ),
             )
             self.note_paused("layer_unavailable")
+        # R2-12: tell the ring how many layers will ACTUALLY report, which is
+        # the ones that began — not the armed count. A DARK layer never reports
+        # progress, so expecting it made pruning wait forever: measured, a
+        # circuit with one dark sibling retained 512 fires instead of 8. R2-10
+        # (prune to the slowest) colliding with R1-02 (a layer can be dark).
+        if began and self._request_circuit_id:
+            try:
+                ctx.ring(
+                    self._request_circuit_id, self._max_token_lag
+                ).expect_layers(len(self._armed_layers) - len(dark))
+            except Exception:
+                logger.exception("circuit_sensing_expect_layers_failed")
         if not began:
             # R2-04/R2-05: no layer opened, so there is no boundary. Leaving
             # the context assigned orphaned it — nothing closes it, because the

@@ -346,3 +346,63 @@ class TestR2ASingleLayerCircuitPrunesToo:
         svc.begin_request("r", saes)
         ring = svc._ctx.ring("circ_1", svc._max_token_lag)
         assert ring._expected_layers == len(svc._armed_layers) == 2
+
+
+class TestR2DarkLayersDoNotBlockPruningForever:
+    """F17 R2-12. R2-10 told the ring to expect `len(_armed_layers)` reporters
+    so it could prune to the slowest. But R1-02 established that a layer can be
+    DARK — no usable SAE at request time — and a dark layer never reports
+    progress at all. So the ring waited for a reporter that would never come:
+    measured, a circuit with one dark sibling retained 512 fires instead of 8.
+
+    R2-10 colliding with R1-02. The count must reflect layers that will
+    ACTUALLY report, not layers that happen to be armed."""
+
+    def _svc_with_dark_layer(self):
+        from tests.unit.services.test_circuit_sensing_service import (
+            circuit, definition, two_saes,
+        )
+        from millm.services.circuit_sensing_service import CircuitSensingService
+
+        svc = CircuitSensingService()
+        saes = two_saes()
+        svc.arm_for_circuit(circuit(), definition(), saes)
+        svc.begin_request("r", {10: saes[10]})      # layer 13 dark
+        return svc, saes
+
+    def test_the_ring_expects_only_the_layers_that_began(self):
+        svc, _ = self._svc_with_dark_layer()
+        ring = svc._ctx.ring("circ_1", svc._max_token_lag)
+        assert ring._expected_layers == 1, (
+            f"expected {ring._expected_layers} reporters while one armed layer "
+            "is dark and will never report"
+        )
+
+    def test_pruning_still_happens_with_a_dark_sibling(self):
+        svc, _ = self._svc_with_dark_layer()
+        ring = svc._ctx.ring("circ_1", svc._max_token_lag)
+        for pos in range(600):
+            ring.record_up("e", pos, 1.0)
+        ring.note_layer_progress(10, 600)
+        assert len(ring._fires["e"]) < 50, (
+            f"{len(ring._fires['e'])} fires retained — pruning is waiting for "
+            "a dark layer that will never report"
+        )
+
+    def test_a_fully_healthy_circuit_still_waits_for_both(self):
+        """The R1-01 guarantee must survive: with two LIVE layers the fast one
+        must not prune ahead of the slow one."""
+        from tests.unit.services.test_circuit_sensing_service import (
+            circuit, definition, two_saes,
+        )
+        from millm.services.circuit_sensing_service import CircuitSensingService
+
+        svc = CircuitSensingService()
+        saes = two_saes()
+        svc.arm_for_circuit(circuit(), definition(), saes)
+        svc.begin_request("r", saes)
+        ring = svc._ctx.ring("circ_1", svc._max_token_lag)
+        assert ring._expected_layers == 2
+        ring.record_up("e", 38, 1.0)
+        ring.note_layer_progress(10, 5000)
+        assert ring.match_down("e", 41) == (38, 1.0)

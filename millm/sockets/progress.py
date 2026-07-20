@@ -605,40 +605,6 @@ class ProgressEmitter:
 
 
 # Global emitter instance - will be configured with sio on app startup
-progress_emitter = ProgressEmitter()
-
-
-def create_socket_io() -> socketio.AsyncServer:
-    """
-    Create and configure the Socket.IO async server.
-
-    Returns:
-        Configured Socket.IO AsyncServer instance
-    """
-    from millm.core.config import settings
-
-    # Use the same CORS_ORIGINS as the HTTP layer rather than a hardcoded wildcard.
-    # Socket.IO cors_allowed_origins accepts "*" or a list of origin strings.
-    sio_cors: str | list[str] = (
-        "*" if settings.CORS_ORIGINS == "*" else settings.cors_origins_list
-    )
-
-    sio = socketio.AsyncServer(
-        async_mode="asgi",
-        cors_allowed_origins=sio_cors,
-        logger=False,  # Use structlog instead
-        engineio_logger=False,
-        ping_timeout=60,    # Increased from 20s for Cloudflare tunnel latency
-        ping_interval=25,   # Keep default but pair with longer timeout
-    )
-
-    # Register event handlers
-    register_handlers(sio)
-
-    # Configure global emitter
-    progress_emitter.set_sio(sio)
-
-    return sio
 
     def emit_circuit_sensing_event(self, payload: dict) -> None:
         """Broadcast one observed circuit edge firing (Feature 15).
@@ -692,9 +658,41 @@ def create_socket_io() -> socketio.AsyncServer:
             },
         )
 
-
-# Global emitter instance - will be configured with sio on app startup
 progress_emitter = ProgressEmitter()
+
+
+def create_socket_io() -> socketio.AsyncServer:
+    """
+    Create and configure the Socket.IO async server.
+
+    Returns:
+        Configured Socket.IO AsyncServer instance
+    """
+    from millm.core.config import settings
+
+    # Use the same CORS_ORIGINS as the HTTP layer rather than a hardcoded wildcard.
+    # Socket.IO cors_allowed_origins accepts "*" or a list of origin strings.
+    sio_cors: str | list[str] = (
+        "*" if settings.CORS_ORIGINS == "*" else settings.cors_origins_list
+    )
+
+    sio = socketio.AsyncServer(
+        async_mode="asgi",
+        cors_allowed_origins=sio_cors,
+        logger=False,  # Use structlog instead
+        engineio_logger=False,
+        ping_timeout=60,    # Increased from 20s for Cloudflare tunnel latency
+        ping_interval=25,   # Keep default but pair with longer timeout
+    )
+
+    # Register event handlers
+    register_handlers(sio)
+
+    # Configure global emitter
+    progress_emitter.set_sio(sio)
+
+    return sio
+
 
 
 def create_socket_io() -> socketio.AsyncServer:

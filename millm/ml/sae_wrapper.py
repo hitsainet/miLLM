@@ -160,12 +160,19 @@ class EdgeFireRing:
         fires = self._fires.get(edge_key)
         if not fires:
             return None
-        best: Optional[tuple[int, float]] = None
-        for pos, act in fires:
-            if pos < down_pos and (down_pos - pos) <= self._max_lag:
-                if best is None or pos > best[0]:
-                    best = (pos, act)
-        return best
+        # R2: this scanned ALL retained fires per downstream fire — 78.5ms on a
+        # 4096-token pass, a new in-hook hot spot introduced by R1's switch to
+        # count-based bounding. `fires` is ascending by position, so walk
+        # BACKWARD and stop at the window edge: the first hit is already the
+        # newest antecedent, and everything earlier is out of window.
+        for i in range(len(fires) - 1, -1, -1):
+            pos, act = fires[i]
+            if pos >= down_pos:
+                continue
+            if (down_pos - pos) > self._max_lag:
+                break
+            return (pos, act)
+        return None
 
     def prune_before(self, pos: int) -> None:
         """Drop fires that can no longer match anything at or after `pos`.
@@ -935,7 +942,9 @@ class LoadedSAE:
         bad_cols = [
             spec.edge_key
             for spec in config.edges
-            if spec.up_col >= width or spec.down_col >= width
+            # -1 is the legitimate "not my half" sentinel; anything lower is
+            # a bug that would silently skip the edge rather than raise.
+            if not (-1 <= spec.up_col < width and -1 <= spec.down_col < width)
         ]
         if bad_cols:
             raise ValueError(
@@ -1112,16 +1121,24 @@ class LoadedSAE:
         budget = max(
             config.max_events_per_request * 8, _EDGE_FIRE_BUDGET_MIN
         )
-        if total_fires > budget:
+        shed = total_fires > budget
+        if shed:
             if not self._edge_saturation_warned:
                 self._edge_saturation_warned = True
                 logger.warning(
                     "edge_sensing_pass_saturated: fires=%d budget=%d seq=%d — "
-                    "thresholds are likely miscalibrated; skipping this pass",
-                    total_fires, budget, seq_len,
+                    "thresholds are likely miscalibrated; matching only the "
+                    "upstream half of this pass", total_fires, budget, seq_len,
                 )
             self._edge_truncated = True
-            return
+            # R2: R1 returned here, recording NOTHING. Shedding is decided per
+            # SAE per pass, so a saturated UPSTREAM layer silently blinded a
+            # quiet downstream sibling that did not shed — and the truncated
+            # flag landed on the layer that shed, not the layer that lost data.
+            # The operator saw a clean, empty result: exactly the silently-dark
+            # mode R1-01 existed to eliminate, reintroduced by the R1-02 fix.
+            # Upstream recording is cheap (a dict append) and is what siblings
+            # depend on, so keep it and skip only the expensive matching.
 
         fired_positions: list[list[int]] = [[] for _ in range(n_cols)]
         for col in range(n_cols):
@@ -1137,7 +1154,9 @@ class LoadedSAE:
             if 0 <= spec.up_col < n_cols:
                 for local in fired_positions[spec.up_col]:
                     events.append((local, spec_i, True))
-            if 0 <= spec.down_col < n_cols:
+            # When shedding, record upstream halves only — siblings depend on
+            # them — and skip the expensive downstream matching.
+            if not shed and 0 <= spec.down_col < n_cols:
                 for local in fired_positions[spec.down_col]:
                     events.append((local, spec_i, False))
         if not events:

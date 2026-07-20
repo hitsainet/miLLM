@@ -323,3 +323,116 @@ class TestEdgeKey:
     def test_the_key_is_stable_and_directional(self):
         assert edge_key_for(10, 1, 13, 2) == "1@10->2@13"
         assert edge_key_for(13, 2, 10, 1) != edge_key_for(10, 1, 13, 2)
+
+
+class TestRequestIdentityIsSnapshotted:
+    """R2 CRITICAL (R1 deferred C): record() read self._circuit_id at DRAIN
+    time, so a re-arm between begin and flush persisted circuit A's
+    observations under circuit B's id — confidently wrong data, not merely
+    lost sensing."""
+
+    def test_the_boundary_remembers_which_circuit_opened_it(self):
+        svc = CircuitSensingService()
+        saes = two_saes()
+        svc.arm_for_circuit(circuit(id="circ_A"), definition(), saes)
+        svc.begin_request("req-1", saes)
+        assert svc._request_circuit_id == "circ_A"
+
+        # An operator re-arms a different circuit mid-request.
+        svc.arm_for_circuit(circuit(id="circ_B"), definition(), two_saes())
+        assert svc._circuit_id == "circ_B"
+        assert svc._request_circuit_id == "circ_A", (
+            "the open boundary must keep its own identity"
+        )
+
+
+class TestLagWindowDoesNotLeakBetweenCircuits:
+    def test_a_failed_arm_does_not_change_the_reported_lag(self):
+        """R2: build_configs assigned _max_token_lag BEFORE arming could fail,
+        so a circuit that never armed still changed the reported value — and
+        the next EdgeFireRing was built from it."""
+        svc = CircuitSensingService()
+        before = svc._max_token_lag
+        # No layer attached ⇒ nothing sensable ⇒ arming bails.
+        svc.arm_for_circuit(
+            circuit(circuit_meta={"sensing": {"max_token_lag": 55}}),
+            definition(),
+            {},
+        )
+        assert svc.is_armed is False
+        assert svc._max_token_lag == before
+
+    def test_disarm_restores_the_configured_default(self):
+        """R2: every other field was cleared but this one, so a circuit with
+        no override silently inherited the previous circuit's window."""
+        svc = CircuitSensingService()
+        default = svc._max_token_lag
+        svc.arm_for_circuit(
+            circuit(circuit_meta={"sensing": {"max_token_lag": 3}}),
+            definition(),
+            two_saes(),
+        )
+        assert svc._max_token_lag == 3
+        svc.disarm(two_saes())
+        assert svc._max_token_lag == default
+
+
+class TestRingPruningIsWired:
+    """R2: R1 declared pruning request-level and then never added the call, so
+    the ring only ever bounded by count — and R1 even wrote a test enforcing
+    that no hook calls it, permanently pinning the dead state."""
+
+    def test_the_service_exposes_a_prune_entry_point(self):
+        svc = CircuitSensingService()
+        saes = two_saes()
+        svc.arm_for_circuit(circuit(), definition(), saes)
+        svc.begin_request("r", saes)
+        svc._ring.record_up("e", 0, 1.0)
+        svc.prune_ring(1000)
+        assert svc._ring.match_down("e", 1001) is None
+
+    def test_the_prune_boundary_is_the_slowest_layer(self):
+        """Pruning above this would discard a fire a lagging sibling needs."""
+        svc = CircuitSensingService()
+        saes = two_saes()
+        svc.arm_for_circuit(circuit(), definition(), saes)
+        svc.begin_request("r", saes)
+        saes[10]._edge_token_offset = 100
+        saes[13]._edge_token_offset = 40
+        assert svc.safe_prune_boundary(saes) == 40
+
+    def test_pruning_between_passes_respects_the_lagging_layer(self):
+        svc = CircuitSensingService()
+        saes = two_saes()
+        svc.arm_for_circuit(
+            circuit(circuit_meta={"sensing": {"max_token_lag": 4}}),
+            definition(),
+            saes,
+        )
+        svc.begin_request("r", saes)
+        svc._ring.record_up("e", 38, 1.0)
+        saes[10]._edge_token_offset = 100
+        saes[13]._edge_token_offset = 40
+        svc.prune_between_passes(saes)
+        # 38 is within max_lag of the slowest layer's position, so it survives.
+        assert svc._ring.match_down("e", 41) == (38, 1.0)
+
+
+class TestEmitKeepsTheMostRecent:
+    def test_the_flush_cap_keeps_the_newest_events(self):
+        """R2: this kept the FIRST 5, and collect_edges sorts by down_pos — so
+        a live panel always showed a request's EARLIEST edges and never its
+        most recent."""
+        svc = CircuitSensingService()
+        sent = []
+        import millm.sockets.progress as progress
+
+        original = progress.progress_emitter.emit_circuit_sensing_event
+        progress.progress_emitter.emit_circuit_sensing_event = sent.append
+        try:
+            svc._emit([{"id": i} for i in range(12)])
+        finally:
+            progress.progress_emitter.emit_circuit_sensing_event = original
+
+        assert [p["id"] for p in sent] == [7, 8, 9, 10, 11]
+        assert svc._ws_dropped == 7

@@ -565,3 +565,131 @@ class TestCollectRequiresABoundary:
         sae = real_sae()
         sae.arm_edge_sensing(make_config(), EdgeFireRing(4))
         assert sae.collect_sensed_edges() == ("", [], False)
+
+
+class TestMatchDownIsBounded:
+    """R2: R1 traded a 286x latency blowout for a 15x one. match_down linear
+    scanned up to 512 retained fires PER DOWNSTREAM FIRE — 78.5ms on a
+    4096-token pass. `fires` is ascending, so the scan runs backward and breaks
+    at the window edge."""
+
+    def test_a_deep_ring_still_answers_in_constant_time(self):
+        import time
+
+        ring = EdgeFireRing(4)
+        for pos in range(EdgeFireRing._MAX_FIRES_PER_EDGE):
+            ring.record_up("e", pos, 1.0)
+        last = EdgeFireRing._MAX_FIRES_PER_EDGE - 1
+
+        t = time.perf_counter()
+        for _ in range(2000):
+            ring.match_down("e", last + 1)
+        ms = (time.perf_counter() - t) * 1000
+        assert ms < 50.0, f"2000 lookups against a full ring cost {ms:.1f}ms"
+
+    def test_an_out_of_window_lookup_breaks_early(self):
+        ring = EdgeFireRing(2)
+        for pos in range(500):
+            ring.record_up("e", pos, 1.0)
+        assert ring.match_down("e", 10_000) is None
+
+    def test_it_still_returns_the_nearest_antecedent(self):
+        ring = EdgeFireRing(10)
+        for pos in (1, 3, 7):
+            ring.record_up("e", pos, float(pos))
+        assert ring.match_down("e", 8) == (7, 7.0)
+
+
+class TestShedStillFeedsSiblings:
+    """R2 CRITICAL: R1's load shedding returned BEFORE recording upstream
+    fires. Shedding is per-SAE per-pass, so a saturated UPSTREAM layer silently
+    blinded a quiet downstream sibling that did not shed — and the truncated
+    flag landed on the layer that shed, not the layer that lost data. The
+    operator saw a clean, empty result: the silently-dark mode R1-01 existed to
+    eliminate, reintroduced by the R1-02 fix."""
+
+    def test_a_shedding_upstream_layer_still_records_for_its_sibling(self):
+        ring = EdgeFireRing(64)
+        spec = make_spec(up_layer=10, down_layer=13, key="1@10->2@13")
+
+        # Upstream layer: saturated, so it sheds.
+        up = real_sae()
+        up_cfg = make_config(
+            edges=[EdgeSpec(**{**spec.__dict__, "up_col": 0, "down_col": -1})],
+            max_lag=64, layer=10,
+        )
+        up_cfg.thresholds = torch.tensor([0.0001, 0.0001])
+        up.arm_edge_sensing(up_cfg, ring)
+        up.begin_edge_sensing_request("r")
+        up._sense_edges(torch.rand(4096, D_IN) + 1.0)
+        assert up._edge_truncated is True, "the saturated layer must flag it"
+
+        # Downstream layer: quiet, does NOT shed. It must still see the
+        # upstream fires the shedding layer recorded.
+        down = real_sae()
+        down_cfg = make_config(
+            edges=[EdgeSpec(**{**spec.__dict__, "up_col": -1, "down_col": 1})],
+            max_lag=64, layer=13,
+        )
+        down.arm_edge_sensing(down_cfg, ring)
+        down.begin_edge_sensing_request("r")
+        rows = [{2: 0.0}] * 4095 + [{2: 5.0}]
+        down._sense_edges(hidden(*rows))
+
+        assert down._sensed_edges, (
+            "the shedding upstream layer starved its sibling — R1's return "
+            "recorded nothing into the shared ring"
+        )
+
+
+class TestColumnSentinelValidation:
+    def test_minus_one_is_a_legitimate_not_my_half_sentinel(self):
+        sae = real_sae()
+        spec = EdgeSpec(**{**make_spec().__dict__, "up_col": -1})
+        sae.arm_edge_sensing(make_config(edges=[spec]), EdgeFireRing(4))
+        assert sae.is_edge_sensing_armed is True
+
+    def test_a_column_below_minus_one_is_refused(self):
+        """R2: validation checked only the upper bound, so -2 passed and the
+        matcher's `0 <= col` guard silently skipped that half — the edge
+        reported armed and sensable and simply never fired."""
+        sae = real_sae()
+        spec = EdgeSpec(**{**make_spec().__dict__, "down_col": -2})
+        with pytest.raises(ValueError, match="column out of range"):
+            sae.arm_edge_sensing(make_config(edges=[spec]), EdgeFireRing(4))
+
+
+class TestSensingFailuresAreNotSilent:
+    """R2 process finding: while fixing the shedding bug I introduced a
+    NameError inside _sense_edges. The broad `except` swallowed it and turned a
+    hard crash into silent non-detection — the suite stayed green on the ring
+    tests and only an end-to-end assertion caught it. A pass that raises must
+    be observable."""
+
+    def test_a_raising_pass_is_logged_not_swallowed_silently(self, caplog):
+        import logging
+
+        sae = real_sae()
+        sae.arm_edge_sensing(make_config(), EdgeFireRing(4))
+        sae.begin_edge_sensing_request("r")
+        sae._match_edges = lambda *a, **k: (_ for _ in ()).throw(
+            RuntimeError("boom")
+        )
+        with caplog.at_level(logging.ERROR):
+            sae._sense_edges(hidden({1: 2.0}, {2: 2.0}))
+        assert any(
+            "edge_sensing_pass_failed" in r.message or "boom" in str(r)
+            for r in caplog.records
+        ), "a failing pass must leave a trace"
+
+    def test_a_raising_pass_still_advances_the_offset(self):
+        """Otherwise one failure desynchronises this SAE from its siblings for
+        the rest of the request."""
+        sae = real_sae()
+        sae.arm_edge_sensing(make_config(), EdgeFireRing(4))
+        sae.begin_edge_sensing_request("r")
+        sae._match_edges = lambda *a, **k: (_ for _ in ()).throw(
+            RuntimeError("boom")
+        )
+        sae._sense_edges(hidden({1: 2.0}, {2: 2.0}))
+        assert sae._edge_token_offset == 2

@@ -19,14 +19,18 @@ import { useUIStore } from '@/stores/uiStore';
 const APP_VERSION = '0.5.0';
 
 const navItems = [
+  // Order mirrors miStudio's sidebar for the labels the two share
+  // (Models → SAEs → … → Clusters → Circuits → Steering → Monitor), so moving
+  // between the authoring tool and the serving runtime doesn't relearn the nav.
+  // miLLM-only entries keep their relative position within that frame.
   { id: 'dashboard', label: 'Dashboard', path: '/dashboard', icon: LayoutDashboard },
   { id: 'models', label: 'Models', path: '/models', icon: Server },
   { id: 'sae', label: 'SAEs', path: '/sae', icon: Layers },
-  { id: 'steering', label: 'Steering', path: '/steering', icon: Sliders },
-  { id: 'monitoring', label: 'Probe', path: '/monitoring', icon: Activity },
   { id: 'profiles', label: 'Profiles', path: '/profiles', icon: FileJson },
   { id: 'clusters', label: 'Clusters', path: '/clusters', icon: Boxes },
   { id: 'circuits', label: 'Circuits', path: '/circuits', icon: Share2 },
+  { id: 'steering', label: 'Steering', path: '/steering', icon: Sliders },
+  { id: 'monitoring', label: 'Probe', path: '/monitoring', icon: Activity },
 ];
 
 const bottomNavItems = [

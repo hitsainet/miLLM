@@ -74,6 +74,9 @@ class CircuitSensingService:
         self._configs: dict[int, CircuitSensingConfig] = {}
         self._ring: Optional[EdgeFireRing] = None
         self._armed_saes: dict[int, LoadedSAE] = {}
+        #: Identity of the circuit that owns the OPEN request boundary.
+        self._request_circuit_id: Optional[str] = None
+        self._request_context_tokens: int = 0
         self._unsensable: list[UnsensableEdge] = []
         self._max_token_lag: int = settings.CIRCUIT_SENSING_MAX_TOKEN_LAG
         self._last_request_overhead_ms: float = 0.0
@@ -129,7 +132,10 @@ class CircuitSensingService:
             )
         )
         lag = max(1, min(MAX_TOKEN_LAG_HARD_MAX, lag))
-        self._max_token_lag = lag
+        # R2: this used to assign self._max_token_lag here, BEFORE arming could
+        # fail — so a circuit that never armed still changed the reported lag,
+        # and the next EdgeFireRing was built from it. The value is now
+        # returned on the config and committed only by a successful arm.
 
         ctx = int(
             _override(
@@ -357,7 +363,10 @@ class CircuitSensingService:
         if self.is_armed:
             self.disarm(self._armed_saes or layer_saes)
 
-        ring = EdgeFireRing(self._max_token_lag)
+        # Commit the lag only now that we know we can arm.
+        lag = next(iter(configs.values())).max_token_lag
+        self._max_token_lag = lag
+        ring = EdgeFireRing(lag)
         armed: list[int] = []
         try:
             for layer, config in configs.items():
@@ -410,6 +419,9 @@ class CircuitSensingService:
         self._ring = None
         self._armed_saes = {}
         self._unsensable = []
+        # R2: every other field was cleared but this one, so a circuit with no
+        # override silently inherited the previous circuit's lag window.
+        self._max_token_lag = settings.CIRCUIT_SENSING_MAX_TOKEN_LAG
 
     # ------------------------------------------------------------------
     # Request lifecycle
@@ -432,6 +444,17 @@ class CircuitSensingService:
         """
         if not self.is_armed:
             return False
+        # Snapshot the circuit this boundary belongs to. R2: record() read
+        # self._circuit_id at DRAIN time, so a re-arm between begin and flush
+        # persisted circuit A's observations under circuit B's id — confidently
+        # wrong data, not merely lost sensing. request_id was already
+        # snapshotted per-SAE; identity was not.
+        self._request_circuit_id = self._circuit_id
+        self._request_context_tokens = (
+            self._configs[self._armed_layers[0]].context_tokens
+            if self._armed_layers and self._configs
+            else 0
+        )
         if self._ring is not None:
             self._ring.clear()
         began = False
@@ -481,6 +504,36 @@ class CircuitSensingService:
             self._ring.clear()
         return request_id, merged, truncated
 
+    def prune_ring(self, through_position: int) -> None:
+        """Drop upstream fires that can no longer match, at a safe boundary.
+
+        R1 moved pruning out of the hooks (a hook cannot know whether a sibling
+        layer still needs a fire) and declared it request-level — but never
+        added this call, so the ring only ever bounded by count. The service is
+        the only component that knows when every layer has passed a position,
+        so it is the only safe caller.
+        """
+        if self._ring is not None:
+            self._ring.prune_before(through_position)
+
+    def safe_prune_boundary(self, layer_saes: dict[int, LoadedSAE]) -> Optional[int]:
+        """The lowest position every armed layer has already walked past.
+
+        Pruning above this would discard a fire a lagging sibling still needs.
+        """
+        offsets = [
+            int(getattr(sae, "_edge_token_offset", 0) or 0)
+            for layer, sae in layer_saes.items()
+            if layer in self._armed_layers and sae.is_edge_sensing_armed
+        ]
+        return min(offsets) if offsets else None
+
+    def prune_between_passes(self, layer_saes: dict[int, LoadedSAE]) -> None:
+        """Bound ring growth mid-request without racing a lagging layer."""
+        boundary = self.safe_prune_boundary(layer_saes)
+        if boundary is not None:
+            self.prune_ring(boundary)
+
     # ------------------------------------------------------------------
     # Reporting
     # ------------------------------------------------------------------
@@ -499,12 +552,13 @@ class CircuitSensingService:
             CircuitEdgeSensingRepository,
         )
 
-        circuit_id = self._circuit_id
+        # Use the identity captured when the boundary OPENED — see
+        # begin_request. Reading self._circuit_id here would attribute these
+        # observations to whatever is armed NOW.
+        circuit_id = self._request_circuit_id or self._circuit_id
         if not circuit_id or not edges:
             return []
-        ctx_tokens = 0
-        if self._armed_layers and self._configs:
-            ctx_tokens = self._configs[self._armed_layers[0]].context_tokens
+        ctx_tokens = self._request_context_tokens
 
         rows: list[dict[str, Any]] = []
         for edge in edges:
@@ -624,7 +678,11 @@ class CircuitSensingService:
         try:
             from millm.sockets.progress import progress_emitter
 
-            for payload in payloads[: self._WS_MAX_PER_FLUSH]:
+            # R2: this kept the FIRST 5. collect_edges sorts by down_pos, so
+            # the panel always showed a request's EARLIEST edges and never its
+            # most recent — the opposite of the ring's own "recent history is
+            # what matters" policy, and wrong for a live-observation surface.
+            for payload in payloads[-self._WS_MAX_PER_FLUSH :]:
                 progress_emitter.emit_circuit_sensing_event(payload)
                 sent += 1
         except Exception:

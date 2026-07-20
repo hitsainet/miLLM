@@ -1585,9 +1585,24 @@ class InferenceService:
         return None
 
     async def _notify_circuit_sensing(self, layer_saes, full_ids) -> None:
-        """Drain and persist the request's observed edges. Never raises."""
+        """Drain and persist the request's observed edges, then CLOSE the
+        boundary. Never raises.
+
+        F17 task 4.2: closing lives here because this is the one place every
+        generation path already reaches in a `finally`. Before this, the only
+        `close_request()` in the codebase was inside the hung-thread handler —
+        so the two normal completion paths drained their edges and left the
+        context (and its rings) alive past the end of the request. Verified by
+        grep: three `_circuit_sensing_begin` call sites, one `close_request`.
+
+        The close is in a `finally` because this method has two early returns
+        (no service, nothing sensed) and the quiet path — a request that
+        observed nothing — is the common one. Closing only when edges were
+        found would leak the context on exactly the requests that look fine.
+        """
         if not layer_saes:
             return
+        service = None
         try:
             import millm.api.dependencies as deps
 
@@ -1606,6 +1621,12 @@ class InferenceService:
             )
         except Exception:
             logger.exception("circuit_sensing_flush_failed")
+        finally:
+            if service is not None:
+                try:
+                    service.close_request()
+                except Exception:
+                    logger.exception("circuit_sensing_close_failed")
 
     def _sensing_mark_history(self, sensing_ctx, prompt_ids) -> None:
         """Set the history-dedup boundary for this request (goal item 2):

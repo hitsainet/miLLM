@@ -1916,3 +1916,69 @@ class TestApplyProfileValidation:
             MockState.return_value.attached_sae = None
             result = await service._apply_request_steering("any")
         assert result is None
+
+
+class TestCircuitSensingBoundaryIsClosedOnEveryPath:
+    """F17 task 4.2. Before this, the ONLY `close_request()` in the codebase
+    was inside the hung-thread handler: three `_circuit_sensing_begin` call
+    sites, one close. The two normal completion paths drained their edges and
+    left the context — and its rings — alive past the end of the request.
+
+    Closing lives in `_notify_circuit_sensing`'s `finally` because that is the
+    one place every generation path already reaches, and because this method
+    has two early returns. The quiet path (a request that observed nothing) is
+    the COMMON one in production, so closing only when edges were found would
+    leak the context on exactly the requests that look healthy."""
+
+    def _wire(self, monkeypatch):
+        import asyncio
+
+        from tests.unit.services.test_circuit_sensing_service import (
+            circuit, definition, two_saes,
+        )
+        import millm.api.dependencies as deps
+        from millm.services.circuit_sensing_service import CircuitSensingService
+        from millm.services.inference_service import InferenceService
+
+        class Stub(InferenceService):
+            _tokenizer = None
+
+            def __init__(self):
+                pass
+
+            def is_model_loaded(self):
+                return False
+
+        svc = CircuitSensingService()
+        saes = two_saes()
+        svc.arm_for_circuit(circuit(), definition(), saes)
+        monkeypatch.setattr(deps, "_circuit_sensing_service", svc, raising=False)
+        svc.begin_request("r1", saes)
+        return asyncio, svc, saes, Stub()
+
+    def test_the_quiet_path_still_closes_the_boundary(self, monkeypatch):
+        """Nothing sensed -> an early return. The context must still close."""
+        asyncio, svc, saes, stub = self._wire(monkeypatch)
+        ctx = svc._ctx
+        asyncio.new_event_loop().run_until_complete(
+            stub._notify_circuit_sensing(saes, None)
+        )
+        assert ctx.is_closed is True, "the boundary leaked on the quiet path"
+        assert svc._ctx is None
+        assert all(s._edge_ctx is None for s in saes.values())
+
+    def test_a_raising_flush_still_closes_the_boundary(self, monkeypatch):
+        """An observation path must never leave the boundary open, even when
+        draining fails — otherwise one bad flush poisons every later request."""
+        asyncio, svc, saes, stub = self._wire(monkeypatch)
+        ctx = svc._ctx
+
+        def boom(*a, **k):
+            raise RuntimeError("drain exploded")
+
+        monkeypatch.setattr(svc, "collect_edges", boom)
+        asyncio.new_event_loop().run_until_complete(
+            stub._notify_circuit_sensing(saes, None)
+        )
+        assert ctx.is_closed is True, "a raising flush leaked the boundary"
+        assert all(s._edge_ctx is None for s in saes.values())

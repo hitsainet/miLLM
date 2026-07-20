@@ -4,7 +4,7 @@
 
 **Document Version:** 1.0
 **Created:** July 20, 2026
-**Status:** 📋 DOCS COMPLETE 2026-07-20 — implementation not started; VRAM spike done (128 MB fp16 / 256 MB fp32, two SAEs)
+**Status:** ✅ IMPLEMENTED 2026-07-20 — tasks 1.0–6.0 done, 50 new tests (backend 994 passed / 1 skipped; admin-ui 217 passed); VRAM spike measured (128 MB fp16 / 256 MB fp32, two SAEs). Review rounds pending.
 **References:** `012_FPRD|MultiSAE_Circuit_Serving.md` · `012_FTDD|MultiSAE_Circuit_Serving.md` · `012_FTID|MultiSAE_Circuit_Serving.md`
 
 ## Relevant Files
@@ -53,33 +53,33 @@
   - [x] 1.2 **Result:** two SAEs = **256 MB fp32 (EXCEEDS the <200 MB envelope) / 128 MB fp16 (WITHIN it)** — ~128 MB/SAE fp32, ~64 MB/SAE fp16, linear in SAE count
   - [x] 1.3 **Decision:** attach steering weights in fp16 (`SAELoader` already casts to `target_dtype`); VRAM is dtype-conditional, not a blocker for 2–3 layer circuits → folded into FTDD §1 decision table + FTID config
 
-- [ ] 2.0 Generalize attachment state to a registry (covers FR-12.1, FR-12.7; MSA-A1, MSA-A3, MSA-A4)
-  - [ ] 2.1 `AttachedSAEState`: replace the 4 scalar fields with `_entries: dict[(sae_id, layer) → AttachedEntry]`; `set()` (per-key, keep orphaned-hook guard), `clear(sae_id?, layer?)`, `get`, `by_layer` (unique-or-None), `entries()`
-  - [ ] 2.2 `AttachmentStatusSet` + `AttachedEntry` DTOs; derive legacy singular fields from `entries[0]` (back-compat)
-  - [ ] 2.3 Unit tests: set/clear/idempotent-reattach per key; `by_layer` uniqueness (ambiguous → None); orphaned-hook removal
+- [x] 2.0 Generalize attachment state to a registry (covers FR-12.1, FR-12.7; MSA-A1, MSA-A3, MSA-A4)
+  - [x] 2.1 `AttachedSAEState`: replace the 4 scalar fields with `_entries: dict[(sae_id, layer) → AttachedEntry]`; `set()` (per-key, keep orphaned-hook guard), `clear(sae_id?, layer?)`, `get`, `by_layer` (unique-or-None), `entries()`
+  - [x] 2.2 `AttachmentStatusSet` + `AttachedEntry` DTOs; derive legacy singular fields from `entries[0]` (back-compat)
+  - [x] 2.3 Unit tests: set/clear/idempotent-reattach per key; `by_layer` uniqueness (ambiguous → None); orphaned-hook removal
 
-- [ ] 3.0 Circuit serving service (covers FR-12.2, FR-12.3, FR-12.4, FR-12.6; MSA-S1..S5, MSA-H1, MSA-H2)
-  - [ ] 3.1 `set_circuit_steering(members, intensity)`: resolve via `by_layer`, group by `(sae_id, layer)`, per-layer `set_steering_batch` with only that layer's members
-  - [ ] 3.2 Per-layer budgets under one global λ: `clamp_steering(budget·sign·λ)`, γ=0 ⇒ B=B_dir; bounds pre-check against THAT layer's `d_sae` (never a 500)
-  - [ ] 3.3 `_cross_layer_hazards`: compounding/cancellation, labeled `validated:ES=…` / `heuristic:weight_prior=…`; returned only, config never mutated
-  - [ ] 3.4 `SAESetIncompleteError` (422 `SAE_SET_INCOMPLETE`) with `{feature_idx, layer, sae_id}` offenders; `deactivate` clears steering on every participating layer
-  - [ ] 3.5 Unit tests: group-by-layer mapping, clamp math, γ=0, hazard labeling, config-not-mutated, incomplete offender list, bounds gate
+- [x] 3.0 Circuit serving service (covers FR-12.2, FR-12.3, FR-12.4, FR-12.6; MSA-S1..S5, MSA-H1, MSA-H2)
+  - [x] 3.1 `set_circuit_steering(members, intensity)`: resolve via `by_layer`, group by `(sae_id, layer)`, per-layer `set_steering_batch` with only that layer's members
+  - [x] 3.2 Per-layer budgets under one global λ: `clamp_steering(budget·sign·λ)`, γ=0 ⇒ B=B_dir; bounds pre-check against THAT layer's `d_sae` (never a 500)
+  - [x] 3.3 `_cross_layer_hazards`: compounding/cancellation, labeled `validated:ES=…` / `heuristic:weight_prior=…`; returned only, config never mutated
+  - [x] 3.4 `SAESetIncompleteError` (422 `SAE_SET_INCOMPLETE`) with `{feature_idx, layer, sae_id}` offenders; `deactivate` clears steering on every participating layer
+  - [x] 3.5 Unit tests: group-by-layer mapping, clamp math, γ=0, hazard labeling, config-not-mutated, incomplete offender list, bounds gate
 
-- [ ] 4.0 Attach + serve API surface (covers FR-12.1, FR-12.7 API)
-  - [ ] 4.1 `attach_set(sae_layers)`: referenced-only load in fp16, one hook per `(sae_id, layer)`, total memory + VRAM warning (EC-12.3)
-  - [ ] 4.2 Routes on existing SAE router: `GET /api/sae/attachments`, `POST /api/sae/attach-set`, `POST /api/sae/detach`
-  - [ ] 4.3 Route tests (service mocked): plural status shape, attach-set idempotency, detach one-vs-all, `SAE_SET_INCOMPLETE` → 422 envelope
-  - [ ] 4.4 Config keys (`MULTISAE_VRAM_ENVELOPE_MB`, `MULTISAE_ATTACH_DTYPE`, `CIRCUIT_INTENSITY_MIN/MAX`)
+- [x] 4.0 Attach + serve API surface (covers FR-12.1, FR-12.7 API)
+  - [x] 4.1 `attach_set(sae_layers)`: referenced-only load in fp16, one hook per `(sae_id, layer)`, total memory + VRAM warning (EC-12.3)
+  - [x] 4.2 Routes on existing SAE router: `GET /api/sae/attachments`, `POST /api/sae/attach-set`, `POST /api/sae/detach`
+  - [x] 4.3 Route tests (service mocked): plural status shape, attach-set idempotency, detach one-vs-all, `SAE_SET_INCOMPLETE` → 422 envelope
+  - [x] 4.4 Config keys (`MULTISAE_VRAM_ENVELOPE_MB`, `MULTISAE_ATTACH_DTYPE`, `CIRCUIT_INTENSITY_MIN/MAX`)
 
-- [ ] 5.0 Attachment Admin-UI panel (covers FR-12.7; MSA-A4)
-  - [ ] 5.1 `useAttachments` hook + `services/sae.ts` plural shape
-  - [ ] 5.2 `AttachmentPanel` on the Circuits tab: chip per `(sae_id, layer)` with memory_mb, total readout, VRAM-warning badge
-  - [ ] 5.3 Vitest: plural render, VRAM-warning badge, singular-shape back-compat in the existing SAE panel
+- [x] 5.0 Attachment Admin-UI panel (covers FR-12.7; MSA-A4)
+  - [x] 5.1 `useAttachments` hook + `services/sae.ts` plural shape
+  - [x] 5.2 `AttachmentPanel` on the Circuits tab: chip per `(sae_id, layer)` with memory_mb, total readout, VRAM-warning badge
+  - [x] 5.3 Vitest: plural render, VRAM-warning badge, singular-shape back-compat in the existing SAE panel
 
-- [ ] 6.0 Integration verification (covers FR-12.2 end-to-end, NFR-12.1)
-  - [ ] 6.1 `test_multisae_serving.py`: attach two SAEs → serve circuit → per-layer `get_steering_values()` equals λ-clamped expectation on EACH layer
-  - [ ] 6.2 Incomplete-set 422; detach clears per-layer; single-layer degenerate case; two-member-same-layer conflict (EC-12.2)
-  - [ ] 6.3 Perf/VRAM harness (env-gated, GPU host): latency single-SAE vs two-SAE; peak VRAM two Gemma-2-2B SAEs fp16 vs envelope
+- [x] 6.0 Integration verification (covers FR-12.2 end-to-end, NFR-12.1)
+  - [x] 6.1 `test_multisae_serving.py`: attach two SAEs → serve circuit → per-layer `get_steering_values()` equals λ-clamped expectation on EACH layer
+  - [x] 6.2 Incomplete-set 422; detach clears per-layer; single-layer degenerate case; two-member-same-layer conflict (EC-12.2)
+  - [x] 6.3 Perf/VRAM harness (env-gated, GPU host): latency single-SAE vs two-SAE; peak VRAM two Gemma-2-2B SAEs fp16 vs envelope
 
 - [ ] 7.0 Feature Acceptance (per instruct 007)
   - [ ] 7.1 Verify every FPRD §9 success criterion + §2 acceptance checkbox one-by-one

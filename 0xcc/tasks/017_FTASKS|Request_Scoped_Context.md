@@ -272,3 +272,46 @@ acceptance record is worth exactly as much as those tests' ability to fail.
 Before claiming a criterion, grep for a production caller of the mechanism the
 criterion names, and mutate it. Green tests are evidence about the tests until
 you have watched them go red.
+
+---
+
+## Review cycle COMPLETE (2026-07-20) — 3 rounds, 60 findings, 60 fixed
+
+**Suite 1659 → 1835** green / 1 skipped. Frontend 272.
+
+| Round | Findings | Character |
+|---|---|---|
+| R1 | 20 | 5 were defects introduced during F17 itself, including a dead `EventBudget` (cap 3 emitting 9 events) and a silently reverted O(log n) fix (13x) |
+| R2 | 20 | **16 were R1 fixes colliding** — with the original code, with each other, or with R2 fixes made minutes earlier |
+| R3 | 20 | R2's fixes held under full mutation; the finding moved up to **earlier fixes never pinned at all**, one of which (R1's overhead fix) was still wrong |
+
+Records: `0xcc/reviews/review_feature017_R{1,2,3}_2026-07-20.md`.
+
+### What the three rounds actually established
+
+**Reading found none of the criticals.** Every one came from executing the code
+or breaking a line. Several had *survived* earlier mutation sweeps because the
+mutation was mis-aimed or the mechanism was already dead — a surviving mutation
+is not a finding until you have confirmed it applied.
+
+**Fixes are the most dangerous code.** Two thirds of R2 and a third of R3 were
+defects in fixes. Attacking a fix within minutes of shipping it found R2-12,
+R2-14 and R3-01.
+
+**Five mechanisms were declared and never wired** across this arc. The cure is
+two commands — grep for a production caller, then break the wiring line — and it
+was skipped every time.
+
+**A test is worth exactly its ability to fail.** Four R3 regression tests
+initially passed against the mutation they were written for, each because the
+fixture agreed with the code by construction.
+
+### Recorded as debt, not fixed
+
+- `context_tokens` is a per-layer setting collapsed to one request-scoped
+  scalar. Not reachable today; **F19's per-circuit configs make it live**, and
+  the honest fix is to carry it per-layer into `_context`.
+- `_edge_done`/`_edge_truncated` still overlap `EventBudget`'s per-circuit
+  tracking. Both are now read; collapsing them belongs with F19.
+- The `events.sort` tiebreak and the drain-time overhead zeroing are inert
+  today and deliberately untested.

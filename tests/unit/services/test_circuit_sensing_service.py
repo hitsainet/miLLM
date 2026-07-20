@@ -1568,3 +1568,69 @@ class TestR2ThrottlingIsVisibleWithoutBeingCalledLoss:
         svc._emit([{"id": i} for i in range(20)])
         model = CircuitSensingStatusResponse(**svc.status({}))
         assert model.model_dump()["ws_throttled"] == 15
+
+
+class TestR2ARareTruncationCannotBeRacedAway:
+    """F17 R2-13. R2-06 clears `truncated_layers` when a new boundary opens,
+    which is correct — it describes the LAST DRAINED request, and leaving it
+    would accuse a recovered layer. But it means a fast-arriving next request
+    supersedes the report before an operator polls, so a rare truncation can
+    never be seen at all.
+
+    Both behaviours are right for their own field; the answer is a cumulative
+    counter that no later request can erase."""
+
+    def _armed(self):
+        svc = CircuitSensingService()
+        saes = two_saes()
+        svc.arm_for_circuit(circuit(), definition(), saes)
+        return svc, saes
+
+    def test_a_superseded_truncation_still_leaves_a_trace(self):
+        svc, saes = self._armed()
+        svc.begin_request("r1", saes)
+        saes[13]._edge_truncated = True
+        svc.collect_edges(saes)
+        svc.close_request()
+        svc.begin_request("r2", saes)               # supersedes the report
+        st = svc.status(saes)
+        assert st["truncated_layers"] == []         # correct: r2 is clean
+        assert st["requests_truncated"] == 1, (
+            "r1's truncation vanished entirely — nothing records that the "
+            "circuit has ever lost data"
+        )
+
+    def test_a_clean_circuit_reports_zero(self):
+        svc, saes = self._armed()
+        svc.begin_request("r1", saes)
+        svc.collect_edges(saes)
+        assert svc.status(saes)["requests_truncated"] == 0
+
+    def test_it_counts_requests_not_layers(self):
+        """Two layers truncating in ONE request is one truncated request."""
+        svc, saes = self._armed()
+        svc.begin_request("r1", saes)
+        for s in saes.values():
+            s._edge_truncated = True
+        svc.collect_edges(saes)
+        assert svc.status(saes)["requests_truncated"] == 1
+
+    def test_it_resets_on_disarm(self):
+        """The count belongs to the CURRENT arming, like requests_sensed."""
+        svc, saes = self._armed()
+        svc.begin_request("r1", saes)
+        saes[13]._edge_truncated = True
+        svc.collect_edges(saes)
+        svc.close_request()
+        svc.disarm(saes)
+        assert svc.status(saes)["requests_truncated"] == 0
+
+    def test_it_reaches_the_STATUS_PAYLOAD(self):
+        from millm.api.schemas.circuit_sensing import CircuitSensingStatusResponse
+
+        svc, saes = self._armed()
+        svc.begin_request("r1", saes)
+        saes[13]._edge_truncated = True
+        svc.collect_edges(saes)
+        model = CircuitSensingStatusResponse(**svc.status(saes))
+        assert model.model_dump()["requests_truncated"] == 1

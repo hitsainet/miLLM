@@ -76,6 +76,15 @@ class CircuitSensingStatusResponse(BaseModel):
             "`paused_reason`. Without this the two readings are identical."
         ),
     )
+    requests_truncated: int = Field(
+        default=0,
+        description=(
+            "Requests that lost data since arming, cumulative. "
+            "`truncated_layers` describes only the LAST drained request and is "
+            "superseded when the next one begins, so a rare truncation can be "
+            "missed by a poll; this counter cannot be raced away."
+        ),
+    )
     events_recorded: int = 0
     ws_dropped: int = 0
     ws_throttled: int = Field(

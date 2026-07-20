@@ -111,6 +111,13 @@ class CircuitSensingService:
         #: healthy quiet system; only this one is non-zero on a healthy BUSY
         #: one, which is the difference an operator needs to read the panel.
         self._ws_throttled: int = 0
+        #: R2-13: how many requests have truncated since arming. The
+        #: per-request `truncated_layers` describes only the LAST drained
+        #: request, so a fast-arriving next request supersedes it before an
+        #: operator polls — correct for a "last request" field, but it means a
+        #: rare truncation can never be seen. This one is cumulative and cannot
+        #: be raced away.
+        self._requests_truncated: int = 0
 
     _WS_MAX_PER_FLUSH = 5
     _WS_MIN_INTERVAL_S = 0.1
@@ -471,6 +478,7 @@ class CircuitSensingService:
         self._last_request_truncated_layers = []
         self._request_dark_layers = []
         self._requests_sensed = 0
+        self._requests_truncated = 0
         # R2: every other field was cleared but this one, so a circuit with no
         # override silently inherited the previous circuit's lag window.
         self._max_token_lag = settings.CIRCUIT_SENSING_MAX_TOKEN_LAG
@@ -750,6 +758,8 @@ class CircuitSensingService:
         self._last_request_truncated_layers = sorted(
             set(truncated_layers) | set(self._request_dark_layers)
         )
+        if self._last_request_truncated_layers:
+            self._requests_truncated += 1
         return request_id, merged, truncated
 
     @property
@@ -1102,6 +1112,10 @@ class CircuitSensingService:
             # Zero while armed means no request reached the boundary at all —
             # check `paused_reason`.
             "requests_sensed": self._requests_sensed,
+            # Cumulative since arming. `truncated_layers` only describes the
+            # LAST drained request and is superseded by the next one, so a rare
+            # truncation could otherwise vanish before an operator polls.
+            "requests_truncated": self._requests_truncated,
             "events_recorded": self._events_recorded,
             "ws_dropped": self._ws_dropped,
             # Declined by the per-flush cap, NOT lost — they are in the events

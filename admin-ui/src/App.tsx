@@ -11,6 +11,7 @@ import {
   MonitoringPage,
   ProfilesPage,
   ClustersPage,
+  CircuitsPage,
   SettingsPage,
 } from '@pages/index';
 import { useUIStore } from '@stores/uiStore';
@@ -60,6 +61,7 @@ function AppContent() {
           <Route path="/monitoring" element={<MonitoringPage />} />
           <Route path="/profiles" element={<ProfilesPage />} />
           <Route path="/clusters" element={<ClustersPage />} />
+          <Route path="/circuits" element={<CircuitsPage />} />
           <Route path="/settings" element={<SettingsPage />} />
           <Route path="*" element={<Navigate to="/dashboard" replace />} />
         </Route>

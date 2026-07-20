@@ -12,6 +12,7 @@ import {
   ChevronRight,
   BookOpen,
   Boxes,
+  Share2,
 } from 'lucide-react';
 import { useUIStore } from '@/stores/uiStore';
 
@@ -25,6 +26,7 @@ const navItems = [
   { id: 'monitoring', label: 'Probe', path: '/monitoring', icon: Activity },
   { id: 'profiles', label: 'Profiles', path: '/profiles', icon: FileJson },
   { id: 'clusters', label: 'Clusters', path: '/clusters', icon: Boxes },
+  { id: 'circuits', label: 'Circuits', path: '/circuits', icon: Share2 },
 ];
 
 const bottomNavItems = [

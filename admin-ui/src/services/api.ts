@@ -113,9 +113,10 @@ export class ApiError extends Error {
  * @returns Promise resolving to the response data
  * @throws {ApiError} When the API returns an error response
  *
- * @internal
+ * Exported so sibling service modules (e.g. services/circuits.ts) reuse the
+ * SAME envelope unwrapping and ApiError semantics instead of duplicating them.
  */
-async function request<T>(
+export async function request<T>(
   endpoint: string,
   options: RequestInit = {}
 ): Promise<T> {

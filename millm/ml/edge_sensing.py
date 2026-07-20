@@ -175,7 +175,23 @@ class EdgeFireRing:
         fires = self._fires.get(edge_key)
         if not fires:
             return None
-        i = len(fires) - 1
+        # R1-08: this said `i = len(fires) - 1` — a linear backward walk — from
+        # the F17 extraction until review round 1. The docstring above kept
+        # describing the bisect while the code no longer did it, so reading the
+        # function told you the opposite of what it ran. F15 R3's O(n)->O(log n)
+        # fix was silently reverted by a change described as a pure move.
+        #
+        # Measured against a full 512-fire ring with a wide window, ASCENDING
+        # (the normal cross-layer order the docstring names): 7.38ms/2000 vs
+        # 0.29ms/2000 for a tail probe — 25.9x. The existing bound test only
+        # ever probed the tail, where the linear walk terminates on iteration
+        # one, so it could not fail.
+        #
+        # The `-inf` sentinel is load-bearing: it keeps the insertion point
+        # strictly LEFT of any fire at `down_pos`, which is one of the two
+        # guards enforcing strictly-before (see the pair-mutation control in
+        # test_sensing_request_context.py).
+        i = bisect.bisect_left(fires, (down_pos, float("-inf"))) - 1
         while i >= 0:
             pos, act = fires[i]
             if (down_pos - pos) > self._max_lag:
@@ -253,13 +269,31 @@ class EventBudget:
     _truncated: dict[str, set[int]] = field(default_factory=dict)
 
     def try_spend(self, circuit_id: str, layer: int) -> bool:
-        """Claim one observation slot. False ⇒ continue, do not return."""
+        """Claim one observation slot. False ⇒ continue, do not return.
+
+        ``layer`` must be the layer that is SHEDDING — the SAE's own
+        ``cfg.layer`` — not an edge's ``down_layer``. A cross-layer edge's
+        downstream endpoint may live on a layer this SAE does not own, and
+        naming it here would accuse a layer that is not even armed. That is the
+        R1-04 defect (status naming an uncontained layer) reached through a
+        different path.
+        """
         used = self._spent.get(circuit_id, 0)
         if used >= self.cap:
-            self._truncated.setdefault(circuit_id, set()).add(layer)
+            self.note_truncated(circuit_id, layer)
             return False
         self._spent[circuit_id] = used + 1
         return True
+
+    def note_truncated(self, circuit_id: str, layer: int) -> None:
+        """Record that ``layer`` lost data for ``circuit_id``.
+
+        Separate from ``try_spend`` because shedding truncates WITHOUT
+        spending: a saturated pass drops events before the budget is consulted,
+        so the budget would otherwise have no idea it happened. Before this the
+        two truncation sources disagreed on exactly that case.
+        """
+        self._truncated.setdefault(circuit_id, set()).add(layer)
 
     def truncated_layers(self, circuit_id: str) -> list[int]:
         return sorted(self._truncated.get(circuit_id, ()))

@@ -575,3 +575,61 @@ class TestThePerCircuitBudgetIsWiredNotJustDeclared:
             "a second circuit's budget was consumed by the first"
         )
         assert ctx.budget.try_spend("circ_OTHER", 10) is True
+
+
+class TestTruncationHasONESourceOfTruth:
+    """R1-07/R1-09. Two mechanisms record truncation — the per-SAE
+    `_edge_truncated` flag and `EventBudget` — and wiring the budget made them
+    genuinely divergent: a SHED pass set the SAE flag while the budget stayed
+    empty, because shedding drops events before the budget is ever consulted.
+
+    `truncated_layers` happens to read the SAE flag today, so the API was
+    right — but two sources of truth for one operator-facing honesty signal is
+    a trap, and F19 (where the budget becomes the per-circuit authority) is
+    where it would bite."""
+
+    def _shed(self, layer=10):
+        import torch
+        c = config(edges=[spec()], max_lag=8, cap=20, layer=layer)
+        c.circuit_id = "circ_1"
+        # A pathologically low threshold fires on nearly every (pos, member):
+        # 8192 fires against a budget of max(20*8, 2048) = 2048.
+        c.thresholds = torch.tensor([0.0001, 0.0001])
+        ctx = ctx_for(c, "r")
+        sae = real_sae()
+        sae.arm_edge_sensing(c)
+        sae.bind_context(ctx)
+        sae.begin_edge_sensing_request("r")
+        sae._sense_edges(torch.rand(4096, D_IN) + 1.0)
+        return ctx, sae
+
+    def test_a_shed_reaches_the_circuit_budget_too(self):
+        ctx, sae = self._shed()
+        assert sae._edge_saturation_warned is True, "precondition: must shed"
+        assert sae._edge_truncated is True
+        assert ctx.budget.truncated_layers("circ_1") == [10], (
+            "the SAE recorded truncation and the circuit budget did not — two "
+            "sources of truth disagreeing about whether data was lost"
+        )
+
+    def test_truncation_names_the_SHEDDING_layer_not_an_edge_endpoint(self):
+        """A cross-layer edge's `down_layer` can name a layer this SAE does not
+        own and that may not be armed at all — the R1-04 defect (status naming
+        an uncontained layer) reached through the budget."""
+        s = spec(up_layer=42, down_layer=99, key="1@42->2@99")
+        c = config(edges=[s], max_lag=8, cap=1, layer=42)
+        c.circuit_id = "circ_1"
+        ctx = ctx_for(c, "r")
+        sae = real_sae()
+        sae.arm_edge_sensing(c)
+        sae.bind_context(ctx)
+        sae.begin_edge_sensing_request("r")
+        rows = []
+        for _ in range(6):
+            rows += [{1: 2.0}, {2: 2.0}]
+        sae._sense_edges(hidden(*rows))
+        named = ctx.budget.truncated_layers("circ_1")
+        assert named == [42], (
+            f"named {named} — 99 is the edge's downstream endpoint, not the "
+            "layer that shed; this SAE is armed on 42"
+        )

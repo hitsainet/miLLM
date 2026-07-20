@@ -1145,6 +1145,15 @@ class LoadedSAE:
                     "upstream half of this pass", total_fires, budget, seq_len,
                 )
             self._edge_truncated = True
+            # R1-07: tell the CIRCUIT's budget too, not just this SAE.
+            # Shedding never calls try_spend, so before this the two truncation
+            # sources disagreed on exactly the case that matters: a shed pass
+            # set `_edge_truncated=True` while `budget.truncated_layers()`
+            # stayed empty. `truncated_layers` happens to read the SAE flag, so
+            # the API is right today — but two sources of truth for one
+            # operator-facing honesty signal is a trap, and F19 (where the
+            # budget becomes the per-circuit authority) is where it would bite.
+            self._note_circuit_truncation()
             # R2: R1 returned here, recording NOTHING. Shedding is decided per
             # SAE per pass, so a saturated UPSTREAM layer silently blinded a
             # quiet downstream sibling that did not shed — and the truncated
@@ -1192,7 +1201,31 @@ class LoadedSAE:
         cfg = self._edge_sensing
         if ctx is None or cfg is None or ctx.is_closed:
             return True
-        return ctx.budget.try_spend(cfg.circuit_id, spec.down_layer)
+        # cfg.layer — the layer that is SHEDDING — not spec.down_layer. A
+        # cross-layer edge's downstream endpoint can live on a layer this SAE
+        # does not own, so naming it would accuse a layer that may not be armed
+        # (R1-04's defect via another path). Verified: an SAE at layer 42
+        # sensing an edge with down_layer 99 recorded truncation against 99.
+        return ctx.budget.try_spend(cfg.circuit_id, cfg.layer)
+
+    def _note_circuit_truncation(self) -> None:
+        """Record truncation against the CIRCUIT's budget as well as this SAE.
+
+        Shedding never calls `try_spend`, so without this the two truncation
+        sources disagreed exactly where it matters: a shed pass set
+        `_edge_truncated` while `budget.truncated_layers()` stayed empty.
+        Attributed to `cfg.layer` — the layer that actually shed — never to an
+        edge's `down_layer`, which may name a layer this SAE does not own and
+        that may not even be armed (the R1-04 defect through another path).
+        """
+        ctx = self._edge_ctx
+        cfg = self._edge_sensing
+        if ctx is None or cfg is None or ctx.is_closed:
+            return
+        try:
+            ctx.budget.note_truncated(cfg.circuit_id, cfg.layer)
+        except Exception:
+            logger.exception("edge_budget_truncation_note_failed")
 
     def _note_edge_cap(self) -> None:
         """The per-request cap was reached. Latches so later passes skip the

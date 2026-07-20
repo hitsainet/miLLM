@@ -112,3 +112,69 @@ class TestParityBaselines:
             f"512-tok={short:.1f}ms 4096-tok={long_:.1f}ms — growth suggests "
             "the positions x edges scan has returned"
         )
+
+
+class TestMatchDownIsLogarithmicOnTheCrossLayerPath:
+    """R1-08. The F17 extraction silently replaced `bisect_left` with a linear
+    backward walk — reverting F15 R3's O(n)->O(log n) fix — while leaving the
+    docstring describing the bisect. Reading the function told you the opposite
+    of what it ran.
+
+    The existing bound test could not catch it: it probes `last + 1`, the one
+    position where a backward walk terminates on iteration ONE. This probes
+    ASCENDING, which is the order the docstring itself names as normal — hooks
+    run in layer order, so the upstream layer records its whole prefill before
+    the downstream layer matches ascending.
+
+    Measured on a full 512-fire ring with a window wide enough that the walk
+    cannot break early:
+
+        linear walk : 7.38 ms / 2000   <- the regression, suite green
+        bisect      : 0.55 ms / 2000   <- restored
+    """
+
+    def _full_ring(self):
+        from millm.ml.edge_sensing import EdgeFireRing
+
+        # max_lag deliberately huge: with a small window the linear walk breaks
+        # out early and looks fast, which is how this hid.
+        ring = EdgeFireRing(100_000)
+        for pos in range(EdgeFireRing._MAX_FIRES_PER_EDGE):
+            ring.record_up("e", pos, 1.0)
+        return ring
+
+    def test_ascending_matching_over_a_full_ring_stays_cheap(self):
+        ring = self._full_ring()
+        ring.match_down("e", 1)                      # warm
+        started = time.perf_counter()
+        for down in range(2000):
+            ring.match_down("e", down)
+        elapsed_ms = (time.perf_counter() - started) * 1000.0
+        assert elapsed_ms < 3.0, (
+            f"{elapsed_ms:.2f} ms / 2000 ascending matches — the linear walk "
+            "is back; measured 7.38 ms for it and 0.55 ms for the bisect"
+        )
+
+    def test_ascending_is_not_dramatically_worse_than_a_tail_probe(self):
+        """The shape-independent form: a logarithmic lookup costs about the
+        same wherever it lands, a linear walk does not. This survives machines
+        faster or slower than the one the absolute bound was measured on."""
+        ring = self._full_ring()
+        ring.match_down("e", 1)
+
+        started = time.perf_counter()
+        for down in range(2000):
+            ring.match_down("e", down)
+        ascending = (time.perf_counter() - started) * 1000.0
+
+        tail = EdgeFireRing_last = ring._fires["e"][-1][0] + 1
+        started = time.perf_counter()
+        for _ in range(2000):
+            ring.match_down("e", tail)
+        tail_ms = (time.perf_counter() - started) * 1000.0
+
+        assert ascending < max(tail_ms * 8.0, 1.5), (
+            f"ascending {ascending:.2f} ms vs tail {tail_ms:.2f} ms — a "
+            f"{ascending / max(tail_ms, 1e-9):.1f}x gap means the lookup is "
+            "walking, not bisecting"
+        )

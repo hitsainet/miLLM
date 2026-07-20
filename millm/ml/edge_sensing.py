@@ -141,6 +141,12 @@ class EdgeFireRing:
     #: relative to any plausible lag window; the matcher filters by window.
     _MAX_FIRES_PER_EDGE = 512
 
+    #: Consecutive passes with a missing reporter before the ring stops waiting
+    #: for it (R3-01). A live layer reports on EVERY pass, including suppressed
+    #: and quiet ones, so this only trips when a layer has genuinely stopped —
+    #: never merely because a sibling is slow.
+    _STALLED_REPORTER_PASSES = 64
+
     def __init__(self, max_lag: int):
         self._max_lag = max(1, int(max_lag))
         #: edge_key -> list of (abs_pos, activation), ascending by position.
@@ -149,6 +155,9 @@ class EdgeFireRing:
         #: SLOWEST layer without any hook knowing about its siblings.
         self._progress: dict[int, int] = {}
         self._last_pruned_at: int = 0
+        #: Consecutive progress reports made while an expected reporter was
+        #: missing (R3-01).
+        self._unanswered: int = 0
         #: How many layers are expected to report progress for this circuit,
         #: or None until told. None means "unknown", and pruning then waits for
         #: a SECOND reporter — the old conservative behaviour — because a ring
@@ -257,7 +266,33 @@ class EdgeFireRing:
             if len(self._progress) < 2:
                 return
         elif len(self._progress) < expected:
-            return
+            # R3-01: waiting for the expected reporters is right, but waiting
+            # FOREVER is not. `expect_layers` is fixed at begin, and a layer can
+            # go dark AFTER that — an SAE detached mid-request, evicted, or
+            # swapped. The ring then waits for a reporter that no longer exists
+            # and never prunes: measured, 512 retained fires per edge after a
+            # mid-request detach. R2-12's stall through a different door, and no
+            # count computed at begin can close it.
+            #
+            # The wait is bounded by CONSECUTIVE UNANSWERED REPORTS, not by how
+            # far the reporting layers have walked. Distance is the wrong
+            # signal: a merely-slow sibling is exactly the case where one layer
+            # races far ahead, so a distance bound prunes the history that
+            # sibling still needs (R1-01, caught by two tests when tried).
+            #
+            # Counting reports is safe because a live layer reports on EVERY
+            # pass, including suppressed and quiet ones (EC-17.1). A sibling
+            # that has missed this many consecutive passes has stopped.
+            self._unanswered += 1
+            if self._unanswered < self._STALLED_REPORTER_PASSES:
+                return
+            logger.info(
+                "edge_ring_pruning_without_all_reporters: expected=%s "
+                "reporting=%s after %s passes — a layer stopped reporting",
+                expected, len(self._progress), self._unanswered,
+            )
+        else:
+            self._unanswered = 0
         slowest = min(self._progress.values())
         if slowest - self._last_pruned_at >= self._max_lag:
             self._last_pruned_at = slowest

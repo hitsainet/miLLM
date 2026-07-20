@@ -406,3 +406,65 @@ class TestR2DarkLayersDoNotBlockPruningForever:
         ring.record_up("e", 38, 1.0)
         ring.note_layer_progress(10, 5000)
         assert ring.match_down("e", 41) == (38, 1.0)
+
+
+class TestR3AStoppedReporterDoesNotBlockPruningForever:
+    """F17 R3-01. R2-12 fixed pruning stalling on a layer that was dark AT
+    BEGIN. But `expect_layers` is fixed at begin, and a layer can go dark AFTER
+    it — an SAE detached mid-request, evicted, or swapped. The ring then waits
+    for a reporter that no longer exists: measured, 512 retained fires per edge
+    after a mid-request detach. R2-12's stall through a different door, and no
+    count computed at begin can close it.
+
+    The first attempt bounded the wait by DISTANCE — how far the reporting
+    layers had walked past the last prune. That broke R1-01 immediately (two
+    tests), because a merely-slow sibling is exactly the case where one layer
+    races far ahead, so a distance bound prunes the history that sibling still
+    needs.
+
+    Bounded by CONSECUTIVE UNANSWERED PASSES instead. A live layer reports on
+    every pass including suppressed and quiet ones (EC-17.1), so a sibling that
+    has missed 64 consecutive passes has stopped, not slowed."""
+
+    def test_a_merely_SLOW_sibling_is_still_protected(self):
+        """R1-01, the guarantee this must not trade away."""
+        from millm.ml.edge_sensing import EdgeFireRing
+
+        ring = EdgeFireRing(4)
+        ring.expect_layers(2)
+        ring.record_up("e", 38, 1.0)
+        for _ in range(10):                       # fast layer races ahead
+            ring.note_layer_progress(10, 5000)
+        assert ring.match_down("e", 41) == (38, 1.0), (
+            "pruned past a fire a slow sibling still needed"
+        )
+
+    def test_a_STOPPED_reporter_eventually_stops_blocking(self):
+        from millm.ml.edge_sensing import EdgeFireRing
+
+        ring = EdgeFireRing(4)
+        ring.expect_layers(2)
+        for pos in range(600):
+            ring.record_up("e", pos, 1.0)
+        for i in range(ring._STALLED_REPORTER_PASSES + 6):
+            ring.note_layer_progress(10, 600 + i)   # sibling never reports
+        assert len(ring._fires.get("e", [])) < 50, (
+            "the ring is still waiting for a layer that has stopped reporting"
+        )
+
+    def test_the_counter_resets_when_the_sibling_returns(self):
+        """A sibling that misses some passes and comes back must restore the
+        full guarantee, not stay one missed pass from being abandoned."""
+        from millm.ml.edge_sensing import EdgeFireRing
+
+        ring = EdgeFireRing(4)
+        ring.expect_layers(2)
+        for _ in range(ring._STALLED_REPORTER_PASSES - 1):
+            ring.note_layer_progress(10, 100)
+        ring.note_layer_progress(13, 100)          # it returns
+        assert ring._unanswered == 0
+
+        ring.record_up("e", 38, 1.0)
+        for _ in range(10):
+            ring.note_layer_progress(10, 5000)
+        assert ring.match_down("e", 41) == (38, 1.0)

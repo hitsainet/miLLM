@@ -92,8 +92,26 @@ async def _apply_request_steering(self, profile_name, intensity_raw):
     Restore via the existing _restore_request_profile in finally (same saved shape)."""
 ```
 - **Call sites unchanged:** both generation paths already wrap `_apply_request_steering` in the
-  `try/finally` that restores on completion and client disconnect (Feature 10). The circuit path adds no
-  new call site — only the base-selection branch.
+  `try/finally` that restores on completion and client disconnect (Feature 10).
+
+> **AS-BUILT AMENDMENT (2026-07-20, R3).** The design above specifies a single base-selection branch
+> inside the reused `_apply_request_steering`. **What shipped is a separate
+> `_apply_request_circuit_steering`**, with its own saved-state shape
+> (`{"circuit": True, "layers": [...]}` vs `{"values", "enabled"}`), its own resolver
+> (`_resolve_circuit_intensity` vs `_plan_effective_intensity`, which differ on floor clamping and on
+> the configured envelope), and a demultiplexing branch in `_restore_request_profile`.
+>
+> **Why:** Feature 10's base is single-SAE — it saves and restores exactly one SAE, reachable only as
+> `layers[0]`. A circuit spans layers, so reusing that base would leave every other layer permanently
+> dialled. The branch could not be "only base selection" without generalizing Feature 10's save/restore
+> to a list first.
+>
+> **Known cost, recorded rather than hidden:** this is two parallel derivations of one concept, and
+> five of the worst defects across R1–R3 were consequences of it (wrong-basis rescale, snapshot keyed
+> off the wrong source, rung/λ echo divergence, λ=0 clear divergence, duplicated envelope logic). The
+> right long-term shape is to make the PROFILE path a degenerate one-member case of the circuit path,
+> collapsing to one saved shape, one restore loop, and one resolver. That refactor is deferred with the
+> steering-epoch work (R3 deferred items A and B) because it also spans Feature 10.
 - **All-layers-under-one-λ (DIAL-A1/A3):** the members dict spans layers; a single λ multiplies every
   authored strength; each product is clamped ±200 per member via the shared `clamp_steering` helper.
 - **Routing:** `steering_intensity is not None` already forces serial (Feature 10, `_use_cbm_for_request`).
@@ -185,7 +203,12 @@ compatibility notes).
   RUNG_LANGUAGE map keys 0/1 are asserted to contain no "causal" string; rung<2 forced to "unvalidated".
 - **Probe latency in the inlet path.** Mitigation: best-effort, short-timeout, silent-degrade probe; the
   dial injection never waits on it (status emitted after, chat never blocked).
-- **Circuit vs cluster base-selection drift.** Mitigation: one base-selection branch inside the reused
-  `_apply_request_steering`; unit tests pin cluster-active vs circuit-active vs no-active bases.
+- **Circuit vs cluster base-selection drift.** Mitigation as designed was one shared branch; **as built**
+  the two paths are separate (see the amendment above), so the mitigation is instead: one
+  `_steering_circuit()` predicate answering "is a circuit steering" for every surface (apply, λ echo,
+  rung echo, and the `steering` field clients read), plus unit tests pinning cluster-active vs
+  circuit-active vs no-active bases and integration tests asserting global state is byte-identical
+  across interleaved requests. This risk MATERIALISED three times during review — it is the single
+  most productive risk row in the document.
 - **Cross-layer over-steering under one λ (RSK-002).** Out of scope to correct here (surfaced by Features
   12/13); the dial can always reach off, and default λ stays conservative.

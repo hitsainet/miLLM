@@ -105,8 +105,17 @@ covers only its Open WebUI dial surface.)*
 (scales the active cluster); status line reflects cluster identity, no circuit rung.
 **EC-14.2: No active steering at all** — **Behavior:** field is a no-op with a logged notice; chat never
 breaks (parity with EC-10.1).
-**EC-14.3: Circuit in slice_fallback** — **Behavior:** λ scales the bound per-layer slice; the status line
-marks it a slice (a projection, not the whole circuit); rung still surfaced.
+**EC-14.3: Circuit in slice_fallback** — **Behavior (CORRECTED at acceptance, 2026-07-20):** the circuit
+dial path deliberately no-ops. A slice-fallback circuit is served as its backing per-layer CLUSTER
+PROFILE, so the ordinary Feature 10 profile path already owns it — dialling it here as well would
+double-apply. λ therefore scales the slice through the profile path, against the **cluster** envelope
+(floor `0.5`, not the circuit floor `0.0`), and `X-miLLM-Circuit-Rung` is **omitted** because no
+circuit-attributable steering occurred on that response.
+*Original text ("λ scales the bound per-layer slice; the status line marks it a slice; rung still
+surfaced") described a behavior the implementation does not and should not produce. R3 flagged the
+divergence rather than letting the acceptance gate wave it through; the code is correct and this
+requirement is amended to match. The differing floor is documented in the manual, the OpenAI-API
+reference, and `docs/mcp-contract.md` §4b.*
 **EC-14.4: Invalid λ** — **Behavior:** OpenAI-style 400 (λ<0, λ>2, unknown symbol) — reuses Feature 10's validator.
 **EC-14.5: Older miLLM / no circuit runtime** — **Behavior:** `extra="ignore"` drops the field; the filter's
 circuit status probe returns nothing and the dial degrades to cluster behavior — documented rollout property.
@@ -178,7 +187,7 @@ Filter's valve + status line, rendered natively by Open WebUI.
 
 ## 10. Testing Requirements
 - Unit: circuit λ resolution (range present/absent, config fallback), all-layer scaling + clamp parity, λ=0 disable, rung header echo, RUNG_LANGUAGE map exactness (no "causal" below rung 2).
-- Integration: streaming + non-streaming with the field over an active circuit; serial routing asserted; global steering byte-identical before/after; cluster-active fallback (EC-14.1); no-active no-op (EC-14.2); slice_fallback scaling (EC-14.3).
+- Integration: streaming + non-streaming with the field over an active circuit; serial routing asserted; global steering byte-identical before/after; cluster-active fallback (EC-14.1); no-active no-op (EC-14.2); slice_fallback routed to the profile path, NOT dialled here (EC-14.3, as amended).
 - Filter unit: circuit-status probe → status-line copy; rung<2 → "unvalidated"; "causal" never emitted; degradation when the probe returns nothing.
 - E2E (post-deploy): OWUI circuit dial walkthrough; scripted identical-prompt off/min/max comparison.
 

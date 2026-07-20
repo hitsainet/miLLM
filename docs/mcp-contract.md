@@ -124,7 +124,46 @@ verbatim, never re-phrase. Activating a circuit whose rung < 2 requires
 `acknowledge_unvalidated=true`; without it the route refuses with
 `UNVALIDATED_CIRCUIT` (200 + `success:false`, house style).
 
-### 4b. Circuit slice-fallback (v1.1)
+### 4b. Circuit per-request dial (v1.1 — Feature 14)
+
+`POST /v1/chat/completions` accepts the miLLM extension field
+`steering_intensity` (`"off" | "min" | "max"`, or a numeric λ). When a circuit
+is serving in `full` mode, one λ scales EVERY layer together, each member
+through its own layer's SAE, for that request only. Two rules differ from the
+cluster dial and clients must not assume the cluster semantics:
+
+- **Both ends clamp.** Numeric λ is clamped into the circuit's declared
+  `budget.intensity_range` intersected with the configured envelope — the floor
+  as well as the ceiling. `0.1` against an authored `[0.5, 1.5]` resolves to
+  `0.5`. Only an exact `0`/`"off"` is honored below the floor.
+- **The default floor is `0.0`, not `0.5`.** Circuits use
+  `CIRCUIT_INTENSITY_MIN` where clusters use `CLUSTER_INTENSITY_MIN`. A circuit
+  whose document declares no `intensity_range` therefore makes `"min"` and
+  `"off"` the same request — clients that offer a `min` control MUST disclose
+  this rather than implying a non-zero bound.
+
+Members are re-derived from their AUTHORED strengths, so the dial is absolute
+rather than compounding on the circuit's stored intensity. Each member clamps
+to ±200 at apply time, so at a high λ relative proportions can compress.
+A circuit in `slice_fallback` is dialled through its backing cluster profile
+and therefore follows the CLUSTER rules above, including the `0.5` floor.
+
+Responses carry `X-miLLM-Circuit-Rung` in RFC 8941 structured form when — and
+only when — a circuit is genuinely steering that response:
+
+```
+X-miLLM-Circuit-Rung: 2; language="causally validated (edge)"
+```
+
+The header is OMITTED for no active circuit, a slice-fallback serve, an
+unparseable definition, or no SAE attached on any member layer. **Its absence
+never means rung 0**; it means "no circuit-attributable steering here". Clients
+MUST NOT derive evidence language from whether a circuit row is `is_active` —
+`GET /api/circuits/active` carries a `steering: bool|null` field giving the
+server's own verdict, and that (or this header) is the only correct source.
+`null` means the server did not evaluate it (older build), not "not steering".
+
+### 4c. Circuit slice-fallback (v1.1)
 When not all of a circuit's referenced SAEs are attached, activation degrades
 to the per-layer `cluster-definition/v1` slice (a valid v1 cluster document;
 the partial-rendering marker rides in the slice name + `provenance.source_note`).

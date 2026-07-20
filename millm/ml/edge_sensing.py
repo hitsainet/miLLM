@@ -290,8 +290,9 @@ class EdgeSensingRequestContext:
     def __init__(self, request_id: str, circuit_ids: frozenset[str], cap: int):
         self.request_id = request_id
         self.circuit_ids = circuit_ids
-        self.position: int = 0
-        self.phase: str = "prefill"
+        # NOT a shared position counter — see the note where `advance()` used
+        # to live. Position and phase are per-layer, on the SAE. These remain
+        # only as the request's own bookkeeping for `close()`/logging.
         self.budget = EventBudget(cap=cap)
         self._rings: dict[str, EdgeFireRing] = {}
         self._closed = False
@@ -304,33 +305,74 @@ class EdgeSensingRequestContext:
             self._rings[circuit_id] = r
         return r
 
-    def advance(self, layer: int, seq_len: int) -> int:
-        """Advance past ``seq_len`` tokens and report progress. Returns the
-        position the pass STARTED at, or -1 once closed.
+    # `advance()` was DELETED (F17 task 5.2 mutation finding).
+    #
+    # The design called for ONE shared position counter per request, and it is
+    # wrong. Every layer's hook sees the SAME tokens, so with a shared counter
+    # the upstream layer advances to 12 and the downstream layer then senses
+    # those same 12 tokens starting at 12 — the two layers' coordinates
+    # diverge and no cross-layer edge can ever match. Verified by execution:
+    # the characterization gate failed the moment it was wired, with
+    # `ring._fires` holding upstream positions 2..11 against a downstream
+    # layer that had begun at 12.
+    #
+    # Absolute position is shared BY CONSTRUCTION instead — every layer counts
+    # the same tokens from 0, so their coordinates agree without any shared
+    # counter, and F15 R1-03 (an early return skipping one SAE's advance) is
+    # prevented by the single unconditional advance in
+    # `LoadedSAE._advance_edge_position` rather than by centralising the count.
+    #
+    # A dead `advance()` was left here briefly with tests asserting that layer
+    # 13 continues from layer 10's position. Those tests pinned the defect
+    # rather than preventing it, which is the exact anti-pattern BR-005
+    # forbids, so both are gone. What genuinely IS per-request and shared —
+    # the rings, the budget, the pruning boundary — still lives here.
 
-        Called UNCONDITIONALLY at the top of every pass, before any guard.
-        F15's offset advance lived in a ``finally`` below three early returns,
-        so a suppressed, unarmed or batched pass left one SAE behind its
-        siblings — and F15 R3's own fix inherited the same shape, because
-        ``note_layer_progress`` sat below the returns too, meaning a suppressed
-        layer never reported progress and the ring never pruned (FPRD §15.6 /
-        EC-17.1). Here there is no path that reaches sensing without advancing.
+    def report_progress(
+        self, layer: int, through: int,
+        circuit_id: Optional[str] = None, max_lag: int = 1,
+    ) -> None:
+        """Tell every ring how far ``layer`` has walked, so pruning tracks the
+        SLOWEST layer.
+
+        Deliberately NOT part of ``advance``. Position must move before the
+        guards (so no pass is skipped); progress must be reported after the
+        match (so a layer's own advance cannot prune the ring out from under a
+        sibling that has not read it yet). Folding the two together
+        resurrects F15 R1-01 and takes cross-layer sensing dark — the
+        characterization gate caught exactly that, twice: once on LoadedSAE
+        and again here when ``advance`` was first wired in.
+
+        ``through`` is the reporting layer's OWN absolute offset. It is passed
+        in rather than read from ``self.position`` because position is
+        per-layer: every layer's hook walks the same tokens, so a single shared
+        counter would make the layers' coordinates diverge (see
+        ``_advance_edge_position``). Reading ``self.position`` here reported 0
+        forever once that was understood — caught by the gate, not by reading.
+
+        Must be called on EVERY pass, including suppressed and batched ones,
+        or ``_progress`` stays under the ring's len<2 guard and pruning never
+        runs at all (EC-17.1).
         """
         if self._closed:
-            # A late write from a hung generate thread must never land in the
-            # next request's accounting (CTX-L2, EC-17.5).
-            logger.warning(
-                "edge_sensing_write_after_close: request=%s layer=%s",
-                self.request_id, layer,
-            )
-            return -1
-        base = self.position
-        self.position += int(seq_len)
-        if self.phase == "prefill":
-            self.phase = "decode"
+            return
+        if circuit_id is not None:
+            # Report to THIS layer's circuit ring, CREATING it if the request
+            # has not matched anything yet. Rings are lazy, and a suppressed or
+            # quiet pass never matches — so reporting only to already-existing
+            # rings silently dropped the report on exactly the passes EC-17.1
+            # is about. Caught by the gate: `_progress` stayed {} while the
+            # layer had walked 3 tokens.
+            try:
+                self.ring(circuit_id, max_lag).note_layer_progress(layer, through)
+            except Exception:
+                logger.exception("edge_ring_progress_failed")
+            return
         for ring in self._rings.values():
-            ring.note_layer_progress(layer, self.position)
-        return base
+            try:
+                ring.note_layer_progress(layer, through)
+            except Exception:
+                logger.exception("edge_ring_progress_failed")
 
     def close(self) -> None:
         """Release the boundary. Idempotent."""
@@ -344,51 +386,14 @@ class EdgeSensingRequestContext:
         return self._closed
 
 
-def match_edges(
-    ctx: EdgeSensingRequestContext,
-    circuit_id: str,
-    config: Any,
-    base: int,
-    seq_len: int,
-    acts_cpu: Any,
-    fired_cpu: Any,
-    out: list[SensedEdge],
-    *,
-    shed: bool,
-    capped: bool,
-    positions_per_col_when_shed: int = _EDGE_SHED_POSITIONS_PER_COL,
-) -> None:
-    """Record upstream fires and match downstream ones, in position order.
-
-    Ordering is load-bearing: within one prefill pass an upstream fire at p must
-    be visible to a downstream fire at p+1, so events are sorted with upstream
-    first at equal positions — which also keeps a same-position co-fire from
-    matching, since ``match_down`` requires strictly before.
-
-    ``shed`` and ``capped`` are REQUIRED keywords, deliberately. They used to
-    default to False, which meant a caller that forgot them got a silently
-    unshedded, uncapped matcher — no exception, no log, just the 1430ms
-    in-hook regression R1 fixed, quietly restored. This module's failures have
-    consistently been failures by omission, so omission is now a TypeError.
-
-    Note this function is the MATCHING half only. Load-shedding accounting
-    (total fires, the saturation warning, the shed truncation flag) belongs to
-    the caller, which owns the counters those feed.
-    """
-    _match_edges_impl(
-        ring=ctx.ring(circuit_id, config.max_token_lag),
-        config=config,
-        phase=ctx.phase,
-        base=base,
-        acts_cpu=acts_cpu,
-        fired_cpu=fired_cpu,
-        out=out,
-        n_cols=fired_cpu.shape[-1] if fired_cpu.dim() > 1 else 0,
-        shed=shed,
-        capped=capped,
-        positions_per_col_when_shed=positions_per_col_when_shed,
-        try_spend=lambda spec: ctx.budget.try_spend(circuit_id, spec.down_layer),
-    )
+# The context-entry wrapper `match_edges(ctx, circuit_id, ...)` was DELETED.
+#
+# It existed to drive matching from the request context, reading `ctx.phase`
+# and spending a per-circuit budget. With position and phase established as
+# per-LAYER (see where `advance()` used to live), it had no caller in
+# production or in tests — a second entry point to the same loop, kept alive
+# only by having been written. `_match_edges_impl` below is the one matcher;
+# `LoadedSAE._match_edges` is its one caller.
 
 
 def _match_edges_impl(

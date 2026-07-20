@@ -1040,6 +1040,21 @@ class LoadedSAE:
         returns plus a `finally`) is what produced F15 R1-03 and then survived
         one level down into R3's own fix.
         """
+        # PER-LAYER, deliberately — not ctx.advance().
+        #
+        # Wiring this to a single shared ctx.position looked like the obvious
+        # completion of the context design, and it is wrong. Every layer's
+        # hook sees the SAME tokens: with one counter the upstream layer
+        # advances it to 12, then the downstream layer senses those same 12
+        # tokens starting at 12, so the two layers' coordinates diverge and no
+        # cross-layer edge can ever match. Verified by execution — the gate
+        # caught it, and `ring._fires` showed upstream positions 2..11 against
+        # a downstream layer that began at 12.
+        #
+        # Absolute position is shared BY CONSTRUCTION instead: every layer
+        # counts the same tokens from 0, so their coordinates agree without a
+        # shared counter. What genuinely is per-request-and-shared — the rings,
+        # the budget, the pruning boundary — lives on the context.
         base = self._edge_token_offset
         self._edge_token_offset += seq
         if self._edge_phase == "prefill":
@@ -1058,10 +1073,22 @@ class LoadedSAE:
         Position must advance before the guards; progress must be reported
         after the work.
         """
-        if self._edge_ring is not None and self._edge_sensing is not None:
+        cfg = self._edge_sensing
+        if cfg is None:
+            return
+        ctx = self._edge_ctx
+        if ctx is not None:
+            # The context reports to every ring it owns, so a circuit with
+            # more than one ring cannot have one of them silently unpruned.
+            ctx.report_progress(
+                cfg.layer, self._edge_token_offset,
+                circuit_id=cfg.circuit_id, max_lag=cfg.max_token_lag,
+            )
+            return
+        if self._edge_ring is not None:
             try:
                 self._edge_ring.note_layer_progress(
-                    self._edge_sensing.layer, self._edge_token_offset
+                    cfg.layer, self._edge_token_offset
                 )
             except Exception:
                 logger.exception("edge_ring_progress_failed")

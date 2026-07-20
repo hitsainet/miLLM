@@ -613,8 +613,10 @@ class TestTheRequestBoundaryIsActuallyReleased:
         ctx = svc._ctx
         svc.close_request()
         assert ctx.is_closed is True, "close_request left the context OPEN"
-        # A late write is refused rather than silently accounted.
-        assert ctx.advance(10, 5) == -1
+        # A late write from a hung generate thread is refused rather than
+        # silently landing in the next request's accounting (CTX-L2).
+        ctx.report_progress(10, 500, circuit_id="circ_1", max_lag=8)
+        assert ctx._rings == {}, "a post-close write rebuilt a ring"
 
     def test_close_request_unbinds_every_sae(self):
         """Closing without unbinding leaves each SAE holding a closed context.

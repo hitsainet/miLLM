@@ -20,48 +20,88 @@ def ctx(cap=20, circuits=("c1",)):
     return EdgeSensingRequestContext("req-1", frozenset(circuits), cap=cap)
 
 
-class TestPositionOwnership:
-    def test_advance_returns_the_base_and_moves_the_position(self):
-        c = ctx()
-        assert c.advance(10, 5) == 0
-        assert c.position == 5
-        assert c.advance(10, 3) == 5
-        assert c.position == 8
+class TestPositionIsPerLayerNotShared:
+    """The context deliberately owns NO position counter.
 
-    def test_phase_flips_to_decode_exactly_once(self):
-        c = ctx()
-        assert c.phase == "prefill"
-        c.advance(10, 4)
-        assert c.phase == "decode"
-        c.advance(10, 1)
-        assert c.phase == "decode"
+    The original design gave it one, shared by every layer, and that is wrong:
+    every layer's hook sees the SAME tokens, so a shared counter makes the
+    upstream layer advance to 12 and the downstream layer then sense those same
+    12 tokens starting at 12. Their coordinates diverge and no cross-layer edge
+    can match. Found by wiring it and watching the characterization gate fail.
 
-    def test_every_participating_layer_shares_ONE_counter(self):
-        """The defect this replaces: two SAEs advancing independently meant the
-        shared ring's absolute-position key silently diverged (F15 R1-03)."""
+    The tests that used to live here asserted `advance(13, 4) == 4` — layer 13
+    continuing from layer 10's count. They pinned the defect instead of
+    preventing it (BR-005), so they are gone along with `advance()` itself."""
+
+    def test_the_context_owns_no_position_counter(self):
         c = ctx()
-        c.advance(10, 4)
-        base_for_layer_13 = c.advance(13, 4)
-        assert base_for_layer_13 == 4, (
-            "layer 13 started from its own counter instead of the request's"
+        assert not hasattr(c, "advance"), (
+            "a shared position counter is back; it breaks cross-layer matching"
         )
+        assert not hasattr(c, "position")
+
+    def test_two_layers_reading_the_same_tokens_agree_on_coordinates(self):
+        """The property the deleted counter was trying to provide, which holds
+        BY CONSTRUCTION: each layer counts the same tokens from 0, so an
+        upstream fire at absolute position 2 is at position 2 for every layer
+        without anything being centralised."""
+        c = ctx()
+        ring = c.ring("c1", 8)
+        # Layer 10 records an upstream fire at absolute position 2.
+        ring.record_up("e", 2, 1.0)
+        # Layer 13 walks the SAME tokens and matches at position 4 — BEFORE
+        # either layer reports progress, which is the production order
+        # (progress is reported after the match, never before; reporting first
+        # is what prunes the ring out from under a sibling).
+        assert ring.match_down("e", 4) == (2, 1.0), (
+            "the layers disagree about where token 2 is"
+        )
+        c.report_progress(10, 12, circuit_id="c1", max_lag=8)
+        c.report_progress(13, 12, circuit_id="c1", max_lag=8)
 
 
 class TestSuppressedPassesStillReportProgress:
-    def test_progress_is_reported_on_every_advance(self):
-        """FPRD §15.6 / EC-17.1: F15 R3's own fix put note_layer_progress in a
-        `finally` BELOW three early returns, so a suppressed layer never
-        reported progress, `_progress` stayed under the len<2 guard, and the
-        ring never pruned. `advance` is now called before any guard."""
+    def test_progress_is_reported_even_before_any_ring_exists(self):
+        """FPRD §15.6 / EC-17.1. Rings are created lazily on first MATCH, and a
+        suppressed or quiet pass never matches — so reporting only to
+        already-existing rings dropped the report on exactly the passes this
+        rule is about. `_progress` stayed {} while the layer had walked 3
+        tokens; the ring's len<2 guard then meant it never pruned at all."""
+        c = ctx()
+        assert not c._rings, "precondition: no ring has been created yet"
+        c.report_progress(10, 3, circuit_id="c1", max_lag=4)
+        assert c.ring("c1", 4)._progress.get(10) == 3
+
+    def test_progress_prunes_to_the_SLOWEST_layer(self):
         c = ctx()
         ring = c.ring("c1", 4)
         ring.record_up("e", 0, 1.0)
-
-        # Two layers walk well past the fire; both advances report progress.
-        c.advance(10, 100)
-        c.advance(13, 0)   # a suppressed pass still advances (seq_len 0)
-        # The slowest layer is now at 100, so pos 0 is far out of window.
+        c.report_progress(10, 100, circuit_id="c1", max_lag=4)
+        c.report_progress(13, 100, circuit_id="c1", max_lag=4)
         assert ring.match_down("e", 101) is None
+
+    def test_a_lagging_layer_holds_the_boundary_back(self):
+        """The whole point of tracking per-layer progress: a fire the slow
+        layer still needs must not be pruned by the fast one."""
+        c = ctx()
+        ring = c.ring("c1", 4)
+        ring.record_up("e", 38, 1.0)
+        c.report_progress(10, 5000, circuit_id="c1", max_lag=4)
+        c.report_progress(13, 40, circuit_id="c1", max_lag=4)
+        assert ring.match_down("e", 41) == (38, 1.0), (
+            "pruned past a fire the lagging layer still needed"
+        )
+
+    def test_progress_after_close_is_a_no_op(self):
+        """CTX-L2 / EC-17.5: a hung generate thread waking up later must never
+        land in the next request's accounting. `advance` used to carry this
+        guarantee; with it gone, `report_progress` is the write path that
+        needs it."""
+        c = ctx()
+        ring = c.ring("c1", 4)
+        c.close()
+        c.report_progress(10, 500, circuit_id="c1", max_lag=4)
+        assert ring._progress == {}, "a post-close write landed"
 
 
 class TestRingIsolationPerCircuit:
@@ -125,13 +165,14 @@ class TestCloseAndWriteAfterClose:
         c.close()
         assert c.is_closed is True
 
-    def test_advance_after_close_returns_minus_one(self):
-        """CTX-L2 / EC-17.5: a hung generate thread waking up later must never
-        land in the NEXT request's accounting."""
+    def test_a_closed_context_creates_no_new_rings(self):
+        """CTX-L2 / EC-17.5. `close()` drops the rings; a late write must not
+        resurrect one, or the next request inherits a live object from the
+        previous one."""
         c = ctx()
         c.close()
-        assert c.advance(10, 5) == -1
-        assert c.position == 0, "a post-close write moved the position"
+        c.report_progress(10, 5, circuit_id="c1", max_lag=4)
+        assert c._rings == {}, "a post-close write rebuilt a ring"
 
     def test_close_releases_the_rings(self):
         c = ctx()
@@ -139,3 +180,104 @@ class TestCloseAndWriteAfterClose:
         ring.record_up("e", 1, 1.0)
         c.close()
         assert ring.match_down("e", 2) is None
+
+
+class TestStrictlyBeforeIsEnforcedByEachGuardIndEPENDENTLY:
+    """F17 task 5.2. Mutating `bisect_left`→`bisect_right`, or the `-inf`
+    sentinel, or `pos < down_pos` each left the whole suite GREEN — three
+    mutations, three survivors on the invariant that matters most.
+
+    None is a test gap in the ordinary sense. Mapping every combination shows
+    the real structure — only the SENTINEL and the COMPARISON are load-bearing,
+    and each alone is sufficient:
+
+        sentinel + bisect broken   -> None          (comparison holds)
+        bisect   + comparison      -> None          (sentinel holds)
+        sentinel + comparison      -> (5, 1.0)      *** invariant broken ***
+        all three                  -> (5, 1.0)
+
+    `bisect_left` vs `bisect_right` is behaviourally INERT: the `-inf` sentinel
+    makes both land at the same index. It is a performance choice (F15 R3's
+    O(n)→O(log n) fix), not a correctness guard, and no behavioural test can
+    pin it — the benchmark in test_edge_sensing_baseline.py is what protects it.
+
+    So the two guards are mutually redundant by design, and no single-line
+    mutation of them is observable. Rather than leave that as an unexplained
+    pair of survivors, the pair mutation is tested directly below, and the
+    boundary behaviour is pinned so the invariant is checked from the outside
+    regardless of which mechanism enforces it."""
+
+    def test_a_fire_at_exactly_down_pos_never_matches(self):
+        """Same-position firing is co-activation, not an up→down sequence.
+        Reporting it as one overclaims direction on an evidence surface."""
+        c = ctx()
+        ring = c.ring("c1", 8)
+        ring.record_up("e", 5, 1.0)
+        assert ring.match_down("e", 5) is None
+
+    def test_a_fire_one_position_before_DOES_match(self):
+        """The other side of the boundary: strictly-before must not be
+        strengthened into something that drops legitimate adjacent fires."""
+        c = ctx()
+        ring = c.ring("c1", 8)
+        ring.record_up("e", 5, 1.0)
+        assert ring.match_down("e", 6) == (5, 1.0)
+
+    def test_the_newest_STRICTLY_EARLIER_fire_wins_over_a_same_position_one(self):
+        """The case that needs all three guards agreeing: a same-position fire
+        sits at the bisect boundary next to a legitimate earlier one. The
+        earlier fire must be returned, not the co-fire and not None."""
+        c = ctx()
+        ring = c.ring("c1", 8)
+        ring.record_up("e", 3, 1.0)
+        ring.record_up("e", 7, 2.0)
+        assert ring.match_down("e", 7) == (3, 1.0), (
+            "matched the same-position fire, or missed the real antecedent"
+        )
+
+    def test_several_fires_at_the_same_position_are_all_rejected(self):
+        """Ties at the boundary are where bisect_left and bisect_right differ
+        most. Every one of them is a co-fire and none may match."""
+        c = ctx()
+        ring = c.ring("c1", 8)
+        for act in (1.0, 2.0, 3.0):
+            ring.record_up("e", 4, act)
+        assert ring.match_down("e", 4) is None
+        # ...but an earlier fire behind the tie is still reachable.
+        ring.record_up("e", 2, 9.0)
+        ring._fires["e"].sort()
+        assert ring.match_down("e", 4) == (2, 9.0)
+
+    def test_the_invariant_survives_losing_EITHER_guard_alone(self):
+        """The negative control for the two survivors, run in-process.
+
+        Rebuilds `match_down`'s logic with each guard individually disabled and
+        asserts the same-position fire is still rejected — which is what makes
+        the surviving mutations safe rather than merely unobserved. With BOTH
+        disabled the co-fire matches, so the redundancy is real and neither
+        guard is decorative."""
+        import bisect as _bisect
+
+        fires = [(5, 1.0)]
+        down_pos = 5
+        max_lag = 8
+
+        def match(sentinel_ok: bool, compare_ok: bool):
+            key = (down_pos, float("-inf") if sentinel_ok else float("inf"))
+            i = _bisect.bisect_left(fires, key) - 1
+            while i >= 0:
+                pos, act = fires[i]
+                if (down_pos - pos) > max_lag:
+                    break
+                if (pos < down_pos) if compare_ok else (pos <= down_pos):
+                    return (pos, act)
+                i -= 1
+            return None
+
+        assert match(True, True) is None, "the shipped configuration"
+        assert match(True, False) is None, "sentinel alone must hold"
+        assert match(False, True) is None, "comparison alone must hold"
+        assert match(False, False) == (5, 1.0), (
+            "with both guards disabled a same-position co-fire must match — "
+            "if it does not, this control proves nothing"
+        )

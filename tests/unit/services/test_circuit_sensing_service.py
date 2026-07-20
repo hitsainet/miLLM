@@ -2276,3 +2276,101 @@ class TestR3TruncationCountsPerRequestNotPerDrain:
             svc.collect_edges(saes)
             svc.close_request()
         assert svc.status(saes)["requests_truncated"] == 2
+
+
+class TestR3StaleCountersFromAMissedBeginAreNotRecounted:
+    """F17 R3-11/12. Both per-SAE accumulators had the same defect, one line
+    apart: a layer ABSENT from `begin_request` never runs
+    `_reset_edge_buffer`, so its value from an earlier request was summed into
+    this one. Overhead inflated the number driving
+    `circuit_sensing_overhead_high`; member-fires inflated an operator-facing
+    activity counter.
+
+    R1 fixed the overhead case by zeroing AFTER summing — which still counts
+    the stale value once, producing exactly the number the comment says it
+    prevents. Only layers that actually BEGAN this request contribute now."""
+
+    def _armed(self):
+        svc = CircuitSensingService()
+        saes = two_saes()
+        svc.arm_for_circuit(circuit(), definition(), saes)
+        return svc, saes
+
+    def test_stale_overhead_is_not_recounted(self):
+        svc, saes = self._armed()
+        svc.begin_request("r1", saes)
+        saes[10]._edge_overhead_ms = 8.0
+        svc.collect_edges(saes)
+        svc.close_request()
+
+        saes[10]._edge_overhead_ms = 8.0        # stale, never cleared
+        svc.begin_request("r2", {13: saes[13]})  # layer 10 misses begin
+        svc.collect_edges(saes)
+        assert svc.status(saes)["last_request_overhead_ms"] == 0.0
+
+    def test_stale_member_fires_are_not_recounted(self):
+        svc, saes = self._armed()
+        svc.begin_request("r1", saes)
+        saes[10]._edge_member_fires = 42
+        svc.collect_edges(saes)
+        assert svc._last_request_member_fires == 42
+        svc.close_request()
+
+        saes[10]._edge_member_fires = 42         # stale
+        svc.begin_request("r2", {13: saes[13]})
+        svc.collect_edges(saes)
+        assert svc._last_request_member_fires == 0, (
+            "request 1's fire count was reported again under request 2"
+        )
+
+    def test_a_layer_that_DID_begin_still_contributes(self):
+        """The gate must not swing the other way and drop real measurements."""
+        svc, saes = self._armed()
+        svc.begin_request("r1", saes)
+        saes[10]._edge_overhead_ms = 3.0
+        saes[13]._edge_member_fires = 7
+        svc.collect_edges(saes)
+        assert svc.status(saes)["last_request_overhead_ms"] == 3.0
+        assert svc._last_request_member_fires == 7
+
+
+class TestR3TheBudgetIsAnActualTruncationSource:
+    """F17 R3-13. `EventBudget.truncated_layers()` had ZERO production readers.
+    R1-07 and R2-03 both did real work keeping the per-SAE flag and the budget
+    in agreement about which layers lost data — and the budget's answer was
+    never consulted by anything.
+
+    A source of truth nobody reads is not a source of truth. It is the
+    declared-but-unwired pattern this arc has now produced five times, and F19
+    makes the budget the per-circuit authority."""
+
+    def _armed(self):
+        svc = CircuitSensingService()
+        saes = two_saes()
+        svc.arm_for_circuit(circuit(), definition(), saes)
+        return svc, saes
+
+    def test_a_truncation_only_the_BUDGET_knows_reaches_the_operator(self):
+        svc, saes = self._armed()
+        svc.begin_request("r", saes)
+        svc._ctx.budget.note_truncated("circ_1", 13)   # no per-SAE flag set
+        svc.collect_edges(saes)
+        assert 13 in svc.last_request_truncated_layers, (
+            "the budget recorded a loss and the status never mentioned it"
+        )
+
+    def test_all_three_sources_are_unioned(self):
+        """Shed, budget-refused and dark are three distinct ways a layer's view
+        can be incomplete; the operator's question is the same for all."""
+        svc, saes = self._armed()
+        svc.begin_request("r", {10: saes[10]})     # layer 13 dark
+        saes[10]._edge_truncated = True            # layer 10 shed
+        svc._ctx.budget.note_truncated("circ_1", 10)
+        svc.collect_edges(saes)
+        assert svc.last_request_truncated_layers == [10, 13]
+
+    def test_a_clean_request_still_claims_completeness(self):
+        svc, saes = self._armed()
+        svc.begin_request("r", saes)
+        svc.collect_edges(saes)
+        assert svc.last_request_truncated_layers == []

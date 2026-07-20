@@ -823,7 +823,15 @@ class CircuitSensingService:
             sae._edge_overhead_ms = 0.0
             if id(sae) in begun:
                 overhead += layer_overhead
-            member_fires += int(getattr(sae, "_edge_member_fires", 0) or 0)
+            # R3-12: the identical missed-begin bug as the overhead above,
+            # one line down. A layer absent from begin never runs
+            # `_reset_edge_buffer`, so its stale fire count was re-counted
+            # against this request — measured: 42 fires from request 1 reported
+            # again under request 2. Only layers that BEGAN contribute.
+            layer_fires = int(getattr(sae, "_edge_member_fires", 0) or 0)
+            sae._edge_member_fires = 0
+            if id(sae) in begun:
+                member_fires += layer_fires
         self._last_request_overhead_ms = overhead
         self._last_request_member_fires = member_fires
         if overhead > settings.CIRCUIT_SENSING_MAX_OVERHEAD_MS:
@@ -844,8 +852,30 @@ class CircuitSensingService:
         # same operator-facing reason as one that shed: its view is partial.
         # Merging them here keeps `truncated_layers` a single honest answer to
         # "which layers should I not trust for this request".
+        # R3-13: the CIRCUIT budget is read here too. `EventBudget.
+        # truncated_layers()` had ZERO production readers — R1-07 and R2-03
+        # both did real work keeping the two truncation sources in agreement,
+        # and one of them was never consulted. A source of truth nobody reads
+        # is not a source of truth; it is the declared-but-unwired pattern this
+        # arc has produced five times.
+        #
+        # Union of all three: layers that shed (per-SAE flag), layers the
+        # shared budget refused, and layers that were dark. Each is a distinct
+        # way a layer's view can be incomplete, and the operator's question is
+        # the same for all of them — "which layers should I not trust".
+        budget_truncated: set[int] = set()
+        ctx = self._ctx
+        if ctx is not None and self._request_circuit_id:
+            try:
+                budget_truncated = set(
+                    ctx.budget.truncated_layers(self._request_circuit_id)
+                )
+            except Exception:
+                logger.exception("circuit_sensing_budget_truncation_read_failed")
         self._last_request_truncated_layers = sorted(
-            set(truncated_layers) | set(self._request_dark_layers)
+            set(truncated_layers)
+            | set(self._request_dark_layers)
+            | budget_truncated
         )
         # R3-07: count once per REQUEST, not once per drain. `collect_edges`
         # can run more than once for one boundary (a retry, a second flush),

@@ -152,6 +152,17 @@ class TestCopyAudit:
                     hits.append((rel, i, line.strip()))
         return hits
 
+    #: Comment prefixes stripped before auditing. A marker in a COMMENT must not
+    #: exempt a claim in the code — that is how an allow-list quietly stops
+    #: guarding (R3 finding: `const m = "...causally validated"; // rung_language`
+    #: previously passed).
+    _COMMENT = re.compile(r"(//.*$)|(#.*$)|(/\*.*?\*/)")
+
+    @staticmethod
+    def _code_only(line: str) -> str:
+        """The line with trailing comments removed."""
+        return TestCopyAudit._COMMENT.sub("", line)
+
     def test_no_handwritten_causal_language_on_runtime_surfaces(self):
         """No runtime/UI file may hand-write 'causal' — it must come from
         RUNG_LANGUAGE (which only yields it at rung>=2)."""
@@ -160,7 +171,12 @@ class TestCopyAudit:
         )
         offenders = []
         for rel, line_no, line in hits:
-            lowered = line.lower()
+            # Audit the CODE, not the comments: a marker in a trailing comment
+            # must never exempt a claim made in a string literal.
+            code = self._code_only(line)
+            if not re.search(r"\bcausal", code, re.IGNORECASE):
+                continue  # the only occurrence was in a comment — prose, not copy
+            lowered = code.lower()
             # Permitted: prose that states the prohibition/contract, or a
             # reference to the ladder constant//vocabulary function.
             if any(

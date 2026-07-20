@@ -93,8 +93,14 @@ class Circuit(Base):
 
         Below this, the runtime must never describe the circuit as "causal"
         and activation requires an explicit unvalidated acknowledgement.
+
+        Delegates to the evidence ladder rather than hardcoding the threshold —
+        two implementations of the same gate WILL drift, and this one is the
+        feature's central honesty invariant.
         """
-        return self.rung >= 2
+        from millm.core.circuit_evidence import is_validated
+
+        return is_validated(self.rung)
 
     def __repr__(self) -> str:  # pragma: no cover - debug helper
         return (

@@ -601,3 +601,80 @@ class TestR2Fixes:
         await service.activate(circuit.id)
         refreshed = await service.repository.get(circuit.id)
         assert refreshed.provenance["slice_profile_id"] == "prof_slice"
+
+
+class TestR3Fixes:
+    """Review round 3 — the R2 fail-closed check was itself defeated, and the
+    single-active invariant only held in one direction."""
+
+    async def test_slice_import_that_imported_but_failed_to_activate(self, service):
+        """ClusterService keeps status='imported' when ACTIVATION raised,
+        recording the failure only as a warning — so checking status alone let
+        the circuit claim to serve while the model ran unsteered."""
+        attach("sae-10", 10)
+        service._cluster_service.import_definition = AsyncMock(
+            return_value=_slice_import_ok(status="imported", profile_id="p1")
+        )
+        # Simulate the real cluster behaviour: imported, but activation failed.
+        service._cluster_service.import_definition.return_value.warnings = [
+            "Imported but activation failed: SAE feature space mismatch"
+        ]
+        circuit = await service.import_definition(make_doc())
+        with pytest.raises(SAESetIncompleteError) as ei:
+            await service.activate(circuit.id)
+        assert "slice_activation_failed" in str(ei.value.offenders)
+        refreshed = await service.repository.get(circuit.id)
+        assert refreshed.is_active is False
+
+    def test_member_cap_counts_distinct_features_like_the_projection(self, service):
+        """The cap must measure exactly what the projection emits: an overlap
+        between a cluster_ref expansion and the member's own feature is ONE
+        served member, not two."""
+        overlapping = make_doc(
+            saes=[{"layer": 10, "n_features": 8192, "mistudio_sae_id": "sae-10"}],
+            members=[
+                {
+                    "layer": 10,
+                    "member_kind": "cluster_ref",
+                    "expanded_members": [
+                        {"feature_idx": i, "strength": 1.0} for i in range(20)
+                    ],
+                    # Overlaps the expansion → still 20 DISTINCT features.
+                    "feature": {"feature_idx": 0, "strength": 5.0},
+                }
+            ],
+            edges=[],
+        )
+        definition = CircuitDefinitionV1.model_validate(overlapping)  # must not raise
+        assert len(service.to_layer_slice(definition, 10)["members"]) == 20
+
+    def test_member_cap_still_rejects_21_distinct_features(self, service):
+        from pydantic import ValidationError as PydanticValidationError
+
+        too_many = make_doc(
+            saes=[{"layer": 10, "n_features": 8192}],
+            members=[
+                {"layer": 10, "feature": {"feature_idx": i, "strength": 1.0}}
+                for i in range(21)
+            ],
+            edges=[],
+        )
+        with pytest.raises(PydanticValidationError):
+            CircuitDefinitionV1.model_validate(too_many)
+
+    def test_empty_budget_object_still_carries_the_dial(self, service):
+        """A present-but-empty budget must not skip the λ fallback."""
+        doc = make_doc(budget={"layers": {}, "intensity": 1.75})
+        definition = CircuitDefinitionV1.model_validate(doc)
+        sl = service.to_layer_slice(definition, 10, fallback_intensity=0.5)
+        assert sl["budget"]["intensity"] == 1.75  # the document's λ wins
+
+    @pytest.mark.parametrize("rung", [0, 1, 2, 3])
+    def test_model_validated_property_delegates_to_the_ladder(self, rung):
+        """Two implementations of the rung gate WILL drift — the property must
+        delegate to the single ladder source."""
+        from millm.core.circuit_evidence import is_validated
+        from millm.db.models.circuit import Circuit
+
+        c = Circuit(id="c", name="n", circuit_meta={}, layers=[], rung=rung)
+        assert c.validated is is_validated(rung)

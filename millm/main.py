@@ -129,44 +129,52 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         from millm.db.base import async_session_factory
         from sqlalchemy import text
 
-        async with async_session_factory() as session:
-            # Reset models that were marked as loaded or loading
-            # (in-memory state is lost on restart, so these are stale)
-            result = await session.execute(
-                text("UPDATE models SET status = 'ready', loaded_at = NULL WHERE status IN ('loaded', 'loading')")
-            )
-            if result.rowcount > 0:
-                logger.info("reset_stale_model_status", count=result.rowcount)
-
-            # Reset SAEs that were marked as attached (back to cached)
-            result = await session.execute(
-                text("UPDATE saes SET status = 'cached' WHERE status = 'attached'")
-            )
-            if result.rowcount > 0:
-                logger.info("reset_stale_sae_status", count=result.rowcount)
-
-            # Deactivate any active attachment records
-            result = await session.execute(
-                text("UPDATE sae_attachments SET is_active = false, detached_at = NOW() WHERE is_active = true")
-            )
-            if result.rowcount > 0:
-                logger.info("deactivated_stale_attachments", count=result.rowcount)
-
-            # Deactivate stale circuits (Feature 13). In-memory steering is lost
-            # on restart, so an is_active row would claim live influence that
-            # does not exist — and, because the evidence gate is checked at
-            # ACTIVATION, dialling intensity on that stale row would re-arm an
-            # unvalidated (rung<2) circuit without a fresh acknowledgement.
-            result = await session.execute(
-                text(
-                    "UPDATE circuits SET is_active = false, serving_mode = NULL "
-                    "WHERE is_active = true"
+        # Each reset gets its OWN transaction. Sharing one would mean a single
+        # failing statement (e.g. a table from a migration that has not run on
+        # this deployment yet) aborts the transaction and rolls back the resets
+        # that DID succeed — silently leaving exactly the stale state this block
+        # exists to clear.
+        resets: list[tuple[str, str, str]] = [
+            (
+                "reset_stale_model_status",
+                "UPDATE models SET status = 'ready', loaded_at = NULL "
+                "WHERE status IN ('loaded', 'loading')",
+                "models",
+            ),
+            (
+                "reset_stale_sae_status",
+                "UPDATE saes SET status = 'cached' WHERE status = 'attached'",
+                "saes",
+            ),
+            (
+                "deactivated_stale_attachments",
+                "UPDATE sae_attachments SET is_active = false, detached_at = NOW() "
+                "WHERE is_active = true",
+                "sae_attachments",
+            ),
+            (
+                # Feature 13: in-memory steering is lost on restart, so an
+                # is_active circuit row would claim live influence that does not
+                # exist — and because the evidence gate is checked at ACTIVATION,
+                # dialling that stale row would re-arm an unvalidated (rung<2)
+                # circuit without a fresh acknowledgement.
+                "deactivated_stale_circuits",
+                "UPDATE circuits SET is_active = false, serving_mode = NULL "
+                "WHERE is_active = true",
+                "circuits",
+            ),
+        ]
+        for event, sql, table in resets:
+            try:
+                async with async_session_factory() as session:
+                    result = await session.execute(text(sql))
+                    await session.commit()
+                    if result.rowcount > 0:
+                        logger.info(event, count=result.rowcount)
+            except Exception as e:
+                logger.warning(
+                    "stale_reset_failed", table=table, error=str(e)
                 )
-            )
-            if result.rowcount > 0:
-                logger.info("deactivated_stale_circuits", count=result.rowcount)
-
-            await session.commit()
     except Exception as e:
         logger.warning("failed_to_reset_stale_status", error=str(e))
 

@@ -487,15 +487,27 @@ class CircuitService:
         # the cluster path itself fixed in its own review. Fail closed.
         status = getattr(item, "status", None)
         profile_id = getattr(item, "profile_id", None)
-        if status != "imported" or not profile_id:
+        item_warnings = list(getattr(item, "warnings", []) or [])
+        # A successful IMPORT is not a successful ACTIVATION: ClusterService
+        # keeps status='imported' when activation itself raised, recording the
+        # failure only as a warning. Checking the status alone would let the
+        # circuit claim to serve while the model runs unsteered.
+        activation_failed = any(
+            "activation failed" in w.lower() or "activation requested but skipped" in w.lower()
+            for w in item_warnings
+        )
+        if status != "imported" or not profile_id or activation_failed:
             raise SAESetIncompleteError(
                 [
                     {
                         "layer": layer,
                         "sae_id": None,
-                        "reason": f"slice_import_{status or 'failed'}",
-                        "detail": getattr(item, "error", None)
-                        or "; ".join(getattr(item, "warnings", []) or []),
+                        "reason": (
+                            "slice_activation_failed"
+                            if activation_failed
+                            else f"slice_import_{status or 'failed'}"
+                        ),
+                        "detail": getattr(item, "error", None) or "; ".join(item_warnings),
                     }
                 ]
             )
@@ -556,7 +568,7 @@ class CircuitService:
         # silently serve the slice at the cluster default (λ=1.0) instead of the
         # authored λ.
         budget = None
-        if definition.budget:
+        if definition.budget is not None:
             per_layer = definition.budget.layers.get(str(layer))
             budget = per_layer.model_dump(mode="json") if per_layer else {}
             budget["intensity"] = definition.budget.intensity

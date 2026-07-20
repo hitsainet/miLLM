@@ -176,15 +176,22 @@ class CircuitDefinitionV1(BaseModel):
         apply globally — but an unbounded per-layer member list is the same
         hostile-payload risk the cluster cap exists to stop.
         """
-        counts: dict[int, int] = {}
+        # Count the DISTINCT features the projection/serving flatten produces
+        # (expansion AND the member's own feature, deduped by feature_idx).
+        # Counting pre-dedupe rejected contract-valid circuits whose cluster_ref
+        # expansion overlapped its own feature; counting only one source let an
+        # over-cap slice through. Measure exactly what the projection emits.
+        per_layer: dict[int, set[int]] = {}
         for m in v:
-            # Count the SAME sources the projection/serving flatten collects
-            # (expansion AND the member's own feature) — under-counting here
-            # let a contract-valid circuit project to an over-cap cluster slice.
-            n = len(m.expanded_members or [])
+            seen = per_layer.setdefault(m.layer, set())
+            for feat in list(m.expanded_members or []):
+                seen.add(feat.feature_idx)
             if m.feature is not None:
-                n += 1
-            counts[m.layer] = counts.get(m.layer, 0) + max(n, 1)
+                seen.add(m.feature.feature_idx)
+            if not (m.expanded_members or m.feature is not None):
+                # A member carrying no feature at all still occupies a slot.
+                seen.add(-(len(seen) + 1))
+        counts = {layer: len(idxs) for layer, idxs in per_layer.items()}
         for layer, n in counts.items():
             if n > MAX_MEMBERS_PER_LAYER:
                 raise ValueError(

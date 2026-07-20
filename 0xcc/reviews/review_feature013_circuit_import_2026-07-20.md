@@ -141,4 +141,71 @@ introduced one CRITICAL bug and left two protections weaker than claimed.
 +6 regression tests (unbound/errored slice not reported as serving, re-arm ack,
 slice teardown, persisted slice id). **Backend 1361 passed / 1 skipped.**
 
-## Round 3 — pending.
+## Round 3 (2026-07-20) — /review 4 perspectives (product+architect / QA+test)
+
+**29 findings.** Three were EMPIRICALLY REPRODUCED by the reviewer against live
+Postgres rather than argued from semantics — and all three were invisible to a
+fully green suite.
+
+### Confirmed & FIXED in R3
+1. **[CRIT] My own R2 startup fix caused a regression.** All four stale-state
+   UPDATEs shared ONE transaction with a single commit, so a missing `circuits`
+   table (migration 011 not yet run on a deployment) aborted the transaction and
+   **rolled back the model/SAE resets that previously worked** — swallowed as a
+   warning, leaving models stuck `loaded` and SAEs `attached`. Reviewer verified
+   against live Postgres (`FINAL STATUS AFTER FAILURE: loaded`). → each reset now
+   owns its transaction and its own guard. Pinned by `tests/unit/test_startup_reset.py`.
+2. **[CRIT] My R2 fail-closed check was itself defeated.** `ClusterService` sets
+   `status="imported"` even when *activation* raised (recording the failure only as
+   a warning) — so the status check passed and the circuit again claimed to serve
+   while the model ran unsteered. → also treat an activation-failure warning as a
+   failure; reason `slice_activation_failed`.
+3. **[HIGH] The copy-audit could be disarmed by a comment.** Allow-list markers
+   matched anywhere on the line, so `const m = "...causally validated"; // rung_language`
+   passed. → comments are stripped before auditing; a marker in a comment can no
+   longer exempt a claim in code. **Negative control re-run: the comment-disarmed
+   overclaim is now caught.**
+4. **[HIGH] Single-active invariant held in ONE direction only** — a circuit released
+   an active cluster, but activating a cluster/profile never released an active
+   circuit, so the circuit row kept reporting `is_active` + `serving_mode` while a
+   profile had taken its layers. → symmetric release at `ProfileService.activate_profile`
+   (the choke point every activation path shares), with a user-visible warning.
+5. **[MED] Member cap counted pre-dedupe** while the projection dedupes, so a
+   contract-valid circuit whose expansion overlapped its own feature was rejected at
+   import. → the cap now counts the DISTINCT features the projection emits.
+6. **[MED] Dual rung gate** — `Circuit.validated` hardcoded `rung >= 2` while the
+   ladder owns the threshold. → the property delegates to `is_validated()`; a
+   parametrised test asserts they agree for 0–3.
+7. **[MED] Empty-but-present budget skipped the λ fallback** (truthiness check) →
+   `is not None`.
+
+### Assessed & recorded as debt (with rationale)
+- **MCP `millm_*_circuit` tools don't exist** though the contract marks them F13 ✅.
+  Correct call: the REST+UI surface is what F13 promised; the MCP proxies belong with
+  F14/F15 which own that surface. **Contract rows to be demoted at F13 close-out.**
+- **Hazards + per-edge rungs are computed then not rendered.** Real UX gap, and the
+  most safety-relevant output of the arc. Recorded as the top F14/F15 UI item.
+- **Slice serves only `bound_layers[0]`** and the disclosure doesn't name the other
+  bound layers. Single-active cluster semantics genuinely constrain the capability;
+  the *disclosure* gap is recorded for F14.
+- `assess_compatibility` reaching the singleton (layering + TOCTOU — F12 fails closed,
+  so it degrades to a hard error not a wrong-basis serve), `provenance.slice_profile_id`
+  wanting a real FK column, the 200-status exception pattern wanting a single
+  registered handler, `set_active`'s two commits, `_dedupe_name`'s 51 queries →
+  IntegrityError→500, `_max_depth` not bounding width, `count()` materialising rows.
+  All real, all cheap, none blocking — carried into the F14/F15 debt list.
+
+### Honest assessment (reviewer's words, verified)
+The evidence ladder is well-built: single language source, server-rendered verbatim,
+coercion that degrades DOWNWARD, MIN-over-edges, and a copy-audit that now actually
+guards. The rung-0 user journey was traced end to end (list → badge → blocked
+activate → ack → active) and **"associated" is never presented as causal anywhere**.
+
++11 regression tests (5 service, 6 startup). **Backend 1374 passed / 1 skipped;
+frontend 240 passed; tsc clean; app boots with all 8 circuit routes.**
+
+## Outcome
+3 rounds · **85 findings surfaced** (31 + 25 + 29) · **27 fixed** · zero regressions.
+Every round found a defect in the PREVIOUS round's fix — R1's slice fix hid R2's
+ignored-status bug, and R2's startup fix caused R3's transaction regression. Each
+was caught only because the next round attacked the last round's work.

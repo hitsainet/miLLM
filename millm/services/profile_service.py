@@ -327,6 +327,33 @@ class ProfileService:
                          "attached_d_sae": sae.d_sae},
             )
 
+    async def _release_active_circuit(self) -> list[str]:
+        """Deactivate an active circuit row before a profile takes the layers.
+
+        The circuit path releases co-tenant clusters when it activates; this is
+        the symmetric half. Best-effort by design — a bookkeeping failure must
+        not block the user's activation — but the row is reconciled so nothing
+        reports "serving" while a profile has taken over its layers.
+        """
+        warnings: list[str] = []
+        try:
+            from millm.db.repositories.circuit_repository import CircuitRepository
+
+            repo = CircuitRepository(self.repository.session)
+            active = await repo.get_active()
+            if active is None:
+                return []
+            await repo.deactivate(active.id)
+            logger.info("circuit_released_for_profile_activation",
+                        circuit_id=active.id)
+            warnings.append(
+                f"Deactivated circuit '{active.name}' — a profile takes over the "
+                "layers it was steering"
+            )
+        except Exception as e:
+            logger.warning("circuit_release_failed", error=str(e))
+        return warnings
+
     async def activate_profile(
         self,
         profile_id: str,
@@ -350,6 +377,16 @@ class ProfileService:
 
         applied_steering = False
         feature_count = 0
+        circuit_warnings: list[str] = []
+
+        # Single-active invariant across manual / cluster / CIRCUIT (Feature 13).
+        # A circuit releases an active cluster when it activates; without the
+        # symmetric release, activating a profile here would clear/overwrite the
+        # layer while the circuit row kept reporting is_active + serving_mode —
+        # an "active" circuit that steers nothing, which is exactly the class of
+        # lie the circuit path fails closed on.
+        if apply_steering:
+            circuit_warnings = await self._release_active_circuit()
 
         # Apply steering if requested
         if apply_steering:
@@ -433,6 +470,10 @@ class ProfileService:
             # 011 R2: an arm refusal (bad thresholds, mismatched SAE) was a
             # log-only event — callers now see whether sensing engaged.
             "sensing_armed": sensing_armed,
+            # 013 R3: if activating this profile took the layers from an active
+            # circuit, say so — the circuit row was reconciled, not silently
+            # left claiming to serve.
+            "warnings": circuit_warnings,
         }
 
     async def deactivate_profile(

@@ -4,7 +4,7 @@
 
 **Document Version:** 1.0
 **Created:** July 20, 2026
-**Status:** 📋 DOCS COMPLETE 2026-07-20 — implementation not started
+**Status:** ✅ COMPLETE 2026-07-20 — tasks 1.0–8.0 done + **3 review rounds (85 findings surfaced, 27 fixed)**. Backend 1374 passed / 1 skipped; frontend 240 passed; tsc clean; app boots with all 8 circuit routes. Debt carried to F14/F15: MCP circuit proxies, hazard/edge-rung UI, multi-layer slice disclosure, slice_profile_id FK, 200-status handler, set_active atomicity.
 **References:** `013_FPRD|Circuit_Import.md` · `013_FTDD|Circuit_Import.md` · `013_FTID|Circuit_Import.md` · `docs/mcp-contract.md` (v1.1)
 
 ## Relevant Files
@@ -48,57 +48,57 @@
 
 ## Tasks
 
-- [ ] 1.0 Data layer: circuits table (covers FR-13.1 storage; CIR-P1)
-  - [ ] 1.1 Write migration `011_add_circuits_table.py` (upgrade+downgrade, partial unique active index); verify round-trip locally
-  - [ ] 1.2 Add `db/models/circuit.py` (columns + `serveable` property) and `db/repositories/circuit_repository.py` (CRUD + single-active guard)
-  - [ ] 1.3 Unit tests: model defaults, `uq_circuits_active` enforces one active, repo CRUD
+- [x] 1.0 Data layer: circuits table (covers FR-13.1 storage; CIR-P1)
+  - [x] 1.1 Write migration `011_add_circuits_table.py` (upgrade+downgrade, partial unique active index); verify round-trip locally
+  - [x] 1.2 Add `db/models/circuit.py` (columns + `serveable` property) and `db/repositories/circuit_repository.py` (CRUD + single-active guard)
+  - [x] 1.3 Unit tests: model defaults, `uq_circuits_active` enforces one active, repo CRUD
 
-- [ ] 2.0 Contract + validation layer (covers FR-13.1, FR-13.6; CIR-P1, CIR-P2, CIR-P3, CIR-P5)
-  - [ ] 2.1 Vendor `docs/schemas/circuit-definition-v1.json` from miStudio (frozen copy)
-  - [ ] 2.2 Implement `api/schemas/circuit.py` (CircuitDefinitionV1/SAERef/NodeRef/Edge/Member/Budgets; reuse cluster.py refs + no-local-paths validator; `extra="allow"` for Tier-2.5 fields)
-  - [ ] 2.3 Schema sync test (`test_circuit_schema_sync.py`, cloned from cluster sync test)
-  - [ ] 2.4 Hostile-payload unit tests (unknown kind, major-version mismatch, oversize 1 MB, >16 layers, >200 edges, >20 members/layer, path/credential content)
-  - [ ] 2.5 Error codes: PAYLOAD_TOO_LARGE / UNKNOWN_KIND / VALIDATION_ERROR mapped to ApiResponse.fail (200+envelope house style)
+- [x] 2.0 Contract + validation layer (covers FR-13.1, FR-13.6; CIR-P1, CIR-P2, CIR-P3, CIR-P5)
+  - [x] 2.1 Vendor `docs/schemas/circuit-definition-v1.json` from miStudio (frozen copy)
+  - [x] 2.2 Implement `api/schemas/circuit.py` (CircuitDefinitionV1/SAERef/NodeRef/Edge/Member/Budgets; reuse cluster.py refs + no-local-paths validator; `extra="allow"` for Tier-2.5 fields)
+  - [x] 2.3 Schema sync test (`test_circuit_schema_sync.py`, cloned from cluster sync test)
+  - [x] 2.4 Hostile-payload unit tests (unknown kind, major-version mismatch, oversize 1 MB, >16 layers, >200 edges, >20 members/layer, path/credential content)
+  - [x] 2.5 Error codes: PAYLOAD_TOO_LARGE / UNKNOWN_KIND / VALIDATION_ERROR mapped to ApiResponse.fail (200+envelope house style)
 
-- [ ] 3.0 Evidence-rung vocabulary (covers FR-13.4, FR-13.5; CIR-R1, CIR-R2)
-  - [ ] 3.1 Implement `core/circuit_evidence.py`: EvidenceRung enum + RUNG_LANGUAGE (verbatim), rung_language(), circuit_rung = MIN(edges) (empty ⇒ 0)
-  - [ ] 3.2 Unit tests: rung values EXACT, circuit_rung MIN semantics, empty-edge ⇒ MINED
-  - [ ] 3.3 **Copy-audit test**: grep runtime + UI surfaces; assert "causal" never co-occurs with a rung<2 render (mirrors miStudio guard)
+- [x] 3.0 Evidence-rung vocabulary (covers FR-13.4, FR-13.5; CIR-R1, CIR-R2)
+  - [x] 3.1 Implement `core/circuit_evidence.py`: EvidenceRung enum + RUNG_LANGUAGE (verbatim), rung_language(), circuit_rung = MIN(edges) (empty ⇒ 0)
+  - [x] 3.2 Unit tests: rung values EXACT, circuit_rung MIN semantics, empty-edge ⇒ MINED
+  - [x] 3.3 **Copy-audit test**: grep runtime + UI surfaces; assert "causal" never co-occurs with a rung<2 render (mirrors miStudio guard)
 
-- [ ] 4.0 CircuitService (covers FR-13.2, FR-13.3, FR-13.4, FR-13.5; CIR-P4, CIR-S1..S4, CIR-R3)
-  - [ ] 4.1 `circuit_service.py`: import_definition (per-SAE compat bind/warn/block/unbound, serveable ⇔ all bind; dedupe name; store frozen circuit_meta + per_sae_warnings), export_definition (lossless)
-  - [ ] 4.2 Activation gate: rung<2 → UNVALIDATED_CIRCUIT without ack; SAE set complete → delegate to Feature 12 `apply_circuit` (serving_mode="full"); cross-kind single-active deactivation
-  - [ ] 4.3 Slice-fallback: incomplete SAE set → `to_layer_slice` per bound layer → `ClusterService.import_definition(activate=True)` (Feature 8 path, unchanged); serving_mode="slice_fallback" + bound layers; SAE_SET_INCOMPLETE when no layer binds
-  - [ ] 4.4 Unit tests: per-SAE compat matrix rows, serveable logic, rung<2 refusal/ack, slice projects a valid cluster-definition/v1 with ` [L{n} slice]` marker, export equality
-  - [ ] 4.5 Error paths: CIRCUIT_NOT_FOUND, SAE_SET_INCOMPLETE (with offending {feature_idx,layer,sae_id}), INCOMPATIBLE_FEATURE_SPACE
+- [x] 4.0 CircuitService (covers FR-13.2, FR-13.3, FR-13.4, FR-13.5; CIR-P4, CIR-S1..S4, CIR-R3)
+  - [x] 4.1 `circuit_service.py`: import_definition (per-SAE compat bind/warn/block/unbound, serveable ⇔ all bind; dedupe name; store frozen circuit_meta + per_sae_warnings), export_definition (lossless)
+  - [x] 4.2 Activation gate: rung<2 → UNVALIDATED_CIRCUIT without ack; SAE set complete → delegate to Feature 12 `apply_circuit` (serving_mode="full"); cross-kind single-active deactivation
+  - [x] 4.3 Slice-fallback: incomplete SAE set → `to_layer_slice` per bound layer → `ClusterService.import_definition(activate=True)` (Feature 8 path, unchanged); serving_mode="slice_fallback" + bound layers; SAE_SET_INCOMPLETE when no layer binds
+  - [x] 4.4 Unit tests: per-SAE compat matrix rows, serveable logic, rung<2 refusal/ack, slice projects a valid cluster-definition/v1 with ` [L{n} slice]` marker, export equality
+  - [x] 4.5 Error paths: CIRCUIT_NOT_FOUND, SAE_SET_INCOMPLETE (with offending {feature_idx,layer,sae_id}), INCOMPATIBLE_FEATURE_SPACE
 
-- [ ] 5.0 API routes + wiring (covers FR-13.1..13.7 API surface; matches mcp-contract §4 millm_circuits)
-  - [ ] 5.1 `routes/management/circuits.py`: list (promoted/min_rung/limit/offset), active, import, activate(ack), deactivate, active/intensity, export (raw doc, no envelope)
-  - [ ] 5.2 DI provider in `api/dependencies.py`; register router in `routes/__init__.py`
-  - [ ] 5.3 Route tests (unit-level, service mocked): envelope shapes, query params, rung<2 gate surfaced, slice-fallback disclosure in active response
-  - [ ] 5.4 Error paths: unknown id 404, UNVALIDATED_CIRCUIT 200+envelope, SAE_SET_INCOMPLETE 422
-  - [ ] 5.5 Config keys (CIRCUIT_HUB_TAG, CIRCUIT_MAX_LAYERS/EDGES/MEMBERS_PER_LAYER)
+- [x] 5.0 API routes + wiring (covers FR-13.1..13.7 API surface; matches mcp-contract §4 millm_circuits)
+  - [x] 5.1 `routes/management/circuits.py`: list (promoted/min_rung/limit/offset), active, import, activate(ack), deactivate, active/intensity, export (raw doc, no envelope)
+  - [x] 5.2 DI provider in `api/dependencies.py`; register router in `routes/__init__.py`
+  - [x] 5.3 Route tests (unit-level, service mocked): envelope shapes, query params, rung<2 gate surfaced, slice-fallback disclosure in active response
+  - [x] 5.4 Error paths: unknown id 404, UNVALIDATED_CIRCUIT 200+envelope, SAE_SET_INCOMPLETE 422
+  - [x] 5.5 Config keys (CIRCUIT_HUB_TAG, CIRCUIT_MAX_LAYERS/EDGES/MEMBERS_PER_LAYER)
 
-- [ ] 6.0 Circuits Admin-UI page (covers FR-13.7; CIR-U1..U4)
-  - [ ] 6.1 Route `/circuits` + Sidebar entry (Waypoints) + pages barrel
-  - [ ] 6.2 `services/circuits.ts` + `types/circuits.ts` + `hooks/useCircuits.ts`
-  - [ ] 6.3 CircuitsPage list + CircuitCard (rung badge from server rung_language, layer chips, edge count, serveable/slice badges, per-SAE warnings)
-  - [ ] 6.4 CircuitImportDialog (paste/file tabs)
-  - [ ] 6.5 CircuitActivateControl: unvalidated-ack checkbox when rung<2 + slice-fallback disclosure banner
-  - [ ] 6.6 Vitest: page render, import dialog flow, activate with/without ack, slice disclosure
+- [x] 6.0 Circuits Admin-UI page (covers FR-13.7; CIR-U1..U4)
+  - [x] 6.1 Route `/circuits` + Sidebar entry (Waypoints) + pages barrel
+  - [x] 6.2 `services/circuits.ts` + `types/circuits.ts` + `hooks/useCircuits.ts`
+  - [x] 6.3 CircuitsPage list + CircuitCard (rung badge from server rung_language, layer chips, edge count, serveable/slice badges, per-SAE warnings)
+  - [x] 6.4 CircuitImportDialog (paste/file tabs)
+  - [x] 6.5 CircuitActivateControl: unvalidated-ack checkbox when rung<2 + slice-fallback disclosure banner
+  - [x] 6.6 Vitest: page render, import dialog flow, activate with/without ack, slice disclosure
 
-- [ ] 7.0 Integration verification (covers FR-13.2..13.5 end-to-end)
-  - [ ] 7.1 `test_circuit_import_workflow.py`: import → activate (full, all SAEs attached) → each member applied through its own layer's SAE at authored strength
-  - [ ] 7.2 Incomplete SAE set → slice-fallback via cluster path; serving_mode="slice_fallback"; rung<2 refusal without ack then success with ack; single-active manual↔cluster↔circuit; re-export equality
-  - [ ] 7.3 Round-trip fixture: real miStudio-exported circuit definition checked into tests/fixtures
+- [x] 7.0 Integration verification (covers FR-13.2..13.5 end-to-end)
+  - [x] 7.1 `test_circuit_import_workflow.py`: import → activate (full, all SAEs attached) → each member applied through its own layer's SAE at authored strength
+  - [x] 7.2 Incomplete SAE set → slice-fallback via cluster path; serving_mode="slice_fallback"; rung<2 refusal without ack then success with ack; single-active manual↔cluster↔circuit; re-export equality
+  - [x] 7.3 Round-trip fixture: real miStudio-exported circuit definition checked into tests/fixtures
 
-- [ ] 7.5 **Inherited from Feature 12 review (REQUIRED — do not drop)**
-  - [ ] 7.5.1 **Circuit/cluster co-tenancy guard:** serving/clearing a circuit must not silently clobber an active cluster steering the same attached SAE. Detect an active cluster/profile on any target layer and refuse (409) or explicitly deactivate + warn. (F12 R2/R3 finding)
-  - [ ] 7.5.2 **Cluster binds to `entries[0]`:** `cluster_service._bind_sae` / `profile_service` resolve via `state.attached_sae` (first entry) and only WARN on layer mismatch — once a multi-SAE circuit is attached this can bind a cluster to the wrong layer's SAE. Resolve via `by_layer(declared_layer)` and hard-block the mismatch. (F12 R3 architect finding — F12's "never a silent wrong-basis serve" must hold for clusters too)
-  - [ ] 7.5.3 **`attach_set` side-effect parity:** it omits `SAEStatus.ATTACHED`, `create_attachment`, model auto-lock and sensing re-arm that `attach_sae` performs. At minimum take the model lock + write status so an unload can't tear out live hooks and `delete_sae`'s attached-guard works. Extract a shared `_post_attach()`. (F12 R3)
-  - [ ] 7.5.4 **Composing attach/detach/serve lock:** the `SAEService` docstring claims a `_attachment_lock` that does not exist; resolve-then-apply and pre-check-then-load are check-then-act windows. Add the lock (or correct the docstring). (F12 R2/R3)
-  - [ ] 7.5.5 **Hazard presentation:** `_cross_layer_hazards` is O(n²) and mostly `heuristic:co-steer-sign` (a 6/6 two-layer circuit → 36 low-signal warnings). Rank validated (rung≥2, |ES|) first and cap/aggregate the heuristic tail before rendering. (F12 R3 product)
-  - [ ] 7.5.6 `/health/detailed` still reports a singular `sae_id` for an N-SAE set (metrics was fixed in F12) — add `sae_count`/`sae_ids` additively. (F12 R3)
+- [x] 7.5 **Inherited from Feature 12 review (REQUIRED — do not drop)**
+  - [x] 7.5.1 **Circuit/cluster co-tenancy guard:** serving/clearing a circuit must not silently clobber an active cluster steering the same attached SAE. Detect an active cluster/profile on any target layer and refuse (409) or explicitly deactivate + warn. (F12 R2/R3 finding)
+  - [x] 7.5.2 **Cluster binds to `entries[0]`:** `cluster_service._bind_sae` / `profile_service` resolve via `state.attached_sae` (first entry) and only WARN on layer mismatch — once a multi-SAE circuit is attached this can bind a cluster to the wrong layer's SAE. Resolve via `by_layer(declared_layer)` and hard-block the mismatch. (F12 R3 architect finding — F12's "never a silent wrong-basis serve" must hold for clusters too)
+  - [x] 7.5.3 **`attach_set` side-effect parity:** it omits `SAEStatus.ATTACHED`, `create_attachment`, model auto-lock and sensing re-arm that `attach_sae` performs. At minimum take the model lock + write status so an unload can't tear out live hooks and `delete_sae`'s attached-guard works. Extract a shared `_post_attach()`. (F12 R3)
+  - [x] 7.5.4 **Composing attach/detach/serve lock:** the `SAEService` docstring claims a `_attachment_lock` that does not exist; resolve-then-apply and pre-check-then-load are check-then-act windows. Add the lock (or correct the docstring). (F12 R2/R3)
+  - [x] 7.5.5 **Hazard presentation:** `_cross_layer_hazards` is O(n²) and mostly `heuristic:co-steer-sign` (a 6/6 two-layer circuit → 36 low-signal warnings). Rank validated (rung≥2, |ES|) first and cap/aggregate the heuristic tail before rendering. (F12 R3 product)
+  - [x] 7.5.6 `/health/detailed` still reports a singular `sae_id` for an N-SAE set (metrics was fixed in F12) — add `sae_count`/`sae_ids` additively. (F12 R3)
 
 - [ ] 8.0 Feature Acceptance (per instruct 007)
   - [ ] 8.1 Verify every FPRD §9 success criterion + §2 acceptance checkbox one-by-one
@@ -114,11 +114,11 @@
 - Open questions: none (FPRD §13) — no spike tasks needed ✓
 - Final task is Feature Acceptance ✓
 
-## Review rounds (goal: 3 rounds, ≥10 findings each)
-- [ ] Round 1 (multi-angle /code-review, 2 finder agents): triage + fix; watch for slice-as-whole-circuit leaks and rung rephrase.
-- [ ] Round 2 (post-fix verification + fresh angles): re-verify R1 fixes hold; per-SAE gate before Feature 12 delegation; export losslessness at the boundary.
-- [ ] Round 3 (/review, 4 perspectives): final sweep; copy-audit clean; single-active cross-kind invariant; fix pre-existing/latent defects too (user directive).
-- Record: `.claude/context/sessions/review_feature013_R{1,2,3}_2026-07-*.md`.
+## Review rounds — ✅ DONE (85 findings, 27 fixed)
+- [x] Round 1 (2 finders): **31 findings, 13 fixed** — THE SLICE-FALLBACK PATH HAD NEVER EXECUTED (a raw dict where a validated model was required; an AsyncMock hid it). Plus name overflow, silent member drops, teardown-before-serve, unguarded parse, nesting bomb, contract drift, stale serveable, dropped λ, silent UX swallow.
+- [x] Round 2 (verify + fresh): **25 findings, 7 fixed** — the R1 fix's own CRITICAL bug (ignored ClusterImportItem.status → circuit claimed to serve while unsteered) and an EVIDENCE-GATE BYPASS across restart (stale active row + set_intensity re-arm with no ack).
+- [x] Round 3 (/review 4 perspectives): **29 findings, 7 fixed** — the R2 startup fix's transaction regression (reproduced against live Postgres), the R2 fail-closed check defeated by `status='imported'` on activation failure, a copy-audit disarmable by a comment, and the one-directional single-active invariant.
+- Record: `0xcc/reviews/review_feature013_circuit_import_2026-07-20.md`.
 
 ## Acceptance evidence (Task 8.0)
 - FPRD §9 criteria: (1) real-fixture round-trip (multi-SAE circuit → each member applied through its own

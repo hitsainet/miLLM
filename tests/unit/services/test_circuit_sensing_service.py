@@ -1724,3 +1724,152 @@ class TestR2AReclaimedRequestsDataIsDiscardedLOUDLY:
         svc.begin_request("A", saes)          # observed nothing
         svc.begin_request("B", saes)
         assert svc.status(saes)["requests_truncated"] == 0
+
+
+class TestR2ContextCaptureCannotGoSilentlyDark:
+    """F17 R2-16/17. `_request_context_tokens` used `_armed_layers[0]` — the
+    same order-dependence R2-08 fixed for the budget cap, one expression away.
+    Measured with configs {10: 0, 13: 32}: order [10,13] gave 0, [13,10] gave
+    32.
+
+    Worse than the cap's version: `ctx_tokens == 0` hits the `k == 0` early
+    return in `_context`, so ALL context capture is disabled — every event row
+    loses its decoded window — depending on which layer sorted first.
+
+    And nothing detected it. Mutating the whole expression to 0 left the suite
+    green, because no test drove `record()` with a real tokenizer. That is the
+    silently-dark mode this feature exists to remove, on the field that carries
+    the operator's only view of WHAT fired."""
+
+    def _armed(self, ctx_tokens_by_layer):
+        svc = CircuitSensingService()
+        saes = two_saes()
+        svc.arm_for_circuit(circuit(), definition(), saes)
+        for layer, n in ctx_tokens_by_layer.items():
+            svc._configs[layer].context_tokens = n
+        return svc, saes
+
+    def test_context_tokens_are_order_independent(self):
+        svc, saes = self._armed({10: 0, 13: 32})
+        svc._armed_layers = [10, 13]
+        svc.begin_request("a", saes)
+        first = svc._request_context_tokens
+        svc.close_request()
+        svc._armed_layers = [13, 10]
+        svc.begin_request("b", saes)
+        assert svc._request_context_tokens == first, (
+            "the decoded-window size changed with layer order alone"
+        )
+
+    def test_one_layer_configured_to_zero_does_not_silence_the_circuit(self):
+        """MAX, not min: the cap bounds a shared resource so the strictest wins,
+        but context capture is per-row enrichment and a single zero must not
+        disable it everywhere."""
+        svc, saes = self._armed({10: 0, 13: 32})
+        svc.begin_request("r", saes)
+        assert svc._request_context_tokens == 32
+
+    def test_a_real_context_window_reaches_the_row(self):
+        """C3: the coverage gap that let the above go unnoticed. Drives the
+        real `_context` with a real token list."""
+        import torch
+
+        svc, saes = self._armed({10: 8, 13: 8})
+        svc.begin_request("r", saes)
+
+        class _Tok:
+            def decode(self, ids, **kw):
+                return " ".join(f"t{int(i)}" for i in ids)
+
+        edge = SimpleNamespace(
+            up_pos=2, down_pos=4, up_layer=10, down_layer=13,
+            up_feature_idx=1, down_feature_idx=2,
+        )
+        ids = torch.arange(0, 12).unsqueeze(0)
+        text, window, parts = svc._context(ids, edge, 8, _Tok())
+        assert text, "context capture produced nothing with a live tokenizer"
+        assert window, "no token window was captured"
+        assert parts is None or isinstance(parts, dict)
+
+    def test_zero_context_tokens_captures_nothing_by_design(self):
+        """The other side: 0 genuinely means 'no capture', so the fix must not
+        make it impossible to turn context off."""
+        import torch
+
+        svc, saes = self._armed({10: 0, 13: 0})
+        svc.begin_request("r", saes)
+        assert svc._request_context_tokens == 0
+
+        class _Tok:
+            def decode(self, ids, **kw):
+                return "should not be called"
+
+        edge = SimpleNamespace(
+            up_pos=2, down_pos=4, up_layer=10, down_layer=13,
+            up_feature_idx=1, down_feature_idx=2,
+        )
+        text, window, parts = svc._context(
+            torch.arange(0, 12).unsqueeze(0), edge, 0, _Tok()
+        )
+        assert text is None and window is None
+
+
+class TestR2CountersAreConsistentAcrossAnArmCycle:
+    """F17 R2-18. `requests_sensed`/`requests_truncated` reset on disarm while
+    `events_recorded`/`ws_dropped`/`ws_throttled` persisted, so a freshly
+    re-armed circuit read
+
+        requests_sensed: 0, events_recorded: 99
+
+    which the schema defines as the WIRING-FAILURE signature ("zero while armed
+    means no request reached sensing at all"). A healthy re-arm looked broken —
+    the counter added to expose a failure mode was manufacturing one."""
+
+    def test_every_counter_resets_together_on_rearm(self):
+        svc = CircuitSensingService()
+        saes = two_saes()
+        svc.arm_for_circuit(circuit(), definition(), saes)
+        svc.begin_request("r", saes)
+        svc.collect_edges(saes)
+        svc.note_events_recorded(99)
+        svc.note_ws_dropped(7)
+        svc._ws_throttled = 5
+        svc.close_request()
+        svc.disarm(saes)
+        svc.arm_for_circuit(circuit(), definition(), saes)
+
+        st = svc.status(saes)
+        stale = {
+            k: st[k]
+            for k in (
+                "requests_sensed", "requests_truncated", "events_recorded",
+                "ws_dropped", "ws_throttled",
+            )
+            if st[k] != 0
+        }
+        assert not stale, f"counters survived a re-arm: {stale}"
+
+
+class TestR2TheStaleContextIsCLEAREDNotJustClosed:
+    """F17 R2-19. `stale, self._ctx = self._ctx, None` — the `None` half was
+    load-bearing and untested. Normally inert, because `stale.close()` sets
+    `is_closed` and the guard tolerates that. But when `close()` RAISES, the
+    real code still recovers while a version that only closed would deadlock
+    permanently — the exact permanent outage R2-01 exists to prevent, on the
+    hung-thread path it was written for."""
+
+    def test_recovery_survives_a_context_that_fails_to_close(self, monkeypatch):
+        svc = CircuitSensingService()
+        saes = two_saes()
+        svc.arm_for_circuit(circuit(), definition(), saes)
+        svc.begin_request("A", saes)
+
+        def boom():
+            raise RuntimeError("close failed")
+
+        monkeypatch.setattr(svc._ctx, "close", boom, raising=False)
+
+        assert svc.begin_request("B", saes) is False, "B must still be refused"
+        assert svc.begin_request("C", saes) is True, (
+            "a context that failed to close deadlocked sensing permanently"
+        )

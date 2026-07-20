@@ -477,8 +477,17 @@ class CircuitSensingService:
         # armed layer reported completely". Verified by execution.
         self._last_request_truncated_layers = []
         self._request_dark_layers = []
+        # R2-18: ALL per-arming counters reset together. `requests_sensed` and
+        # `requests_truncated` reset while `events_recorded`, `ws_dropped` and
+        # `ws_throttled` persisted, so a re-armed circuit read
+        # `requests_sensed: 0, events_recorded: 99` — which the schema defines
+        # as the WIRING-FAILURE signature ("zero while armed means no request
+        # reached sensing at all"). A healthy re-arm looked broken.
         self._requests_sensed = 0
         self._requests_truncated = 0
+        self._events_recorded = 0
+        self._ws_dropped = 0
+        self._ws_throttled = 0
         # R2: every other field was cleared but this one, so a circuit with no
         # override silently inherited the previous circuit's lag window.
         self._max_token_lag = settings.CIRCUIT_SENSING_MAX_TOKEN_LAG
@@ -513,11 +522,27 @@ class CircuitSensingService:
         # wrong data, not merely lost sensing. request_id was already
         # snapshotted per-SAE; identity was not.
         self._request_circuit_id = self._circuit_id
-        self._request_context_tokens = (
-            self._configs[self._armed_layers[0]].context_tokens
-            if self._armed_layers and self._configs
-            else 0
-        )
+        # R2-16: this used `_armed_layers[0]` — the same order-dependence R2-08
+        # fixed for the budget cap, left behind on the sibling field one
+        # expression away. Measured with configs {10: 0, 13: 32}: layer order
+        # [10,13] gave 0 and [13,10] gave 32.
+        #
+        # The consequence is worse than the cap's. `ctx_tokens == 0` hits the
+        # `k == 0` early return in `_context`, so ALL context capture — the
+        # decoded window on every event row — is silently disabled by whichever
+        # layer happened to sort first.
+        #
+        # MAX here, not min. The cap bounds a shared resource, so the most
+        # restrictive layer wins; context capture is per-row enrichment, and
+        # taking the min would let a single layer configured to 0 silence the
+        # whole circuit. The hard ceiling still applies per config at build
+        # time.
+        ctx_tokens = [
+            c.context_tokens
+            for c in (self._configs or {}).values()
+            if c.context_tokens is not None
+        ]
+        self._request_context_tokens = max(ctx_tokens) if ctx_tokens else 0
         # R1-03: an already-open boundary means two generations interleaved.
         # `MAX_CONCURRENT_REQUESTS` MUST be 1 for this service to attribute
         # observations correctly, and that was enforced only by a comment in

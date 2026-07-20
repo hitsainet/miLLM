@@ -157,7 +157,12 @@ class CircuitSteeringResult:
     clamp_warnings: list[str]
     #: Feature 16 R2: the steering epoch THIS write produced. A caller that
     #: re-reads the counter afterwards names whoever wrote last, not itself.
-    applied_epoch: int = 0
+    #:
+    #: R3 finding 6: defaults to -1, NOT 0. At a fresh boot the counter IS 0,
+    #: so a default-constructed result would compare equal to a real epoch and
+    #: report a false "still current". An unset field must never be able to
+    #: alias a genuine value.
+    applied_epoch: int = -1
 
 
 @dataclass

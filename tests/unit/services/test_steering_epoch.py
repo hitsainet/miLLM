@@ -538,3 +538,91 @@ class TestRequestIdReachesTheLog:
         assert "request_id" in sig.parameters
         sig2 = inspect.signature(InferenceService._apply_request_steering)
         assert "request_id" in sig2.parameters
+
+
+class TestTheEpochSurvivesARealApply:
+    """R3's root-cause finding: every restore-guard test hand-builds
+    `{"epoch": 0, ...}` as a LITERAL, so the guard is exhaustively tested
+    against dicts the tests themselves wrote — while the production code that
+    POPULATES those dicts had no coverage at all.
+
+    Six mutations survived the full 1627-test suite because of it (dropping the
+    epoch key from the circuit dict, the profile dict and the λ=0 return, plus
+    three request_id sites). These call the REAL apply and assert the key
+    survives into the saved dict."""
+
+    def _armed_dial(self):
+        """A service whose circuit dial will actually run."""
+        from types import SimpleNamespace
+        from unittest.mock import AsyncMock
+
+        svc = service()
+        sae = make_sae({1: 40.0})
+        AttachedSAEState().set(sae, "sae-10", 10, None)
+
+        circuit = SimpleNamespace(
+            id="circ_1", name="c", layers=[10], serving_mode="full",
+            intensity=1.0, rung=2,
+            circuit_meta={
+                "kind": "mistudio.circuit-definition", "schema_version": "1",
+                "name": "c",
+                "saes": [{"layer": 10, "n_features": 8192,
+                          "mistudio_sae_id": "sae-10"}],
+                "members": [{"layer": 10, "feature": {
+                    "feature_idx": 1, "strength": 40.0,
+                    "max_activation": 10.0}}],
+                "edges": [],
+                "budget": {"layers": {}, "intensity": 1.0,
+                           "intensity_range": [0.0, 2.0]},
+            },
+        )
+        svc._active_full_circuit = AsyncMock(return_value=circuit)
+        return svc, sae
+
+    async def test_the_circuit_apply_records_its_epoch(self):
+        """MUT-M18: dropping `"epoch"` here left 1627 green while US-16.1 was
+        broken — the guard cannot compare what the apply never recorded."""
+        svc, _ = self._armed_dial()
+        saved = await svc._apply_request_circuit_steering(2.0, request_id="r-1")
+
+        assert saved is not None
+        assert "epoch" in saved, (
+            "the apply produced a snapshot the guard can never evaluate"
+        )
+        assert isinstance(saved["epoch"], int)
+        assert saved["request_id"] == "r-1"
+
+    async def test_the_lambda_zero_path_records_its_epoch(self):
+        """MUT-M41: the λ=0 fast path returns early, so it needs its own
+        assertion — it is the one apply path with no steering call at all."""
+        svc, _ = self._armed_dial()
+        saved = await svc._apply_request_circuit_steering(0.0, request_id="r-0")
+
+        assert saved is not None and "epoch" in saved
+        assert saved["request_id"] == "r-0"
+
+    async def test_the_captured_epoch_is_the_PRE_apply_value(self):
+        """R1 finding 1, pinned end-to-end rather than by source inspection:
+        the epoch must be the one in force when the SNAPSHOT was taken, so an
+        operator write during the apply window is detected, not absorbed."""
+        svc, _ = self._armed_dial()
+        before = AttachedSAEState().steering_epoch
+        saved = await svc._apply_request_circuit_steering(2.0, request_id="r-2")
+        assert saved["epoch"] == before, (
+            "the apply captured a post-apply epoch, absorbing any operator "
+            "write that landed during the apply window"
+        )
+
+    async def test_a_saved_snapshot_round_trips_through_the_guard(self):
+        """The full loop: a REAL apply, an operator write, then the REAL
+        restore — no hand-built dict anywhere."""
+        svc, sae = self._armed_dial()
+        saved = await svc._apply_request_circuit_steering(2.0, request_id="r-3")
+        dialled = dict(sae._applied)
+
+        AttachedSAEState().bump_steering_epoch("operator")
+        svc._restore_request_profile(saved)
+
+        assert sae._applied == dialled, (
+            "the restore reverted an operator write that landed mid-request"
+        )

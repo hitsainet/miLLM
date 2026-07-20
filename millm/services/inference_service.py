@@ -976,7 +976,10 @@ class InferenceService:
             logger.warning(
                 "circuit_dial_apply_failed", circuit_id=circuit.id, error=str(e)
             )
-            self._restore_request_profile({"circuit": True, "layers": saved_layers})
+            self._restore_request_profile(
+                {"circuit": True, "epoch": saved_epoch,
+                 "request_id": request_id, "layers": saved_layers}
+            )
             return None
 
         # R3: the dial discarded set_circuit_steering's result entirely, so a
@@ -1304,9 +1307,17 @@ class InferenceService:
             #
             # The guard sits ABOVE both branches so a saved shape added later
             # inherits it by default rather than by someone remembering. A
-            # snapshot with no "epoch" key (older state, or the apply-failure
-            # rollback which restores a snapshot from microseconds ago within
-            # the same epoch) proceeds exactly as before.
+            # snapshot with no "epoch" key (older state) proceeds as before.
+            #
+            # R3 finding 1: the apply-failure rollback used to rely on that
+            # same absence, which conflated "deliberate exemption" with "old
+            # state" — and the exemption was WRONG. `set_circuit_steering` can
+            # raise arbitrarily late, so an operator write landing during a
+            # failing apply was silently reverted by a rollback that always
+            # proceeded. R2 deleted the revert ledger arguing "once the guard
+            # works, an in-flight restore CANNOT revert an operator"; this path
+            # was the counterexample. The rollback now carries its epoch like
+            # every other caller and is exempt from nothing.
             saved_epoch = saved.get("epoch")
             current_epoch = state.steering_epoch
             if saved_epoch is not None and saved_epoch != current_epoch:

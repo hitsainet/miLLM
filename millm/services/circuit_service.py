@@ -425,13 +425,23 @@ class CircuitService:
         intensity = (
             definition.budget.intensity if definition.budget else circuit.intensity
         )
+        # R3 finding 2: `activate` bumps for the whole logical action, so this
+        # write must NOT bump as well — one activation advanced the epoch by 2,
+        # and any request whose snapshot landed BETWEEN the two saw a spurious
+        # mismatch, skipped its restore and stranded its transient λ in global
+        # state permanently. Identical to the defect R1 fixed for
+        # `set_intensity` and did not apply here.
         outcome = self._sae_service.set_circuit_steering(
-            members, intensity, edges=edges
+            members, intensity, edges=edges, authoritative=False
         )
         return {
             "serving_mode": "full",
             "bound_layers": definition.layers(),
             "applied_per_layer": outcome.applied_per_layer,
+            # R3 finding 7: carry the epoch OUR write produced rather than
+            # discarding it — without this the activate path has nothing to
+            # compare and cannot report supersession at all.
+            "applied_epoch": outcome.applied_epoch,
             "hazards": outcome.hazards,
             "warnings": outcome.clamp_warnings,
         }
@@ -689,7 +699,10 @@ class CircuitService:
                     )
         if self._sae_service is not None:
             try:
-                self._sae_service.clear_circuit_steering()
+                # R3 finding 3: `deactivate` bumps for the whole logical
+                # action; bumping here too advanced the epoch by 2 for one
+                # deactivation, stranding any restore snapshotted between them.
+                self._sae_service.clear_circuit_steering(authoritative=False)
                 cleared = True
             except Exception as e:  # pragma: no cover - defensive
                 logger.warning("circuit_clear_steering_failed", error=str(e))

@@ -178,14 +178,18 @@ observations with a `truncated` flag.
 was made. It was previously unconditional, so an operator whose change was
 overwritten by an in-flight request's steering restore still saw `true`.
 
-- `reapplied: false, superseded: true` — the write landed and was then reverted
-  by a per-request restore. Re-issue it.
+- `reapplied: false, superseded: true` — **another authoritative write landed
+  after yours** (a different operator, an activation, an attach/detach), so
+  your value is no longer live. Re-issue it if you still want it.
 - `reapplied: false, superseded: false` — it was never pushed to the model at
   all; the accompanying warning says why (typically a slice-fallback circuit,
-  whose backing cluster profile owns its own intensity).
+  whose backing cluster profile owns its own intensity, or an apply that
+  raised after the intensity had already been recorded).
 
 A concurrent operator change WINS over an in-flight request: the request's
-restore is skipped rather than overwriting the newer authoritative write.
+restore is skipped rather than overwriting the newer authoritative write. So a
+per-request dial can no longer be the cause of `superseded` — only another
+authoritative writer can.
 
 ### 4b. Circuit per-request dial (v1.1 — Feature 14)
 

@@ -925,6 +925,26 @@ class LoadedSAE:
         self._reset_edge_buffer()
         if self._edge_ctx is None or self._edge_ctx.is_closed:
             cfg = self._edge_sensing
+            # R2-07: this fallback is the per-circuit budget's escape hatch.
+            # It builds a PRIVATE context with this layer's own cap, so a
+            # shared cap of 3 silently became a private cap of 20 (measured).
+            # Harmless before R1-01, when the budget was dead; a correctness
+            # hole now that it enforces FPRD §9 criterion 3.
+            #
+            # Kept, because arming and beginning without a context would
+            # otherwise find no ring and record NOTHING — silent-dark, which is
+            # worse — and a single-SAE circuit is a legitimate configuration.
+            # But it is now LOUD: a multi-layer circuit reaching here means the
+            # service failed to bind, and that must not look like normal
+            # operation.
+            if cfg is not None and self._edge_ctx is not None:
+                logger.warning(
+                    "edge_sensing_solo_context_fallback: circuit=%s layer=%s — "
+                    "the bound context was closed; this layer will sense into a "
+                    "PRIVATE ring no sibling can read, and against its own cap "
+                    "rather than the circuit's",
+                    cfg.circuit_id, cfg.layer,
+                )
             self._edge_ctx = EdgeSensingRequestContext(
                 request_id=request_id,
                 circuit_ids=frozenset({cfg.circuit_id} if cfg else set()),

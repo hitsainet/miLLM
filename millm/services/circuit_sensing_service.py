@@ -562,11 +562,37 @@ class CircuitSensingService:
         # the armed circuit SET rather than a single id: Feature 19 lifts the
         # single-active invariant, and building for one circuit now would
         # repeat the assumption this feature exists to remove.
-        cap = (
-            self._configs[self._armed_layers[0]].max_events_per_request
-            if self._armed_layers and self._configs
-            else 20
-        )
+        # R2-08: the circuit budget used `_armed_layers[0]` — whichever layer
+        # sorts first. Verified with divergent configs: {10:5, 20:500} gave 5,
+        # and reordering to [20,10] gave 500. Not reachable today (every config
+        # takes the same setting), but it is precisely the order-dependence
+        # R1-15 fixed for the ambient count, one function away, and F19's
+        # per-circuit configs make it live.
+        #
+        # MIN, not first: the budget bounds the whole circuit, so the most
+        # restrictive layer's intent is the safe reading.
+        caps = [
+            c.max_events_per_request
+            for c in (self._configs or {}).values()
+            if c.max_events_per_request is not None
+        ]
+        cap = min(caps) if caps else 20
+        # R2-09: `cap=0` meant "armed, latched, and reporting truncation on
+        # every layer" — sensing that looks on and observes nothing. A
+        # misconfigured zero should mean OFF. There is no lower-bound
+        # validation on CIRCUIT_SENSING_MAX_EVENTS_PER_REQUEST, so clamp here
+        # and say so rather than degrade into a confusing half-state.
+        if cap < 1:
+            logger.warning(
+                "circuit_sensing_cap_too_low",
+                cap=cap,
+                detail=(
+                    "max_events_per_request below 1 would arm sensing and then "
+                    "immediately truncate every layer; clamped to 1 — set the "
+                    "circuit inactive to disable sensing"
+                ),
+            )
+            cap = 1
         ctx = EdgeSensingRequestContext(
             request_id=request_id,
             circuit_ids=frozenset(
@@ -577,6 +603,15 @@ class CircuitSensingService:
         self._ctx = ctx
         # A new boundary: reasons from earlier requests are stale from here.
         self._pause_is_current = False
+        # R2-06: and so is the previous request's truncation report. It was
+        # only rebuilt at `collect_edges`, so for the whole span between begin
+        # and drain the status named LAST request's dark layers as
+        # untrustworthy — accusing a layer that has fully recovered. Given the
+        # field's contract ("empty means every armed layer reported
+        # completely"), accusing a healthy layer is the same class of
+        # dishonesty as R1-04's stale-after-disarm, inverted.
+        self._last_request_truncated_layers = []
+        self._request_dark_layers = []
         began = False
         # R1-02: a layer that cannot be bound is DARK for this request, and
         # `began` used to be True if ANY layer began. Verified by execution

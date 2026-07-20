@@ -1458,3 +1458,58 @@ class TestR2AnAllDarkBeginLeavesNothingBehind:
         svc, saes = self._armed()
         svc.begin_request("r1", {})
         assert svc.status(saes)["paused_reason"] == "layer_unavailable"
+
+
+class TestR2TheCircuitBudgetIsDerivedHonestly:
+    """F17 R2-06/08/09. Three ways the budget and the truncation report could
+    mislead an operator, all found by attacking round 1's fixes."""
+
+    def _armed(self):
+        svc = CircuitSensingService()
+        saes = two_saes()
+        svc.arm_for_circuit(circuit(), definition(), saes)
+        return svc, saes
+
+    def test_a_recovered_layer_is_not_still_accused(self):
+        """R2-06: `truncated_layers` was rebuilt only at drain time, so for the
+        whole span between begin and drain the status named LAST request's dark
+        layers. Accusing a healthy layer is R1-04's dishonesty inverted."""
+        svc, saes = self._armed()
+        svc.begin_request("r1", {10: saes[10]})      # layer 13 dark
+        svc.collect_edges(saes)
+        assert svc.last_request_truncated_layers == [13]
+        svc.close_request()
+
+        svc.begin_request("r2", saes)               # everything healthy
+        assert svc.status(saes)["truncated_layers"] == [], (
+            "a recovered layer is still reported as untrustworthy"
+        )
+
+    def test_the_budget_takes_the_MOST_RESTRICTIVE_layer(self):
+        """R2-08: it used `_armed_layers[0]` — whichever layer sorts first.
+        Verified with divergent configs: {10:5, 20:500} gave 5, reordered gave
+        500. The same order-dependence R1-15 fixed for the ambient count, one
+        function away, and F19's per-circuit configs make it live."""
+        svc, saes = self._armed()
+        svc._configs[10].max_events_per_request = 5
+        svc._configs[13].max_events_per_request = 500
+        svc.begin_request("r", saes)
+        assert svc._ctx.budget.cap == 5
+
+    def test_the_budget_is_order_independent(self):
+        svc, saes = self._armed()
+        svc._configs[10].max_events_per_request = 500
+        svc._configs[13].max_events_per_request = 5
+        svc.begin_request("r", saes)
+        assert svc._ctx.budget.cap == 5, "the answer changed with layer order"
+
+    def test_a_zero_cap_is_clamped_rather_than_arming_a_dead_circuit(self):
+        """R2-09: `cap=0` meant armed, latched, and reporting truncation on
+        every layer — sensing that looks ON and observes nothing. A
+        misconfigured zero should mean OFF, and there is no lower-bound
+        validation on the setting."""
+        svc, saes = self._armed()
+        for c in svc._configs.values():
+            c.max_events_per_request = 0
+        svc.begin_request("r", saes)
+        assert svc._ctx.budget.cap >= 1

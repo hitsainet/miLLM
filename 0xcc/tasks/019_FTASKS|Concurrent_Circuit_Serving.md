@@ -67,12 +67,17 @@
   - [ ] 3.4 Owner-scoped `deactivate` and activation rollback — release this circuit's claims and keys only, never the global `clear_circuit_steering()`
   - [ ] 3.5 Override path: `composed_layers` + warning in the response, `allowed_layer_overlap` echo, explicit `logger.warning` naming both circuits and the layers (CLAIM-O4)
   - [ ] 3.6 `profile_service._release_active_circuit` iterates `list_active()` — a profile taking layers must release EVERY circuit holding one (and must not start raising in a best-effort block)
-  - [ ] 3.7 `CIRCUIT_ALLOW_CONCURRENT` config key; flag-off path preserves the pre-existing single-active behaviour exactly (CLAIM-M4)
+  - [ ] 3.7 `CIRCUIT_ALLOW_CONCURRENT` config key (default `false` for ONE release, BR-011a). **Flag-off REFUSES LOUDLY**, naming configuration as the reason — it MUST NOT fall back to the silent single-active disarm this feature replaces; that silent fallback IS the bug (CLAIM-M4)
+  - [ ] 3.8 Test the flag-off refusal explicitly: a second activation with the flag false produces a refusal naming configuration, NOT a silent disarm of the incumbent
+  - [ ] 3.9 Record the dated flip commitment in the BRD/PPRD; an unflipped flag makes a shipped capability unreachable, which is the defect class this increment exists to eliminate
   - [ ] 3.8 Unit tests: co-tenant survival on release, `_rebuild_layer` collision raise, gate ordering, claim-set = served layers, flag-off parity
 
 - [ ] 4.0 API + rung suppression (covers FR-19.2, FR-19.3; CLAIM-R1, CLAIM-R3, CLAIM-O2, CLAIM-O3)
   - [ ] 4.1 `_steering_circuit` → `_steering_circuits` (plural, contextvar memo PRESERVED); `active_circuit_rung` returns None for `len != 1` AND for a single circuit on a composed layer
   - [ ] 4.2 `allow_layer_overlap` on BOTH the Query param (`circuits.py:208`) and the body schema (`schemas/circuit.py:281`); `GET /api/circuits/active` returns a LIST with `?single=true` compatibility; `GET /api/circuits/claims`
+  - [ ] 4.3 **Informed refusal (BR-011 binding condition)**: the `CIRCUIT_LAYER_CONTENTION` payload carries `measured_hazard` — the close-out result AND its "one model, one fixture" caveat — plus `override_param` and `rung_header_suppressed_if_overridden`. A refusal that states only the fact of contention FAILS this task
+  - [ ] 4.4 **Loud override**: every `allow_layer_overlap` use is echoed in the response (`composed_layers`), logged at WARNING with both circuit ids, and surfaced in the UI — mirroring `acknowledged_unvalidated` at `circuit_service.py:349-351`
+  - [ ] 4.5 Test that an override is UNREACHABLE without first receiving the informed refusal, so the measurement cannot be bypassed by a client that guesses the parameter
   - [ ] 4.3 Route tests: refusal envelope (200 + `success:false`, incumbent named by NAME), atomicity (no claim row, no steering, incumbent untouched), override response shape, claims listing
   - [ ] 4.4 `core/errors.py`: `CircuitLayerContentionError` (code `CIRCUIT_LAYER_CONTENTION`, `status_code = 200`) + `ERROR_CLASSES` registration, following `UnvalidatedCircuitError` (:289-300)
 

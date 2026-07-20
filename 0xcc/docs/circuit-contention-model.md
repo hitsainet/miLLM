@@ -114,14 +114,24 @@ On overlap, activation refuses with a new code `CIRCUIT_LAYER_CONTENTION`, house
 
 ```json
 { "code": "CIRCUIT_LAYER_CONTENTION",
-  "message": "Layers [13] are already served by circuit 'fear→threat' (circ_abc).",
+  "message": "Layers [13] are already served by circuit 'fear\u2192threat' (circ_abc). Overriding composes both circuits additively on those layers. In close-out testing, TWO steered layers at individually-harmless strength (5) destroyed generation entirely \u2014 two orders of magnitude below the per-member clamp. Pass allow_layer_overlap=true only if you intend a compounding study; the circuit-rung header is omitted while any layer is composed, because no single circuit's evidence describes the response.",
   "details": { "contended_layers": [13],
-               "incumbent": {"id": "circ_abc", "name": "fear→threat"},
-               "requested": {"id": "circ_xyz", "name": "hedging"} } }
+               "incumbent": {"id": "circ_abc", "name": "fear\u2192threat"},
+               "requested": {"id": "circ_xyz", "name": "hedging"},
+               "override_param": "allow_layer_overlap",
+               "measured_hazard": {
+                 "source": "GPU close-out 2026-07-20, LFM2.5-1.2B-Instruct",
+                 "one_layer_at_strength_5": "coherent, indistinguishable from baseline",
+                 "two_layers_at_strength_5": "degenerate output",
+                 "note": "one model, one fixture \u2014 indicative, not exhaustive"
+               },
+               "rung_header_suppressed_if_overridden": true } }
 ```
 
 Refusal names the incumbent so the operator's next action is obvious: deactivate it, or edit one
-circuit's layers.
+circuit's layers. It also carries the MEASUREMENT behind the refusal, per the settled retention
+condition in §6.2 — an operator overriding this has been told what happened last time, and the
+hazard block is explicit that it is one model and one fixture rather than an exhaustive claim.
 
 ### 3.3 Explicit override — `allow_layer_overlap`
 
@@ -187,7 +197,70 @@ per (request, circuit).**
 
 ---
 
-## 6. Open questions for the product owner
+## 6. Settled decisions (product owner, 2026-07-20)
+
+The three items below were open when this document was written. Two are now decided; the third is
+promoted to its own requirement.
+
+### 6.1 `CIRCUIT_ALLOW_CONCURRENT` defaults to `false` for ONE release — with a dated flip
+
+**Decided: ship `false`, commit the flip date now, and drop the flag entirely if no other deployment
+exists at flip time.**
+
+The flag exists for exactly one reason: the first concurrent activation is a **one-way door in
+deployed data**. Once two circuits have been active simultaneously, `uq_circuits_active` cannot be
+restored without choosing which row to destroy. That asymmetry — trivial to enable, destructive to
+reverse — is what justifies a gate. It is *not* a statement of doubt about the implementation.
+
+Two conditions attach, because a default-off flag has its own failure mode:
+
+- **The flip is dated, not deferred.** An unflipped flag makes a shipped capability unreachable, which
+  is the precise defect class this increment exists to eliminate. Shipping `millm_circuits` MCP tools
+  that fail against a disabled flag would be self-defeating in the most literal sense.
+- **`false` means refuse LOUDLY**, naming configuration as the reason. It must not fall back to the
+  silent single-active disarm that Feature 19 replaces — that is the bug, not the safe default.
+
+Tracked as **BR-011a**.
+
+### 6.2 `allow_layer_overlap` is RETAINED — on condition it is loud and informed
+
+**Decided: keep it.** This was the closer call, and the argument against is recorded honestly: it is a
+flag whose only function is to permit a configuration the close-out measured as destructive. "A
+footgun with a label on it" is fair.
+
+It is retained for three reasons, in order of weight:
+
+1. **The measurement is thinner than it sounds.** One model, arbitrarily chosen feature indices,
+   invented `max_activation` values. It proves *that fixture* compounds destructively — not that all
+   overlapping circuits do. A circuit built from mined features at calibrated strengths might compose
+   fine; there is no data either way. Hard-refusing a legitimate research action on one
+   unrepresentative data point is overreach.
+2. **Deliberate compounding studies are a real use case.** This is an interpretability tool. "What
+   happens when two circuits contend for a layer?" is a legitimate question, and a runtime that
+   forbids asking it is the wrong tool.
+3. **The honesty guarantee holds either way.** The rung header is omitted when composed, so the system
+   never claims evidence it does not have. The danger was never "the user got garbage" — it was "the
+   user got garbage while being told a validated circuit produced it."
+
+**The retention condition is binding: the override must be LOUD AND INFORMED.**
+
+- The refusal that precedes it **carries the measurement**, not merely the fact of contention. An
+  override chosen knowing that two steered layers at individually-harmless strength destroyed
+  generation in testing is a research decision; one chosen blind is a footgun.
+- Every use is **echoed in the response, logged, and surfaced in the UI**, mirroring
+  `acknowledged_unvalidated`, which is already echoed back at `circuit_service.py:349-351`.
+
+### 6.3 Warning on circuit SHAPE is a separate requirement
+
+Not a contention concern — a **single** circuit spanning 2+ layers already degenerates, so
+layer-exclusive claims do not address it. Promoted to **BR-012** and its own feature-level work rather
+than folded here.
+
+---
+
+## 7. Superseded: original open questions
+
+### The questions as originally posed
 
 1. **Default for `CIRCUIT_ALLOW_CONCURRENT`** — proposal is `false` for one release. Ship enabled
    instead?

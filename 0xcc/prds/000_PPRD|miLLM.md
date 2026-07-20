@@ -382,10 +382,10 @@ Organized by logical workflow (matching UI structure):
 #### Concurrent Circuit Serving (FR-19.x) — Increment: Circuit Consolidation
 - FR-19.1: A layer SHALL be claimed by at most one active circuit; circuits with disjoint claim sets SHALL serve concurrently.
 - FR-19.2: Activation whose claim set overlaps an incumbent's SHALL be refused with `CIRCUIT_LAYER_CONTENTION` (200 + `success:false`), naming the incumbent circuit and the contended layers.
-- FR-19.3: An explicit `allow_layer_overlap` acknowledgement SHALL permit additive composition; while any layer is composed, `X-miLLM-Circuit-Rung` SHALL be OMITTED, because no single circuit's evidence describes the response.
+- FR-19.3: An explicit `allow_layer_overlap` acknowledgement SHALL permit additive composition; while any layer is composed, `X-miLLM-Circuit-Rung` SHALL be OMITTED, because no single circuit's evidence describes the response. The refusal preceding any override SHALL carry the MEASURED hazard (close-out: two steered layers at individually-harmless strength destroyed generation) together with its "one model, one fixture" caveat, and every override SHALL be echoed, logged and surfaced — an override taken blind is a footgun; one taken informed is a research decision.
 - FR-19.4: Two active circuits naming the same `(layer, feature_idx)` SHALL be refused unconditionally, with no override, since the merge would serve a strength belonging to neither author.
 - FR-19.5: Deactivation SHALL release only that circuit's own claims and steering keys, never a co-tenant's.
-- FR-19.6: The capability SHALL ship behind `CIRCUIT_ALLOW_CONCURRENT` (default false for one release) with a tested downgrade, since the first concurrent activation is a one-way door in deployed data.
+- FR-19.6: The capability SHALL ship behind `CIRCUIT_ALLOW_CONCURRENT` (default false for exactly ONE release, with the flip to true recorded as a DATED commitment) and a tested downgrade, since the first concurrent activation is a one-way door in deployed data. While the flag is false a second activation SHALL be refused LOUDLY, naming configuration as the reason; it SHALL NOT fall back to the silent single-active disarm this feature replaces.
 
 #### MCP Circuit Surface & Reachability (FR-20.x) — Increment: Circuit Consolidation
 - FR-20.1: A `millm_circuits` MCP category SHALL expose every circuit capability reachable by REST — list, import, activate, deactivate, export, set intensity, status, and edge-sensing status/events/enable/disable.

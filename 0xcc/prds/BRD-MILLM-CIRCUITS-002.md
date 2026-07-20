@@ -192,7 +192,9 @@ brd:
     - id: BR-010
       text: "The SAE picker SHALL indicate which SAEs are compatible with the loaded model BEFORE submission, using a compatibility verdict exposed by the SAE listing rather than discovering incompatibility through a server rejection."
     - id: BR-011
-      text: "miLLM SHALL serve MORE THAN ONE circuit concurrently, replacing the single-active invariant (enforced today by the uq_circuits_active partial unique index) with LAYER-EXCLUSIVE CLAIMS: a layer is claimed by at most one active circuit, activation is refused with CIRCUIT_LAYER_CONTENTION naming the incumbent when claim sets overlap, and an operator may override with an explicit allow_layer_overlap acknowledgement — under which the circuit-rung header is OMITTED, because no single circuit's evidence describes a composed response. Two circuits naming the same (layer, feature_idx) SHALL be refused unconditionally, since the merge would silently serve a strength belonging to neither author. Design of record: 0xcc/docs/circuit-contention-model.md."
+      text: "miLLM SHALL serve MORE THAN ONE circuit concurrently, replacing the single-active invariant (enforced today by the uq_circuits_active partial unique index) with LAYER-EXCLUSIVE CLAIMS: a layer is claimed by at most one active circuit, activation is refused with CIRCUIT_LAYER_CONTENTION naming the incumbent when claim sets overlap, and an operator may override with an explicit allow_layer_overlap acknowledgement — under which the circuit-rung header is OMITTED, because no single circuit's evidence describes a composed response. The refusal that precedes any override SHALL carry the MEASUREMENT that motivates it, not merely the fact of contention: an override chosen in knowledge that two steered layers at individually-harmless strength destroyed generation in close-out testing is a research decision; one chosen blind is a footgun. Every use SHALL be echoed in the response, logged, and surfaced in the UI, mirroring acknowledge_unvalidated. Two circuits naming the same (layer, feature_idx) SHALL be refused unconditionally, since the merge would silently serve a strength belonging to neither author. Design of record: 0xcc/docs/circuit-contention-model.md."
+    - id: BR-011a
+      text: "CIRCUIT_ALLOW_CONCURRENT SHALL default to false for exactly ONE release, with the flip to true recorded as a dated commitment rather than deferred indefinitely — an unflipped flag makes a shipped capability unreachable, which is the precise defect class this increment exists to eliminate. While the flag is false, a second activation SHALL be refused LOUDLY, naming configuration as the reason; it SHALL NOT silently fall back to the single-active disarm behaviour that Feature 19 replaces."
     - id: BR-012
       text: "miLLM SHALL warn on circuit SHAPE — the number of steered layers and their aggregate strength — independently of miStudio-supplied effect sizes, because the GPU close-out measured generation collapsing at TWO steered layers at individually-harmless strengths, two orders of magnitude below the per-member clamp that is the only aggregate bound today."
     - id: BR-013
@@ -273,7 +275,7 @@ brd:
         incompatibility by round trip. Neither is deep, and both are the difference between a control
         that works and one that behaves as it looks.
     - theme: "Concurrent circuit serving"
-      covers: [BR-011]
+      covers: [BR-011, BR-011a]
       note: >
         The one genuinely NEW design work in this increment, and the largest single risk in it. This
         is not a cleanup: the invariant is enforced at the database level by a partial unique index, so
@@ -372,6 +374,19 @@ brd:
         unavailable, BR-008's fallback clause applies: restate the criteria as suite-dischargeable.
 
   next_steps:
+    - "SETTLED 2026-07-20 (product owner): CIRCUIT_ALLOW_CONCURRENT ships false for ONE release with a
+       dated flip commitment, NOT an open-ended default. The flag exists solely because the first
+       concurrent activation is a one-way door in deployed data — trivial to enable, destructive to
+       reverse — and not because the code is doubted. It protects OTHER deployments; if none exist at
+       flip time, drop the flag rather than carry it."
+    - "SETTLED 2026-07-20 (product owner): allow_layer_overlap IS retained. The close-out measurement
+       is real but thin — one model, arbitrarily chosen feature indices, invented max_activation
+       values — so it proves that fixture compounds destructively, NOT that all overlapping circuits
+       do. Hard-refusing a legitimate research action on one unrepresentative data point is overreach,
+       and deliberate compounding studies are a real use case for an interpretability tool. The
+       honesty guarantee holds regardless, since the rung header is omitted when composed. The
+       override is retained on the explicit condition that it is LOUD AND INFORMED: the refusal
+       carries the measurement, and every use is echoed, logged and surfaced."
     - "Design the contention model for BR-011 FIRST — what happens when two active circuits claim the
        same layer, and what a per-layer budget means under two claimants. This gates BR-001, because
        the request-scoped context must be built for N circuits rather than generalised later."

@@ -293,10 +293,18 @@ Refusal envelope (200 + `success:false`), per the design of record §3.2:
 
 ```json
 { "code": "CIRCUIT_LAYER_CONTENTION",
-  "message": "Layers [13] are already served by circuit 'fear→threat' (circ_abc).",
+  "message": "Layers [13] are already served by circuit 'fear\u2192threat' (circ_abc). Overriding composes both circuits additively on those layers. In close-out testing, TWO steered layers at individually-harmless strength (5) destroyed generation entirely \u2014 two orders of magnitude below the per-member clamp. Pass allow_layer_overlap=true only if you intend a compounding study; the circuit-rung header is omitted while any layer is composed, because no single circuit's evidence describes the response.",
   "details": { "contended_layers": [13],
-               "incumbent": {"id": "circ_abc", "name": "fear→threat"},
-               "requested": {"id": "circ_xyz", "name": "hedging"} } }
+               "incumbent": {"id": "circ_abc", "name": "fear\u2192threat"},
+               "requested": {"id": "circ_xyz", "name": "hedging"},
+               "override_param": "allow_layer_overlap",
+               "measured_hazard": {
+                 "source": "GPU close-out 2026-07-20, LFM2.5-1.2B-Instruct",
+                 "one_layer_at_strength_5": "coherent, indistinguishable from baseline",
+                 "two_layers_at_strength_5": "degenerate output",
+                 "note": "one model, one fixture \u2014 indicative, not exhaustive"
+               },
+               "rung_header_suppressed_if_overridden": true } }
 ```
 
 ## 6. UI Requirements
@@ -365,24 +373,36 @@ warning), a separate feature. Automatic resolution of a contention (the operator
 
 ## 13. Open Questions
 
-Carried from `docs/circuit-contention-model.md` §6 — these are for the product owner, and the first two
-gate acceptance:
+**Both questions carried from `docs/circuit-contention-model.md` §6 were SETTLED by the product owner
+on 2026-07-20.** They are recorded here as decisions, not questions; §6 of the design of record holds
+the full reasoning.
 
-1. **Default for `CIRCUIT_ALLOW_CONCURRENT`** — the proposal, and what these documents implement, is
-   `false` for one release (CLAIM-M4). Ship enabled instead? Shipping enabled removes the deliberate-act
-   property RSK-008 asks for; shipping disabled means the increment's headline capability is dark on
-   arrival.
-2. **Should `allow_layer_overlap` exist at all?** It is the only path to the configuration the close-out
-   proved dangerous. FOR: refusing outright makes the runtime paternalistic about a legitimate research
-   action, and researchers doing deliberate compounding studies are a real user. AGAINST: a flag that
-   reliably produces garbage output is a footgun with a label on it. **Design-of-record recommendation:
-   keep it, with the rung header omitted** — the honesty guarantee holds either way. These documents
-   implement the recommendation; removing it later is a strict simplification (delete CLAIM-O1..O5).
-3. **Should the runtime warn on circuit SHAPE regardless of contention?** The close-out found a SINGLE
-   circuit spanning 2+ layers at moderate strength already degenerates. That is the same underlying
-   hazard but it is NOT contention — layer-exclusive claims do not address it at all. **This is BR-012
-   and is a SEPARATE FEATURE**, noted here only so the boundary is explicit: Feature 19 makes sure two
-   circuits do not silently sum; it makes no claim about one circuit being too large.
+1. **`CIRCUIT_ALLOW_CONCURRENT` — DECIDED: `false` for exactly ONE release, with a DATED flip.** The
+   flag exists solely because the first concurrent activation is a one-way door in deployed data —
+   trivial to enable, destructive to reverse — not because the implementation is doubted. Two binding
+   conditions: (a) the flip date is committed now, because an unflipped flag makes a shipped capability
+   unreachable, which is the defect class this increment exists to eliminate; (b) while `false`, a
+   second activation refuses LOUDLY naming configuration as the reason — it must NOT fall back to the
+   silent single-active disarm this feature replaces. If no other deployment exists at flip time, drop
+   the flag rather than carry it. Tracked as **BR-011a**.
+
+2. **`allow_layer_overlap` — DECIDED: RETAINED, on the binding condition that it is LOUD AND
+   INFORMED.** The argument against is real and recorded: it permits a configuration the close-out
+   measured as destructive. It is kept because that measurement is thinner than it sounds — one model,
+   arbitrarily chosen feature indices, invented `max_activation` values — so it proves *that fixture*
+   compounds destructively, not that all overlapping circuits do; because deliberate compounding
+   studies are a legitimate use of an interpretability tool; and because the honesty guarantee holds
+   regardless, since the rung header is omitted when composed.
+
+   **The retention condition is binding and testable:** the refusal preceding any override MUST carry
+   the MEASUREMENT, not merely the fact of contention (see §5's payload), and every use MUST be echoed
+   in the response, logged, and surfaced in the UI — mirroring `acknowledged_unvalidated`, which is
+   already echoed at `circuit_service.py:349-351`. An override chosen knowing that two steered layers
+   at individually-harmless strength destroyed generation in testing is a research decision; one
+   chosen blind is a footgun.
+
+3. **Warning on circuit SHAPE** remains out of scope here — it is **BR-012**, a separate feature. A
+   *single* circuit spanning 2+ layers already degenerates, so layer-exclusive claims do not address it.
 
 ## 14. Documentation Requirements
 Manual: a Circuits page contention section — what a claim is, why the unit of contention is the LAYER

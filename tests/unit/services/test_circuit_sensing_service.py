@@ -2085,3 +2085,63 @@ class TestR3TheCapOrderingKeepsTheCountHonest:
         for s in saes.values():
             self._fire(s)
         assert ctx.budget.truncated_layers("c") == [10, 11, 12]
+
+
+class TestR3TheMergedDrainIsOrderedByPosition:
+    """F17 R3-06, found by mutation: deleting `merged.sort(...)` in
+    `collect_edges` left the whole suite green.
+
+    The sort is load-bearing for two things. Events reach the operator in
+    CAUSAL order, and `_emit` keeps the LAST `_WS_MAX_PER_FLUSH` — a deliberate
+    R2 fix so the live panel shows a request's most RECENT edges rather than
+    its earliest. Without the sort, "last 5" means "whichever layer happened to
+    drain last", which silently undoes that fix: a circuit whose late-position
+    layer drains first would show the panel its oldest events."""
+
+    def _edge(self, down_pos, up_pos):
+        return SimpleNamespace(
+            down_pos=down_pos, up_pos=up_pos, edge_key="e", phase="prefill",
+            up_layer=10, up_feature_idx=1, up_act=1.0,
+            down_layer=13, down_feature_idx=2, down_act=1.0,
+            token_lag=down_pos - up_pos, rung=2,
+            rung_language="causally validated (edge)", edge_type="computed",
+        )
+
+    def test_the_merge_is_sorted_by_downstream_position(self):
+        svc = CircuitSensingService()
+        saes = two_saes()
+        svc.arm_for_circuit(circuit(), definition(), saes)
+        svc.begin_request("r", saes)
+        # `collect_edges` walks `_armed_layers` in SORTED order (10 then 13),
+        # so the LOWER layer must hold the LATER positions or the drain order
+        # already matches position order and the sort is untested. The first
+        # version of this test put late positions on layer 13 and passed
+        # against the mutation — a fixture agreeing with the code by
+        # construction (R1-12's anti-pattern, committed again here).
+        saes[10]._sensed_edges = [self._edge(90, 88), self._edge(95, 93)]
+        saes[13]._sensed_edges = [self._edge(5, 3), self._edge(9, 7)]
+
+        _, merged, _ = svc.collect_edges(saes)
+        positions = [e.down_pos for e in merged]
+        assert positions == sorted(positions), (
+            f"drained out of causal order: {positions}"
+        )
+
+    def test_the_live_panel_gets_the_NEWEST_events(self):
+        """The property the sort exists to protect, asserted end to end."""
+        svc = CircuitSensingService()
+        saes = two_saes()
+        svc.arm_for_circuit(circuit(), definition(), saes)
+        svc.begin_request("r", saes)
+        # Late positions on the LOWER layer, so drain order fights position
+        # order — see the note above.
+        saes[10]._sensed_edges = [self._edge(90, 88), self._edge(95, 93)]
+        saes[13]._sensed_edges = [self._edge(5, 3), self._edge(9, 7)]
+
+        _, merged, _ = svc.collect_edges(saes)
+        newest = [e.down_pos for e in merged[-2:]]
+        assert 95 in newest and 90 in newest, (
+            f"the panel would show {newest}, missing the request's most recent "
+            "edges — the flush cap keeps the LAST entries, so order is what "
+            "makes 'last' mean 'newest'"
+        )

@@ -26,6 +26,12 @@ logger = logging.getLogger(__name__)
 #: tiny cap should still tolerate an ordinarily busy pass.
 _EDGE_FIRE_BUDGET_MIN = 2048
 
+#: When a pass sheds, how many fired positions per COLUMN still feed the shared
+#: ring. Bounds the upstream half, which is per-edge and was otherwise
+#: unbounded — a shed pass at the contract's 200-edge maximum cost 544ms
+#: because "cheap" only described the downstream half it skipped.
+_EDGE_SHED_POSITIONS_PER_COL = 64
+
 
 @dataclass
 class SensingConfig:
@@ -1200,6 +1206,23 @@ class LoadedSAE:
             nz = fired_cpu[:, col].nonzero()
             if nz.numel():
                 fired_positions[col] = nz.flatten().tolist()
+
+        if shed:
+            # F17 gate finding: shedding bounded the DOWNSTREAM matching but
+            # left the upstream half unbounded — and the upstream half is
+            # per-edge, so at the contract's 200-edge maximum a shed pass still
+            # built ~260k events and cost 544ms (vs 5ms at one edge). R2 was
+            # right that siblings depend on upstream recording; it just has to
+            # be bounded too.
+            #
+            # Keep the NEWEST fires per column: match_down reports the nearest
+            # antecedent, so recent history is what a sibling can still use.
+            # Cost now tracks distinct columns, not edge count.
+            for col in range(n_cols):
+                if len(fired_positions[col]) > _EDGE_SHED_POSITIONS_PER_COL:
+                    fired_positions[col] = fired_positions[col][
+                        -_EDGE_SHED_POSITIONS_PER_COL:
+                    ]
 
         # (local_pos, spec, is_upstream) events, processed in position order so
         # an upstream fire at p is visible to a downstream fire at p+1 within

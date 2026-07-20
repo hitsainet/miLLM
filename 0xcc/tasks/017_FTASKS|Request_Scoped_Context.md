@@ -42,7 +42,33 @@
 
 ## Tasks
 
-- [ ] **1.0 Characterization gate — MUST be complete and green BEFORE any code moves (FR-17.6, CTX-V1)**
+- [x] **1.0 Characterization gate — COMPLETE 2026-07-20, green BEFORE any code moved (FR-17.6, CTX-V1)**
+
+  **Gate results.** 24 characterization tests (`test_edge_sensing_characterization.py`) + 4 parity
+  baselines (`test_edge_sensing_baseline.py`), all green against the pre-extraction code.
+
+  **The gate paid for itself immediately — it found a live defect (task 1.3's stated purpose).**
+  The saturated-4096-token baseline measured **549 ms**, not the ~1 ms the F15 R1 load-shedding
+  work claimed. Root cause: shedding bounded the DOWNSTREAM matching but left the UPSTREAM half
+  unbounded, and the upstream half is per-edge. At the contract's 200-edge maximum a shed pass
+  built ~260k events — 544 ms at 200 edges vs 5 ms at one. R2 was right that siblings depend on
+  upstream recording; it simply had to be bounded too. Fixed by capping fired positions per COLUMN
+  (`_EDGE_SHED_POSITIONS_PER_COL = 64`), keeping the newest since `match_down` reports the nearest
+  antecedent. **544 ms → 24.7 ms**, and the cost now tracks distinct columns rather than edge count.
+
+  **Parity targets for the extraction** (a 3x regression fails the suite):
+
+  | Shape | Measured | Assertion |
+  |---|---|---|
+  | Saturated 4096-token, 200 edges | 24.7 ms | < 50 ms |
+  | Realistic 4096-token, 200 edges | ~10 ms | < 60 ms |
+  | Typical 512-token | ~3 ms | < 30 ms |
+  | Growth 512 → 4096 | sublinear | < 8x |
+
+  **Suite baselines:** backend **1659** passed / 1 skipped; frontend 272.
+
+  From here on, an edit to 1.1/1.2 is a behaviour change requiring justification in the review
+  record (CTX-V2).
   - [ ] 1.1 `tests/unit/ml/test_edge_sensing_characterization.py` against the CURRENT code: strict up→down ordering; lag boundary at exactly L and L+1; same-position co-fire does NOT match; newest-antecedent selection; non-destructive read (one upstream fathers several events); `_MAX_FIRES_PER_EDGE` evicts oldest; prefill→decode phase flips exactly once
   - [ ] 1.2 Characterize the eight fixed criticals by behaviour, one test each: R1-01 cross-layer survives a noisy upstream; R1-02/R2-02/R3-03 latency shapes; R1-03 offset advances on EVERY return path (suppressed, batched, raising); R1-04 out-of-range column is a clean arm-time error; R2-03 shed still feeds siblings; R3-02 cap still feeds siblings; R2-04/R3-04 identity snapshotted and released
   - [ ] 1.3 Run against current code — **all green**. Record the count in the task list. A failure here is a live defect found before the refactor, not a test bug

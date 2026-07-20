@@ -352,6 +352,39 @@ async def get_cluster_service(
 # Type alias for injected ClusterService
 ClusterServiceDep = Annotated["ClusterService", Depends(get_cluster_service)]
 
+
+async def get_circuit_repository(session: DbSession) -> "CircuitRepository":
+    """Dependency that provides a CircuitRepository (Feature 13)."""
+    from millm.db.repositories.circuit_repository import CircuitRepository
+
+    return CircuitRepository(session)
+
+
+CircuitRepo = Annotated["CircuitRepository", Depends(get_circuit_repository)]
+
+
+async def get_circuit_service(
+    repository: CircuitRepo,
+    sae_service: SAEServiceDep,
+    cluster_service: ClusterServiceDep,
+) -> "CircuitService":
+    """Dependency that provides a CircuitService (Feature 13).
+
+    Depends on the SAE service (Feature 12 multi-SAE serving) and the cluster
+    service (Feature 8 import path, reused unchanged for the slice fallback).
+    """
+    from millm.services.circuit_service import CircuitService
+
+    return CircuitService(
+        repository=repository,
+        sae_service=sae_service,
+        cluster_service=cluster_service,
+    )
+
+
+# Type alias for injected CircuitService
+CircuitServiceDep = Annotated["CircuitService", Depends(get_circuit_service)]
+
 # Module-level singleton so the Hub listing cache survives across requests.
 _cluster_hub_service: "ClusterHubService | None" = None
 

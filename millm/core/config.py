@@ -65,6 +65,12 @@ class Settings(BaseSettings):
     CLUSTER_INTENSITY_MIN: float = 0.5
     CLUSTER_INTENSITY_MAX: float = 1.5
 
+    # ── Circuit import (Feature 13) ────────────────────────────────────
+    CIRCUIT_HUB_TAG: str = "mistudio-circuit-definition"
+    CIRCUIT_MAX_LAYERS: int = 16          # == contract MAX_SAES
+    CIRCUIT_MAX_EDGES: int = 200          # == contract MAX_EDGES
+    CIRCUIT_MAX_MEMBERS_PER_LAYER: int = 20
+
     # ── Multi-SAE circuit serving (Feature 12) ─────────────────────────
     # Documented VRAM close-out envelope for the attached SAE steering set.
     # Measured: two Gemma-2-2B SAEs = 128 MB fp16 (within) / 256 MB fp32.

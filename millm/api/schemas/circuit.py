@@ -201,6 +201,65 @@ class CircuitDefinitionV1(BaseModel):
         return None
 
 
+# ── API DTOs (Feature 13) ───────────────────────────────────────────────────
+
+
+class PerSAEVerdict(BaseModel):
+    """One layer's compatibility verdict from import/activation."""
+
+    layer: int
+    sae_id: str | None = None
+    verdict: Literal["bind", "warn", "block", "unbound"]
+    reason: str | None = None
+
+
+class CircuitSummary(BaseModel):
+    """List/detail row. Rung language is ALWAYS server-rendered."""
+
+    id: str
+    name: str
+    description: str | None = None
+    rung: int = Field(..., ge=0, le=3)
+    rung_language: str = Field(
+        ..., description="Server-rendered evidence phrase — never re-phrase client-side"
+    )
+    rung_next_step: str
+    validated: bool = Field(
+        ..., description="rung >= 2; below this the circuit is not causally validated"
+    )
+    edge_count: int
+    layers: list[int]
+    serveable: bool
+    is_active: bool
+    serving_mode: str | None = None
+    intensity: float
+    per_sae_warnings: list[PerSAEVerdict] = Field(default_factory=list)
+    created_at: Any = None
+    updated_at: Any = None
+
+
+class CircuitListResponse(BaseModel):
+    circuits: list[CircuitSummary]
+    active_circuit_id: str | None = None
+    total: int = 0
+
+
+class CircuitActivationResponse(CircuitSummary):
+    """Activation outcome: how it is serving and what the user must know."""
+
+    bound_layers: list[int] = Field(default_factory=list)
+    slice_layer: int | None = None
+    applied_per_layer: dict[str, dict[str, float]] | None = None
+    hazards: list[dict[str, Any]] = Field(default_factory=list)
+    warnings: list[str] = Field(default_factory=list)
+    acknowledged_unvalidated: bool = False
+
+
+class SetCircuitIntensityRequest(BaseModel):
+    intensity: float = Field(..., ge=0.0, le=2.0)
+    reapply: bool = True
+
+
 # ── Runtime DTOs (Feature 12 serving) ───────────────────────────────────────
 
 

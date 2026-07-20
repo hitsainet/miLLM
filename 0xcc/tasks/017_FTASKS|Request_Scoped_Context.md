@@ -194,7 +194,7 @@ metrics from 6.3.]*
 |---|---|---|
 | 1 | Exactly ONE position counter per request | **NOT MET — criterion was WRONG.** See below. |
 | 2 | One ring per `(request, circuit)`; cross-circuit `edge_key` collision fabricates nothing | ✅ 2 tests; `ring_key`→constant mutation fails 20 tests |
-| 3 | Budget attributed per circuit | ✅ 3 tests |
+| 3 | Budget attributed per circuit | ⚠️ **CLAIMED IN ERROR, then made true.** See below. |
 | 4 | Pruning with no caller outside the context, incl. a fully suppressed layer (EC-17.1) | ✅ 7 tests; the live §15.6 defect is fixed AND a second instance was found (lazy rings) |
 | 5 | Characterization suite written first, green before and after, unmodified | ✅ 0-line diff since the extraction; it caught 3 regressions during it |
 | 6 | Mutation testing; every survivor pinned or recorded | ✅ 9 mutations, 7 caught, 2 recorded with the combination analysis proving them safe |
@@ -246,3 +246,29 @@ the per-SAE cap has to become per-circuit anyway.
    `try`). EC-17.1 on a third path.
 
 Every one was found by executing or mutating, none by reading.
+
+---
+
+## Correction to the acceptance record (F17 R1, 2026-07-20)
+
+**Criterion 3 was recorded as passing and was not.** I cited "✅ 3 tests" — and
+those three tests passed for the entire life of a mechanism that nothing called.
+`EventBudget.try_spend` had ZERO production suppliers, so the live cap was still
+F15's per-SAE one and an N-layer circuit emitted N x its cap. Measured: cap 3,
+three layers, **9 events**, `budget.spent` 0.
+
+The tests drove `EventBudget` directly instead of through a `LoadedSAE`. They
+asserted the mechanism EXISTS, never that it is CALLED — the exact anti-pattern
+BR-005 forbids and that this arc has now produced four times. Reading the tests
+and seeing them green is what produced the false acceptance; a grep for a
+production caller would have caught it in seconds.
+
+**What made the difference:** review round 1 ran mutation testing rather than
+reading. The budget is now wired, and the new tests drive real SAEs through the
+real entry point, so unwiring it fails 4 tests instead of 0.
+
+**Process lesson, recorded because it will recur:** every "✅ N tests" in an
+acceptance record is worth exactly as much as those tests' ability to fail.
+Before claiming a criterion, grep for a production caller of the mechanism the
+criterion names, and mutate it. Green tests are evidence about the tests until
+you have watched them go red.

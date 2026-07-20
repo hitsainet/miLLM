@@ -1675,3 +1675,52 @@ class TestR2APauseReasonCannotLagARequestBehind:
         svc.begin_request("r2", saes)
         svc.clear_stale_pause()
         assert svc._paused_reason is None
+
+
+class TestR2AReclaimedRequestsDataIsDiscardedLOUDLY:
+    """F17 R2-15, from attacking R2-01's reclaim path.
+
+    Verified first that the reclaim does NOT leak: a later request drains 0
+    edges and none of the stale observations, because
+    `begin_edge_sensing_request` resets each buffer. So attribution is safe —
+    the guard's whole purpose holds.
+
+    But the discard was SILENT. On an evidence surface, quietly dropping a
+    request's observations leaves the operator reading a clean circuit that
+    lost data."""
+
+    def _armed(self):
+        svc = CircuitSensingService()
+        saes = two_saes()
+        svc.arm_for_circuit(circuit(), definition(), saes)
+        return svc, saes
+
+    def test_stale_observations_are_never_attributed_to_a_later_request(self):
+        """The guarantee that must hold no matter what: no fabrication."""
+        svc, saes = self._armed()
+        svc.begin_request("A", saes)
+        saes[10]._sensed_edges.append("A-observation")
+        svc.begin_request("B", saes)          # refused, reclaims
+        svc.begin_request("C", saes)          # succeeds
+        request_id, edges, _ = svc.collect_edges(saes)
+        assert request_id == "C"
+        assert "A-observation" not in edges, (
+            "A's observation was drained under C's identity — fabricated "
+            "attribution, the exact failure the guard exists to prevent"
+        )
+
+    def test_a_lossy_reclaim_is_counted(self):
+        svc, saes = self._armed()
+        svc.begin_request("A", saes)
+        saes[10]._sensed_edges.append("obs")
+        svc.begin_request("B", saes)
+        assert svc.status(saes)["requests_truncated"] == 1, (
+            "a request's observations were discarded and nothing recorded it"
+        )
+
+    def test_a_clean_reclaim_is_NOT_counted(self):
+        """A reclaim that lost nothing must not raise a data-loss signal."""
+        svc, saes = self._armed()
+        svc.begin_request("A", saes)          # observed nothing
+        svc.begin_request("B", saes)
+        assert svc.status(saes)["requests_truncated"] == 0

@@ -560,6 +560,31 @@ class CircuitSensingService:
             # and reclaiming would corrupt the live one. That setting is the
             # documented invariant this whole guard exists to enforce.
             stale, self._ctx = self._ctx, None
+            # R2-15: the stale request may have observed edges it never drained.
+            # They are correctly DISCARDED rather than leaked — the next
+            # request's `begin_edge_sensing_request` resets each buffer, so
+            # they can never be attributed to it (verified: a later request
+            # drained 0 edges and none of the stale observations). But a silent
+            # discard on an evidence surface still has to be counted, or the
+            # operator sees a clean circuit that quietly lost a request's data.
+            undrained = 0
+            for sae in list(self._armed_saes.values()):
+                try:
+                    undrained += len(getattr(sae, "_sensed_edges", ()) or ())
+                except Exception:
+                    pass
+            if undrained:
+                self._requests_truncated += 1
+                logger.warning(
+                    "circuit_sensing_stale_observations_discarded",
+                    events=undrained,
+                    stale_request=getattr(stale, "request_id", None),
+                    detail=(
+                        "a request boundary was reclaimed before its "
+                        "observations were drained; they are discarded, never "
+                        "attributed to another request"
+                    ),
+                )
             try:
                 stale.close()
             except Exception:

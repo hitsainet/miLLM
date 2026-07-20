@@ -18,19 +18,24 @@ from typing import Iterator, Optional
 import torch
 from torch import Tensor
 
+# The edge-sensing primitives are DEFINED in millm.ml.edge_sensing and
+# re-exported here.
+#
+# EdgeSpec / SensedEdge / EdgeFireRing and the two shed constants used to be
+# declared in BOTH modules with identical field names — two definitions that
+# read as interchangeable, were not the same type, and would have diverged the
+# moment either gained a field. Nine call sites import these names from this
+# module, so the names stay put while the definitions do not.
+from millm.ml.edge_sensing import (
+    _EDGE_FIRE_BUDGET_MIN,
+    _EDGE_SHED_POSITIONS_PER_COL,
+    EdgeFireRing,
+    EdgeSpec,
+    SensedEdge,
+)
 from millm.ml.sae_config import SAEConfig
 
 logger = logging.getLogger(__name__)
-
-#: Floor for the per-pass fire budget (see _match_edges). Below this even a
-#: tiny cap should still tolerate an ordinarily busy pass.
-_EDGE_FIRE_BUDGET_MIN = 2048
-
-#: When a pass sheds, how many fired positions per COLUMN still feed the shared
-#: ring. Bounds the upstream half, which is per-edge and was otherwise
-#: unbounded — a shed pass at the contract's 200-edge maximum cost 544ms
-#: because "cheap" only described the downstream half it skipped.
-_EDGE_SHED_POSITIONS_PER_COL = 64
 
 
 @dataclass
@@ -54,33 +59,6 @@ class SensingConfig:
 
 
 @dataclass
-class EdgeSpec:
-    """One sensable edge, resolved against the SAEs actually attached.
-
-    ``up_col``/``down_col`` are COLUMN OFFSETS into this SAE's armed member
-    slice, not feature indices — the slice is what `_W_enc_e` selects, so the
-    activation lookup must use the offset. ``up_feature_idx``/
-    ``down_feature_idx`` keep the real indices for reporting.
-
-    An edge whose endpoints live on different layers is sensed COOPERATIVELY:
-    the upstream SAE records the fire into a shared ring and the downstream
-    SAE matches against it. Both SAEs therefore hold the same EdgeSpec, and
-    each uses only the half that belongs to its own layer.
-    """
-
-    edge_key: str
-    up_layer: int
-    up_feature_idx: int
-    up_col: int                            # offset into THIS SAE's slice, or -1
-    down_layer: int
-    down_feature_idx: int
-    down_col: int                          # offset into THIS SAE's slice, or -1
-    rung: int
-    rung_language: str
-    edge_type: Optional[str] = None
-
-
-@dataclass
 class CircuitSensingConfig:
     """Armed edge-sensing parameters for ONE SAE of a circuit (Feature 15).
 
@@ -99,144 +77,6 @@ class CircuitSensingConfig:
     context_tokens: int
     max_events_per_request: int = 20
 
-
-@dataclass
-class SensedEdge:
-    """One observed up->down firing within the lag window.
-
-    NOT a causal observation. It says the upstream member fired and the
-    downstream partner then fired within ``token_lag`` tokens, in the
-    authored direction. The rung carried here is the only claim about
-    causality and it comes from miStudio, never from this observation.
-    """
-
-    edge_key: str
-    up_layer: int
-    up_feature_idx: int
-    up_pos: int
-    up_act: float
-    down_layer: int
-    down_feature_idx: int
-    down_pos: int
-    down_act: float
-    token_lag: int
-    phase: str                             # phase of the DOWNSTREAM fire
-    rung: int
-    rung_language: str
-    edge_type: Optional[str] = None
-
-
-class EdgeFireRing:
-    """Per-request record of upstream fires, shared across a circuit's SAEs.
-
-    A cross-layer edge cannot be detected inside one SAE: the upstream fire
-    happens in layer L's hook and the downstream fire in layer M's, on
-    different passes for decode tokens and different rows of the same pass for
-    prefill. The ring is the only shared state, and it is keyed by ABSOLUTE
-    token position so the two hooks agree on ordering regardless of which ran
-    first.
-    """
-
-    def __init__(self, max_lag: int):
-        self._max_lag = max(1, int(max_lag))
-        #: edge_key -> list of (abs_pos, activation), ascending by position.
-        self._fires: dict[str, list[tuple[int, float]]] = {}
-        #: layer -> position walked through, so the ring can prune to the
-        #: SLOWEST layer without any hook knowing about its siblings.
-        self._progress: dict[int, int] = {}
-        self._last_pruned_at: int = 0
-
-    #: Per-edge upstream-fire retention. The ring cannot prune by position —
-    #: see prune_before — so it bounds memory by count instead. Generous
-    #: relative to any plausible lag window; the matcher filters by window.
-    _MAX_FIRES_PER_EDGE = 512
-
-    def record_up(self, edge_key: str, pos: int, act: float) -> None:
-        fires = self._fires.setdefault(edge_key, [])
-        fires.append((pos, float(act)))
-        if len(fires) > self._MAX_FIRES_PER_EDGE:
-            # Drop the OLDEST: the newest antecedent is the one match_down
-            # reports, so recent history is what matters.
-            del fires[: len(fires) - self._MAX_FIRES_PER_EDGE]
-
-    def match_down(self, edge_key: str, down_pos: int) -> Optional[tuple[int, float]]:
-        """Newest upstream fire STRICTLY before down_pos and within the lag.
-
-        Strictly before: a same-position co-fire is co-activation, not an
-        up->down sequence, and reporting it as one would overclaim direction
-        (EC-15.2). Newest-first because the closest antecedent is the most
-        defensible attribution.
-        """
-        fires = self._fires.get(edge_key)
-        if not fires:
-            return None
-        # R2: this scanned ALL retained fires per downstream fire — 78.5ms on a
-        # 4096-token pass, a new in-hook hot spot introduced by R1's switch to
-        # count-based bounding. `fires` is ascending by position, so walk
-        # BACKWARD and stop at the window edge: the first hit is already the
-        # newest antecedent, and everything earlier is out of window.
-        # R3: stepping back over the tail one entry at a time was O(n) on the
-        # NORMAL cross-layer path — hooks run in layer order, so the upstream
-        # layer records its entire prefill before the downstream layer matches
-        # ascending, making every match walk the whole tail (39ms at 4096
-        # tokens for ONE edge). Jump straight to the insertion point.
-        import bisect
-
-        i = bisect.bisect_left(fires, (down_pos, float("-inf"))) - 1
-        while i >= 0:
-            pos, act = fires[i]
-            if (down_pos - pos) > self._max_lag:
-                break
-            if pos < down_pos:
-                return (pos, act)
-            i -= 1
-        return None
-
-    def prune_before(self, pos: int) -> None:
-        """Drop fires that can no longer match anything at or after `pos`.
-
-        MUST NOT be called from a hook. R1 CRITICAL: this was called per
-        position inside `_match_edges`, so the UPSTREAM layer's hook walked an
-        entire prefill and pruned the ring down to (last_pos - max_lag) before
-        the DOWNSTREAM layer's hook ever ran — destroying the very fires the
-        downstream needed and silently killing cross-layer detection, the
-        whole point of the feature, while status still reported "armed".
-
-        A hook cannot know whether a sibling layer still needs a fire, so
-        pruning is a REQUEST-level operation: only CircuitSensingService, which
-        knows when every layer has finished a request, may call it.
-        """
-        cutoff = pos - self._max_lag
-        for key, fires in list(self._fires.items()):
-            kept = [f for f in fires if f[0] >= cutoff]
-            if kept:
-                self._fires[key] = kept
-            else:
-                del self._fires[key]
-
-    def note_layer_progress(self, layer: int, through: int) -> None:
-        """Record how far one layer has walked, and prune to the slowest.
-
-        R1 moved pruning out of the hooks and declared it request-level, then
-        never wired a caller; R2 added service methods and ALSO never wired
-        them. Third attempt, different shape: the RING tracks each layer's
-        progress, so it can prune to the slowest layer itself — the hook does
-        not need to know about its siblings, which is what made the previous
-        two designs unwireable. Bounded by construction rather than by a
-        caller remembering.
-        """
-        self._progress[layer] = through
-        if len(self._progress) < 2:
-            return  # a single layer: nothing to be slower than
-        slowest = min(self._progress.values())
-        if slowest - self._last_pruned_at >= self._max_lag:
-            self._last_pruned_at = slowest
-            self.prune_before(slowest)
-
-    def clear(self) -> None:
-        self._fires.clear()
-        self._progress.clear()
-        self._last_pruned_at = 0
 
 
 @dataclass

@@ -34,6 +34,20 @@ import logging
 from dataclasses import dataclass, field
 from typing import Any, Optional
 
+#: Floor for the per-pass fire budget. Below this even a tiny cap should still
+#: tolerate an ordinarily busy pass.
+_EDGE_FIRE_BUDGET_MIN = 2048
+
+#: When a pass sheds, how many fired positions per COLUMN still feed the shared
+#: ring. Bounds the upstream half, which is per-edge and was otherwise
+#: unbounded — a shed pass at the contract's 200-edge maximum cost 544ms
+#: because "cheap" only described the downstream half it skipped.
+#:
+#: Defined HERE, next to the matcher that enforces it, and imported by
+#: sae_wrapper. It briefly existed as two independent literals in two files
+#: with no shared source, which is how a shed threshold drifts silently.
+_EDGE_SHED_POSITIONS_PER_COL = 64
+
 logger = logging.getLogger(__name__)
 
 
@@ -340,9 +354,9 @@ def match_edges(
     fired_cpu: Any,
     out: list[SensedEdge],
     *,
-    shed: bool = False,
-    capped: bool = False,
-    positions_per_col_when_shed: int = 64,
+    shed: bool,
+    capped: bool,
+    positions_per_col_when_shed: int = _EDGE_SHED_POSITIONS_PER_COL,
 ) -> None:
     """Record upstream fires and match downstream ones, in position order.
 
@@ -350,6 +364,16 @@ def match_edges(
     be visible to a downstream fire at p+1, so events are sorted with upstream
     first at equal positions — which also keeps a same-position co-fire from
     matching, since ``match_down`` requires strictly before.
+
+    ``shed`` and ``capped`` are REQUIRED keywords, deliberately. They used to
+    default to False, which meant a caller that forgot them got a silently
+    unshedded, uncapped matcher — no exception, no log, just the 1430ms
+    in-hook regression R1 fixed, quietly restored. This module's failures have
+    consistently been failures by omission, so omission is now a TypeError.
+
+    Note this function is the MATCHING half only. Load-shedding accounting
+    (total fires, the saturation warning, the shed truncation flag) belongs to
+    the caller, which owns the counters those feed.
     """
     ring = ctx.ring(circuit_id, config.max_token_lag)
     phase = ctx.phase

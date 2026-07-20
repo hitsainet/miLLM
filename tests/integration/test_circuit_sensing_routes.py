@@ -362,3 +362,53 @@ class TestToggleRoutes:
         assert body["success"] is False
         assert "unreadable" in body["error"]["message"].lower()
         assert circuit.sensing_enabled is True, "intent survives a refused arm"
+
+
+class TestR3TheNewStatusFieldsReachTheHTTPRESPONSE:
+    """F17 R3-18. Rounds 1-3 added five status fields — `truncated_layers`,
+    `requests_sensed`, `requests_truncated`, `ws_throttled`, and the reasons
+    behind `paused_reason` — and NO route test asserts any of them.
+
+    The unit tests prove the service computes them and the schema tests prove
+    the model carries them. Neither proves the HTTP response does. That gap is
+    the F16 R1 failure mode exactly: a field the service computes, the response
+    model does not declare, and Pydantic silently drops on the way out — moved
+    up a layer to the route.
+
+    Each of these fields exists so an operator can tell 'quiet' from 'broken'.
+    A field that never reaches the wire cannot do that."""
+
+    def _status(self, client):
+        with patch("millm.db.base.async_session_factory", return_value=session_ctx()):
+            r = client.get("/api/circuit-sensing/status")
+        assert r.status_code == 200
+        return r.json()["data"]
+
+    def test_the_status_route_carries_every_honesty_field(self, client):
+        data = self._status(client)
+        for field in (
+            "truncated_layers", "requests_sensed", "requests_truncated",
+            "ws_throttled", "ws_dropped", "paused_reason", "events_recorded",
+        ):
+            assert field in data, (
+                f"{field!r} never reached the HTTP response — the operator "
+                "signal it carries is unreachable"
+            )
+
+    def test_the_counters_are_typed_as_the_contract_promises(self, client):
+        """`truncated_layers` is a LIST of layers, not a boolean — the whole
+        point of BR-006. A client reading it as truthy would report every
+        request as truncated."""
+        data = self._status(client)
+        assert isinstance(data["truncated_layers"], list)
+        assert isinstance(data["requests_sensed"], int)
+        assert isinstance(data["requests_truncated"], int)
+        assert isinstance(data["ws_throttled"], int)
+
+    def test_an_unarmed_circuit_reports_zeroes_not_nulls(self, client):
+        """Nulls would force every consumer into defensive checks, and an
+        agent reading null as 'unknown' would hedge a claim it can make."""
+        data = self._status(client)
+        assert data["requests_sensed"] == 0
+        assert data["requests_truncated"] == 0
+        assert data["truncated_layers"] == []

@@ -1187,6 +1187,9 @@ class LoadedSAE:
             # (measured: cap 3, three layers, nine events, `spent` 0). This is
             # the guarantee FPRD §9 criterion 3 requires and F19 depends on.
             try_spend=self._try_spend_circuit_budget,
+            # Truncation WITHOUT the latch: a circuit-budget refusal is a
+            # global condition, so it must not disable this layer (R2-03).
+            on_truncated=self._note_budget_truncation,
         )
 
     def _try_spend_circuit_budget(self, spec) -> bool:
@@ -1227,12 +1230,33 @@ class LoadedSAE:
         except Exception:
             logger.exception("edge_budget_truncation_note_failed")
 
+    def _note_budget_truncation(self) -> None:
+        """The CIRCUIT's shared budget refused an event for this layer.
+
+        Records the loss and stops there. Deliberately NOT `_note_edge_cap`:
+        that latches `_edge_done`, which is right for this SAE's own cap and
+        wrong for a shared one — a layer refused because a SIBLING spent the
+        budget would go dark for the rest of the request (R2-03 starvation,
+        measured).
+        """
+        self._edge_truncated = True
+        self._note_circuit_truncation()
+
     def _note_edge_cap(self) -> None:
-        """The per-request cap was reached. Latches so later passes skip the
-        downstream half entirely rather than re-walking it to reject every
-        event (the latch is a performance property, not a correctness one)."""
+        """This SAE's OWN per-request cap was reached. Latches so later passes
+        skip the downstream half entirely rather than re-walking it to reject
+        every event (the latch is a performance property, not a correctness
+        one — see `_note_budget_truncation` for why the SHARED budget must not
+        latch).
+
+        Also tells the circuit budget. R2-03 reordered the two cap checks so
+        this one runs first, which made the budget unaware of a layer that
+        truncated on its own cap — the two truncation sources diverging again,
+        the exact defect R1-07 fixed one round earlier.
+        """
         self._edge_truncated = True
         self._edge_done = True
+        self._note_circuit_truncation()
 
     @contextmanager
     def suppressed(self) -> Iterator[None]:

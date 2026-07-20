@@ -445,6 +445,7 @@ def _match_edges_impl(
     positions_per_col_when_shed: int = _EDGE_SHED_POSITIONS_PER_COL,
     try_spend: Optional[Any] = None,
     on_cap: Optional[Any] = None,
+    on_truncated: Optional[Any] = None,
 ) -> None:
     """The single matching loop. ONE copy, two entry points.
 
@@ -455,6 +456,10 @@ def _match_edges_impl(
       per CIRCUIT and shared across its layers.
     * ``on_cap()`` — the LoadedSAE path, where the cap is per SAE and reaching
       it latches so later passes skip the downstream half.
+    * ``on_truncated()`` — records data loss WITHOUT latching, for the shared
+      circuit budget. A layer refused by a sibling's spending must stay
+      eligible; latching it would starve it for the rest of the request
+      (R2-03).
 
     Everything load-bearing — ordering, the shed cap, the strictly-before
     match, the fourteen event fields — exists exactly once. This function was
@@ -508,6 +513,17 @@ def _match_edges_impl(
         if match is None:
             continue
         up_pos, up_act = match
+        # ORDER MATTERS (R2-03). This layer's OWN cap is checked first:
+        # reaching it means the layer is genuinely done, so the latch is a
+        # correct optimisation. The shared circuit budget is checked
+        # second and never latches, because a layer refused by a SIBLING's
+        # spending must stay eligible. Checking the budget first made the
+        # per-SAE latch unreachable whenever the two caps were equal — the
+        # common single-layer case.
+        if on_cap is not None and len(out) >= config.max_events_per_request:
+            # Per-SAE cap reached. Latch, then CONTINUE for the same reason.
+            on_cap()
+            continue
         if try_spend is not None and not try_spend(spec):
             # Budget exhausted for this circuit. CONTINUE — returning here
             # would stop this layer feeding the ring and blind its siblings.
@@ -518,12 +534,24 @@ def _match_edges_impl(
             # reached — so the drain reported a clean, complete result while
             # events were being discarded. That is the silent-dark failure this
             # feature exists to remove, reintroduced by the fix for it.
-            if on_cap is not None:
-                on_cap()
-            continue
-        if on_cap is not None and len(out) >= config.max_events_per_request:
-            # Per-SAE cap reached. Latch, then CONTINUE for the same reason.
-            on_cap()
+            # R2-03: report truncation WITHOUT latching. `on_cap` also sets
+            # `_edge_done`, which makes every later pass skip the downstream
+            # half — correct for the PER-SAE cap (this layer really is done)
+            # and wrong for the shared circuit budget, which is a global
+            # condition. Measured with a circuit cap of 4 across two layers:
+            #
+            #   pass 1 (only L10 busy): L10 4 events | L11 0 events, done=False
+            #   pass 2 (L11 now fires): L11 0 events, done=TRUE   <- latched
+            #   pass 3:                 L11 0 events              <- dark
+            #
+            # Layer 11 recorded NOTHING for the whole request because a SIBLING
+            # spent the budget. That is the R2-03/R3-02 starvation this code
+            # has already fixed twice, reintroduced through the budget path by
+            # the R1-05 fix. The budget can legitimately free up — another
+            # circuit's layers do not share it — so a refused layer must stay
+            # eligible.
+            if on_truncated is not None:
+                on_truncated()
             continue
         out.append(
             SensedEdge(

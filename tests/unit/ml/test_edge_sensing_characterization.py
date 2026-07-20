@@ -732,3 +732,79 @@ class TestUncoveredPathsThatBehaveCorrectly:
             "the offset rolled back — if re-runs are now handled, revisit the "
             "speculative-decoding exclusion in _circuit_sensing_begin"
         )
+
+
+class TestR2ASiblingsSpendingNeverStarvesAQuietLayer:
+    """F17 R2-03. R1-05 routed budget refusals through `on_cap`, which LATCHES
+    `_edge_done` — correct for a layer's own cap, wrong for the shared circuit
+    budget. Measured with a circuit cap of 4 across two layers:
+
+        pass 1 (only L10 busy): L10 4 events | L11 0 events, done=False
+        pass 2 (L11 now fires): L11 0 events, done=TRUE   <- latched
+        pass 3:                 L11 0 events              <- dark all request
+
+    Layer 11 recorded NOTHING because a SIBLING spent the budget — the
+    R2-03/R3-02 starvation this codebase has already fixed twice, arriving a
+    third time through the budget path.
+
+    R1's `test_a_refused_layer_still_feeds_its_siblings` missed it because it
+    fires every layer once in a single even pass; the latch needs a SECOND pass
+    to bite. The interaction surface is where these defects live."""
+
+    def _circuit(self, cap=4, layers=(10, 11)):
+        cfgs = {}
+        for L in layers:
+            c = config(
+                edges=[spec(up_layer=L, down_layer=L, key=f"1@{L}->2@{L}")],
+                max_lag=8, cap=cap, layer=L,
+            )
+            c.circuit_id = "circ_1"
+            cfgs[L] = c
+        ctx = ctx_for(cfgs[layers[0]], "r")
+        saes = {}
+        for L, c in cfgs.items():
+            s = real_sae()
+            s.arm_edge_sensing(c)
+            s.bind_context(ctx)
+            s.begin_edge_sensing_request("r")
+            saes[L] = s
+        return ctx, saes
+
+    def _busy(self, pairs=6):
+        rows = []
+        for _ in range(pairs):
+            rows += [{1: 2.0}, {2: 2.0}]
+        return hidden(*rows)
+
+    def test_a_quiet_layer_is_not_latched_by_a_busy_sibling(self):
+        ctx, saes = self._circuit()
+        saes[10]._sense_edges(self._busy())          # spends the circuit budget
+        saes[11]._sense_edges(hidden(*[{}] * 12))    # quiet pass
+        saes[11]._sense_edges(self._busy())          # NOW it fires
+        assert saes[11]._edge_done is False, (
+            "a sibling's spending latched this layer for the rest of the "
+            "request — R2-03 starvation through the budget path"
+        )
+
+    def test_a_starved_layer_still_reports_truncation(self):
+        """It must not go quietly dark either: refused events are lost data."""
+        ctx, saes = self._circuit()
+        saes[10]._sense_edges(self._busy())
+        saes[11]._sense_edges(self._busy())
+        assert saes[11]._edge_truncated is True
+
+    def test_a_layer_hitting_its_OWN_cap_still_latches(self):
+        """The per-SAE latch is a real optimisation and must survive: reaching
+        your own cap means you genuinely are done for this request."""
+        ctx, saes = self._circuit(cap=2, layers=(10,))
+        ctx.budget.cap = 10_000                      # the circuit is not binding
+        saes[10]._sense_edges(self._busy())
+        assert saes[10]._edge_done is True
+        assert len(saes[10]._sensed_edges) == 2
+
+    def test_both_cap_paths_tell_the_circuit_budget(self):
+        """R1-07's one-source-of-truth rule survives the reordering: whichever
+        cap fires, `truncated_layers` learns about it."""
+        ctx, saes = self._circuit(cap=2, layers=(10,))
+        saes[10]._sense_edges(self._busy())
+        assert ctx.budget.truncated_layers("circ_1") == [10]

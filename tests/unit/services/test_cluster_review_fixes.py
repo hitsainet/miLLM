@@ -5,6 +5,7 @@ rollback + authored-range enforcement, lossless raw storage, activation-
 failure warning persistence, and cluster-row edit/flat-export guards.
 """
 
+from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -30,10 +31,44 @@ def make_definition(**overrides) -> ClusterDefinitionV1:
 
 
 class FakeAttachedState:
-    def __init__(self, d_sae=16384, sae_id="sae_local", layer=12, attached=True):
+    """Stands in for the AttachedSAEState singleton, including the multi-SAE
+    registry surface (Feature 12) the cluster compat check now uses."""
+
+    def __init__(self, d_sae=16384, sae_id="sae_local", layer=12, attached=True,
+                 extra_entries=()):
         self.attached_sae = MagicMock(d_sae=d_sae) if attached else None
         self.attached_sae_id = sae_id if attached else None
         self.attached_layer = layer if attached else None
+        self._entries = []
+        if attached:
+            self._entries.append(
+                SimpleNamespace(sae=self.attached_sae, sae_id=sae_id, layer=layer)
+            )
+        for extra_sae_id, extra_layer, extra_d_sae in extra_entries:
+            self._entries.append(
+                SimpleNamespace(
+                    sae=MagicMock(d_sae=extra_d_sae),
+                    sae_id=extra_sae_id,
+                    layer=extra_layer,
+                )
+            )
+
+    @property
+    def count(self):
+        return len(self._entries)
+
+    def entries(self):
+        return list(self._entries)
+
+    def by_layer(self, layer):
+        matches = [e for e in self._entries if e.layer == int(layer)]
+        return matches[0] if len(matches) == 1 else None
+
+    def get(self, sae_id, layer):
+        for e in self._entries:
+            if e.sae_id == sae_id and e.layer == int(layer):
+                return e
+        return None
 
 
 def patched_state(**kw):

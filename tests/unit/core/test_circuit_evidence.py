@@ -180,6 +180,13 @@ class TestCopyAudit:
                     "rung < 2",
                     "rung<2",
                     "below rung 2",
+                    # The ladder enumerated in a doc comment: the phrase is
+                    # attached to its own rung number, not to a lower one.
+                    "2 causally validated",
+                    # Copy stating the GATE ("only a causally validated circuit
+                    # activates without an acknowledgement") — that is the rule,
+                    # not a claim about a specific low-rung artifact.
+                    "only a causally validated",
                     # References to the vocabulary itself, not hand-written copy.
                     "causally_validated",   # the enum member name
                     "rung_language",        # rendering through the vocabulary

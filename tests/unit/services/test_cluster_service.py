@@ -4,6 +4,7 @@ compatibility outcomes, name dedupe, the activation gate, lambda/clamp math,
 intensity, and lossless export.
 """
 
+from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -35,12 +36,50 @@ def make_definition(**overrides) -> ClusterDefinitionV1:
 
 
 class FakeAttachedState:
-    """Stands in for the AttachedSAEState singleton."""
+    """Stands in for the AttachedSAEState singleton.
 
-    def __init__(self, d_sae=16384, sae_id="sae_local", layer=12, attached=True):
+    Mirrors the multi-SAE registry surface (Feature 12) the cluster
+    compatibility check now uses: ``by_layer`` resolves a layer to its unique
+    entry, ``count``/``entries`` describe the whole attached set. The singular
+    properties remain the first-entry view for back-compat.
+    """
+
+    def __init__(self, d_sae=16384, sae_id="sae_local", layer=12, attached=True,
+                 extra_entries=()):
         self.attached_sae = MagicMock(d_sae=d_sae) if attached else None
         self.attached_sae_id = sae_id if attached else None
         self.attached_layer = layer if attached else None
+        self._entries = []
+        if attached:
+            self._entries.append(
+                SimpleNamespace(sae=self.attached_sae, sae_id=sae_id, layer=layer)
+            )
+        # extra_entries: iterable of (sae_id, layer, d_sae) for multi-SAE cases.
+        for extra_sae_id, extra_layer, extra_d_sae in extra_entries:
+            self._entries.append(
+                SimpleNamespace(
+                    sae=MagicMock(d_sae=extra_d_sae),
+                    sae_id=extra_sae_id,
+                    layer=extra_layer,
+                )
+            )
+
+    @property
+    def count(self):
+        return len(self._entries)
+
+    def entries(self):
+        return list(self._entries)
+
+    def by_layer(self, layer):
+        matches = [e for e in self._entries if e.layer == int(layer)]
+        return matches[0] if len(matches) == 1 else None
+
+    def get(self, sae_id, layer):
+        for e in self._entries:
+            if e.sae_id == sae_id and e.layer == int(layer):
+                return e
+        return None
 
 
 @pytest.fixture
@@ -302,3 +341,44 @@ class TestDelete:
         )
         with pytest.raises(Exception):
             await service.delete("prof_manual3")
+
+
+class TestMultiSAEBinding:
+    """Feature 12/13 (inherited F12 R3 finding): once a multi-SAE circuit is
+    attached, `attached_sae` is an ARBITRARY first entry. A cluster must bind
+    by its DECLARED LAYER, never to whatever happens to be first — that would
+    be the silent wrong-basis serve the circuit path fails closed on."""
+
+    async def test_binds_to_the_sae_on_its_declared_layer_not_the_first(self, service):
+        # Registry: L12 (first) + L20. The definition targets L20.
+        with patched_state(
+            sae_id="sae_first", layer=12,
+            extra_entries=[("sae_on_20", 20, 16384)],
+        ):
+            definition = make_definition(sae={"layer": 20, "n_features": 16384})
+            result = await service.import_definition(definition)
+        row = await service.repository.get(result.profile_id)
+        # Bound to L20's SAE, NOT the first entry.
+        assert row.sae_id == "sae_on_20"
+
+    async def test_no_unique_sae_on_declared_layer_is_a_hard_block(self, service):
+        """Several SAEs attached but none uniquely serves the declared layer —
+        refuse to guess (import unbound), rather than warn-and-bind wrongly."""
+        with patched_state(
+            sae_id="sae_first", layer=12,
+            extra_entries=[("sae_on_20", 20, 16384)],
+        ):
+            definition = make_definition(sae={"layer": 99, "n_features": 16384})
+            result = await service.import_definition(definition)
+        row = await service.repository.get(result.profile_id)
+        assert row.sae_id is None  # unbound, not mis-bound
+        assert any("no unique SAE" in w for w in result.warnings)
+
+    async def test_single_sae_deployment_unchanged(self, service):
+        """The common single-SAE case must behave exactly as before."""
+        with patched_state(sae_id="sae_local", layer=12):
+            result = await service.import_definition(
+                make_definition(sae={"layer": 12, "n_features": 16384})
+            )
+        row = await service.repository.get(result.profile_id)
+        assert row.sae_id == "sae_local"

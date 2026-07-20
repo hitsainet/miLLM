@@ -103,7 +103,20 @@ class DetailedHealthResponse(BaseModel):
     model_loaded: bool = Field(False, description="Whether a model is currently loaded")
     model_name: Optional[str] = Field(None, description="Name of loaded model")
     sae_attached: bool = Field(False, description="Whether an SAE is currently attached")
-    sae_id: Optional[str] = Field(None, description="ID of attached SAE")
+    sae_id: Optional[str] = Field(
+        None,
+        description=(
+            "ID of the FIRST attached SAE (back-compat singular view). With a "
+            "multi-SAE circuit attached, see sae_count/sae_ids for the full set."
+        ),
+    )
+    sae_count: int = Field(
+        0, description="Number of attached (sae_id, layer) entries (Feature 12)"
+    )
+    sae_ids: list[str] = Field(
+        default_factory=list,
+        description="Every attached SAE id, in attachment order (Feature 12)",
+    )
     inference: Optional[dict[str, Any]] = Field(None, description="Inference backend info")
     active_profile: Optional[ActiveProfileInfo] = Field(
         None, description="Currently active steering profile (null when none)"
@@ -341,6 +354,10 @@ async def detailed_health_check(
         model_name=model_name,
         sae_attached=sae_state.is_attached,
         sae_id=sae_state.attached_sae_id,
+        # Multi-SAE aware (Feature 12/13): a cross-layer circuit attaches
+        # several SAEs, so the singular id alone under-reports what is live.
+        sae_count=sae_state.count,
+        sae_ids=[e.sae_id for e in sae_state.entries()],
         inference=inference_info or None,
         active_profile=active_profile,
     )

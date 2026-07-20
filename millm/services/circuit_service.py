@@ -282,6 +282,13 @@ class CircuitService:
         ]
         all_bound = bool(verdicts) and len(bound_layers) == len(verdicts)
 
+        # Co-tenancy guard (F12 R2/R3 finding): circuit serving CLEARS each
+        # target layer's SAE before applying, so an active cluster/profile
+        # steering one of those layers would be silently wiped while its row
+        # still reported "active". Deactivate it explicitly and tell the user —
+        # a single steering owner at a time, never a silent clobber.
+        co_tenant_warnings = await self._release_co_tenants(bound_layers)
+
         if all_bound:
             result = await self._serve_full(circuit, definition)
         else:
@@ -292,6 +299,7 @@ class CircuitService:
             circuit.id, serving_mode=result["serving_mode"]
         )
         refreshed = await self.repository.get(circuit.id)
+        result["warnings"] = co_tenant_warnings + list(result.get("warnings") or [])
         return {
             **self.summarize(refreshed),
             **result,
@@ -299,6 +307,45 @@ class CircuitService:
                 not is_validated(circuit.rung) and acknowledge_unvalidated
             ),
         }
+
+    async def _release_co_tenants(self, target_layers: list[int]) -> list[str]:
+        """Deactivate an active cluster/profile that steers a target layer.
+
+        Circuit serving takes exclusive ownership of the layers it applies to
+        (it clears each SAE before writing). Rather than silently clobbering a
+        co-located cluster, deactivate it and return a user-visible warning.
+        Best-effort: a lookup failure must not block activation.
+        """
+        if self._cluster_service is None or not target_layers:
+            return []
+        try:
+            active = await self._cluster_service.get_active_cluster()
+        except Exception as e:  # pragma: no cover - defensive
+            logger.warning("circuit_co_tenant_lookup_failed", error=str(e))
+            return []
+        if active is None:
+            return []
+
+        active_layer = getattr(active, "layer", None)
+        # Deactivate when the cluster steers one of our target layers, or when
+        # its layer is unknown (we cannot prove it is safe to leave running).
+        if active_layer is not None and int(active_layer) not in target_layers:
+            return []
+        try:
+            await self._cluster_service.deactivate(active.id)
+        except Exception as e:  # pragma: no cover - defensive
+            logger.warning(
+                "circuit_co_tenant_deactivate_failed", profile_id=active.id, error=str(e)
+            )
+            return [
+                f"Cluster '{getattr(active, 'name', active.id)}' also steers this "
+                "layer and could not be deactivated — its steering may be overwritten"
+            ]
+        logger.info("circuit_co_tenant_deactivated", profile_id=active.id)
+        return [
+            f"Deactivated cluster '{getattr(active, 'name', active.id)}' — a circuit "
+            "takes exclusive ownership of the layers it steers"
+        ]
 
     async def _serve_full(
         self, circuit: Circuit, definition: CircuitDefinitionV1

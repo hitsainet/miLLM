@@ -41,6 +41,16 @@ from millm.sockets.progress import ProgressEmitter
 
 logger = structlog.get_logger()
 
+#: How many heuristic (sign-only / weight-prior) hazards to list before
+#: collapsing the rest into a count. Validated hazards are never suppressed.
+HAZARD_HEURISTIC_CAP = 10
+
+#: Composes the multi-step attachment operations (attach_set / detach_sae /
+#: set_circuit_steering). SAEService is constructed per-request via DI, so this
+#: must be module-level to be shared. Re-entrant so a composed operation may
+#: call another guarded helper without self-deadlocking.
+_ATTACHMENT_LOCK = threading.RLock()
+
 # Attach-dtype names accepted for the multi-SAE steering weight cache.
 _ATTACH_DTYPES: dict[str, "torch.dtype"] = {
     "float16": torch.float16,
@@ -326,7 +336,12 @@ class SAEService:
     Manages SAE lifecycle: download, attach, steer, monitor, detach.
 
     Thread Safety:
-        Uses _attachment_lock for state mutations during attach/detach.
+        Multi-step attachment operations (attach_set / detach_sae / circuit
+        serving) hold the process-wide ``_ATTACHMENT_LOCK`` so a check-then-act
+        window cannot interleave: e.g. a concurrent detach between resolving a
+        circuit's SAEs and applying its steering would otherwise write into a
+        just-detached SAE. ``AttachedSAEState._lock`` only guards individual
+        registry operations; this lock composes them.
         Forward pass through SAE is thread-safe.
     """
 
@@ -491,6 +506,20 @@ class SAEService:
             CircuitSteeringResult with per-layer applied strengths, hazards,
             and clamp warnings.
         """
+        # Hold the composing lock across resolve→apply: a concurrent
+        # detach/attach between the two would otherwise write steering into a
+        # just-detached SAE (or resolve a basis that no longer exists).
+        with _ATTACHMENT_LOCK:
+            return self._set_circuit_steering_locked(members, intensity, edges=edges)
+
+    def _set_circuit_steering_locked(
+        self,
+        members: list["CircuitMember"],
+        intensity: float,
+        *,
+        edges: Optional[list[dict[str, Any]]] = None,
+    ) -> CircuitSteeringResult:
+        """Body of :meth:`set_circuit_steering`; call only with the lock held."""
         from millm.core.config import settings
 
         # 0. Clamp the global λ to the configured circuit-intensity envelope so a
@@ -754,9 +783,37 @@ class SAEService:
                         "down": {"layer": down.layer, "feature_idx": down.feature_idx},
                         "label": label,
                         "rung": hazard_rung,
+                        "quantified_effect": float(es) if (es is not None and rung >= 2) else None,
                     }
                 )
-        return hazards
+
+        # Rank so the INFORMATIVE hazards survive truncation: validated
+        # (rung>=2, quantified) first, ordered by |effect size|, then the
+        # heuristic tail. Pairwise detection is O(n²) — a 6/6 two-layer circuit
+        # emits 36 warnings, nearly all "heuristic:co-steer-sign", which buries
+        # the real signal. Cap the heuristic tail and report the remainder as a
+        # count rather than dropping it silently.
+        validated = [h for h in hazards if h["rung"] >= 2 and h["quantified_effect"] is not None]
+        heuristic = [h for h in hazards if h not in validated]
+        validated.sort(key=lambda h: abs(h["quantified_effect"]), reverse=True)
+
+        kept_heuristic = heuristic[:HAZARD_HEURISTIC_CAP]
+        suppressed = len(heuristic) - len(kept_heuristic)
+        ranked = validated + kept_heuristic
+        if suppressed > 0:
+            ranked.append(
+                {
+                    "kind": "summary",
+                    "label": f"heuristic:suppressed={suppressed}",
+                    "rung": 0,
+                    "quantified_effect": None,
+                    "message": (
+                        f"{suppressed} further heuristic sign-only hazard(s) not listed "
+                        "— validated hazards are shown first"
+                    ),
+                }
+            )
+        return ranked
 
     async def preview_repository(
         self,
@@ -1532,6 +1589,44 @@ class SAEService:
                 envelope_mb=envelope,
                 attached=status_set.count,
             )
+        # Side-effect parity with attach_sae (F12 R3 finding): record the
+        # attachment in the DB and LOCK the model. Without the lock a concurrent
+        # unload could tear out live hooks mid-generation; without the status,
+        # delete_sae's "cannot delete an attached SAE" guard (which reads the DB)
+        # would happily delete files out from under a hooked SAE.
+        for sae_id, layer in attached_keys:
+            try:
+                await self.repository.update_status(sae_id, SAEStatus.ATTACHED)
+                await self.repository.create_attachment(
+                    sae_id=sae_id,
+                    model_id=model_state.loaded_model_id,
+                    layer=layer,
+                    memory_usage_mb=next(
+                        (
+                            r.get("memory_usage_mb", 0) or 0
+                            for r in results
+                            if r.get("sae_id") == sae_id and r.get("layer") == layer
+                        ),
+                        0,
+                    ),
+                )
+            except Exception as e:  # pragma: no cover - best effort, never fails attach
+                logger.warning(
+                    "attach_set_db_record_failed", sae_id=sae_id, layer=layer, error=str(e)
+                )
+        if attached_keys and model_state.loaded_model_id:
+            try:
+                from millm.db.base import async_session_factory
+                from millm.db.repositories.model_repository import ModelRepository
+
+                async with async_session_factory() as session:
+                    await ModelRepository(session).update(
+                        model_state.loaded_model_id, locked=True
+                    )
+                logger.info("model_auto_locked", model_id=model_state.loaded_model_id)
+            except Exception as e:
+                logger.warning("attach_set_model_lock_failed", error=str(e))
+
         logger.info(
             "sae_set_attached",
             requested=len(requested),

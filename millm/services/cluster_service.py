@@ -333,13 +333,36 @@ class ClusterService:
         """
         warnings: list[str] = []
         state = AttachedSAEState()
-        sae = state.attached_sae
+        ref = definition.sae
+
+        # Feature 12/13: resolve by the DECLARED LAYER when the definition
+        # names one. The singular `attached_sae` is the FIRST registry entry —
+        # once a multi-SAE circuit is attached that is an arbitrary SAE, and
+        # binding a cluster to it would be the silent wrong-basis serve the
+        # circuit path fails closed on. Only fall back to the singular view
+        # when the definition declares no layer.
+        entry = None
+        if ref.layer is not None:
+            entry = state.by_layer(int(ref.layer))
+            if entry is None and state.count > 1:
+                # Several SAEs attached but none uniquely serves the declared
+                # layer — refuse to guess (hard block, not a warning).
+                warnings.append(
+                    f"Layer mismatch: definition targets L{ref.layer} but no unique "
+                    f"SAE is attached there ({state.count} SAEs attached) — imported "
+                    "unbound; attach an SAE on that layer to bind"
+                )
+                return None, warnings
+
+        sae = entry.sae if entry is not None else state.attached_sae
+        sae_id = entry.sae_id if entry is not None else state.attached_sae_id
+        attached_layer = entry.layer if entry is not None else state.attached_layer
+
         if sae is None:
             warnings.append("No SAE attached — imported unbound; bind by activating "
                             "once a compatible SAE is attached")
             return None, warnings
 
-        ref = definition.sae
         if ref.n_features is not None and int(ref.n_features) != sae.d_sae:
             warnings.append(
                 f"Feature-space mismatch: definition declares n_features="
@@ -348,13 +371,13 @@ class ClusterService:
             )
             return None, warnings
 
-        if ref.layer is not None and state.attached_layer is not None \
-                and int(ref.layer) != int(state.attached_layer):
+        if ref.layer is not None and attached_layer is not None \
+                and int(ref.layer) != int(attached_layer):
             warnings.append(
                 f"Layer mismatch: definition targets L{ref.layer}, attached SAE "
-                f"is on L{state.attached_layer}"
+                f"is on L{attached_layer}"
             )
-        return state.attached_sae_id, warnings
+        return sae_id, warnings
 
     def _range_warnings(self, definition: ClusterDefinitionV1) -> list[str]:
         from millm.core.steering_range import declared_intensity_range

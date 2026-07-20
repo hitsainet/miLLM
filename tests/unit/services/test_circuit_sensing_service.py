@@ -1873,3 +1873,63 @@ class TestR2TheStaleContextIsCLEAREDNotJustClosed:
         assert svc.begin_request("C", saes) is True, (
             "a context that failed to close deadlocked sensing permanently"
         )
+
+
+class TestR2TruncationAccountingCannotDoubleCountOrCarryOver:
+    """F17 R2-20. Two independent sites now increment `_requests_truncated` —
+    the lossy-reclaim path (R2-15) and the drain (R2-13) — and two independent
+    places record per-layer truncation. Attacked both for double-counting and
+    for carry-over; they hold, and these pin them so a later change cannot
+    quietly break either.
+
+    Both failure modes matter on an evidence surface: double-counting
+    manufactures data loss that did not happen, carry-over attributes one
+    request's loss to another."""
+
+    def _armed(self):
+        svc = CircuitSensingService()
+        saes = two_saes()
+        svc.arm_for_circuit(circuit(), definition(), saes)
+        return svc, saes
+
+    def test_one_lossy_request_is_counted_ONCE(self):
+        """A request that both truncated AND was reclaimed with undrained data
+        is still one truncated request."""
+        svc, saes = self._armed()
+        svc.begin_request("A", saes)
+        saes[13]._edge_truncated = True
+        saes[10]._sensed_edges.append("undrained")
+        svc.begin_request("B", saes)              # refused, lossy reclaim
+        svc.begin_request("C", saes)
+        svc.collect_edges(saes)
+        assert svc.status(saes)["requests_truncated"] == 1, (
+            "one request's loss was counted twice — manufactured data loss"
+        )
+
+    def test_a_truncation_flag_does_not_follow_into_the_next_request(self):
+        """`begin_edge_sensing_request` resets the per-SAE flag; if it stopped,
+        request B would be reported as having lost data that A lost."""
+        svc, saes = self._armed()
+        svc.begin_request("A", saes)
+        saes[13]._edge_truncated = True
+        svc.collect_edges(saes)
+        assert svc.last_request_truncated_layers == [13]
+        svc.close_request()
+
+        svc.begin_request("B", saes)
+        assert saes[13]._edge_truncated is False
+        svc.collect_edges(saes)
+        assert svc.last_request_truncated_layers == [], (
+            "A's truncation was attributed to B"
+        )
+
+    def test_two_separate_truncated_requests_count_twice(self):
+        """The counter must still move: a fix for double-counting that stopped
+        counting would be worse."""
+        svc, saes = self._armed()
+        for rid in ("A", "B"):
+            svc.begin_request(rid, saes)
+            saes[13]._edge_truncated = True
+            svc.collect_edges(saes)
+            svc.close_request()
+        assert svc.status(saes)["requests_truncated"] == 2

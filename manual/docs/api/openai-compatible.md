@@ -40,6 +40,34 @@ miLLM exposes an OpenAI-compatible API at `/v1`, making it a drop-in replacement
 When the steering base is an imported **cluster**, its stored strengths are scaled by an intensity dial (λ) before applying. Without `steering_intensity`, the cluster's persistent dial (set on the Clusters page) applies; with it, the request's λ **overrides** the stored one for that request only. Symbolic `"min"`/`"max"` resolve to the cluster's declared `intensity_range` bounds (intersected with the `[0, 2]` dial envelope), and numeric λ is capped at the range's **maximum** (or the server's configured maximum for clusters without a declared range) — dialing *down* below the declared floor (toward off) is always honored, matching the management API's bounds of `[0, max]`. The base is the named `profile` if given, else the active profile, else the live steering values. `0`/`"off"` disables steering for the request without validating the base (a profile that would 400 at λ=0.01 still turns steering off at λ=0).
 :::
 
+When the steering base is an imported **circuit** (a multi-layer intervention spanning several SAEs), one λ scales **every layer together** — each member through its own layer's SAE. Two differences from the cluster rule above:
+
+- **Both ends are clamped.** Numeric λ is clamped into the circuit's declared `intensity_range` intersected with the configured envelope — the floor as well as the ceiling. `0.1` against an authored `[0.5, 1.5]` resolves to `0.5`, not `0.1`. Only an exact `0`/`"off"` is honored below the floor.
+- **The default floor is 0, not 0.5.** Circuits use `CIRCUIT_INTENSITY_MIN` (default `0.0`) where clusters use `CLUSTER_INTENSITY_MIN` (default `0.5`). A circuit whose document declares no `intensity_range` therefore makes `"min"` identical to `"off"`.
+
+Members are re-derived from the strengths the circuit was **authored** with, so the dial is absolute rather than compounding on the circuit's stored intensity. Each member is clamped to miLLM's ±200 steering range at apply time, so at a high λ a strong member can reach the ceiling while weaker ones keep scaling, compressing their relative proportions.
+
+A circuit serving in `slice_fallback` mode is steered by its backing **cluster profile**, so the cluster rule above applies to it — including the 0.5 floor.
+
+### `X-miLLM-Circuit-Rung`
+
+Responses carry `X-miLLM-Circuit-Rung` when a circuit is genuinely steering generation, in [RFC 8941](https://www.rfc-editor.org/rfc/rfc8941) structured form:
+
+```
+X-miLLM-Circuit-Rung: 2; language="causally validated (edge)"
+```
+
+The rung is a bare integer and the phrase a quoted-string, so ladder punctuation cannot break a naive parser. The phrase is rendered server-side from the evidence ladder and **never composed per-request** — a circuit below rung 2 is never described as causal:
+
+| Rung | `language` | Meaning |
+|------|-----------|---------|
+| 0 | `associated` | Mined co-occurrence only — unvalidated |
+| 1 | `suggested (attribution-supported)` | Attribution evidence, not causal |
+| 2 | `causally validated (edge)` | Each edge causally validated |
+| 3 | `faithfulness-tested (circuit)` | The whole circuit was faithfulness-tested |
+
+The header is **omitted** whenever the circuit is not actually steering — no active circuit, a slice-fallback serve, an unparseable definition, or no SAE attached on any member layer. Its absence never means "rung 0"; it means "no circuit-attributable steering on this response". Clients displaying evidence language must read this header (or the `steering` field on `GET /api/circuits/active`) rather than deriving it from whether a circuit row is active.
+
 Responses to dialed requests carry an `X-miLLM-Steering-Intensity` header echoing the resolved λ. The echo is best-effort: it is omitted whenever the dial will not change steering (no SAE attached, unknown profile, steering disabled with a dial-only request, or an empty steering base), and a concurrent profile switch while the request queues can in rare cases make a symbolic echo differ from the applied λ.
 
 ```bash

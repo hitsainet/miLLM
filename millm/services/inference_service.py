@@ -12,6 +12,8 @@ Implementation notes:
 """
 
 import asyncio
+import contextvars
+import math
 import uuid
 from datetime import datetime
 from threading import Event, Thread
@@ -46,6 +48,25 @@ if TYPE_CHECKING:
     from millm.services.monitoring_service import MonitoringService
 
 logger = get_logger(__name__)
+
+#: Per-request memo for "which circuit is actually steering". A ContextVar
+#: because the InferenceService is a process singleton (see _steering_circuit).
+#: Reset at the top of each chat request by reset_steering_memo().
+_MEMO_UNSET: Any = object()
+_STEERING_CIRCUIT_MEMO: "contextvars.ContextVar[Any]" = contextvars.ContextVar(
+    "millm_steering_circuit_memo", default=_MEMO_UNSET
+)
+
+
+def reset_steering_memo() -> None:
+    """Drop any memoised steering-circuit verdict for this context.
+
+    Called at the top of each chat request. An ASGI server may reuse a context
+    across requests, so the reset is explicit — assuming a fresh context per
+    request would repeat the very "it's request-scoped" mistake that made the
+    previous memo process-wide.
+    """
+    _STEERING_CIRCUIT_MEMO.set(_MEMO_UNSET)
 
 
 class LoadedModelInfo:
@@ -744,23 +765,27 @@ class InferenceService:
     async def _steering_circuit(self) -> Optional[Any]:
         """The active circuit IF it is genuinely steering right now.
 
-        Memoised per InferenceService instance (which is request-scoped): the
-        rung echo, the λ echo and the apply all ask this, and each answer cost
-        its own session checkout + SELECT. R2 flagged the resulting per-request
-        DB fan-out on deployments that use no circuits at all.
-
         The single predicate behind all three surfaces — the apply, the λ echo,
         and the rung echo. R1 fixed the λ echo's copy of these rules and left
         the rung echo's, so a response could still advertise
         ``X-miLLM-Circuit-Rung: 2`` while nothing was steering. Any surface that
         answers "what is steering" must ask THIS, never re-derive it.
+
+        Memoised in a CONTEXTVAR, not on ``self``. R2 cached this on the
+        service "which is request-scoped" — it is not: ``get_inference_service``
+        is ``@lru_cache``'d and its own docstring reads "Singleton inference
+        service", so the memo was written once per PROCESS and never
+        invalidated. That advertised a deactivated circuit's rung header
+        forever after the first request, and in the negative case permanently
+        suppressed the rung disclosure while steering was live — resurrecting
+        the exact overclaim R2 was written to kill. A contextvar cannot outlive
+        the request that set it.
         """
-        sentinel = object()
-        cached = getattr(self, "_steering_circuit_memo", sentinel)
-        if cached is not sentinel:
+        cached = _STEERING_CIRCUIT_MEMO.get()
+        if cached is not _MEMO_UNSET:
             return cached
         result = await self._steering_circuit_uncached()
-        self._steering_circuit_memo = result
+        _STEERING_CIRCUIT_MEMO.set(result)
         return result
 
     async def _steering_circuit_uncached(self) -> Optional[Any]:
@@ -802,7 +827,20 @@ class InferenceService:
             return None
         from millm.core.circuit_evidence import rung_language
 
-        return int(circuit.rung), rung_language(circuit.rung)
+        # R3: an unguarded int() on a NULL/garbage rung column raised, and the
+        # route swallows it with a bare except — silently disabling the rung
+        # disclosure with nothing in the logs. Degrade DOWNWARD to MINED
+        # instead, matching _coerce, and say so loudly.
+        try:
+            rung = int(circuit.rung)
+        except (TypeError, ValueError):
+            logger.warning(
+                "circuit_rung_uncoercible_degraded_to_mined",
+                circuit_id=getattr(circuit, "id", None),
+                raw_rung=repr(getattr(circuit, "rung", None)),
+            )
+            rung = 0
+        return rung, rung_language(rung)
 
     async def _apply_request_circuit_steering(
         self,
@@ -892,23 +930,14 @@ class InferenceService:
         #     non-1.0 budget intensity.
         # Re-serving from the stored definition is the same path set_intensity
         # uses, so the dial and the management API agree by construction.
+        #
+        # `definition` and `members` were parsed above to derive the snapshot
+        # layers. R3: this block used to re-parse and re-flatten them, leaving
+        # two unreachable failure branches whose log events could never fire —
+        # so an operator grepping for `circuit_dial_definition_unparseable` to
+        # debug a silent no-op would wrongly conclude the document parsed.
         try:
-            definition = CircuitDefinitionV1.model_validate(circuit.circuit_meta)
-        except Exception as e:
-            logger.warning(
-                "circuit_dial_definition_unparseable",
-                circuit_id=circuit.id,
-                error=str(e),
-            )
-            return None
-
-        members = self._circuit_serving_members(definition)
-        if not members:
-            logger.info("circuit_dial_noop_no_members", circuit_id=circuit.id)
-            return None
-
-        try:
-            self._sae_service_for_dial().set_circuit_steering(
+            outcome = self._sae_service_for_dial().set_circuit_steering(
                 members,
                 lam,
                 edges=[e.model_dump(mode="json") for e in definition.edges],
@@ -922,12 +951,30 @@ class InferenceService:
             self._restore_request_profile({"circuit": True, "layers": saved_layers})
             return None
 
+        # R3: the dial discarded set_circuit_steering's result entirely, so a
+        # dialled λ=2 could compound cross-layer hazards and clamp every member
+        # while PUT /api/circuits/active/intensity — the same operation through
+        # the management API — reports both. Two paths to one intervention, one
+        # of them silent. The dial cannot put warnings in an OpenAI-shaped
+        # response body, but it must not swallow them.
+        hazards = list(getattr(outcome, "hazards", None) or [])
+        clamps = list(getattr(outcome, "clamp_warnings", None) or [])
         logger.info(
             "circuit_dial_applied",
             circuit_id=circuit.id,
             intensity=lam,
             layers=[e.layer for e in entries],
+            hazard_count=len(hazards),
+            clamp_count=len(clamps),
         )
+        if hazards or clamps:
+            logger.warning(
+                "circuit_dial_hazards",
+                circuit_id=circuit.id,
+                intensity=lam,
+                hazards=[str(h) for h in hazards],
+                clamp_warnings=[str(c) for c in clamps],
+            )
         return {"circuit": True, "layers": saved_layers}
 
     @classmethod
@@ -948,6 +995,11 @@ class InferenceService:
 
         lo = float(settings.CIRCUIT_INTENSITY_MIN)
         hi = float(settings.CIRCUIT_INTENSITY_MAX)
+        # R3: the configured envelope is operator-set and unvalidated. Inverted
+        # bounds would invert the dial itself ("max" → the floor), so normalise
+        # here the way sae_service already does for its own envelope.
+        if lo > hi:
+            lo, hi = hi, lo
         budget = ((circuit.circuit_meta or {}).get("budget") or {})
         declared = budget.get("intensity_range")
         if isinstance(declared, list) and len(declared) == 2:
@@ -967,6 +1019,11 @@ class InferenceService:
 
         if isinstance(raw, (int, float)) and not isinstance(raw, bool):
             lam = float(raw)
+            # R3: NaN and +inf both survive max(lo, min(hi, x)) and resolve to
+            # the CEILING — a garbage dial silently producing the most
+            # aggressive intervention available. Reject rather than fail open.
+            if not math.isfinite(lam):
+                return None
             # Dialling to 0 (off) is ALWAYS allowed, even below an authored floor.
             if lam == 0.0:
                 return 0.0

@@ -101,9 +101,30 @@ async def list_circuits(
 async def get_active_circuit(
     service: CircuitServiceDep,
 ) -> ApiResponse[CircuitSummary | None]:
-    """The active circuit (with serving_mode), or null when none is serving."""
+    """The active circuit (with serving_mode), or null when none is serving.
+
+    Carries ``steering``: the server's own verdict on whether this circuit is
+    genuinely influencing generation. R3 found the OWUI filter deriving that
+    locally from ``is_active``, which overclaims for a slice-fallback,
+    unparseable, or unattached circuit — the same rung overclaim the server
+    already suppresses on its own headers. Clients read this field instead.
+    """
     row = await service.get_active()
-    return ApiResponse.ok(CircuitSummary(**row) if row else None)
+    if not row:
+        return ApiResponse.ok(None)
+    summary = CircuitSummary(**row)
+    try:
+        from millm.api.dependencies import get_inference_service
+        from millm.services.inference_service import reset_steering_memo
+
+        reset_steering_memo()
+        steering = await get_inference_service()._steering_circuit()
+        summary.steering = steering is not None and str(
+            getattr(steering, "id", "")
+        ) == str(summary.id)
+    except Exception:  # a status nicety must never fail the status call
+        summary.steering = None
+    return ApiResponse.ok(summary)
 
 
 @router.post(

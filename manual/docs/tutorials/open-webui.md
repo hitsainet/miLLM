@@ -65,7 +65,7 @@ operators can silence it with the `show_status` valve. The dial itself is a per-
 | `server` | Always send nothing — the server's stored state governs, even when the operator set a default |
 | `off` | Steering disabled for the request (λ = 0) |
 | `min` / `max` | The steering base's declared `intensity_range` bounds (the active cluster's, or the named profile's when a request also carries `profile`) |
-| `custom` | The exact λ from your `custom_lambda` valve (`0`–`2`, capped at the cluster's declared maximum; dialing below the declared floor is honored) |
+| `custom` | The exact λ from your `custom_lambda` valve (`0`–`2`, capped at the cluster's declared maximum; dialing below the declared floor is honored). **For circuits both ends clamp** — see Step 6. |
 
 Operators get matching `default_dial` / `default_custom_lambda` valves that apply to users who
 leave their dial at `default`.
@@ -127,7 +127,10 @@ A circuit **below rung 2 is marked `[UNVALIDATED]`** and is never described as
 influences generation would be an overclaim. Activating such a circuit in the
 Admin UI requires an explicit acknowledgement for the same reason.
 
-If you see `(serving a per-layer SLICE, not the whole circuit)`, only some of
+A circuit in **slice-fallback** mode is a special case: it is steered by its
+backing *cluster profile*, not by the circuit path, so your λ is resolved
+against the **cluster** envelope (floor `0.5`) and no `X-miLLM-Circuit-Rung`
+header is emitted. If you see `(serving a per-layer SLICE, not the whole circuit)`, only some of
 the circuit's SAEs are attached, so miLLM is serving a single-layer projection
 rather than the full cross-layer intervention.
 
@@ -166,7 +169,17 @@ never blocks your message.
 | Replies but no steering effect | SAE not attached, steering disabled, or strength too low — check `steering_apply_count` ([verification](/concepts/steering#verifying-steering-is-active)) |
 | `429` errors under load | Serial queue full (`MAX_PENDING_REQUESTS`); Open WebUI parallel title-generation requests can pile up — raise the limit or disable title generation |
 | CORS errors (browser direct) | Set `CORS_ORIGINS` to include your Open WebUI origin — see [Configuration](/reference/configuration) |
-| Dial has no effect | All by-design silent no-ops — check in order: Function enabled on *this model*? master valve on? SAE attached? steering enabled in miLLM (a dial never re-enables disabled steering)? an active cluster or live steering values to scale? miLLM build new enough (older builds ignore the field)? Scripted clients can check for the `X-miLLM-Steering-Intensity` response header — absent means the dial didn't apply |
+| Dial has no effect | All by-design silent no-ops — check in order: Function enabled on *this model*? master valve on? SAE attached? steering enabled in miLLM (a dial never re-enables disabled steering)? an active cluster or live steering values to scale? miLLM build new enough (older builds ignore the field)? Scripted clients can check for the `X-miLLM-Steering-Intensity` response header — absent means the dial didn't apply Circuit-specific: is `min` resolving to `0`? (a circuit that declares no floor makes `min` identical to `off` — the status line says so); is the circuit in `slice_fallback` (dialled through its cluster profile, different floor); is an SAE attached on **every** member layer? |
+
+### When `min` means `off`
+
+Circuits floor at `0` by default, where clusters floor at `0.5`. A circuit whose
+definition declares no `budget.intensity_range` therefore makes **`min`
+identical to `off`** — the same output, byte for byte. The status line
+discloses this explicitly (`min — this circuit declares no floor, so min is
+OFF`) rather than implying a bound that is not being applied. To get a
+meaningful `min`, author an `intensity_range` with a non-zero floor in miStudio
+before exporting the circuit.
 
 ## Upgrading from an earlier filter version
 

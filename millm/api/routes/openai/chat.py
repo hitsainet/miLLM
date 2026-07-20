@@ -23,7 +23,7 @@ from millm.api.schemas.openai import (
     OpenAIErrorResponse,
 )
 from millm.core.logging import get_logger
-from millm.services.inference_service import InferenceService
+from millm.services.inference_service import InferenceService, reset_steering_memo
 
 router = APIRouter()
 logger = get_logger(__name__)
@@ -87,6 +87,10 @@ async def create_chat_completion(
     # X-miLLM-Circuit-Rung tells a dial client WHAT it is steering with
     # (Feature 14). The phrase comes from the evidence ladder, never composed
     # here, so the header can never describe a rung<2 circuit as causal.
+    # Drop any memoised steering verdict from a previous request sharing this
+    # context — the memo must never outlive the request that set it.
+    reset_steering_memo()
+
     echo_circuit_rung = None
     try:
         rung_info = await inference.active_circuit_rung()

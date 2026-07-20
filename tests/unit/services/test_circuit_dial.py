@@ -11,7 +11,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from millm.services.inference_service import InferenceService
+from millm.services.inference_service import InferenceService, reset_steering_memo
 from millm.services.sae_service import AttachedSAEState
 
 
@@ -19,8 +19,10 @@ from millm.services.sae_service import AttachedSAEState
 def clean_registry():
     state = AttachedSAEState()
     state._entries.clear()
+    reset_steering_memo()
     yield
     state._entries.clear()
+    reset_steering_memo()
 
 
 def make_sae(values: dict[int, float] | None = None, enabled: bool = True):
@@ -277,6 +279,7 @@ class TestRungEcho:
     async def test_rung_below_two_is_never_described_as_causal(self):
         for rung, expected in ((0, "associated"), (1, "suggested (attribution-supported)")):
             AttachedSAEState()._entries.clear()
+            reset_steering_memo()   # each iteration is a fresh "request"
             svc = self._steering(rung=rung)
             got = await svc.active_circuit_rung()
             assert got == (rung, expected)
@@ -346,3 +349,53 @@ class TestDialInputValidation:
         c = make_circuit(circuit_meta={"budget": {"intensity_range": [0.5, 1.5]}})
         assert svc._resolve_circuit_intensity(0.1, c) == 0.5
         assert svc._resolve_circuit_intensity(0.0, c) == 0.0   # off still allowed
+
+
+class TestSteeringMemoIsRequestScoped:
+    """R3: R2 memoised the steering verdict on the InferenceService "which is
+    request-scoped". It is not — get_inference_service() is @lru_cache'd and
+    documents itself as a singleton, so the memo lived for the whole PROCESS.
+    All four R3 reviewer perspectives independently found this."""
+
+    async def test_a_reused_service_does_not_serve_a_stale_verdict(self):
+        """The failure R2's memo caused: one service instance across two
+        requests, the circuit deactivated in between, rung header forever."""
+        attach(make_sae({1: 40.0}), "sae-10", 10)
+        attach(make_sae({2: 30.0}), "sae-13", 13)
+        svc = service_with_circuit(make_circuit(rung=2))
+
+        reset_steering_memo()
+        assert await svc.active_circuit_rung() == (2, "causally validated (edge)")
+
+        # Operator deactivates. The SAME service object handles the next request.
+        svc._active_full_circuit = AsyncMock(return_value=None)
+        reset_steering_memo()
+        assert await svc.active_circuit_rung() is None, (
+            "stale memo advertised a deactivated circuit as causally validated"
+        )
+
+    async def test_a_reused_service_picks_up_a_newly_active_circuit(self):
+        """The inverse, equally bad: a None cached before activation would
+        suppress the rung disclosure while steering was live."""
+        svc = service_with_circuit(None)
+        reset_steering_memo()
+        assert await svc.active_circuit_rung() is None
+
+        attach(make_sae({1: 40.0}), "sae-10", 10)
+        attach(make_sae({2: 30.0}), "sae-13", 13)
+        circuit = make_circuit(rung=2)
+        svc._active_full_circuit = AsyncMock(return_value=circuit)
+        reset_steering_memo()
+        assert await svc.active_circuit_rung() == (2, "causally validated (edge)")
+
+    async def test_the_memo_still_collapses_repeat_lookups_within_one_request(self):
+        """The perf win R2 was after must survive the correctness fix."""
+        attach(make_sae({1: 40.0}), "sae-10", 10)
+        attach(make_sae({2: 30.0}), "sae-13", 13)
+        svc = service_with_circuit(make_circuit(rung=2))
+        reset_steering_memo()
+
+        await svc.active_circuit_rung()
+        await svc.active_circuit_rung()
+        await svc._resolve_active_circuit_intensity(1.0)
+        assert svc._active_full_circuit.await_count == 1

@@ -243,6 +243,16 @@ class CircuitSummary(BaseModel):
     is_active: bool
     serving_mode: str | None = None
     intensity: float
+    steering: bool | None = Field(
+        default=None,
+        description=(
+            "Whether this circuit is ACTUALLY steering generation right now — "
+            "is_active only says a row is marked active. Answered by the "
+            "server's own predicate so clients never re-derive it (a client "
+            "deriving it from is_active will overclaim on a slice-fallback, "
+            "unparseable, or unattached circuit). Null when not evaluated."
+        ),
+    )
     per_sae_warnings: list[PerSAEVerdict] = Field(default_factory=list)
     created_at: Any = None
     updated_at: Any = None

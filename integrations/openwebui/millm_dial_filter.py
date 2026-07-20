@@ -5,7 +5,10 @@ version: 1.4.1
 description: Per-chat steering-intensity dial for a miLLM backend. Injects the
   miLLM extension field `steering_intensity` (off | min | max, or a numeric
   lambda in [0, 2]) into /v1/chat/completions requests so each user can dial
-  the active cluster's steering strength without touching the global state.
+  the active CLUSTER or CIRCUIT's steering strength without touching global
+  state. When a multi-layer circuit is serving, one lambda scales every layer
+  together and the status line discloses the circuit's evidence rung — a
+  circuit below rung 2 is marked [UNVALIDATED] and never called causal.
 
 UX (v1.3.0)
 -----------
@@ -27,7 +30,11 @@ Compatibility
 - Open WebUI: Filter surface (class Filter, Valves / UserValves, inlet) plus
   the toggle/icon chip and __event_emitter__ status API (verified on 0.10.x;
   chip support exists since ~0.6.10). No outlet, no stream hook.
-- miLLM: requires a build with Feature 10 (per-request steering dial). Older
+- miLLM: requires a build with Feature 10 (per-request steering dial); the
+  circuit-rung disclosure additionally needs Feature 14 and the
+  `millm_base_url` valve set (it is EMPTY by default, so the disclosure is off
+  until configured — "localhost" inside the OWUI container is OWUI itself).
+  Older
   miLLM builds silently ignore the injected field (`extra="ignore"` on the
   request schema), so enabling this Function against an older backend is safe
   and simply has no effect — the rollout property EC-10.4 pins.
@@ -99,7 +106,10 @@ class Filter:
                 "Your steering dial: 'default' (use the operator's setting), "
                 "'server' (send nothing — the server's stored state governs, "
                 "even when the operator set a default), 'off', 'min', 'max', "
-                "or 'custom' (uses custom_lambda)."
+                "or 'custom' (uses custom_lambda). Note for CIRCUITS: 'min' "
+                "means the circuit's declared floor, and a circuit that "
+                "declares none floors at 0 — so 'min' can be the same as "
+                "'off'. The status line says so when it is."
             ),
         )
         custom_lambda: float = Field(
@@ -182,6 +192,49 @@ class Filter:
         data = payload.get("data") if isinstance(payload, dict) else None
         return data if isinstance(data, dict) else None
 
+    #: Circuit names arrive via import from shared/marketplace definitions, so
+    #: they are attacker-influenced by design, and this text lands in the chat
+    #: transcript (which the model may see on a later turn) rendered as
+    #: markdown. R1 hardened rung_language against a spoofed endpoint and left
+    #: this adjacent field from the same untrusted response unhardened.
+    _MAX_NAME_LEN = 60
+
+    @classmethod
+    def _safe_name(cls, raw: object) -> str:
+        """A circuit name safe to render into a chat status line."""
+        if not isinstance(raw, str) or not raw.strip():
+            return "circuit"
+        # Collapse ALL whitespace: newlines would let a name inject what looks
+        # like separate lines (or a fake system message) into the transcript.
+        flat = " ".join(raw.split())
+        # Neutralise markdown emphasis/link/code punctuation.
+        for ch in ("*", "_", "`", "[", "]", "(", ")", "#", "|", "<", ">"):
+            flat = flat.replace(ch, "")
+        flat = flat.strip()
+        if not flat:
+            return "circuit"
+        if len(flat) > cls._MAX_NAME_LEN:
+            flat = flat[: cls._MAX_NAME_LEN - 1].rstrip() + "…"
+        return flat
+
+    @staticmethod
+    def _min_is_off(circuit: Optional[dict]) -> bool:
+        """True when "min" on this circuit resolves to zero steering.
+
+        Circuits take a configured floor of 0.0 (clusters use 0.5), so a
+        circuit whose document declares no ``budget.intensity_range`` makes
+        "min" and "off" the same request.
+        """
+        if not circuit:
+            return False
+        rng = ((circuit.get("budget") or {}).get("intensity_range")) or None
+        if not (isinstance(rng, (list, tuple)) and len(rng) == 2):
+            return True  # no authored floor -> configured floor 0.0 -> off
+        try:
+            return float(min(rng)) == 0.0
+        except (TypeError, ValueError):
+            return True
+
     async def _circuit_status(self) -> Optional[dict]:
         """Read-only probe of GET /api/circuits/active.
 
@@ -229,13 +282,22 @@ class Filter:
             rung = int(circuit.get("rung", 0))
         except (TypeError, ValueError):
             rung = 0
+        # The server tells us whether this circuit is ACTUALLY steering. Only
+        # it can know (slice-fallback, unparseable definition, no attached SAE
+        # on a member layer all mean "active but not steering"). Deriving that
+        # here from is_active overclaims — the same error the server already
+        # suppresses on its own rung header. `None` means an older build that
+        # does not answer, so fall back to rendering the suffix.
+        if circuit.get("steering") is False:
+            return ""
+
         # Prefer the server's phrase, but only when it MATCHES the mirrored
         # vocabulary for that rung: a spoofed or MITM'd endpoint must not be
         # able to inject "causal" for a rung-0 circuit and defeat the guarantee.
         expected = self.RUNG_LANGUAGE.get(rung, self.RUNG_LANGUAGE[0])
         server_phrase = circuit.get("rung_language")
         phrase = server_phrase if server_phrase == expected else expected
-        name = circuit.get("name") or "circuit"
+        name = self._safe_name(circuit.get("name"))
         mark = "" if rung >= 2 else " [UNVALIDATED]"
         mode = circuit.get("serving_mode")
         slice_note = " (serving a per-layer SLICE, not the whole circuit)" if (
@@ -289,13 +351,31 @@ class Filter:
             suffix = self._circuit_suffix(circuit)
             if dial == "off" or dial == 0.0:
                 text = "miLLM steering: off for this reply"
+                # R3: rendering "off" alongside a circuit attribution read as a
+                # contradiction — the user could not tell whether the circuit
+                # was applied. At λ=0 nothing is steering, so name nothing.
+                suffix = ""
             elif dial in ("min", "max"):
                 # Only name the source we actually observed — a failed probe
                 # must not assert "cluster's" about an active circuit.
                 bound = "circuit's declared bound" if circuit else "declared bound"
                 text = f"miLLM steering: {dial} ({bound})"
+                if dial == "min" and self._min_is_off(circuit):
+                    # R3: a circuit with no authored intensity_range takes the
+                    # configured floor, which is 0.0 for circuits — so "min" is
+                    # byte-identical to "off". Saying "min (declared bound)"
+                    # implies a nonzero intervention that is not happening.
+                    text = "miLLM steering: min — this circuit declares no floor, so min is OFF"
             else:
                 text = f"miLLM steering: λ={dial:g}"
+            if (
+                self.valves.show_circuit_rung
+                and not (self.valves.millm_base_url or "").strip()
+            ):
+                # R3: with the probe unconfigured the status line looks healthy
+                # while the circuit-evidence disclosure is silently off. Make
+                # the missing safety surface visible rather than invisible.
+                text += " · circuit evidence unavailable (set millm_base_url)"
             await self._status(__event_emitter__, text + suffix)
         else:
             await self._status(

@@ -1,6 +1,6 @@
 # miLLM ↔ Unified MCP Server Contract
 
-**Status:** Normative for miLLM Feature 9 (Unified MCP) and Feature 15 (Circuit Edge Sensing / circuit MCP surface). **Version:** 1.2 (2026-07-20)
+**Status:** Normative for miLLM Feature 9 (Unified MCP) and Feature 15 (Circuit Edge Sensing / circuit MCP surface). **Version:** 1.3 (2026-07-20)
 **Consumer:** the unified MCP server that ships in the miStudio repo
 (`backend/src/mcp_server/`), exposing `millm_runtime` / `millm_clusters` /
 `millm_sensing` / `millm_circuits` tool categories against a miLLM deployment.
@@ -17,6 +17,10 @@ BRD-MILLM-CIRCUITS-001): it adds the `millm_circuits` tool category (§4), the
 `/api/circuits/*` endpoints and circuit edge-sensing routes, the circuit error
 codes (§5), and the rung-vocabulary rule (§4a). No v1.0 endpoint, field, or
 error code changed. A v1.0 client that ignores the circuit surface is unaffected.
+
+**v1.3 (2026-07-20)** is a strict additive superset of v1.2: the circuit-sensing
+status payload gains `requests_sensed`, `requests_truncated`, and `ws_throttled`
+(§4a-quinquies). No endpoint, field, type, or error code was removed or changed.
 
 **v1.2 (2026-07-20)** is a strict additive superset of v1.1: it tightens the
 *meaning* of `reapplied`/`superseded` on the intensity route (§4a-ter, Feature
@@ -134,7 +138,7 @@ sub-collection of a circuit, and the flat prefix matches `/api/sensing`.
 | `millm_deactivate_circuit` | `POST /api/circuits/{id}/deactivate` | REST ✅ · MCP not registered |
 | `millm_export_circuit` | `GET /api/circuits/{id}/export` (raw circuit document — no envelope) | REST ✅ · MCP not registered |
 | `millm_set_circuit_intensity` | `PUT /api/circuits/active/intensity` (`{intensity, reapply}`; one global λ scales all layers) | REST ✅ · MCP not registered |
-| `millm_circuit_sensing_status` | `GET /api/circuit-sensing/status` (armed state, layers, **`sensable_edges` + `unsensable_edges[{edge_key,reason,detail}]`**, `max_token_lag`, overhead, **`truncated_layers[]` (v1.2)**, `enabled_circuits`) | REST ✅ · MCP not registered |
+| `millm_circuit_sensing_status` | `GET /api/circuit-sensing/status` (armed state, layers, **`sensable_edges` + `unsensable_edges[{edge_key,reason,detail}]`**, `max_token_lag`, overhead, **`truncated_layers[]` (v1.2)**, **`requests_sensed`/`requests_truncated`/`ws_throttled` (v1.3)**, `enabled_circuits`) | REST ✅ · MCP not registered |
 | `millm_circuit_sensing_events` | `GET /api/circuit-sensing/events?circuit_id=&edge_key=&limit=&since=` (rows carry nested `up`/`down` `{layer,feature_idx,pos,act}`, `token_lag`, ±K `context_parts`, `edge_rung` + `edge_rung_language`) | REST ✅ · MCP not registered |
 | `millm_circuit_sensing_enable` / `_disable` | `POST /api/circuit-sensing/{circuit_id}/enable` / `/disable` (off by default, opt-in) | REST ✅ · MCP not registered |
 | `millm_circuit_sensing_event` | `GET /api/circuit-sensing/events/{event_id}` (one observation with its context window) | REST ✅ · MCP not registered |
@@ -217,6 +221,30 @@ about appears in `truncated_layers` — the correct statement is that the
 observation is incomplete for that layer. Truncation is a load-shedding
 outcome, never evidence about the circuit, and (per §4a) it must never move an
 edge's rung or soften the rung language.
+
+### 4a-quinquies. Telling "quiet" apart from "broken" (v1.3 — Feature 17)
+
+`GET /api/circuit-sensing/status` gains three counters. Each exists because two
+very different situations produced identical readings.
+
+| Field | Zero means | Non-zero means |
+|---|---|---|
+| `requests_sensed` | **No request has reached sensing at all** — a wiring or skip condition, NOT quiet traffic. Check `paused_reason`. | that many boundaries were observed |
+| `requests_truncated` | no request has ever lost data since arming | the circuit HAS lost data, even if `truncated_layers` is now empty |
+| `ws_throttled` | nothing was declined by the live-panel cap | the panel is showing a SAMPLE of a busy request — not a fault |
+
+**`ws_throttled` is not loss.** Throttled events are persisted and readable
+through the events API; `ws_dropped` is the field that indicates real delivery
+failure. An agent must not report throttling as missing data.
+
+**`requests_truncated` outlives `truncated_layers`.** The latter describes only
+the last drained request and is superseded when the next one begins, so a rare
+truncation can be missed by a poll. Read the pair: `truncated_layers` says which
+layers to distrust right now, `requests_truncated` says whether this circuit has
+ever lost data.
+
+As in §4a-quater, none of these move an edge's rung or soften rung language.
+Truncation and throttling are load-shedding outcomes, never evidence.
 
 ### 4b. Circuit per-request dial (v1.1 — Feature 14)
 

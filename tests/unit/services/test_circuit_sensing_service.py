@@ -1406,3 +1406,55 @@ class TestR2APartiallyDarkRequestKeepsItsReason:
         assert svc.status(saes)["paused_reason"] is None, (
             "request 1's reason is still showing during a healthy request 2"
         )
+
+
+class TestR2AnAllDarkBeginLeavesNothingBehind:
+    """F17 R2-04/R2-05. `self._ctx = ctx` was assigned BEFORE the dark-layer
+    loop, so an all-dark begin returned False with the context already open.
+    Nothing closes it — the caller returns None on False and
+    `_notify_circuit_sensing` early-returns — so R1-03's concurrency guard then
+    refused the NEXT request. One healthy request lost per orphan, flapping
+    forever under a persistently dark condition.
+
+    R1-02 (name the dark layers) and R1-03 (refuse a second boundary) were each
+    correct alone; the collision is the finding."""
+
+    def _armed(self):
+        svc = CircuitSensingService()
+        saes = two_saes()
+        svc.arm_for_circuit(circuit(), definition(), saes)
+        return svc, saes
+
+    def test_an_all_dark_begin_orphans_no_context(self):
+        svc, saes = self._armed()
+        assert svc.begin_request("r1", {}) is False
+        assert svc._ctx is None, "the failed begin left a boundary open"
+
+    def test_the_next_request_is_not_punished_for_it(self):
+        svc, saes = self._armed()
+        svc.begin_request("r1", {})              # all dark, returns False
+        assert svc.begin_request("r2", saes) is True, (
+            "a healthy request was refused because a dark one orphaned its "
+            "context"
+        )
+
+    def test_requests_sensed_excludes_a_begin_that_observed_nothing(self):
+        """`requests_sensed` promises 'ZERO while armed means no request
+        reached sensing at all'. Counting an all-dark begin reports activity on
+        exactly the wiring-failure path the field exists to expose."""
+        svc, saes = self._armed()
+        svc.begin_request("r1", {})
+        assert svc.status(saes)["requests_sensed"] == 0
+
+    def test_a_partially_dark_begin_IS_counted(self):
+        """It genuinely observed something — the count must not swing the other
+        way and hide real activity."""
+        svc, saes = self._armed()
+        assert svc.begin_request("r1", {10: saes[10]}) is True
+        assert svc.status(saes)["requests_sensed"] == 1
+
+    def test_the_dark_reason_survives_the_failed_begin(self):
+        """Closing the context must not also wipe the explanation."""
+        svc, saes = self._armed()
+        svc.begin_request("r1", {})
+        assert svc.status(saes)["paused_reason"] == "layer_unavailable"

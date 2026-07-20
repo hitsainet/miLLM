@@ -575,7 +575,6 @@ class CircuitSensingService:
             cap=cap,
         )
         self._ctx = ctx
-        self._requests_sensed += 1
         # A new boundary: reasons from earlier requests are stale from here.
         self._pause_is_current = False
         began = False
@@ -613,6 +612,25 @@ class CircuitSensingService:
                 ),
             )
             self.note_paused("layer_unavailable")
+        if not began:
+            # R2-04/R2-05: no layer opened, so there is no boundary. Leaving
+            # the context assigned orphaned it — nothing closes it, because the
+            # caller returns None on False and `_notify_circuit_sensing` early-
+            # returns — and the NEXT request was then refused by the
+            # concurrency guard. One healthy request lost per orphan, flapping
+            # forever under a persistently dark condition.
+            #
+            # And the count must not include it: `requests_sensed` promises
+            # "ZERO while armed means no request reached sensing at all", so
+            # counting a boundary that observed nothing reports activity on
+            # exactly the wiring-failure path the field exists to expose.
+            try:
+                ctx.close()
+            except Exception:
+                logger.exception("circuit_sensing_context_close_failed")
+            self._ctx = None
+            return False
+        self._requests_sensed += 1
         return began
 
     def collect_edges(

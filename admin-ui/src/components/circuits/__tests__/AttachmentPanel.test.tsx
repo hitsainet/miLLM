@@ -6,14 +6,60 @@
 import { describe, expect, it, vi, beforeEach } from 'vitest';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { render, screen, waitFor } from '@testing-library/react';
-import type { AttachmentStatusSet } from '@/types';
+import userEvent from '@testing-library/user-event';
+import type { AttachmentStatusSet, SAEInfo } from '@/types';
 
 const attachmentsMock = vi.fn();
+const attachSetMock = vi.fn();
 
 vi.mock('@/services/api', () => ({
+  // Declared inside the factory: vi.mock is hoisted above any top-level
+  // binding, so a class defined outside would be in its TDZ here.
+  ApiError: class ApiError extends Error {
+    code: string;
+    details?: Record<string, unknown>;
+    constructor(code: string, message: string, details?: Record<string, unknown>) {
+      super(message);
+      this.name = 'ApiError';
+      this.code = code;
+      this.details = details;
+    }
+  },
   saeApi: {
     attachments: (...args: unknown[]) => attachmentsMock(...args),
+    attachSet: (...args: unknown[]) => attachSetMock(...args),
   },
+}));
+
+function makeSAE(id: string, layer: number): SAEInfo {
+  return {
+    id,
+    repository_id: `repo/${id}`,
+    revision: 'main',
+    name: id,
+    format: 'npz',
+    d_in: 2304,
+    d_sae: 16384,
+    trained_on: 'gemma-2-2b',
+    trained_layer: layer,
+    width: '16k',
+    average_l0: 50,
+    file_size_bytes: 1024,
+    status: 'cached',
+    error_message: null,
+    created_at: '2026-07-20T00:00:00Z',
+    updated_at: '2026-07-20T00:00:00Z',
+  };
+}
+
+// The panel derives its picker rows from the SAE list and the loaded model.
+vi.mock('@/hooks/useSAE', () => ({
+  useSAE: () => ({ saes: [makeSAE('sae-a', 10), makeSAE('sae-b', 13)] }),
+}));
+
+vi.mock('@/stores/serverStore', () => ({
+  useServerStore: (selector: (s: unknown) => unknown) =>
+    selector({ loadedModel: { name: 'gemma-2-2b' } }),
 }));
 
 import { AttachmentPanel } from '../AttachmentPanel';
@@ -122,5 +168,42 @@ describe('AttachmentPanel', () => {
     await waitFor(() => {
       expect(screen.getByText('No SAEs attached')).toBeInTheDocument();
     });
+  });
+
+  it('offers the Attach set control alongside the attached chips', async () => {
+    attachmentsMock.mockResolvedValue(makeStatus());
+    renderPanel();
+    await waitFor(() => {
+      expect(screen.getAllByTestId('attachment-chip')).toHaveLength(2);
+    });
+    expect(screen.getByTestId('open-attach-set')).toBeInTheDocument();
+  });
+
+  it('offers the Attach set control from the empty state too', async () => {
+    attachmentsMock.mockResolvedValue(
+      makeStatus({ is_attached: false, count: 0, entries: [], total_memory_usage_mb: null }),
+    );
+    renderPanel();
+    await waitFor(() => {
+      expect(screen.getByText('No SAEs attached')).toBeInTheDocument();
+    });
+    expect(screen.getByTestId('open-attach-set')).toBeInTheDocument();
+  });
+
+  it('opens the picker, pre-selected from the attached set', async () => {
+    const user = userEvent.setup();
+    attachmentsMock.mockResolvedValue(makeStatus());
+    renderPanel();
+    await waitFor(() => {
+      expect(screen.getByTestId('open-attach-set')).toBeInTheDocument();
+    });
+
+    await user.click(screen.getByTestId('open-attach-set'));
+
+    // The dialog is open; both attached (sae_id, layer) keys are pre-selected,
+    // so the control reads as "edit the set" rather than "start over".
+    expect(await screen.findByText('Attach SAE set')).toBeInTheDocument();
+    expect(screen.getByLabelText('sae-a at layer 10')).toBeChecked();
+    expect(screen.getByLabelText('sae-b at layer 13')).toBeChecked();
   });
 });

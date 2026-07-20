@@ -932,7 +932,8 @@ class InferenceService:
                 e.sae.enable_steering(False)
             logger.info("circuit_dial_disabled", circuit_id=circuit.id,
                         layers=[e.layer for e in entries])
-            return {"circuit": True, "layers": saved_layers}
+            return {"circuit": True, "epoch": state.steering_epoch,
+                    "layers": saved_layers}
 
         # Re-derive from the AUTHORED basis rather than rescaling the live
         # values. Dividing live values by a stored λ cannot recover the basis:
@@ -990,7 +991,8 @@ class InferenceService:
                 hazards=[str(h) for h in hazards],
                 clamp_warnings=[str(c) for c in clamps],
             )
-        return {"circuit": True, "layers": saved_layers}
+        return {"circuit": True, "epoch": state.steering_epoch,
+                "layers": saved_layers}
 
     @classmethod
     def _resolve_circuit_intensity(
@@ -1192,6 +1194,7 @@ class InferenceService:
             saved: dict = {
                 "values": sae.get_steering_values(),
                 "enabled": True,
+                "epoch": AttachedSAEState().steering_epoch,
             }
             sae.enable_steering(False)
             logger.info(
@@ -1240,6 +1243,7 @@ class InferenceService:
         saved = {
             "values": sae.get_steering_values(),
             "enabled": sae.is_steering_enabled,
+            "epoch": AttachedSAEState().steering_epoch,
         }
 
         # set_steering_batch MERGES into the live dict (sae_wrapper) — clear
@@ -1273,6 +1277,27 @@ class InferenceService:
             from millm.services.sae_service import AttachedSAEState
 
             state = AttachedSAEState()
+
+            # Feature 16: an authoritative writer (an operator activating,
+            # deactivating or re-dialling; an attach or detach) may have landed
+            # between our save and now. Restoring the pre-request snapshot would
+            # silently undo them — and set_intensity would already have told
+            # them it succeeded. The later authoritative writer wins.
+            #
+            # The guard sits ABOVE both branches so a saved shape added later
+            # inherits it by default rather than by someone remembering. A
+            # snapshot with no "epoch" key (older state, or the apply-failure
+            # rollback which restores a snapshot from microseconds ago within
+            # the same epoch) proceeds exactly as before.
+            saved_epoch = saved.get("epoch")
+            if saved_epoch is not None and saved_epoch != state.steering_epoch:
+                logger.info(
+                    "request_restore_skipped_superseded",
+                    saved_epoch=saved_epoch,
+                    current_epoch=state.steering_epoch,
+                    path="circuit" if saved.get("circuit") else "profile",
+                )
+                return
 
             # Feature 14: a circuit dial saved EVERY participating layer.
             # Restoring only the first would leave the other layers dialled

@@ -43,6 +43,8 @@ from millm.core.errors import (
 from millm.db.models.circuit import Circuit
 from millm.db.repositories.circuit_repository import CircuitRepository
 
+from millm.services.sae_service import AttachedSAEState
+
 logger = structlog.get_logger()
 
 MAX_NAME_DEDUPE_ATTEMPTS = 50
@@ -343,6 +345,8 @@ class CircuitService:
             raise
         refreshed = await self.repository.get(circuit.id)
         result["warnings"] = co_tenant_warnings + list(result.get("warnings") or [])
+        # Feature 16: activation is an authoritative steering write
+        AttachedSAEState().bump_steering_epoch('circuit_activate')
         return {
             **self.summarize(refreshed),
             **result,
@@ -694,6 +698,8 @@ class CircuitService:
 
         await self.repository.deactivate(circuit.id)
         refreshed = await self.repository.get(circuit.id)
+        # Feature 16: deactivation is authoritative
+        AttachedSAEState().bump_steering_epoch('circuit_deactivate')
         return {**self.summarize(refreshed), "cleared_steering": cleared}
 
     @staticmethod
@@ -811,9 +817,27 @@ class CircuitService:
                 "profile keeps its own intensity, so this dial was recorded but "
                 "not applied. Adjust the slice cluster's intensity instead."
             )
+        # Feature 16: an intensity change is authoritative. Capture the epoch
+        # OUR write produced, so the truthfulness check below tests whether
+        # something landed AFTER us — not merely "is anything newer than the
+        # snapshot", which would report superseded for our own bump.
+        applied_epoch = AttachedSAEState().bump_steering_epoch(
+            "circuit_set_intensity"
+        )
+        # `reapplied: true` used to be unconditional whenever the steering call
+        # was made — an affirmative claim that survived an in-flight request
+        # restoring the pre-request snapshot over it moments later. It now
+        # means what a caller reads it to mean: the value is live.
+        still_current = AttachedSAEState().steering_epoch == applied_epoch
+        if reapplied and not still_current:
+            warnings.append(
+                "The intensity was applied but immediately superseded by "
+                "another authoritative steering change; it is not live."
+            )
         return {
             **self.summarize(refreshed),
-            "reapplied": reapplied,
+            "reapplied": reapplied and still_current,
+            "superseded": (reapplied and not still_current) or None,
             "warnings": warnings,
         }
 

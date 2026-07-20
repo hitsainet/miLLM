@@ -19,7 +19,7 @@ from millm.core.errors import (
 from millm.core.steering_range import clamp_steering, would_clamp
 from millm.db.models.profile import Profile
 from millm.db.repositories.profile_repository import ProfileRepository
-from millm.services.sae_service import SAEService
+from millm.services.sae_service import AttachedSAEState, SAEService
 
 logger = structlog.get_logger()
 
@@ -463,6 +463,8 @@ class ProfileService:
             feature_count=feature_count,
         )
 
+        # Feature 16: the Feature 10 path has the identical window
+        AttachedSAEState().bump_steering_epoch('profile_activate')
         return {
             "profile_id": profile_id,
             "applied_steering": applied_steering,
@@ -527,6 +529,8 @@ class ProfileService:
             cleared_steering=cleared_steering,
         )
 
+        # Feature 16: the Feature 10 path has the identical window
+        AttachedSAEState().bump_steering_epoch('profile_deactivate')
         return {
             "profile_id": profile_id,
             "cleared_steering": cleared_steering,

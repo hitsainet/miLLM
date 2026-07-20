@@ -111,7 +111,7 @@ class TestDialSemantics:
         profile = make_profile(steering={"10": 100.0})
         with apply_ctx(sae, by_name=profile):
             saved = await service._apply_request_steering("p", 0.0)
-        assert saved == {"values": {5: 3.0}, "enabled": True}
+        assert {k: v for k, v in saved.items() if k != 'epoch'} == {"values": {5: 3.0}, "enabled": True}
         sae.enable_steering.assert_called_once_with(False)
         sae.set_steering_batch.assert_not_called()
 
@@ -141,7 +141,7 @@ class TestDialSemantics:
         sae = make_sae(values={3: 10.0}, enabled=True)
         with apply_ctx(sae, active=None):
             saved = await service._apply_request_steering(None, 1.5)
-        assert saved == {"values": {3: 10.0}, "enabled": True}
+        assert {k: v for k, v in saved.items() if k != 'epoch'} == {"values": {3: 10.0}, "enabled": True}
         sae.set_steering_batch.assert_called_once_with({3: 15.0})
 
     async def test_dial_never_enables_unconfigured_steering(self, service):
@@ -164,7 +164,7 @@ class TestDialSemantics:
         sae = make_sae(values={}, enabled=True)
         with apply_ctx(sae, active=None):
             saved = await service._apply_request_steering(None, 0.0)
-        assert saved == {"values": {}, "enabled": True}
+        assert {k: v for k, v in saved.items() if k != 'epoch'} == {"values": {}, "enabled": True}
         sae.enable_steering.assert_called_once_with(False)
 
     async def test_dial_clamps_via_shared_helper(self, service):
@@ -332,7 +332,7 @@ class TestReviewRound1Fixes:
         profile = make_profile(steering={"7": 50.0})
         with apply_ctx(sae, by_name=profile):
             saved = await service._apply_request_steering("p", None)
-        assert saved == {"values": {}, "enabled": False}
+        assert {k: v for k, v in saved.items() if k != 'epoch'} == {"values": {}, "enabled": False}
         sae.enable_steering.assert_called_with(True)
 
     async def test_numeric_dial_capped_at_authored_ceiling(self, service):
@@ -426,7 +426,9 @@ class TestReviewRound1Fixes:
             with pytest.raises(RuntimeError, match="tokenizer exploded"):
                 async for _ in service.stream_chat_completion(request):
                     pass
-        assert restored == [{"values": {5: 3.0}, "enabled": True}]
+        assert [{k: v for k, v in r.items() if k != "epoch"} for r in restored] == [
+            {"values": {5: 3.0}, "enabled": True}
+        ]
 
     async def test_call_site_passes_dial_into_routing(self, service):
         """R1: pin the actual call-site expression — a dial-only request must
@@ -585,7 +587,7 @@ class TestReviewRound3Fixes:
         profile = make_profile(steering={"7": 100.0}, intensity=0.0)
         with apply_ctx(sae, by_name=profile):
             saved = await service._apply_request_steering("p", None)
-        assert saved == {"values": {42: 80.0}, "enabled": True}
+        assert {k: v for k, v in saved.items() if k != 'epoch'} == {"values": {42: 80.0}, "enabled": True}
         sae.enable_steering.assert_called_once_with(False)
         sae.set_steering_batch.assert_not_called()
 

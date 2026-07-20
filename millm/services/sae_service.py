@@ -201,7 +201,39 @@ class AttachedSAEState:
                 if cls._instance is None:
                     cls._instance = super().__new__(cls)
                     cls._instance._entries: dict[tuple[str, int], AttachedEntry] = {}
+                    # Feature 16: monotonic counter of AUTHORITATIVE steering
+                    # writes. Initialised here (not __init__) because this is a
+                    # singleton constructed via __new__.
+                    cls._instance._steering_epoch: int = 0
         return cls._instance
+
+    @property
+    def steering_epoch(self) -> int:
+        """Monotonic count of authoritative steering writes (Feature 16).
+
+        A per-request steering override reads this when it SAVES and compares
+        at RESTORE. If it advanced in between, an operator (or an attach/detach)
+        wrote authoritatively while the request was generating, and restoring
+        the pre-request snapshot would silently undo them — so the restore is
+        skipped instead. Last authoritative writer wins.
+        """
+        with _ATTACHMENT_LOCK:
+            return self._steering_epoch
+
+    def bump_steering_epoch(self, reason: str) -> int:
+        """Record an authoritative steering write.
+
+        NEVER call this from ``set_steering_batch`` or any other low-level
+        write used BY the per-request apply path: a per-request apply that
+        bumped would make every request supersede its own restore, silently
+        disabling per-request isolation entirely.
+        """
+        with _ATTACHMENT_LOCK:
+            self._steering_epoch += 1
+            logger.debug(
+                "steering_epoch_bumped", epoch=self._steering_epoch, reason=reason
+            )
+            return self._steering_epoch
 
     def _first(self) -> Optional[AttachedEntry]:
         """First attached entry (insertion order), or None. Locked so the
@@ -510,7 +542,14 @@ class SAEService:
         # detach/attach between the two would otherwise write steering into a
         # just-detached SAE (or resolve a basis that no longer exists).
         with _ATTACHMENT_LOCK:
-            return self._set_circuit_steering_locked(members, intensity, edges=edges)
+            outcome = self._set_circuit_steering_locked(
+                members, intensity, edges=edges
+            )
+            # Feature 16: authoritative write. Bumped INSIDE the lock so a
+            # concurrent restore cannot read a stale epoch between the write
+            # landing and the counter advancing.
+            self._sae_state.bump_steering_epoch('set_circuit_steering')
+            return outcome
 
     def _set_circuit_steering_locked(
         self,
@@ -699,6 +738,9 @@ class SAEService:
                 entry.sae.clear_steering()
                 entry.sae.enable_steering(False)
                 cleared.append(layer)
+        # Feature 16: clearing is authoritative too — a request must not
+        # restore steering over a deliberate clear.
+        self._sae_state.bump_steering_epoch('clear_circuit_steering')
         return cleared
 
     def _cross_layer_hazards(
@@ -1635,6 +1677,9 @@ class SAEService:
             attached=status_set.count,
             total_mb=total_mb,
         )
+        # Feature 16: attachment changes invalidate a per-request snapshot
+        # taken against the previous set.
+        self._sae_state.bump_steering_epoch('attach_set')
         return {
             "status": "attached",
             "entries": results,
@@ -1812,6 +1857,9 @@ class SAEService:
             memory_freed_mb=memory_freed_mb,
         )
 
+        # Feature 16: attachment changes invalidate a per-request snapshot
+        # taken against the previous set.
+        self._sae_state.bump_steering_epoch('detach_sae')
         return {
             "status": "detached",
             "sae_id": sae_id,

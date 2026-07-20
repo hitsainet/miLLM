@@ -43,6 +43,7 @@ from millm.core.errors import (
 from millm.db.models.circuit import Circuit
 from millm.db.repositories.circuit_repository import CircuitRepository
 
+from millm.ml.circuit_steering import CircuitSteeringEngine
 from millm.services.sae_service import AttachedSAEState
 
 logger = structlog.get_logger()
@@ -420,11 +421,16 @@ class CircuitService:
         self, circuit: Circuit, definition: CircuitDefinitionV1
     ) -> dict[str, Any]:
         """All referenced SAEs bound — delegate to Feature 12 serving."""
-        members = self._serving_members(definition)
-        edges = [e.model_dump(mode="json") for e in definition.edges]
-        intensity = (
-            definition.budget.intensity if definition.budget else circuit.intensity
+        # F18: ONE derivation. `plan.claimed_layers` is defined AS the layers
+        # of `plan.members`, so `bound_layers` below cannot drift from what the
+        # apply drives (F14-R2-01), and the intensity resolution is the same
+        # expression the dial uses (F14-R1-01).
+        plan = CircuitSteeringEngine(self._sae_service._sae_state).plan_for(
+            definition, circuit
         )
+        members = plan.members
+        edges = [e.model_dump(mode="json") for e in definition.edges]
+        intensity = plan.intensity
         # R3 finding 2: `activate` bumps for the whole logical action, so this
         # write must NOT bump as well — one activation advanced the epoch by 2,
         # and any request whose snapshot landed BETWEEN the two saw a spurious
@@ -634,46 +640,11 @@ class CircuitService:
             },
         }
 
-    @staticmethod
-    def _serving_members(definition: CircuitDefinitionV1) -> list[CircuitMember]:
-        """Flatten the circuit's members into the Feature 12 serving shape.
-
-        STATIC BY CONTRACT: the inference dial calls this to flatten members by
-        exactly the same rules activation uses. R2 flagged that calling it
-        unbound relied on an unwritten purity promise — one future ``self.``
-        reference would turn every dialled request into an AttributeError.
-        @staticmethod makes that a compile-time guarantee instead.
-
-        A ``cluster_ref`` contributes its frozen ``expanded_members`` AND its own
-        ``feature`` when both are present — taking only one silently dropped
-        authored members from the intervention. Duplicates on a
-        ``(layer, feature_idx)`` are collapsed because the serving path rejects
-        a repeated key outright.
-        """
-        out: list[CircuitMember] = []
-        seen: set[tuple[int, int]] = set()
-        for m in definition.members:
-            ref = definition.sae_for_layer(m.layer)
-            sae_id = ref.mistudio_sae_id if ref else None
-            sources = list(m.expanded_members or [])
-            if m.feature is not None:
-                sources.append(m.feature)
-            for feat in sources:
-                key = (m.layer, feat.feature_idx)
-                if key in seen:
-                    continue
-                seen.add(key)
-                out.append(
-                    CircuitMember(
-                        feature_idx=feat.feature_idx,
-                        layer=m.layer,
-                        budget=feat.strength,
-                        sign=feat.sign,
-                        sae_id=sae_id,
-                        label=feat.label,
-                    )
-                )
-        return out
+    # F18: `_serving_members` was DELETED here. Its rules now live in
+    # `CircuitSteeringEngine.serving_members` — the ONE derivation — and every
+    # call site consumes a `ServingPlan` rather than re-deriving. No shim: a
+    # forwarding stub would leave two names for one thing and invite the next
+    # caller to pick the wrong one, which is how four derivations happened.
 
     async def deactivate(self, circuit_id: str) -> dict[str, Any]:
         """Stop serving a circuit and clear whatever is ACTUALLY steering.
@@ -821,7 +792,7 @@ class CircuitService:
             # Report it rather than letting the exception imply nothing landed.
             try:
                 _outcome = self._sae_service.set_circuit_steering(
-                    self._serving_members(definition),
+                    CircuitSteeringEngine.serving_members(definition),
                     float(intensity),
                     edges=[e.model_dump(mode="json") for e in definition.edges],
                 )

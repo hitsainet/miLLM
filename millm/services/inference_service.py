@@ -717,32 +717,15 @@ class InferenceService:
             )
             return None
 
-    @staticmethod
-    def _circuit_serving_members(definition: Any) -> list:
-        """Flatten a circuit definition to Feature 12 serving members.
-
-        Delegates to CircuitService so the dial and circuit activation flatten
-        members by exactly the same rules (both-sources collection, dedupe) —
-        a second implementation here would drift.
-        """
-        from millm.services.circuit_service import CircuitService
-
-        # _serving_members is a @staticmethod by contract — see its docstring.
-        return CircuitService._serving_members(definition)
-
-    @staticmethod
-    def _sae_service_for_dial() -> Any:
-        """An SAEService bound only to the attachment registry.
-
-        ``set_circuit_steering`` touches nothing but the singleton registry and
-        the attached SAEs, so a repository-free instance is sufficient — and
-        avoids pulling request-scoped DI into the inference hot path.
-        """
-        from millm.services.sae_service import AttachedSAEState, SAEService
-
-        svc = SAEService.__new__(SAEService)
-        svc._sae_state = AttachedSAEState()
-        return svc
+    # F18: `_circuit_serving_members` and `_sae_service_for_dial` were
+    # DELETED here.
+    #
+    # The first forwarded to `CircuitService._serving_members`; both are now
+    # `CircuitSteeringEngine`. The second built an SAEService via `__new__`,
+    # leaving four fields and two collections unset — a partially-constructed
+    # object on the inference hot path that worked only because the dial
+    # happened to touch none of them. `SAEService.for_registry()` constructs it
+    # totally.
 
     async def _active_full_circuit(self) -> Optional[Any]:
         """The active circuit when it is serving in FULL multi-SAE mode.
@@ -810,15 +793,17 @@ class InferenceService:
         definition = self._circuit_definition(circuit)
         if definition is None:
             return None
-        members = self._circuit_serving_members(definition)
-        if not members:
-            return None
-
+        # F18: one derivation. `is_serveable` asks exactly the question this
+        # predicate asked by hand — are there members, and is at least one of
+        # their layers attached — from the SAME plan the apply drives. An
+        # echoed rung header on a circuit that is not steering would attach an
+        # evidence claim to an intervention that never happened.
+        from millm.ml.circuit_steering import CircuitSteeringEngine
         from millm.services.sae_service import AttachedSAEState
 
-        member_layers = {m.layer for m in members}
-        if not any(e.layer in member_layers for e in AttachedSAEState().entries()):
-            return None  # apply will no-op; an echoed header would lie
+        plan = CircuitSteeringEngine(AttachedSAEState()).plan_for(definition, circuit)
+        if not plan.is_serveable:
+            return None
         return circuit
 
     async def _resolve_active_circuit_intensity(
@@ -897,14 +882,23 @@ class InferenceService:
         definition = self._circuit_definition(circuit)
         if definition is None:
             return None
-        members = self._circuit_serving_members(definition)
+        # F18: ONE derivation. The snapshot below is keyed on
+        # `plan.claimed_layers`, which is DEFINED as the layers of
+        # `plan.members` — the same list the apply drives. F14-R2-01 was the
+        # gap between the DB column and those member layers; making them the
+        # same object closes it structurally rather than by agreement.
+        from millm.ml.circuit_steering import CircuitSteeringEngine
+        from millm.services.sae_service import SAEService
+
+        state = AttachedSAEState()
+        plan = CircuitSteeringEngine(state).plan_for(definition, circuit, intensity=lam)
+        members = plan.members
         if not members:
             logger.info("circuit_dial_noop_no_serving_members",
                         circuit_id=circuit.id)
             return None
-        member_layers = {m.layer for m in members}
+        member_layers = set(plan.claimed_layers)
 
-        state = AttachedSAEState()
         entries = [e for e in state.entries() if e.layer in member_layers]
         if not entries:
             logger.info("circuit_dial_noop_no_attached_layers",
@@ -962,7 +956,7 @@ class InferenceService:
         # so an operator grepping for `circuit_dial_definition_unparseable` to
         # debug a silent no-op would wrongly conclude the document parsed.
         try:
-            outcome = self._sae_service_for_dial().set_circuit_steering(
+            outcome = SAEService.for_registry().set_circuit_steering(
                 members,
                 lam,
                 edges=[e.model_dump(mode="json") for e in definition.edges],

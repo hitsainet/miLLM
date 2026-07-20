@@ -421,6 +421,40 @@ class SAEService:
 
         logger.debug("SAEService initialized", cache_dir=cache_dir)
 
+    @classmethod
+    def for_registry(cls) -> "SAEService":
+        """A service bound only to the attachment registry, TOTALLY constructed.
+
+        `set_circuit_steering` touches nothing but the singleton registry and
+        the attached SAEs, so a repository-free instance is sufficient — and
+        avoids pulling request-scoped DI onto the inference hot path.
+
+        F18: this replaces `SAEService.__new__(SAEService)`, which bypassed
+        `__init__` and left FOUR fields unset (`_downloader`, `_loader`,
+        `_hooker`, `_inference_service`) plus two collections. That worked only
+        because the dial path happened to touch none of them — a
+        partially-constructed object on the hot path, one refactor away from an
+        AttributeError in production, and invisible to every test because the
+        methods that would trip it were never called.
+
+        Every field `__init__` sets is set here. The repository and cache dir
+        are the two things a registry-only service genuinely does not have, and
+        they are None/"" rather than absent, so a method that reaches for one
+        fails on a value rather than on a missing attribute.
+        """
+        svc = cls.__new__(cls)
+        svc._repository = None
+        svc._cache_dir = ""
+        svc._emitter = None
+        svc._inference_service = None
+        svc._downloader = None
+        svc._loader = None
+        svc._hooker = None
+        svc._sae_state = AttachedSAEState()
+        svc._active_downloads = {}
+        svc._cancelled_downloads = set()
+        return svc
+
     # =========================================================================
     # Listing Methods
     # =========================================================================

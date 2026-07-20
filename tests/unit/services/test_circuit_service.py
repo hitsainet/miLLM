@@ -426,7 +426,11 @@ class TestR1Fixes:
             edges=[],
         )
         definition = CircuitDefinitionV1.model_validate(doc)
-        members = service._serving_members(definition)
+        # F18: the derivation moved to the engine; these F13-R1 assertions
+        # are unchanged, which is the parity claim.
+        from millm.ml.circuit_steering import CircuitSteeringEngine
+
+        members = CircuitSteeringEngine.serving_members(definition)
         assert {m.feature_idx for m in members} == {7, 999}
         sl = service.to_layer_slice(definition, 10)
         assert {m["feature_idx"] for m in sl["members"]} == {7, 999}
@@ -447,7 +451,11 @@ class TestR1Fixes:
             edges=[],
         )
         definition = CircuitDefinitionV1.model_validate(doc)
-        members = service._serving_members(definition)
+        # F18: the derivation moved to the engine; these F13-R1 assertions
+        # are unchanged, which is the parity claim.
+        from millm.ml.circuit_steering import CircuitSteeringEngine
+
+        members = CircuitSteeringEngine.serving_members(definition)
         assert [m.feature_idx for m in members] == [1]  # deduped, not doubled
 
     async def test_corrupt_stored_document_is_a_structured_error_not_a_500(

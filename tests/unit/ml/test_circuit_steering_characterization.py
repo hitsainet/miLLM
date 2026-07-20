@@ -19,7 +19,16 @@ from types import SimpleNamespace
 
 import pytest
 
-from millm.services.circuit_service import CircuitService
+from millm.ml.circuit_steering import CircuitSteeringEngine
+
+# F18 task 2.7: the characterization ASSERTIONS are unchanged; only the name
+# they call moved, from `CircuitService._serving_members` to the engine. That
+# is the whole parity claim — the same tests, the same expectations, a
+# different owner. The shim lives HERE, in the test file, and deliberately not
+# in production: a forwarding stub in the service would leave two names for one
+# thing, which is how four derivations happened in the first place.
+class CircuitService:
+    _serving_members = staticmethod(CircuitSteeringEngine.serving_members)
 
 
 # ─────────────────────────────────────────────────────────────────────────
@@ -191,10 +200,18 @@ class TestIntensityResolution:
 # ─────────────────────────────────────────────────────────────────────────
 
 
-class TestAllFourSitesAgreeBeforeTheMove:
-    """The witness that F18 PRESERVES agreement rather than creating it. If
-    these disagree now, the refactor is a behaviour change and the FTASKS'
-    premise is wrong."""
+class TestAllFourSitesShareTheSameDerivation:
+    """WAS `TestAllFourSitesAgreeBeforeTheMove` — the pre-move witness that the
+    four sites agreed. They did.
+
+    Behaviour change, justified (F18 task 3.5): the two methods it compared no
+    longer exist, because that is the feature. Comparing
+    `CircuitService._serving_members` with
+    `InferenceService._circuit_serving_members` is now impossible, and a test
+    that reinstated shims to keep comparing them would be testing the shims.
+
+    What replaces it asserts the STRONGER property: there is one derivation,
+    and the four sites reach it."""
 
     def _definition(self):
         return defn(
@@ -205,67 +222,111 @@ class TestAllFourSitesAgreeBeforeTheMove:
             sae_by_layer={10: sae_ref("sae-A"), 13: sae_ref("sae-B")},
         )
 
-    def test_circuit_service_and_inference_service_derive_the_same_members(self):
+    def test_there_is_exactly_ONE_flattening_implementation(self):
+        """ENG-D4 / task 5.4. A second implementation appearing is the defect
+        this whole feature exists to prevent."""
+        import subprocess
+
+        # Target the SERVING shape specifically. A bare grep for
+        # `expanded_members` also matches two legitimate and DIFFERENT
+        # derivations, which this test found on its first run and which are
+        # worth naming so nobody "fixes" them into the engine:
+        #
+        #   millm/api/schemas/circuit.py — counts feature_idx per layer for the
+        #     member-cap validator. Different output (a count), different
+        #     consumer (validation), and deduping there is about the cap.
+        #   circuit_service._slice_members — the slice-fallback PROJECTION,
+        #     which emits a per-layer cluster document for the F8 importer.
+        #     Deduped on feature_idx alone because a cluster is keyed by index;
+        #     the serving path keys on (layer, feature_idx).
+        #
+        # What must exist exactly once is the construction of `CircuitMember`
+        # for the serving path.
+        out = subprocess.run(
+            ["grep", "-rn", "CircuitMember(", "millm/"],
+            capture_output=True, text=True,
+        ).stdout
+        sites = sorted({
+            ln.split(":")[0] for ln in out.splitlines()
+            if ln.strip() and "class CircuitMember" not in ln
+        })
+        assert sites == ["millm/ml/circuit_steering.py"], (
+            f"the serving flattening exists in {sites} — a second derivation "
+            "has appeared"
+        )
+
+    def test_the_deleted_helpers_are_really_gone_with_no_shims(self):
+        from millm.services.circuit_service import CircuitService as RealCS
         from millm.services.inference_service import InferenceService
 
-        d = self._definition()
-        a = CircuitService._serving_members(d)
-        b = InferenceService._circuit_serving_members(d)
-        assert [(m.layer, m.feature_idx, m.budget, m.sign, m.sae_id) for m in a] == [
-            (m.layer, m.feature_idx, m.budget, m.sign, m.sae_id) for m in b
-        ]
+        assert not hasattr(RealCS, "_serving_members")
+        assert not hasattr(InferenceService, "_circuit_serving_members")
+        assert not hasattr(InferenceService, "_sae_service_for_dial")
 
-    def test_the_participating_LAYER_SET_is_the_same_from_both(self):
-        """The claim set. F14-R2-01: the dial's snapshot must cover exactly the
-        layers the apply drives, or a member layer missing from the
-        `circuits.layers` column is steered and never restored."""
-        from millm.services.inference_service import InferenceService
-
+    def test_the_claim_set_IS_the_member_layers(self):
+        """ENG-K1, the structural fix for F14-R2-01: the layers a request
+        snapshots and the layers its apply drives are the same set, not two
+        sets that agree."""
         d = self._definition()
-        a = {m.layer for m in CircuitService._serving_members(d)}
-        b = {m.layer for m in InferenceService._circuit_serving_members(d)}
-        assert a == b == {10, 13}
+        plan = CircuitSteeringEngine().plan_for(d, SimpleNamespace(intensity=1.0))
+        assert plan.claimed_layers == frozenset(m.layer for m in plan.members)
 
     def test_the_member_layer_set_can_EXCEED_the_definitions_layers_list(self):
-        """The F14-R2-01 shape itself: `definition.layers()` is not the same
-        thing as the layers the members actually claim, and the apply follows
-        the members. Pinned here because F18 moves `bound_layers` from one to
-        the other."""
+        """The F14-R2-01 shape itself, preserved from the pre-move gate:
+        `definition.layers()` is not the same thing as the layers the members
+        claim, and the apply follows the members."""
         d = defn(
             [mem(10, feature=feat(1)), mem(99, feature=feat(2))],
             sae_by_layer={10: sae_ref("sae-A")},
         )
-        claimed = {m.layer for m in CircuitService._serving_members(d)}
-        assert 99 in claimed
+        plan = CircuitSteeringEngine().plan_for(d, SimpleNamespace(intensity=1.0))
+        assert 99 in plan.claimed_layers
 
 
-# ─────────────────────────────────────────────────────────────────────────
-# 2.5 witness — the construction bypass being retired
-# ─────────────────────────────────────────────────────────────────────────
+class TestTheDialsServiceConstructionIsNowTotal:
+    """The BEFORE state was: `_sae_service_for_dial` built an SAEService via
+    `__new__`, leaving `_downloader`, `_loader`, `_hooker`,
+    `_inference_service` and two collections UNSET. It worked only because the
+    dial path happened to touch none of them — a partially-constructed object
+    on the inference hot path.
 
+    CTX-V2-style behaviour change, justified: the bypass is gone, so the tests
+    that pinned its shape are replaced by tests that the replacement is TOTAL.
+    Asserting the old unset fields would now be asserting the defect."""
 
-class TestTheDialsServiceConstructionToday:
-    """`_sae_service_for_dial` builds an SAEService via `__new__`, bypassing
-    `__init__`. It works only because the dial path happens to touch nothing
-    but `_sae_state` — a partially-constructed object on the inference hot
-    path, one refactor away from an AttributeError in production.
+    def test_for_registry_sets_every_field___init___sets(self):
+        import inspect
+        import re
 
-    Pinned as the BEFORE state so the `for_registry` replacement can be shown
-    to be total rather than merely different."""
+        from millm.services.sae_service import SAEService
 
-    def test_the_bypass_leaves_four_fields_unset(self):
-        from millm.services.inference_service import InferenceService
+        init_fields = set(
+            re.findall(r"self\.(_[a-z_]+)\s*[:=]", inspect.getsource(SAEService.__init__))
+        )
+        svc = SAEService.for_registry()
+        missing = sorted(f for f in init_fields if not hasattr(svc, f))
+        assert missing == [], f"partially constructed: {missing} unset"
 
-        svc = InferenceService._sae_service_for_dial()
-        unset = [
-            f for f in ("_downloader", "_hooker", "_inference_service", "_loader")
-            if not hasattr(svc, f)
-        ]
-        assert unset, "the bypass is gone — retarget this at for_registry"
+    def test_it_shares_the_singleton_registry(self):
+        from millm.services.sae_service import AttachedSAEState, SAEService
 
-    def test_it_nonetheless_carries_a_usable_registry(self):
-        from millm.services.inference_service import InferenceService
+        assert SAEService.for_registry()._sae_state is AttachedSAEState()
 
-        svc = InferenceService._sae_service_for_dial()
-        assert svc._sae_state is not None
-        assert hasattr(svc, "set_circuit_steering")
+    def test_the_new_bypass_is_gone_from_the_tree(self):
+        """No shim, no second construction path (ENG-D4)."""
+        import subprocess
+
+        # Match a CALL, not prose. The `for_registry` docstring names the
+        # retired bypass on purpose, and a grep that cannot tell an explanation
+        # from an invocation would either fail forever or be deleted.
+        # An ASSIGNMENT from the bypass, not a mention of it. The
+        # `for_registry` docstring names the retired pattern deliberately, and
+        # a grep that cannot tell an explanation from an invocation would
+        # either fail forever or get deleted — which is how a guard stops
+        # guarding.
+        out = subprocess.run(
+            ["grep", "-rnE", r"=\s*SAEService\.__new__\(", "millm/"],
+            capture_output=True, text=True,
+        ).stdout
+        offenders = [ln for ln in out.splitlines() if ln.strip()]
+        assert not offenders, f"the __new__ bypass is back: {offenders}"

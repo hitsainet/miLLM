@@ -468,3 +468,46 @@ class TestR3AStoppedReporterDoesNotBlockPruningForever:
         for _ in range(10):
             ring.note_layer_progress(10, 5000)
         assert ring.match_down("e", 41) == (38, 1.0)
+
+
+class TestR3TheBudgetRecordsTruncationEvenWithoutTheCallback:
+    """F17 R3-05, found by mutation: deleting `note_truncated` from
+    `try_spend` left the whole suite green.
+
+    That is NOT a redundant line. `LoadedSAE` passes `on_truncated`, which
+    records the same fact from the outside — so today the inner call is
+    belt-and-braces. But `try_spend` is the budget's own API and any caller
+    that does not pass a callback (a direct user, a future second caller, an
+    F19 scheduler) depends on it. An untested safety net is one nobody
+    notices removing.
+
+    Both paths are correct and both are now pinned."""
+
+    def test_try_spend_records_truncation_on_its_own(self):
+        from millm.ml.edge_sensing import EventBudget
+
+        budget = EventBudget(cap=1)
+        assert budget.try_spend("c", 10) is True
+        assert budget.try_spend("c", 10) is False
+        assert budget.truncated_layers("c") == [10], (
+            "the budget's own API did not record the loss it just caused"
+        )
+
+    def test_it_records_the_layer_it_was_GIVEN(self):
+        """R1-09's rule at the budget's own boundary: the shedding layer, never
+        an edge endpoint."""
+        from millm.ml.edge_sensing import EventBudget
+
+        budget = EventBudget(cap=0)
+        budget.try_spend("c", 42)
+        assert budget.truncated_layers("c") == [42]
+
+    def test_truncation_is_per_circuit(self):
+        from millm.ml.edge_sensing import EventBudget
+
+        budget = EventBudget(cap=0)
+        budget.try_spend("circ_A", 10)
+        assert budget.truncated_layers("circ_A") == [10]
+        assert budget.truncated_layers("circ_B") == [], (
+            "one circuit's truncation is visible under another's id"
+        )

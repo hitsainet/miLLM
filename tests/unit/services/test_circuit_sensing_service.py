@@ -1976,3 +1976,112 @@ class TestR3ASwappedOutSAEIsStillReleased:
         svc.collect_edges(saes)
         svc.close_request()
         assert stranded._edge_ctx is None
+
+
+class TestR3PauseReasonsTransitionCorrectlyAcrossEveryPath:
+    """F17 R3-03. `_pause_is_current` (R2-14) means "set while a boundary is
+    open", and the reclaim path sets a reason and then nulls `_ctx` in the same
+    call. Attacked every transition between the four reasons; they hold, and
+    these pin them because the state machine now has enough paths that a later
+    change could easily strand one.
+
+    A stranded reason is not cosmetic: `paused_reason` is what an operator
+    reads to decide whether an empty result means quiet traffic or a fault."""
+
+    def _armed(self):
+        svc = CircuitSensingService()
+        saes = two_saes()
+        svc.arm_for_circuit(circuit(), definition(), saes)
+        return svc, saes
+
+    def test_a_refusal_reason_does_not_outlive_the_reclaim(self):
+        svc, saes = self._armed()
+        svc.begin_request("A", saes)
+        svc.begin_request("B", saes)              # refused
+        assert svc._paused_reason == "concurrent_request"
+        svc.begin_request("C", saes)              # succeeds on the reclaimed slot
+        svc.clear_stale_pause()
+        assert svc._paused_reason is None
+
+    def test_a_dark_request_overrides_a_stale_refusal(self):
+        """The newer, more specific reason must win — an operator debugging a
+        dark layer must not be shown a refusal from two requests ago."""
+        svc, saes = self._armed()
+        svc.begin_request("A", saes)
+        svc.begin_request("B", saes)              # refusal
+        svc.begin_request("C", {10: saes[10]})    # partially dark
+        assert svc._paused_reason == "layer_unavailable"
+
+    def test_a_healthy_request_clears_everything(self):
+        svc, saes = self._armed()
+        svc.begin_request("A", saes)
+        svc.begin_request("B", saes)
+        svc.begin_request("C", {10: saes[10]})
+        svc.collect_edges(saes)
+        svc.close_request()
+        svc.begin_request("D", saes)
+        svc.clear_stale_pause()
+        assert svc._paused_reason is None
+
+
+class TestR3TheCapOrderingKeepsTheCountHonest:
+    """F17 R3-04. R2-03 checks the per-SAE cap FIRST, then the shared budget.
+    Attacked for a wrong total, a wrong spend, and a dishonest truncation
+    report under an exhausted circuit budget."""
+
+    def _circuit(self, sae_cap, circuit_cap, layers=(10, 11, 12)):
+        from tests.unit.ml.test_edge_sensing_characterization import (
+            config, ctx_for, real_sae, spec,
+        )
+
+        cfgs = {}
+        for L in layers:
+            c = config(
+                edges=[spec(up_layer=L, down_layer=L, key=f"1@{L}->2@{L}")],
+                max_lag=8, cap=sae_cap, layer=L,
+            )
+            c.circuit_id = "c"
+            cfgs[L] = c
+        ctx = ctx_for(cfgs[layers[0]], "r")
+        ctx.budget.cap = circuit_cap
+        saes = {}
+        for L, c in cfgs.items():
+            s = real_sae()
+            s.arm_edge_sensing(c)
+            s.bind_context(ctx)
+            s.begin_edge_sensing_request("r")
+            saes[L] = s
+        return ctx, saes
+
+    def _fire(self, sae, pairs=6):
+        from tests.unit.ml.test_edge_sensing_characterization import hidden
+
+        rows = []
+        for _ in range(pairs):
+            rows += [{1: 2.0}, {2: 2.0}]
+        sae._sense_edges(hidden(*rows))
+
+    def test_the_circuit_total_respects_the_shared_budget(self):
+        ctx, saes = self._circuit(sae_cap=10, circuit_cap=3)
+        for s in saes.values():
+            self._fire(s)
+        total = sum(len(s._sensed_edges) for s in saes.values())
+        assert total == 3, f"{total} events against a circuit budget of 3"
+
+    def test_the_recorded_spend_matches_what_was_emitted(self):
+        """A spend that drifts from the emission count makes every later
+        budget decision wrong."""
+        ctx, saes = self._circuit(sae_cap=10, circuit_cap=3)
+        for s in saes.values():
+            self._fire(s)
+        total = sum(len(s._sensed_edges) for s in saes.values())
+        assert ctx.budget.spent("c") == total
+
+    def test_every_layer_that_lost_a_match_is_named(self):
+        """Layers emitting 0 are still flagged: they had matches REFUSED, so
+        their view genuinely is incomplete. Silence here would read as 'this
+        layer saw nothing', which is a different and false claim."""
+        ctx, saes = self._circuit(sae_cap=10, circuit_cap=3)
+        for s in saes.values():
+            self._fire(s)
+        assert ctx.budget.truncated_layers("c") == [10, 11, 12]

@@ -1749,6 +1749,27 @@ class SAEService:
                 deps.get_sensing_service().disarm(detach_sae)
             except Exception:
                 logger.warning("sensing_disarm_on_detach_failed", exc_info=False)
+
+            # Edge sensing lifecycle (Feature 15): same reason, and it must be
+            # reached even when F11 sensing is not armed. Detaching one SAE of
+            # an armed CIRCUIT would otherwise leave the service believing it
+            # is armed on a layer whose SAE is gone — status() only repairs
+            # that if somebody happens to call it with the layer map.
+            try:
+                import millm.api.dependencies as deps
+
+                circuit_sensing = deps._circuit_sensing_service
+                if circuit_sensing is not None and circuit_sensing.is_armed:
+                    # disarm() unions its argument with what it armed, so a
+                    # bare layer key is enough to reach this SAE.
+                    layer = getattr(
+                        getattr(detach_sae, "_edge_sensing", None), "layer", -1
+                    )
+                    circuit_sensing.disarm({layer: detach_sae})
+            except Exception:
+                logger.warning(
+                    "circuit_sensing_disarm_on_detach_failed", exc_info=False
+                )
             detach_sae.to_cpu()
 
         # Clear CUDA cache

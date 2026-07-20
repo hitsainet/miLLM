@@ -77,6 +77,11 @@ class CircuitSensingService:
         #: Identity of the circuit that owns the OPEN request boundary.
         self._request_circuit_id: Optional[str] = None
         self._request_context_tokens: int = 0
+        #: Why an armed circuit is nonetheless not observing (R3: an operator
+        #: saw armed=true and zero events with nothing explaining it).
+        self._paused_reason: Optional[str] = None
+        #: Armed-member fires observed anywhere in the last request (EDGE-R2).
+        self._last_request_ambient: int = 0
         self._unsensable: list[UnsensableEdge] = []
         self._max_token_lag: int = settings.CIRCUIT_SENSING_MAX_TOKEN_LAG
         self._last_request_overhead_ms: float = 0.0
@@ -419,6 +424,8 @@ class CircuitSensingService:
         self._ring = None
         self._armed_saes = {}
         self._unsensable = []
+        self._request_circuit_id = None
+        self._request_context_tokens = 0
         # R2: every other field was cleared but this one, so a circuit with no
         # override silently inherited the previous circuit's lag window.
         self._max_token_lag = settings.CIRCUIT_SENSING_MAX_TOKEN_LAG
@@ -478,6 +485,7 @@ class CircuitSensingService:
         merged: list[Any] = []
         truncated = False
         overhead = 0.0
+        ambient = 0
         for layer in self._armed_layers:
             sae = layer_saes.get(layer)
             if sae is None:
@@ -491,7 +499,9 @@ class CircuitSensingService:
             # `continue` in begin_request) re-contributed its stale overhead to
             # the next request, inflating the number that drives the warning.
             sae._edge_overhead_ms = 0.0
+            ambient += int(getattr(sae, "_edge_ambient_fired", 0) or 0)
         self._last_request_overhead_ms = overhead
+        self._last_request_ambient = ambient
         if overhead > settings.CIRCUIT_SENSING_MAX_OVERHEAD_MS:
             logger.warning(
                 "circuit_sensing_overhead_high",
@@ -503,6 +513,14 @@ class CircuitSensingService:
         if self._ring is not None:
             self._ring.clear()
         return request_id, merged, truncated
+
+    def close_request(self) -> None:
+        """Release the boundary snapshot. R3: _request_circuit_id survived both
+        collect_edges and disarm, so a drain arriving after a disarm attributed
+        rows to a circuit that was no longer armed — R2-04 narrowed the
+        mis-attribution window without closing it."""
+        self._request_circuit_id = None
+        self._request_context_tokens = 0
 
     def prune_ring(self, through_position: int) -> None:
         """Drop upstream fires that can no longer match, at a safe boundary.
@@ -584,6 +602,10 @@ class CircuitSensingService:
                     # that was true when it was observed.
                     edge_rung_language=edge.rung_language,
                     edge_type=edge.edge_type,
+                    # EDGE-R2: total armed-member fires this request, so a
+                    # reader can judge whether this edge firing was
+                    # distinctive or whether everything fired at once.
+                    ambient_fired_count=self._last_request_ambient or None,
                     context_text=text,
                     context_token_ids=window,
                     context_parts=parts,
@@ -739,6 +761,7 @@ class CircuitSensingService:
         )
         return {
             "armed": armed,
+            "paused_reason": self._paused_reason,
             "circuit_id": self._circuit_id,
             "circuit_name": self._circuit_name,
             "layers": list(self._armed_layers),
@@ -749,6 +772,10 @@ class CircuitSensingService:
             "events_recorded": self._events_recorded,
             "ws_dropped": self._ws_dropped,
         }
+
+    def note_paused(self, reason: Optional[str]) -> None:
+        """Record why an armed circuit is not observing (or None to clear)."""
+        self._paused_reason = reason
 
     def note_events_recorded(self, count: int) -> None:
         self._events_recorded += int(count)

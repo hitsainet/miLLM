@@ -135,6 +135,10 @@ class EdgeFireRing:
         self._max_lag = max(1, int(max_lag))
         #: edge_key -> list of (abs_pos, activation), ascending by position.
         self._fires: dict[str, list[tuple[int, float]]] = {}
+        #: layer -> position walked through, so the ring can prune to the
+        #: SLOWEST layer without any hook knowing about its siblings.
+        self._progress: dict[int, int] = {}
+        self._last_pruned_at: int = 0
 
     #: Per-edge upstream-fire retention. The ring cannot prune by position —
     #: see prune_before — so it bounds memory by count instead. Generous
@@ -165,13 +169,21 @@ class EdgeFireRing:
         # count-based bounding. `fires` is ascending by position, so walk
         # BACKWARD and stop at the window edge: the first hit is already the
         # newest antecedent, and everything earlier is out of window.
-        for i in range(len(fires) - 1, -1, -1):
+        # R3: stepping back over the tail one entry at a time was O(n) on the
+        # NORMAL cross-layer path — hooks run in layer order, so the upstream
+        # layer records its entire prefill before the downstream layer matches
+        # ascending, making every match walk the whole tail (39ms at 4096
+        # tokens for ONE edge). Jump straight to the insertion point.
+        import bisect
+
+        i = bisect.bisect_left(fires, (down_pos, float("-inf"))) - 1
+        while i >= 0:
             pos, act = fires[i]
-            if pos >= down_pos:
-                continue
             if (down_pos - pos) > self._max_lag:
                 break
-            return (pos, act)
+            if pos < down_pos:
+                return (pos, act)
+            i -= 1
         return None
 
     def prune_before(self, pos: int) -> None:
@@ -196,8 +208,29 @@ class EdgeFireRing:
             else:
                 del self._fires[key]
 
+    def note_layer_progress(self, layer: int, through: int) -> None:
+        """Record how far one layer has walked, and prune to the slowest.
+
+        R1 moved pruning out of the hooks and declared it request-level, then
+        never wired a caller; R2 added service methods and ALSO never wired
+        them. Third attempt, different shape: the RING tracks each layer's
+        progress, so it can prune to the slowest layer itself — the hook does
+        not need to know about its siblings, which is what made the previous
+        two designs unwireable. Bounded by construction rather than by a
+        caller remembering.
+        """
+        self._progress[layer] = through
+        if len(self._progress) < 2:
+            return  # a single layer: nothing to be slower than
+        slowest = min(self._progress.values())
+        if slowest - self._last_pruned_at >= self._max_lag:
+            self._last_pruned_at = slowest
+            self.prune_before(slowest)
+
     def clear(self) -> None:
         self._fires.clear()
+        self._progress.clear()
+        self._last_pruned_at = 0
 
 
 @dataclass
@@ -352,6 +385,7 @@ class LoadedSAE:
         self._edge_request_id: str = ""
         self._edge_batch_warned: bool = False
         self._edge_saturation_warned: bool = False
+        self._edge_ambient_fired: int = 0
         self._edge_overhead_ms: float = 0.0
 
         # Monitoring state
@@ -989,6 +1023,7 @@ class LoadedSAE:
         # identical latent bug in _sensing_batch_warned — fixed there too.)
         self._edge_batch_warned = False
         self._edge_saturation_warned = False
+        self._edge_ambient_fired = 0
 
     def begin_edge_sensing_request(self, request_id: str) -> None:
         """Open a request boundary. The CALLER clears the shared ring once for
@@ -1063,8 +1098,12 @@ class LoadedSAE:
         seq_len = x.shape[0]
         base = self._edge_token_offset
         try:
-            if self._edge_done:
-                return  # cap hit — still advance the offset in finally
+            # R3: this used to `return`, so a layer that hit its cap stopped
+            # recording UPSTREAM fires for the rest of the request — silently
+            # blinding every uncapped sibling. That is R2-03's starvation bug
+            # reached through the cap instead of the shed. Upstream recording
+            # is a dict append and siblings depend on it, so the cap must
+            # suppress only the downstream append (see _match_edges).
             if x.dtype != self._W_enc_e.dtype:
                 x = x.to(self._W_enc_e.dtype)
             acts = torch.relu(x @ self._W_enc_e + self._b_enc_e)   # (seq, m)
@@ -1084,6 +1123,15 @@ class LoadedSAE:
             self._edge_token_offset += seq_len
             if self._edge_phase == "prefill":
                 self._edge_phase = "decode"
+            # Report progress so the ring can prune to the slowest layer. This
+            # is the wiring R1 and R2 each declared and never added.
+            if self._edge_ring is not None and self._edge_sensing is not None:
+                try:
+                    self._edge_ring.note_layer_progress(
+                        self._edge_sensing.layer, self._edge_token_offset
+                    )
+                except Exception:
+                    logger.exception("edge_ring_progress_failed")
             self._edge_overhead_ms += ((_time.perf_counter() - started) * 1000.0)
 
     def _match_edges(
@@ -1118,6 +1166,12 @@ class LoadedSAE:
         # thresholds are miscalibrated and the observations are noise, so
         # skipping is strictly better than stalling generation to collect it.
         total_fires = int(fired_cpu.sum())
+        # EDGE-R2 ambient context: how many armed members fired anywhere in
+        # this pass. Lets a reader judge whether an edge firing was
+        # distinctive or whether everything was firing at once. R3 found the
+        # column, migration, model and API field all shipped with nothing
+        # ever writing them.
+        self._edge_ambient_fired += total_fires
         budget = max(
             config.max_events_per_request * 8, _EDGE_FIRE_BUDGET_MIN
         )
@@ -1154,9 +1208,9 @@ class LoadedSAE:
             if 0 <= spec.up_col < n_cols:
                 for local in fired_positions[spec.up_col]:
                     events.append((local, spec_i, True))
-            # When shedding, record upstream halves only — siblings depend on
-            # them — and skip the expensive downstream matching.
-            if not shed and 0 <= spec.down_col < n_cols:
+            # When shedding OR capped, record upstream halves only — siblings
+            # depend on them — and skip the downstream matching.
+            if not shed and not self._edge_done and 0 <= spec.down_col < n_cols:
                 for local in fired_positions[spec.down_col]:
                     events.append((local, spec_i, False))
         if not events:
@@ -1180,7 +1234,9 @@ class LoadedSAE:
                     if len(self._sensed_edges) >= config.max_events_per_request:
                         self._edge_truncated = True
                         self._edge_done = True
-                        return
+                        # Do NOT return: the remaining upstream events in this
+                        # pass still need recording for sibling layers.
+                        continue
                     self._sensed_edges.append(
                         SensedEdge(
                             edge_key=spec.edge_key,

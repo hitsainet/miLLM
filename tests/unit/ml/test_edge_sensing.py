@@ -80,11 +80,28 @@ def make_config(edges=None, max_lag=4, cap=20, layer=10):
 
 
 class FakeSAE:
-    """Exercises the real _match_edges against a controlled fire matrix."""
+    """Exercises the real _match_edges against a controlled fire matrix.
+
+    R3 flagged this harness as the round's most important finding: it grafts
+    _match_edges onto a hand-written stub, so these tests never run
+    `_sense_edges` — and BOTH R1's and R2's criticals lived in _sense_edges,
+    not in _match_edges. The stub made them unrepresentable.
+
+    It is kept for the matcher-ordering cases it tests well, but its fields are
+    now derived from a REAL LoadedSAE, so a new attribute cannot silently
+    diverge (as `_edge_ambient_fired` did). The end-to-end coverage lives in
+    the real-SAE classes below and in the integration workflow.
+    """
 
     def __init__(self, config, ring):
         from millm.ml.sae_wrapper import LoadedSAE
 
+        # Copy the real per-instance edge state, then override what the test
+        # controls. A field added to LoadedSAE arrives here automatically.
+        template = real_sae()
+        for name, value in vars(template).items():
+            if name.startswith("_edge") or name == "_sensed_edges":
+                setattr(self, name, value)
         self._edge_sensing = config
         self._edge_ring = ring
         self._sensed_edges = []
@@ -693,3 +710,111 @@ class TestSensingFailuresAreNotSilent:
         )
         sae._sense_edges(hidden({1: 2.0}, {2: 2.0}))
         assert sae._edge_token_offset == 2
+
+
+class TestCapDoesNotStarveSiblings:
+    """R3 CRITICAL: `_edge_done` returned from the whole pass, so a layer that
+    hit its cap stopped recording UPSTREAM fires for the rest of the request —
+    silently blinding every uncapped sibling. That is R2-03's starvation bug
+    reached through the CAP instead of the shed, and R2-03's fix never touched
+    this path."""
+
+    def test_a_capped_layer_still_records_upstream_for_its_sibling(self):
+        ring = EdgeFireRing(64)
+        spec = make_spec(up_layer=10, down_layer=13, key="1@10->2@13")
+
+        # Upstream layer, cap 1: it will trip its own cap immediately.
+        up = real_sae()
+        up_cfg = make_config(
+            edges=[
+                EdgeSpec(**{**spec.__dict__, "up_col": 0, "down_col": 1}),
+            ],
+            max_lag=64, cap=1, layer=10,
+        )
+        up.arm_edge_sensing(up_cfg, ring)
+        up.begin_edge_sensing_request("r")
+        # Two up->down pairs on this layer: the second trips the cap.
+        up._sense_edges(hidden({1: 2.0}, {2: 2.0}, {1: 2.0}, {2: 2.0}))
+        assert up._edge_done is True, "the cap must trip"
+
+        # A further pass must STILL record upstream fires for siblings.
+        before = len(ring._fires.get("1@10->2@13", []))
+        up._sense_edges(hidden({1: 2.0}))
+        after = len(ring._fires.get("1@10->2@13", []))
+        assert after > before, (
+            "a capped layer stopped feeding the shared ring — siblings blind"
+        )
+
+    def test_a_capped_layer_records_no_further_events_of_its_own(self):
+        sae = real_sae()
+        sae.arm_edge_sensing(make_config(cap=1, max_lag=64), EdgeFireRing(64))
+        sae.begin_edge_sensing_request("r")
+        sae._sense_edges(hidden({1: 2.0}, {2: 2.0}, {1: 2.0}, {2: 2.0}))
+        assert len(sae._sensed_edges) == 1
+        assert sae._edge_truncated is True
+
+
+class TestRingPrunesItself:
+    """R3: R1 declared pruning request-level and never wired it; R2 added
+    service methods and ALSO never wired them. Third shape: the RING tracks
+    each layer's progress, so it prunes to the SLOWEST layer itself — no hook
+    needs to know about its siblings, which is what made the previous two
+    designs unwireable."""
+
+    def test_progress_from_one_layer_alone_never_prunes(self):
+        ring = EdgeFireRing(4)
+        ring.record_up("e", 0, 1.0)
+        ring.note_layer_progress(10, 1000)
+        assert ring.match_down("e", 1) == (0, 1.0), "nothing is slower than one layer"
+
+    def test_the_ring_prunes_to_the_slowest_layer(self):
+        ring = EdgeFireRing(4)
+        ring.record_up("e", 0, 1.0)
+        ring.note_layer_progress(10, 1000)
+        ring.note_layer_progress(13, 900)
+        assert ring.match_down("e", 1) is None, "pos 0 is far behind both layers"
+
+    def test_a_lagging_layer_holds_the_boundary_back(self):
+        ring = EdgeFireRing(8)
+        ring.record_up("e", 40, 1.0)
+        ring.note_layer_progress(10, 5000)
+        ring.note_layer_progress(13, 42)   # this layer is still near pos 42
+        assert ring.match_down("e", 44) == (40, 1.0), (
+            "pruned past a fire the lagging layer still needs"
+        )
+
+    def test_pruning_is_wired_into_the_pass(self):
+        """The wiring R1 and R2 each declared and never added."""
+        import inspect
+
+        src = inspect.getsource(LoadedSAE._sense_edges)
+        assert "note_layer_progress" in src
+
+    def test_clear_resets_progress(self):
+        ring = EdgeFireRing(4)
+        ring.note_layer_progress(10, 100)
+        ring.clear()
+        assert ring._progress == {}
+
+
+class TestAmbientFiredCount:
+    """R3: EDGE-R2's column, migration, model and API field all shipped and
+    nothing ever wrote them — a permanently-NULL field the API advertised."""
+
+    def test_ambient_accumulates_across_passes(self):
+        sae = real_sae()
+        sae.arm_edge_sensing(make_config(max_lag=16), EdgeFireRing(16))
+        sae.begin_edge_sensing_request("r")
+        sae._sense_edges(hidden({1: 2.0}, {2: 2.0}))
+        first = sae._edge_ambient_fired
+        assert first > 0
+        sae._sense_edges(hidden({1: 2.0}))
+        assert sae._edge_ambient_fired > first
+
+    def test_it_resets_per_request(self):
+        sae = real_sae()
+        sae.arm_edge_sensing(make_config(), EdgeFireRing(4))
+        sae.begin_edge_sensing_request("r1")
+        sae._sense_edges(hidden({1: 2.0}, {2: 2.0}))
+        sae.begin_edge_sensing_request("r2")
+        assert sae._edge_ambient_fired == 0

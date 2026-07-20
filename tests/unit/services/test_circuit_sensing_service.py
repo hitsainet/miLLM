@@ -338,12 +338,33 @@ class TestRequestIdentityIsSnapshotted:
         svc.begin_request("req-1", saes)
         assert svc._request_circuit_id == "circ_A"
 
-        # An operator re-arms a different circuit mid-request.
+        # An operator re-arms a different circuit mid-request. R3: arming now
+        # disarms the prior set first, which also RELEASES the boundary — so
+        # the correct outcome is that the stale snapshot is gone, not that it
+        # survives. A drain arriving after this must attribute nothing rather
+        # than attribute circuit A's edges to circuit B.
         svc.arm_for_circuit(circuit(id="circ_B"), definition(), two_saes())
         assert svc._circuit_id == "circ_B"
-        assert svc._request_circuit_id == "circ_A", (
-            "the open boundary must keep its own identity"
+        assert svc._request_circuit_id is None, (
+            "a released boundary must not keep attributing to a stale circuit"
         )
+
+    def test_a_drain_after_disarm_attributes_nothing(self):
+        svc = CircuitSensingService()
+        saes = two_saes()
+        svc.arm_for_circuit(circuit(id="circ_A"), definition(), saes)
+        svc.begin_request("req-1", saes)
+        svc.disarm(saes)
+        assert svc._request_circuit_id is None
+
+    def test_close_request_releases_the_snapshot(self):
+        svc = CircuitSensingService()
+        saes = two_saes()
+        svc.arm_for_circuit(circuit(id="circ_A"), definition(), saes)
+        svc.begin_request("req-1", saes)
+        svc.collect_edges(saes)
+        svc.close_request()
+        assert svc._request_circuit_id is None
 
 
 class TestLagWindowDoesNotLeakBetweenCircuits:
@@ -436,3 +457,52 @@ class TestEmitKeepsTheMostRecent:
 
         assert [p["id"] for p in sent] == [7, 8, 9, 10, 11]
         assert svc._ws_dropped == 7
+
+
+class TestWebSocketPayloadCarriesNoPromptText:
+    """R3 mutation finding: flipping the WS broadcast to include_context=True
+    was caught by NO test — 135/135 stayed green. R1 recorded "privacy holds"
+    under *verified clean*, but verified it by READING, not by pinning. One
+    word breaks the manual's entire Privacy promise undetectably."""
+
+    def test_the_broadcast_omits_every_context_field(self):
+        from millm.db.models.circuit_edge_sensing_event import (
+            CircuitEdgeSensingEvent,
+        )
+
+        row = CircuitEdgeSensingEvent(
+            id=1, circuit_id="c", request_id="r", phase="decode",
+            edge_key="1@10->2@13", up_layer=10, up_feature_idx=1, up_pos=1,
+            up_act=1.0, down_layer=13, down_feature_idx=2, down_pos=2,
+            down_act=1.0, token_lag=1, edge_rung=2,
+            edge_rung_language="causally validated (edge)", summary="s",
+            truncated=False,
+            context_text="the user's private prompt",
+            context_token_ids=[1, 2, 3],
+            context_parts={"before": "a", "span": "b", "after": "c"},
+        )
+        svc = CircuitSensingService()
+        sent = []
+        import millm.sockets.progress as progress
+
+        original = progress.progress_emitter.emit_circuit_sensing_event
+        progress.progress_emitter.emit_circuit_sensing_event = sent.append
+        try:
+            svc._emit([row.to_dict(include_context=False)])
+        finally:
+            progress.progress_emitter.emit_circuit_sensing_event = original
+
+        assert sent, "expected a broadcast"
+        payload = sent[0]
+        for key in ("context_text", "context_token_ids", "context_parts"):
+            assert key not in payload, f"WS payload leaked {key}"
+        blob = repr(payload)
+        assert "private prompt" not in blob
+
+    def test_record_broadcasts_the_context_free_shape(self):
+        """Pins the call site itself, not just the serialiser: R3's mutation
+        changed record()'s argument, which the serialiser test would miss."""
+        import inspect
+
+        src = inspect.getsource(CircuitSensingService.record)
+        assert "include_context=False" in src

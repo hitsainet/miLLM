@@ -2273,6 +2273,22 @@ class InferenceService:
                             _deps.get_sensing_service().disarm(_sensing_sae.sae)
                         except Exception:
                             logger.warning("sensing_disarm_after_hang_failed")
+                    # F15: same hazard, LARGER blast radius. The edge ring is
+                    # SHARED across the circuit's layers, so a woken hung
+                    # thread writes stale absolute positions into the next
+                    # request's ring and corrupts EVERY layer's coordinates,
+                    # not one self-contained buffer.
+                    if _circuit_sensing:
+                        try:
+                            import millm.api.dependencies as _deps
+
+                            _cs = _deps._circuit_sensing_service
+                            if _cs is not None:
+                                _cs.disarm(_circuit_sensing)
+                                _cs.close_request()
+                        except Exception:
+                            logger.warning("circuit_sensing_disarm_after_hang_failed")
+                        _circuit_sensing = None
                 # Restore steering to its pre-request state (Fix #1: steering race)
                 self._restore_request_profile(_saved_steering)
                 # Flush sensing hits: captured ids when any step ran, else

@@ -41,6 +41,14 @@ class CircuitSensingStatusResponse(BaseModel):
     """Runtime state, reconciled against the SAEs actually armed."""
 
     armed: bool
+    paused_reason: Optional[str] = Field(
+        default=None,
+        description=(
+            "Why an armed circuit is not observing right now (e.g. "
+            "speculative decoding). Null when observing normally — an "
+            "armed circuit reporting zero events must be able to say why."
+        ),
+    )
     circuit_id: Optional[str] = None
     circuit_name: Optional[str] = None
     layers: list[int] = Field(default_factory=list)

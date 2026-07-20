@@ -651,3 +651,50 @@ class TestTruncationHasONESourceOfTruth:
             f"named {named} — 99 is the edge's downstream endpoint, not the "
             "layer that shed; this SAE is armed on 42"
         )
+
+
+class TestUncoveredPathsThatBehaveCorrectly:
+    """R1-17/18. Three paths with correct behaviour and NO coverage. Nothing is
+    fixed here — these pin behaviour a refactor could silently break, which is
+    the whole reason the characterization gate exists."""
+
+    def test_a_batch_of_exactly_one_senses_normally(self):
+        """`dim()==3, shape[0]==1` is the intended SERIAL path — it must fall
+        through to `x = hidden_states[0]`, not trip the batched-pass bail. Only
+        `shape[0] > 1` was ever tested, so a guard changed to `>= 1` would take
+        every request dark while looking like a tightening."""
+        import torch
+        sae = armed()
+        h = torch.zeros(1, 2, D_IN)
+        h[0, 0, 1] = 2.0
+        h[0, 1, 2] = 2.0
+        sae._sense_edges(h)
+        assert sae._edge_batch_warned is False, "the serial path was refused"
+        assert len(sae._sensed_edges) == 1
+        assert sae._edge_token_offset == 2
+
+    def test_to_device_during_an_OPEN_request_keeps_the_boundary(self):
+        """A migration mid-request must not detach the context or rewind the
+        position — either would silently desynchronise this SAE from its
+        siblings on the shared absolute-position key."""
+        sae = armed()
+        sae._sense_edges(hidden({1: 2.0}, {2: 2.0}))
+        ctx_before = sae._edge_ctx
+        offset_before = sae._edge_token_offset
+
+        sae.to_device("cpu")
+
+        assert sae._edge_ctx is ctx_before, "the migration dropped the context"
+        assert sae._edge_token_offset == offset_before, "the position rewound"
+        assert sae._edge_began is True, "the boundary was closed by a migration"
+
+    def test_sensing_continues_across_a_migration(self):
+        """The stronger claim: it still WORKS afterwards, not merely that the
+        fields survived."""
+        sae = armed()
+        sae._sense_edges(hidden({1: 2.0}, {2: 2.0}))
+        first = len(sae._sensed_edges)
+        sae.to_device("cpu")
+        sae._sense_edges(hidden({1: 2.0}, {2: 2.0}))
+        assert len(sae._sensed_edges) > first, "sensing went dark after a move"
+        assert sae._edge_token_offset == 4, "positions did not stay absolute"

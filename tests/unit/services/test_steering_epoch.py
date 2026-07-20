@@ -22,11 +22,9 @@ def clean():
     state = AttachedSAEState()
     state._entries.clear()
     state._steering_epoch = 0
-    state._reverted_epochs.clear()
     yield
     state._entries.clear()
     state._steering_epoch = 0
-    state._reverted_epochs.clear()
 
 
 def make_sae(values=None, enabled=True):
@@ -292,33 +290,40 @@ class TestCaptureHappensAtSnapshotTime:
 
 
 class TestReappliedTruthfulness:
-    """R1 finding 2: FR-16.4 — the feature's stated reason for existing — had
-    ZERO tests. Reverting it to the original defect left 1609/1609 green."""
+    """R2: R1's "revert ledger" was structurally incapable of working — the
+    restore only recorded when saved == current (nothing bumped), while
+    set_intensity's applied_epoch is always post-bump, so the two conditions
+    were mutually exclusive BY CONSTRUCTION. It also fired false positives on
+    ordinary idle traffic. Removed.
 
-    def test_a_reverted_write_is_not_reported_as_reapplied(self):
-        state = AttachedSAEState()
-        applied = state.bump_steering_epoch("operator_set_intensity")
+    The guard is what makes `reapplied` truthful: our bump advances the epoch,
+    an in-flight restore sees the mismatch and SKIPS, so it cannot revert us.
+    The only way our write stops being live is another AUTHORITATIVE write —
+    which the epoch comparison detects directly."""
 
-        # An in-flight restore proceeds and writes over that epoch. It cannot
-        # bump (that would make every request supersede itself), so it records.
-        state.note_restore_reverted(applied)
+    def test_an_in_flight_restore_cannot_revert_an_operator_write(self):
+        """The guarantee that makes a ledger unnecessary."""
+        sae = make_sae({1: 99.0})
+        AttachedSAEState().set(sae, "sae-10", 10, None)
+        snapshot = AttachedSAEState().steering_epoch
+        saved = {"values": {1: 40.0}, "enabled": True, "epoch": snapshot}
 
-        assert state.was_reverted(applied) is True, (
-            "set_intensity cannot detect the case it exists for"
+        applied = AttachedSAEState().bump_steering_epoch("operator")
+        service()._restore_request_profile(saved)
+
+        assert sae._applied == {1: 99.0}, "the restore reverted the operator"
+        assert AttachedSAEState().steering_epoch == applied, (
+            "a restore must never advance the epoch"
         )
 
-    def test_an_unreverted_write_is_clean(self):
+    def test_a_later_authoritative_write_supersedes(self):
         state = AttachedSAEState()
-        applied = state.bump_steering_epoch("operator_set_intensity")
-        assert state.was_reverted(applied) is False
-
-    def test_the_ledger_is_bounded(self):
-        """It must not grow without bound over a long-lived process."""
-        state = AttachedSAEState()
-        for _ in range(1000):
-            e = state.bump_steering_epoch("x")
-            state.note_restore_reverted(e)
-        assert len(state._reverted_epochs) <= 256
+        applied = state.bump_steering_epoch("operator_a")
+        assert state.steering_epoch == applied
+        state.bump_steering_epoch("operator_b")
+        assert state.steering_epoch != applied, (
+            "a later authoritative write must be detectable"
+        )
 
     def test_superseded_is_a_plain_bool_on_the_response_model(self):
         """R1 findings 1 and 9: the field was computed by the service, omitted
@@ -330,6 +335,19 @@ class TestReappliedTruthfulness:
         field = CircuitIntensityResponse.model_fields["superseded"]
         assert field.annotation is bool
         assert field.default is False
+
+    def test_no_ledger_remains(self):
+        """R2: the mechanism was removed, not patched. A partially-removed
+        ledger would be worse than either."""
+        from pathlib import Path
+
+        repo = Path(__file__).resolve().parents[3]
+        for rel in ("millm/services/sae_service.py",
+                    "millm/services/circuit_service.py",
+                    "millm/services/inference_service.py"):
+            src = (repo / rel).read_text()
+            assert "was_reverted" not in src
+            assert "note_restore_reverted" not in src
 
 
 class TestSkipLogIsDiagnosable:
@@ -385,36 +403,138 @@ class TestSetIntensityReturnIsTruthful:
         svc._serving_members = staticmethod(lambda d: [])
         return svc, circuit
 
-    async def test_reapplied_is_false_when_a_restore_reverted_it(self):
-        import millm.services.circuit_service as mod
+    async def test_reapplied_is_false_when_a_later_write_supersedes(self):
+        """MUT-A control: reverting FR-16.4 to the unconditional
+        `"reapplied": reapplied` must FAIL here. R2 replaced the ledger
+        scenario with the one that can ACTUALLY happen — another authoritative
+        write landing after ours."""
+        from unittest.mock import MagicMock
 
         svc, _ = self._service()
         state = AttachedSAEState()
 
-        # Make the steering call land, then simulate an in-flight restore
-        # writing over the epoch it produced.
         def _steer(*a, **k):
-            e = state.steering_epoch
-            state.note_restore_reverted(e)
-            return MagicMock(hazards=[], clamp_warnings=[])
+            # Faithful to the real contract: bump, and report the epoch OUR
+            # write produced on the OUTCOME — then a second operator lands.
+            mine = state.bump_steering_epoch("our_write")
+            state.bump_steering_epoch("another_operator")
+            return MagicMock(hazards=[], clamp_warnings=[], applied_epoch=mine)
 
         svc._sae_service.set_circuit_steering = _steer
         out = await svc.set_intensity("circ_1", 1.5)
 
         assert out["reapplied"] is False, (
-            "reapplied stayed true for a value a restore reverted — the exact "
-            "falsehood FR-16.4 exists to correct"
+            "reapplied stayed true for a value another write superseded"
         )
         assert out["superseded"] is True
         assert any("superseded" in w for w in out["warnings"])
 
     async def test_reapplied_is_true_for_a_clean_write(self):
+        """The stub must model the REAL contract — bump, and report the epoch
+        the bump produced. R2 found the previous stub read the epoch without
+        bumping, which is the fixture-agrees-by-construction pattern that let
+        the ledger mutation survive."""
         from unittest.mock import MagicMock
 
         svc, _ = self._service()
-        svc._sae_service.set_circuit_steering = MagicMock(
-            return_value=MagicMock(hazards=[], clamp_warnings=[])
-        )
+        state = AttachedSAEState()
+
+        def _steer(*a, **k):
+            mine = state.bump_steering_epoch("our_write")
+            return MagicMock(hazards=[], clamp_warnings=[], applied_epoch=mine)
+
+        svc._sae_service.set_circuit_steering = _steer
         out = await svc.set_intensity("circ_1", 1.5)
         assert out["reapplied"] is True
         assert out["superseded"] is False
+
+
+class TestR2SurvivingMutationGaps:
+    """R2 ran mutations that SURVIVED — each is a test finding, not a code
+    finding, so each gets a test that fails against the broken line."""
+
+    def test_operator_clear_steering_bumps(self):
+        """R2 finding 6: deleting this bump left 1621 green. R1 fixed six
+        routes and pinned five."""
+        from millm.services.sae_service import SAEService
+
+        svc = SAEService.__new__(SAEService)
+        svc._sae_state = AttachedSAEState()
+        svc._last_write_epoch = 0
+        AttachedSAEState().set(make_sae({1: 5.0}), "sae-10", 10, None)
+
+        before = AttachedSAEState().steering_epoch
+        svc.clear_steering()
+        assert AttachedSAEState().steering_epoch == before + 1
+
+    def test_the_internal_clear_does_not_double_bump(self):
+        """R2 finding 10: _set_circuit_steering_locked calls
+        clear_circuit_steering internally; bumping there advanced one logical
+        action by 2 AND bumped through the dial's authoritative=False."""
+        import inspect
+
+        from millm.services.sae_service import SAEService
+
+        src = inspect.getsource(SAEService._set_circuit_steering_locked)
+        assert "clear_circuit_steering(authoritative=False)" in src
+
+    def test_the_clear_bump_is_taken_under_the_lock(self):
+        """R2 finding 9: set_circuit_steering bumps inside the lock with a
+        comment explaining the race; this path had the identical race."""
+        import inspect
+
+        from millm.services.sae_service import SAEService
+
+        src = inspect.getsource(SAEService.clear_circuit_steering)
+        bump = src.index("bump_steering_epoch")
+        lock = src.rindex("_ATTACHMENT_LOCK", 0, bump)
+        assert lock < bump, "the clear bump is not taken under the lock"
+
+    def test_set_intensity_reports_an_apply_failure(self):
+        """R2 finding 11: the DB write commits BEFORE the steering call, so a
+        raise left persisted λ diverging from live steering with the caller
+        told nothing."""
+        import inspect
+
+        from millm.services.circuit_service import CircuitService
+
+        src = inspect.getsource(CircuitService.set_intensity)
+        assert "circuit_set_intensity_apply_failed" in src
+        assert "Persisted and live steering now differ" in src
+
+
+class TestRequestIdReachesTheLog:
+    """R2 finding 7: removing `request_id=completion_id` from a call site left
+    1621 green — the log test injected a saved dict that already had the key,
+    so it tested rendering, never supply."""
+
+    def test_both_generation_call_sites_supply_the_request_id(self):
+        from pathlib import Path
+
+        src = (Path(__file__).resolve().parents[3]
+               / "millm/services/inference_service.py").read_text()
+        # R2 finding 7 (and its own follow-up): a COUNT is too weak — dropping
+        # one site and leaving two elsewhere still passes. Assert that every
+        # call to _apply_request_steering supplies it.
+        import re
+
+        calls = re.findall(
+            r"_apply_request_steering\((.*?)\)", src, re.S
+        )
+        invoking = [c for c in calls if "request.profile" in c]
+        assert invoking, "no generation call site found"
+        for c in invoking:
+            assert "request_id=" in c, (
+                f"a generation path calls _apply_request_steering without a "
+                f"request id: {c.strip()[:80]}"
+            )
+
+    def test_the_apply_functions_accept_and_store_it(self):
+        import inspect
+
+        sig = inspect.signature(
+            InferenceService._apply_request_circuit_steering
+        )
+        assert "request_id" in sig.parameters
+        sig2 = inspect.signature(InferenceService._apply_request_steering)
+        assert "request_id" in sig2.parameters

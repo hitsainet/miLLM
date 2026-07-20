@@ -1309,14 +1309,6 @@ class InferenceService:
             # the same epoch) proceeds exactly as before.
             saved_epoch = saved.get("epoch")
             current_epoch = state.steering_epoch
-            if saved_epoch is not None and saved_epoch == current_epoch:
-                # Proceeding: this restore is about to write over whatever the
-                # current authoritative epoch represents. Record it so
-                # set_intensity can answer "was my write reverted?" — the
-                # restore itself must NOT bump (that would make every request
-                # supersede its own restore), so a ledger is the only way it
-                # can report what it did (R1 finding).
-                state.note_restore_reverted(current_epoch)
             if saved_epoch is not None and saved_epoch != current_epoch:
                 logger.info(
                     "request_restore_skipped_superseded",

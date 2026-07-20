@@ -155,6 +155,9 @@ class CircuitSteeringResult:
     applied_per_layer: dict[int, dict[int, float]]
     hazards: list[dict[str, Any]]
     clamp_warnings: list[str]
+    #: Feature 16 R2: the steering epoch THIS write produced. A caller that
+    #: re-reads the counter afterwards names whoever wrote last, not itself.
+    applied_epoch: int = 0
 
 
 @dataclass
@@ -205,7 +208,6 @@ class AttachedSAEState:
                     # writes. Initialised here (not __init__) because this is a
                     # singleton constructed via __new__.
                     cls._instance._steering_epoch: int = 0
-                    cls._instance._reverted_epochs: set[int] = set()
         return cls._instance
 
     @property
@@ -220,29 +222,6 @@ class AttachedSAEState:
         """
         with _ATTACHMENT_LOCK:
             return self._steering_epoch
-
-    def note_restore_reverted(self, epoch: int) -> None:
-        """Record that a per-request restore wrote over epoch ``epoch``.
-
-        R1 finding: `set_intensity` could not detect the very case it was
-        written for. The restore does not (and must not) bump the epoch, so an
-        operator whose write was reverted by an in-flight restore still saw
-        `reapplied: true`. The restore now RECORDS the epoch it clobbered, and
-        `set_intensity` checks whether its own epoch appears here.
-        """
-        with _ATTACHMENT_LOCK:
-            self._reverted_epochs.add(int(epoch))
-            # Bounded: only recent epochs can still be queried.
-            if len(self._reverted_epochs) > 256:
-                self._reverted_epochs = {
-                    e for e in self._reverted_epochs
-                    if e > self._steering_epoch - 256
-                }
-
-    def was_reverted(self, epoch: int) -> bool:
-        """True if a per-request restore overwrote the write at ``epoch``."""
-        with _ATTACHMENT_LOCK:
-            return int(epoch) in self._reverted_epochs
 
     def bump_steering_epoch(self, reason: str) -> int:
         """Record an authoritative steering write.
@@ -577,8 +556,17 @@ class SAEService:
             # entirely (TID pitfall 2). Bumped INSIDE the lock so a concurrent
             # restore cannot read a stale epoch between the write landing and
             # the counter advancing.
+            # R2: return the epoch OUR write produced ON THE OUTCOME. A caller
+            # that re-reads `steering_epoch` afterwards names whoever wrote
+            # LAST, not itself. Storing it on the service does not work either:
+            # SAEService is constructed per request (Depends), so per-write
+            # state on it is stale for every caller.
             if authoritative:
-                self._sae_state.bump_steering_epoch("set_circuit_steering")
+                outcome.applied_epoch = self._sae_state.bump_steering_epoch(
+                    "set_circuit_steering"
+                )
+            else:
+                outcome.applied_epoch = self._sae_state.steering_epoch
             return outcome
 
     def _set_circuit_steering_locked(
@@ -610,7 +598,10 @@ class SAEService:
         # An empty member set means the circuit is OFF — clear + disable every
         # attached layer rather than silently leaving the PREVIOUS circuit armed.
         if not members:
-            cleared = self.clear_circuit_steering()
+            # Internal: the OUTER set_circuit_steering owns the bump for this
+            # logical action, and a dial passing authoritative=False must not
+            # bump through this back door.
+            cleared = self.clear_circuit_steering(authoritative=False)
             logger.info("circuit_steering_cleared_empty_members", layers=cleared)
             return CircuitSteeringResult(
                 applied_per_layer={}, hazards=[], clamp_warnings=[]
@@ -752,7 +743,12 @@ class SAEService:
             clamp_warnings=clamp_warnings,
         )
 
-    def clear_circuit_steering(self, layers: Optional[list[int]] = None) -> list[int]:
+    def clear_circuit_steering(
+        self,
+        layers: Optional[list[int]] = None,
+        *,
+        authoritative: bool = True,
+    ) -> list[int]:
         """Clear steering on every participating layer (or all attached layers).
 
         Returns the list of layers actually cleared.
@@ -773,8 +769,16 @@ class SAEService:
         # actually cleared. An unconditional bump made every no-op clear
         # supersede all in-flight restores, stranding their transient values
         # in global state with no compensating write.
-        if cleared:
-            self._sae_state.bump_steering_epoch("clear_circuit_steering")
+        # R2: bump INSIDE the lock, matching set_circuit_steering. Its own
+        # comment says a bump outside lets "a concurrent restore read a stale
+        # epoch between the write landing and the counter advancing" — this
+        # path had the identical race.
+        # R2: `authoritative=False` for the internal call inside
+        # _set_circuit_steering_locked — it double-bumped one logical action
+        # AND bumped unconditionally, defeating the dial's authoritative=False.
+        if cleared and authoritative:
+            with _ATTACHMENT_LOCK:
+                self._sae_state.bump_steering_epoch("clear_circuit_steering")
         return cleared
 
     def _cross_layer_hazards(

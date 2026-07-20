@@ -802,12 +802,41 @@ class CircuitService:
         reapplied = False
         warnings: list[str] = []
         if serving_full and definition is not None:
-            self._sae_service.set_circuit_steering(
-                self._serving_members(definition),
-                float(intensity),
-                edges=[e.model_dump(mode="json") for e in definition.edges],
-            )
-            reapplied = True
+            # R2: the DB write above already committed the new intensity, so a
+            # raise here leaves persisted λ diverging from live steering — the
+            # very divergence the parse-before-write ordering exists to prevent.
+            # Report it rather than letting the exception imply nothing landed.
+            try:
+                _outcome = self._sae_service.set_circuit_steering(
+                    self._serving_members(definition),
+                    float(intensity),
+                    edges=[e.model_dump(mode="json") for e in definition.edges],
+                )
+                reapplied = True
+                # R2 finding 12: take the epoch OUR write produced from the
+                # OUTCOME. Re-reading `steering_epoch` afterwards names
+                # whoever wrote LAST, so a second operator landing in that gap
+                # made `still_current` compare equal and report success for a
+                # value already superseded. A stub outcome without the field
+                # degrades to a live read (the weaker pre-R2 behaviour).
+                _epoch = getattr(_outcome, "applied_epoch", None)
+                # Must be an int: a stub/mock outcome yields a truthy sentinel
+                # that would never equal the real counter, silently reporting
+                # every clean write as superseded. Fall back to a live read
+                # (the weaker pre-R2 behaviour) rather than trusting it.
+                applied_epoch = (
+                    _epoch if isinstance(_epoch, int) and not isinstance(_epoch, bool)
+                    else AttachedSAEState().steering_epoch
+                )
+            except Exception as exc:
+                logger.warning(
+                    "circuit_set_intensity_apply_failed",
+                    circuit_id=circuit.id, error=str(exc),
+                )
+                warnings.append(
+                    f"The intensity was recorded but could not be applied to "
+                    f"the model: {exc}. Persisted and live steering now differ."
+                )
         elif refreshed.is_active and refreshed.serving_mode == "slice_fallback":
             # The slice is served by a cluster profile that owns its own λ, so
             # this dial did NOT reach the model. Say so rather than reporting a
@@ -824,9 +853,9 @@ class CircuitService:
         # did (the slice-fallback and no-op branches), and either way capture
         # the epoch OUR action produced so the check below tests whether
         # something landed AFTER us rather than reporting our own bump.
-        if reapplied:
-            applied_epoch = AttachedSAEState().steering_epoch
-        else:
+        if not reapplied:
+            # Nothing above bumped (slice-fallback / no-op), so this action is
+            # the authoritative write and owns the bump.
             applied_epoch = AttachedSAEState().bump_steering_epoch(
                 "circuit_set_intensity"
             )
@@ -834,14 +863,21 @@ class CircuitService:
         # was made — an affirmative claim that survived an in-flight request
         # restoring the pre-request snapshot over it moments later. It now
         # means what a caller reads it to mean: the value is live.
-        # R1: "is the epoch still current" could never catch the target case,
-        # because the restore that reverts us does not bump. Ask the ledger
-        # whether OUR epoch was overwritten by a restore as well.
-        _state = AttachedSAEState()
-        still_current = (
-            _state.steering_epoch == applied_epoch
-            and not _state.was_reverted(applied_epoch)
-        )
+        # R2: the epoch GUARD is what makes this truthful, not a ledger.
+        #
+        # R1 added a "revert ledger" so this could detect a restore having
+        # overwritten us. That mechanism was structurally incapable of working:
+        # the restore only recorded when saved == current (i.e. when NOTHING
+        # bumped), while applied_epoch here is always post-bump — so the two
+        # conditions were mutually exclusive by construction, and the ledger
+        # also fired FALSE POSITIVES on ordinary idle traffic.
+        #
+        # It was also unnecessary. Once the guard works, an in-flight restore
+        # CANNOT revert us: our bump advances the epoch, the restore sees the
+        # mismatch, and it skips. The only way this write stops being live is
+        # another AUTHORITATIVE write landing after ours — which is exactly
+        # what the epoch comparison below detects.
+        still_current = AttachedSAEState().steering_epoch == applied_epoch
         if reapplied and not still_current:
             warnings.append(
                 "The intensity was applied but immediately superseded by "

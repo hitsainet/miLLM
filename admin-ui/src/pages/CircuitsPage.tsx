@@ -8,6 +8,7 @@ import { useState } from 'react';
 import { Plus, Share2 } from 'lucide-react';
 
 import { useCircuits } from '@hooks/useCircuits';
+import { useToast } from '@hooks/useToast';
 import { CircuitCard, CircuitImportDialog } from '@components/circuits';
 import { AttachmentPanel } from '@components/circuits';
 import { Button, Card, EmptyState, Spinner } from '@components/common';
@@ -26,17 +27,32 @@ export function CircuitsPage() {
     exportCircuit,
   } = useCircuits();
 
+  const toast = useToast();
   const [showImport, setShowImport] = useState(false);
 
   const handleExport = async (circuitId: string, name: string) => {
-    const doc = await exportCircuit(circuitId);
-    const blob = new Blob([JSON.stringify(doc, null, 2)], { type: 'application/json' });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement('a');
-    a.href = url;
-    a.download = `${name.replace(/[^\w.-]+/g, '_')}.circuit.json`;
-    a.click();
-    URL.revokeObjectURL(url);
+    let url: string | null = null;
+    try {
+      const doc = await exportCircuit(circuitId);
+      const blob = new Blob([JSON.stringify(doc, null, 2)], {
+        type: 'application/json',
+      });
+      url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = `${name.replace(/[^\w.-]+/g, '_')}.circuit.json`;
+      a.click();
+    } catch (error) {
+      // Without this the click silently did nothing (a `void`-discarded
+      // rejection) — every other circuit action reports its failure.
+      toast.error(
+        `Export failed: ${error instanceof Error ? error.message : 'unknown error'}`,
+      );
+    } finally {
+      // Revoke in `finally` so a throw between create and click cannot pin the
+      // blob (exports are the largest payloads in this feature).
+      if (url) URL.revokeObjectURL(url);
+    }
   };
 
   return (

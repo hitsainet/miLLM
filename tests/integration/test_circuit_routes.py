@@ -290,3 +290,52 @@ class TestExport:
         async with client:
             r = await client.get("/api/circuits/circ_1/export")
         assert r.json()["future_field"] == {"kept": True}
+
+
+class TestR1Fixes:
+    """Review round 1 regressions on the route surface."""
+
+    async def test_nesting_bomb_refused(self, client):
+        """A deeply-nested payload is cheap in BYTES (3000 levels ≈ 21 KB) so
+        the size cap cannot see it — the depth gate must."""
+        bomb: dict = {}
+        node = bomb
+        for _ in range(3000):
+            node["n"] = {}
+            node = node["n"]
+        doc = make_doc()
+        doc["nested"] = bomb
+        async with client:
+            r = await client.post("/api/circuits/import", json=doc)
+        body = r.json()
+        assert body["success"] is False
+        assert body["error"]["code"] == "VALIDATION_ERROR"
+        assert "nests" in body["error"]["message"]
+
+    async def test_normal_document_passes_the_depth_gate(self, client):
+        async with client:
+            r = await client.post("/api/circuits/import", json=make_doc())
+        assert r.json()["success"] is True
+
+    async def test_intensity_response_carries_reapplied(self, client, mock_service):
+        """`reapplied` was silently dropped by the route filter — a slice
+        circuit reported a new intensity the steering never received."""
+        mock_service.get_active.return_value = make_summary(is_active=True)
+        mock_service.set_intensity.return_value = {
+            **make_summary(is_active=True, serving_mode="slice_fallback", intensity=0.4),
+            "reapplied": False,
+            "warnings": ["...recorded but not applied..."],
+        }
+        async with client:
+            r = await client.put("/api/circuits/active/intensity", json={"intensity": 0.4})
+        data = r.json()["data"]
+        assert data["reapplied"] is False
+        assert data["warnings"]
+
+    async def test_deactivate_response_carries_cleared_steering(self, client, mock_service):
+        mock_service.deactivate.return_value = {
+            **make_summary(), "cleared_steering": True
+        }
+        async with client:
+            r = await client.post("/api/circuits/circ_1/deactivate")
+        assert r.json()["data"]["cleared_steering"] is True

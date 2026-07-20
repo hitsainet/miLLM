@@ -26,6 +26,8 @@ from millm.api.schemas.circuit import (
     CIRCUIT_DEFINITION_KIND,
     MAX_CIRCUIT_IMPORT_BYTES,
     CircuitActivationResponse,
+    CircuitDeactivationResponse,
+    CircuitIntensityResponse,
     CircuitListResponse,
     CircuitSummary,
     SetCircuitIntensityRequest,
@@ -36,6 +38,32 @@ from millm.core.errors import UnvalidatedCircuitError
 router = APIRouter(prefix="/api/circuits", tags=["circuits"])
 
 CircuitId = Annotated[str, Path(description="Circuit ID")]
+
+#: The v1 contract nests ~5 levels; anything far beyond that is a nesting bomb.
+MAX_IMPORT_NESTING_DEPTH = 32
+
+
+def _max_depth(value: Any) -> int:
+    """Maximum nesting depth of a parsed JSON value.
+
+    Iterative (explicit stack) so measuring the depth cannot itself blow the
+    stack on a hostile payload.
+    """
+    max_seen = 0
+    stack: list[tuple[Any, int]] = [(value, 1)]
+    while stack:
+        node, depth = stack.pop()
+        if depth > max_seen:
+            max_seen = depth
+        if depth > MAX_IMPORT_NESTING_DEPTH:
+            return depth  # already over the limit; stop walking
+        if isinstance(node, dict):
+            for v in node.values():
+                stack.append((v, depth + 1))
+        elif isinstance(node, list):
+            for v in node:
+                stack.append((v, depth + 1))
+    return max_seen
 
 
 @router.get(
@@ -104,6 +132,20 @@ async def import_circuit(
             code="PAYLOAD_TOO_LARGE",
             message=f"Import exceeds {MAX_CIRCUIT_IMPORT_BYTES} bytes",
         )
+    # Depth gate BEFORE json.dumps: a nesting bomb is cheap in bytes (3000
+    # levels ≈ 21 KB, 2% of the cap) but expensive in stack — json.dumps and
+    # pydantic both recurse, and `extra="allow"` means the garbage would be
+    # accepted and persisted, then re-walked on every activate and export.
+    depth = _max_depth(payload)
+    if depth > MAX_IMPORT_NESTING_DEPTH:
+        return ApiResponse.fail(
+            code="VALIDATION_ERROR",
+            message=(
+                f"Import nests {depth} levels deep (max {MAX_IMPORT_NESTING_DEPTH}) "
+                "— the v1 contract nests only a few levels"
+            ),
+        )
+
     encoded = json.dumps(payload, separators=(",", ":"))
     if len(encoded) > MAX_CIRCUIT_IMPORT_BYTES:
         return ApiResponse.fail(
@@ -178,28 +220,26 @@ async def activate_circuit(
 
 @router.post(
     "/{circuit_id}/deactivate",
-    response_model=ApiResponse[CircuitSummary],
+    response_model=ApiResponse[CircuitDeactivationResponse],
     summary="Stop serving a circuit",
 )
 async def deactivate_circuit(
     circuit_id: CircuitId, service: CircuitServiceDep
-) -> ApiResponse[CircuitSummary]:
+) -> ApiResponse[CircuitDeactivationResponse]:
     """Deactivate the circuit and clear its steering on every layer."""
     result = await service.deactivate(circuit_id)
-    return ApiResponse.ok(CircuitSummary(**{
-        k: v for k, v in result.items() if k in CircuitSummary.model_fields
-    }))
+    return ApiResponse.ok(CircuitDeactivationResponse(**result))
 
 
 @router.put(
     "/active/intensity",
-    response_model=ApiResponse[CircuitSummary],
+    response_model=ApiResponse[CircuitIntensityResponse],
     summary="Set the active circuit's global intensity (lambda)",
 )
 async def set_active_circuit_intensity(
     service: CircuitServiceDep,
     body: SetCircuitIntensityRequest,
-) -> ApiResponse[CircuitSummary]:
+) -> ApiResponse[CircuitIntensityResponse]:
     """One global λ scales every layer of the active circuit together."""
     active = await service.get_active()
     if active is None:
@@ -208,9 +248,7 @@ async def set_active_circuit_intensity(
             message="No circuit is currently serving",
         )
     result = await service.set_intensity(active["id"], body.intensity)
-    return ApiResponse.ok(CircuitSummary(**{
-        k: v for k, v in result.items() if k in CircuitSummary.model_fields
-    }))
+    return ApiResponse.ok(CircuitIntensityResponse(**result))
 
 
 @router.delete(

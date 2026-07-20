@@ -13,17 +13,20 @@ Division of labour:
     reuses that code unchanged rather than forking it.
 """
 
+import json
 import uuid
 from datetime import datetime, timezone
 from typing import Any
 
 import structlog
+from pydantic import ValidationError as PydanticValidationError
 
 from millm.api.schemas.circuit import (
     MAX_CIRCUIT_IMPORT_BYTES,
     CircuitDefinitionV1,
     CircuitMember,
 )
+from millm.api.schemas.cluster import MAX_NAME as CLUSTER_MAX_NAME
 from millm.core.circuit_evidence import (
     EvidenceRung,
     circuit_rung,
@@ -275,7 +278,7 @@ class CircuitService:
                 },
             )
 
-        definition = CircuitDefinitionV1.model_validate(circuit.circuit_meta)
+        definition = self._parse_stored(circuit)
         verdicts = self.assess_compatibility(definition)
         bound_layers = [
             v["layer"] for v in verdicts if v["verdict"] in (VERDICT_BIND, VERDICT_WARN)
@@ -285,19 +288,38 @@ class CircuitService:
         # Co-tenancy guard (F12 R2/R3 finding): circuit serving CLEARS each
         # target layer's SAE before applying, so an active cluster/profile
         # steering one of those layers would be silently wiped while its row
-        # still reported "active". Deactivate it explicitly and tell the user —
-        # a single steering owner at a time, never a silent clobber.
-        co_tenant_warnings = await self._release_co_tenants(bound_layers)
+        # still reported "active". Release it explicitly — but only for the
+        # layers we ACTUALLY serve (a slice fallback touches one layer, not
+        # every bindable one), and only AFTER the serve succeeds, so a failed
+        # activation never leaves the user with nothing steering.
+        served_layers = bound_layers if all_bound else bound_layers[:1]
 
         if all_bound:
             result = await self._serve_full(circuit, definition)
         else:
             result = await self._serve_slices(circuit, definition, bound_layers, verdicts)
 
-        await self.repository.update(circuit.id, per_sae_warnings=verdicts)
-        await self.repository.set_active(
-            circuit.id, serving_mode=result["serving_mode"]
-        )
+        co_tenant_warnings = await self._release_co_tenants(served_layers)
+
+        # Refresh `serveable` too: it was a snapshot of attachment state at
+        # IMPORT time, so a circuit that became fully bindable since then kept
+        # reporting "not serveable" while actively serving — and was filtered
+        # out of ?serveable=true queries.
+        try:
+            await self.repository.update(
+                circuit.id, per_sae_warnings=verdicts, serveable=all_bound
+            )
+            await self.repository.set_active(
+                circuit.id, serving_mode=result["serving_mode"]
+            )
+        except Exception:
+            # The steering is already applied; if we cannot record it, clear it
+            # rather than leave the model steering with no active row to stop it.
+            try:
+                self._sae_service.clear_circuit_steering()
+            except Exception:  # pragma: no cover - defensive
+                logger.error("circuit_activate_rollback_clear_failed", circuit_id=circuit.id)
+            raise
         refreshed = await self.repository.get(circuit.id)
         result["warnings"] = co_tenant_warnings + list(result.get("warnings") or [])
         return {
@@ -307,6 +329,28 @@ class CircuitService:
                 not is_validated(circuit.rung) and acknowledge_unvalidated
             ),
         }
+
+    def _parse_stored(self, circuit: Circuit) -> CircuitDefinitionV1:
+        """Re-validate a stored document, surfacing corruption structurally.
+
+        ``circuit_meta`` is the RAW payload, validated at IMPORT time. If the
+        contract tightened since, or the row was hand-edited/partially written,
+        a bare ``model_validate`` would raise a pydantic error that is not a
+        ``MiLLMError`` — landing as an opaque 500 with no circuit id and no
+        recovery path. Convert it to a structured, actionable failure.
+        """
+        try:
+            return CircuitDefinitionV1.model_validate(circuit.circuit_meta)
+        except PydanticValidationError as e:
+            raise ValidationError(
+                f"Circuit '{circuit.name}' has a stored definition that no longer "
+                f"validates against the v1 contract ({e.error_count()} error(s)) — "
+                "re-import it from miStudio",
+                details={
+                    "circuit_id": circuit.id,
+                    "errors": json.loads(e.json())[:5],
+                },
+            ) from e
 
     async def _release_co_tenants(self, target_layers: list[int]) -> list[str]:
         """Deactivate an active cluster/profile that steers a target layer.
@@ -397,13 +441,31 @@ class CircuitService:
         # cluster profile steers at a time).
         layer = bound_layers[0]
         slice_doc = self.to_layer_slice(definition, layer, circuit_rung_value=circuit.rung)
-        await self._cluster_service.import_definition(
-            slice_doc, activate=True, on_conflict="rename"
+        # ClusterService.import_definition takes a VALIDATED model (the raw
+        # payload rides alongside for lossless storage) — passing the bare dict
+        # crashed on `.name`. Validating here also means a malformed projection
+        # surfaces as a structured error instead of an AttributeError.
+        from millm.api.schemas.cluster import ClusterDefinitionV1
+
+        try:
+            slice_model = ClusterDefinitionV1.model_validate(slice_doc)
+        except PydanticValidationError as e:
+            raise ValidationError(
+                f"Circuit '{circuit.name}' could not be projected to an L{layer} "
+                f"cluster slice: {e.error_count()} contract error(s)",
+                details={"layer": layer, "errors": json.loads(e.json())[:5]},
+            ) from e
+        item = await self._cluster_service.import_definition(
+            slice_model,
+            raw_payload=slice_doc,
+            activate=True,
+            on_conflict="rename",
         )
         return {
             "serving_mode": "slice_fallback",
             "bound_layers": bound_layers,
             "slice_layer": layer,
+            "slice_profile_id": getattr(item, "profile_id", None),
             "warnings": [
                 f"Only L{sorted(bound_layers)} of {definition.layers()} bound — serving "
                 f"the L{layer} slice, a PARTIAL rendering of this circuit, not the "
@@ -427,22 +489,37 @@ class CircuitService:
         """
         ref = definition.sae_for_layer(layer)
         members: list[dict[str, Any]] = []
+        seen_idx: set[int] = set()
         for m in definition.members:
             if m.layer != layer:
                 continue
-            if m.member_kind == "cluster_ref" and m.expanded_members:
-                members.extend(x.model_dump(mode="json") for x in m.expanded_members)
-            elif m.feature is not None:
-                members.append(m.feature.model_dump(mode="json"))
+            # A cluster_ref contributes its frozen expansion AND (if present)
+            # its own feature — taking only one would silently drop the other.
+            sources = list(m.expanded_members or [])
+            if m.feature is not None:
+                sources.append(m.feature)
+            for feat in sources:
+                # Dedupe: the same feature may appear standalone and inside a
+                # referenced cluster; a cluster definition is keyed by index, so
+                # a duplicate would last-write-win downstream.
+                if feat.feature_idx in seen_idx:
+                    continue
+                seen_idx.add(feat.feature_idx)
+                members.append(feat.model_dump(mode="json"))
         if not members:
             raise ValidationError(
                 f"Circuit has no serveable members on L{layer}",
                 details={"layer": layer},
             )
 
+        # Always carry the circuit's GLOBAL intensity onto the slice, even when
+        # the document declares no per-layer budget entry — dropping it would
+        # silently serve the slice at the cluster default (λ=1.0) instead of the
+        # authored λ.
         budget = None
-        if definition.budget and str(layer) in definition.budget.layers:
-            budget = definition.budget.layers[str(layer)].model_dump(mode="json")
+        if definition.budget:
+            per_layer = definition.budget.layers.get(str(layer))
+            budget = per_layer.model_dump(mode="json") if per_layer else {}
             budget["intensity"] = definition.budget.intensity
             budget["intensity_range"] = definition.budget.intensity_range
 
@@ -456,10 +533,20 @@ class CircuitService:
             "partial_rendering=true — a slice is NOT the circuit"
         )[:500]
 
+        # The cluster contract caps names at MAX_NAME (120) while a circuit name
+        # may be 200 — truncate the base so the projection always validates
+        # (a long name must not make the fallback impossible), leaving room for
+        # the marker suffix and any " (2)" dedupe suffix.
+        suffix = f" [L{layer} slice]"
+        headroom = CLUSTER_MAX_NAME - len(suffix) - 6
+        base = definition.name if len(definition.name) <= headroom else (
+            definition.name[: max(headroom, 1)]
+        )
+
         return {
             "kind": "mistudio.cluster-definition",
             "schema_version": "1",
-            "name": f"{definition.name} [L{layer} slice]",
+            "name": f"{base}{suffix}",
             "narrative": definition.narrative,
             "model": definition.model.model_dump(mode="json"),
             "sae": ref.model_dump(mode="json") if ref else {"layer": layer},
@@ -472,17 +559,27 @@ class CircuitService:
         }
 
     def _serving_members(self, definition: CircuitDefinitionV1) -> list[CircuitMember]:
-        """Flatten the circuit's members into the Feature 12 serving shape."""
+        """Flatten the circuit's members into the Feature 12 serving shape.
+
+        A ``cluster_ref`` contributes its frozen ``expanded_members`` AND its own
+        ``feature`` when both are present — taking only one silently dropped
+        authored members from the intervention. Duplicates on a
+        ``(layer, feature_idx)`` are collapsed because the serving path rejects
+        a repeated key outright.
+        """
         out: list[CircuitMember] = []
+        seen: set[tuple[int, int]] = set()
         for m in definition.members:
             ref = definition.sae_for_layer(m.layer)
             sae_id = ref.mistudio_sae_id if ref else None
-            sources = (
-                m.expanded_members
-                if (m.member_kind == "cluster_ref" and m.expanded_members)
-                else ([m.feature] if m.feature is not None else [])
-            )
+            sources = list(m.expanded_members or [])
+            if m.feature is not None:
+                sources.append(m.feature)
             for feat in sources:
+                key = (m.layer, feat.feature_idx)
+                if key in seen:
+                    continue
+                seen.add(key)
                 out.append(
                     CircuitMember(
                         feature_idx=feat.feature_idx,
@@ -508,20 +605,42 @@ class CircuitService:
         return {**self.summarize(refreshed), "cleared_steering": True}
 
     async def set_intensity(self, circuit_id: str, intensity: float) -> dict[str, Any]:
-        """Set the global λ for a circuit, re-applying if it is serving."""
+        """Set the global λ for a circuit, re-applying if it is serving.
+
+        The stored document is parsed BEFORE the DB write: a corrupt document
+        must not leave the persisted intensity changed while the model keeps
+        steering at the old λ (a silent DB/GPU divergence).
+        """
         circuit = await self.get(circuit_id)
+        serving_full = circuit.is_active and circuit.serving_mode == "full"
+        definition = self._parse_stored(circuit) if serving_full else None
+
         await self.repository.update(circuit.id, intensity=float(intensity))
         refreshed = await self.repository.get(circuit.id)
+
         reapplied = False
-        if refreshed.is_active and refreshed.serving_mode == "full":
-            definition = CircuitDefinitionV1.model_validate(refreshed.circuit_meta)
+        warnings: list[str] = []
+        if serving_full and definition is not None:
             self._sae_service.set_circuit_steering(
                 self._serving_members(definition),
                 float(intensity),
                 edges=[e.model_dump(mode="json") for e in definition.edges],
             )
             reapplied = True
-        return {**self.summarize(refreshed), "reapplied": reapplied}
+        elif refreshed.is_active and refreshed.serving_mode == "slice_fallback":
+            # The slice is served by a cluster profile that owns its own λ, so
+            # this dial did NOT reach the model. Say so rather than reporting a
+            # new intensity the steering never received.
+            warnings.append(
+                "This circuit is serving a per-layer slice; the slice's cluster "
+                "profile keeps its own intensity, so this dial was recorded but "
+                "not applied. Adjust the slice cluster's intensity instead."
+            )
+        return {
+            **self.summarize(refreshed),
+            "reapplied": reapplied,
+            "warnings": warnings,
+        }
 
     async def delete(self, circuit_id: str) -> dict[str, Any]:
         circuit = await self.get(circuit_id)

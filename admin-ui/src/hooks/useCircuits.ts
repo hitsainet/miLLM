@@ -59,9 +59,20 @@ export function useCircuits() {
       }
     },
     onError: (error: Error) => {
-      // UNVALIDATED_CIRCUIT is a deliberate gate, not a failure — the caller
-      // re-sends with the acknowledgement.
+      // UNVALIDATED_CIRCUIT is a deliberate gate, not a failure. It is normally
+      // pre-empted by the card's acknowledgement checkbox — but a STALE cached
+      // row (rung lowered server-side since the last fetch) renders the plain
+      // Activate button, so the refusal can still arrive. Refetch so the card
+      // learns the new rung and shows the checkbox, and say why the click did
+      // nothing — silently returning left the button dead with no explanation.
       if (error instanceof ApiError && error.code === 'UNVALIDATED_CIRCUIT') {
+        invalidate();
+        const phrase =
+          (error.details?.rung_language as string | undefined) ??
+          'not causally validated';
+        toast.warning(
+          `This circuit is ${phrase} — tick the acknowledgement to steer with it anyway`,
+        );
         return;
       }
       toast.error(`Activation failed: ${error.message}`);

@@ -74,6 +74,8 @@ def service(test_session):
     )
     cluster_service = MagicMock()
     cluster_service.import_definition = AsyncMock(return_value=MagicMock())
+    cluster_service.get_active_cluster = AsyncMock(return_value=None)
+    cluster_service.deactivate = AsyncMock()
     return CircuitService(repo, sae_service=sae_service, cluster_service=cluster_service)
 
 
@@ -359,3 +361,158 @@ class TestExportAndLifecycle:
         result = await service.set_intensity(circuit.id, 1.2)
         assert result["reapplied"] is False
         assert result["intensity"] == 1.2
+
+
+class TestR1Fixes:
+    """Regressions for review round 1 — the slice-fallback path had NEVER
+    executed (a raw dict was passed where a validated model was required, and
+    an AsyncMock hid the crash)."""
+
+    async def test_slice_fallback_passes_a_validated_model_not_a_dict(self, service):
+        """The exact R1 bug: ClusterService.import_definition takes a
+        ClusterDefinitionV1; a dict crashed on `.name`."""
+        from millm.api.schemas.cluster import ClusterDefinitionV1
+
+        attach("sae-10", 10)  # L13 missing → slice fallback
+        circuit = await service.import_definition(make_doc())
+        await service.activate(circuit.id)
+        call = service._cluster_service.import_definition.await_args
+        assert isinstance(call[0][0], ClusterDefinitionV1)
+        assert call.kwargs["raw_payload"]["kind"] == "mistudio.cluster-definition"
+
+    async def test_slice_survives_a_circuit_name_longer_than_the_cluster_cap(
+        self, service
+    ):
+        """A circuit name may be 200 chars but a cluster name caps at 120 —
+        the projection must still validate (truncate), not become impossible."""
+        from millm.api.schemas.cluster import ClusterDefinitionV1
+
+        long_name = "x" * 200
+        definition = CircuitDefinitionV1.model_validate(make_doc(name=long_name))
+        doc = service.to_layer_slice(definition, 10)
+        parsed = ClusterDefinitionV1.model_validate(doc)  # must not raise
+        assert parsed.name.endswith("[L10 slice]")
+        assert len(parsed.name) <= 120
+
+    def test_slice_carries_global_intensity_without_a_per_layer_budget(self, service):
+        """Dropping λ when the layer has no per-layer entry silently served the
+        slice at the cluster default (1.0) instead of the authored value."""
+        doc = make_doc(budget={"layers": {"13": {"B": 30.0}}, "intensity": 1.5,
+                               "intensity_range": [0.0, 2.0]})
+        definition = CircuitDefinitionV1.model_validate(doc)
+        sl = service.to_layer_slice(definition, 10)  # no '10' key in layers
+        assert sl["budget"] is not None
+        assert sl["budget"]["intensity"] == 1.5
+
+    def test_cluster_ref_with_both_expansion_and_feature_keeps_both(self, service):
+        """Taking only one branch silently dropped authored members."""
+        doc = make_doc(
+            saes=[{"layer": 10, "n_features": 8192, "mistudio_sae_id": "sae-10"}],
+            members=[{
+                "layer": 10, "member_kind": "cluster_ref",
+                "expanded_members": [{"feature_idx": 7, "strength": 10.0}],
+                "feature": {"feature_idx": 999, "strength": 5.0},
+            }],
+            edges=[],
+        )
+        definition = CircuitDefinitionV1.model_validate(doc)
+        members = service._serving_members(definition)
+        assert {m.feature_idx for m in members} == {7, 999}
+        sl = service.to_layer_slice(definition, 10)
+        assert {m["feature_idx"] for m in sl["members"]} == {7, 999}
+
+    def test_duplicate_feature_across_cluster_ref_and_feature_ref_is_deduped(
+        self, service
+    ):
+        """The serving path rejects a repeated (layer, feature_idx) outright —
+        a feature appearing both standalone and inside a referenced cluster is
+        a natural authoring outcome and must not fail activation."""
+        doc = make_doc(
+            saes=[{"layer": 10, "n_features": 8192, "mistudio_sae_id": "sae-10"}],
+            members=[
+                {"layer": 10, "member_kind": "cluster_ref",
+                 "expanded_members": [{"feature_idx": 1, "strength": 10.0}]},
+                {"layer": 10, "feature": {"feature_idx": 1, "strength": 20.0}},
+            ],
+            edges=[],
+        )
+        definition = CircuitDefinitionV1.model_validate(doc)
+        members = service._serving_members(definition)
+        assert [m.feature_idx for m in members] == [1]  # deduped, not doubled
+
+    async def test_corrupt_stored_document_is_a_structured_error_not_a_500(
+        self, service
+    ):
+        """circuit_meta is raw JSONB validated at IMPORT time; a later contract
+        tightening or hand-edit must not escape as an opaque pydantic 500."""
+        attach("sae-10", 10)
+        attach("sae-13", 13)
+        circuit = await service.import_definition(make_doc())
+        await service.repository.update(
+            circuit.id, circuit_meta={"kind": "mistudio.circuit-definition",
+                                      "schema_version": "1"}  # missing name/saes/members
+        )
+        with pytest.raises(ValidationError, match="no longer validates"):
+            await service.activate(circuit.id)
+
+    async def test_serveable_is_refreshed_at_activation(self, service):
+        """serveable was a frozen import-time snapshot, so a circuit that became
+        bindable kept reporting not-serveable while actively serving."""
+        circuit = await service.import_definition(make_doc())  # nothing attached
+        assert circuit.serveable is False
+        attach("sae-10", 10)
+        attach("sae-13", 13)
+        await service.activate(circuit.id)
+        refreshed = await service.repository.get(circuit.id)
+        assert refreshed.serveable is True
+
+    async def test_co_tenant_released_only_after_a_successful_serve(self, service):
+        """Releasing before serving left the user with NOTHING steering when the
+        serve then failed."""
+        attach("sae-10", 10)
+        attach("sae-13", 13)
+        service._cluster_service.get_active_cluster = AsyncMock(
+            return_value=MagicMock(id="prof_x", name="c", layer=10)
+        )
+        service._sae_service.set_circuit_steering.side_effect = RuntimeError("serve boom")
+        circuit = await service.import_definition(make_doc())
+        with pytest.raises(RuntimeError):
+            await service.activate(circuit.id)
+        # The cluster must still be running — the circuit never started.
+        service._cluster_service.deactivate.assert_not_awaited()
+
+    async def test_slice_fallback_releases_only_the_served_layer(self, service):
+        """bound_layers may exceed what a slice actually serves; releasing the
+        unused ones killed clusters for nothing."""
+        attach("sae-10", 10)
+        attach("sae-13", 13)
+        doc = make_doc(
+            saes=[
+                {"layer": 10, "n_features": 8192, "mistudio_sae_id": "sae-10"},
+                {"layer": 13, "n_features": 8192, "mistudio_sae_id": "sae-13"},
+                {"layer": 20, "n_features": 8192, "mistudio_sae_id": "sae-20"},
+            ],
+            members=[
+                {"layer": 10, "feature": {"feature_idx": 1, "strength": 10.0}},
+                {"layer": 13, "feature": {"feature_idx": 2, "strength": 10.0}},
+                {"layer": 20, "feature": {"feature_idx": 3, "strength": 10.0}},
+            ],
+            edges=[],
+        )
+        service._cluster_service.get_active_cluster = AsyncMock(
+            return_value=MagicMock(id="prof_l13", name="on L13", layer=13)
+        )
+        circuit = await service.import_definition(doc)
+        result = await service.activate(circuit.id, acknowledge_unvalidated=True)
+        assert result["serving_mode"] == "slice_fallback"
+        assert result["slice_layer"] == 10
+        # The L13 cluster is untouched: the slice only serves L10.
+        service._cluster_service.deactivate.assert_not_awaited()
+
+    async def test_set_intensity_on_a_slice_says_it_was_not_applied(self, service):
+        attach("sae-10", 10)
+        circuit = await service.import_definition(make_doc())
+        await service.activate(circuit.id)  # slice_fallback
+        result = await service.set_intensity(circuit.id, 0.4)
+        assert result["reapplied"] is False
+        assert any("not applied" in w for w in result["warnings"])

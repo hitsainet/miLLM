@@ -92,20 +92,26 @@ healthy) mark the product unavailable; tools then return a structured
 | `millm_sensing_config` | `PUT /api/sensing/{profile_id}/config` (`{min_k}`; null restores the all-sensable default) |
 
 ### `millm_circuits` (v1.1 — Circuit Runtime)
-| Tool | Endpoint |
-|---|---|
-| `millm_circuit_status` | `GET /api/circuits/active` (active circuit + attached-SAE set + rung; `null` when none) |
-| `millm_list_circuits` | `GET /api/circuits?promoted=&min_rung=&limit=&offset=` (slim rows carry `rung`, `rung_language`, layers, edge_count) |
-| `millm_import_circuit` (inline) | `POST /api/circuits/import?activate=&on_conflict=&acknowledge_unvalidated=` (body = raw `mistudio.circuit-definition/v1` document) |
-| `millm_import_circuit` (hub) | `POST /api/circuits/hub/import` (`{repo_id, filename, revision?, activate?, on_conflict?, acknowledge_unvalidated?}`) |
-| `millm_circuit_hub_search` | `GET /api/circuits/hub/search?q=&base_model=&limit=` (tag `mistudio-circuit-definition`) |
-| `millm_activate_circuit` | `POST /api/circuits/{id}/activate?acknowledge_unvalidated=` (fully serveable, or slice-fallback when the SAE set is incomplete) |
-| `millm_deactivate_circuit` | `POST /api/circuits/{id}/deactivate` |
-| `millm_export_circuit` | `GET /api/circuits/{id}/export` (raw circuit document — no envelope) |
-| `millm_set_circuit_intensity` | `PUT /api/circuits/active/intensity` (`{intensity, reapply}`; one global λ scales all layers) |
-| `millm_circuit_sensing_status` | `GET /api/circuits/sensing/status` |
-| `millm_circuit_sensing_events` | `GET /api/circuits/sensing/events?circuit_id=&limit=&since=` (edge co-fire rows: up/down member, activations, alone/within, ±K context, edge rung) |
-| `millm_circuit_sensing_enable` / `_disable` | `POST /api/circuits/{circuit_id}/sensing/enable` / `/disable` (edge sensing; off by default, opt-in) |
+
+**Implemented (Feature 13, shipped).** The hub and edge-sensing rows below are
+**reserved for Feature 15 and are NOT served yet** — calls to them 404 today.
+They are listed so the tool surface is stable when F15 lands; do not register
+them against an F13-only deployment.
+
+| Tool | Endpoint | Status |
+|---|---|---|
+| `millm_circuit_status` | `GET /api/circuits/active` (active circuit + attached-SAE set + rung; `null` when none) | F13 ✅ |
+| `millm_list_circuits` | `GET /api/circuits?promoted=&min_rung=&limit=&offset=` (slim rows carry `rung`, `rung_language`, layers, edge_count) | F13 ✅ |
+| `millm_import_circuit` (inline) | `POST /api/circuits/import?on_conflict=` (body = raw `mistudio.circuit-definition/v1` document). Import does NOT activate — call `/{id}/activate?acknowledge_unvalidated=` separately, so the evidence gate is always an explicit step. | F13 ✅ |
+| `millm_import_circuit` (hub) | `POST /api/circuits/hub/import` (`{repo_id, filename, revision?, activate?, on_conflict?, acknowledge_unvalidated?}`) | **F15 — not served** |
+| `millm_circuit_hub_search` | `GET /api/circuits/hub/search?q=&base_model=&limit=` (tag `mistudio-circuit-definition`) | **F15 — not served** |
+| `millm_activate_circuit` | `POST /api/circuits/{id}/activate?acknowledge_unvalidated=` (fully serveable, or slice-fallback when the SAE set is incomplete) | F13 ✅ |
+| `millm_deactivate_circuit` | `POST /api/circuits/{id}/deactivate` | F13 ✅ |
+| `millm_export_circuit` | `GET /api/circuits/{id}/export` (raw circuit document — no envelope) | F13 ✅ |
+| `millm_set_circuit_intensity` | `PUT /api/circuits/active/intensity` (`{intensity, reapply}`; one global λ scales all layers) | F13 ✅ |
+| `millm_circuit_sensing_status` | `GET /api/circuits/sensing/status` | **F15 — not served** |
+| `millm_circuit_sensing_events` | `GET /api/circuits/sensing/events?circuit_id=&limit=&since=` (edge co-fire rows: up/down member, activations, alone/within, ±K context, edge rung) | **F15 — not served** |
+| `millm_circuit_sensing_enable` / `_disable` | `POST /api/circuits/{circuit_id}/sensing/enable` / `/disable` (edge sensing; off by default, opt-in) | **F15 — not served** |
 
 ### 4a. Circuit evidence-rung rule (v1.1)
 Every circuit and edge field carries `rung` (0–3 int) and `rung_language`

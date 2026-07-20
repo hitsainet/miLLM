@@ -17,6 +17,7 @@ import pytest
 import torch
 
 from millm.api.schemas.circuit import CircuitDefinitionV1
+from millm.api.schemas.cluster import ClusterDefinitionV1
 from millm.core.errors import SAESetIncompleteError, UnvalidatedCircuitError
 from millm.db.repositories.circuit_repository import CircuitRepository
 from millm.ml.sae_config import SAEConfig
@@ -167,10 +168,16 @@ class TestIncompleteSAESet:
         assert result["bound_layers"] == [10]
         assert result["slice_layer"] == 10
         cluster_service.import_definition.assert_awaited_once()
-        slice_doc = cluster_service.import_definition.await_args[0][0]
-        # It really is a cluster definition, marked as a partial rendering.
+        call = cluster_service.import_definition.await_args
+        slice_model = call[0][0]
+        slice_doc = call.kwargs["raw_payload"]
+        # The cluster importer takes a VALIDATED model (R1: passing the bare
+        # dict crashed on `.name`, and the AsyncMock hid it).
+        assert isinstance(slice_model, ClusterDefinitionV1)
+        assert slice_model.kind == "mistudio.cluster-definition"
+        assert slice_model.name.endswith("[L10 slice]")
+        # The raw payload rides alongside for lossless storage.
         assert slice_doc["kind"] == "mistudio.cluster-definition"
-        assert slice_doc["name"].endswith("[L10 slice]")
         assert "partial_rendering=true" in slice_doc["provenance"]["source_note"]
         # And the multi-SAE serving path was NOT used.
         assert s10.get_steering_values() == {}

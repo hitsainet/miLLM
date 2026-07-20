@@ -260,6 +260,22 @@ class SetCircuitIntensityRequest(BaseModel):
     reapply: bool = True
 
 
+class CircuitIntensityResponse(CircuitSummary):
+    """Intensity change outcome.
+
+    ``reapplied`` is load-bearing: a slice-fallback circuit records the new λ
+    but does NOT push it to the model (the backing cluster profile owns its own
+    intensity), so a client must not report the dial as applied.
+    """
+
+    reapplied: bool = False
+    warnings: list[str] = Field(default_factory=list)
+
+
+class CircuitDeactivationResponse(CircuitSummary):
+    cleared_steering: bool = False
+
+
 # ── Runtime DTOs (Feature 12 serving) ───────────────────────────────────────
 
 

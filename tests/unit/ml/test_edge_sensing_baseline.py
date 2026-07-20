@@ -105,13 +105,51 @@ class TestParityBaselines:
         """F15 R1's vectorisation and R2's bisect made cost track the number
         of fires rather than seq_len x edge_count. A move that reintroduced
         the nested scan would show up as superlinear growth here."""
+        # R1-10: this asserted `long_ < max(short * 8.0, 60.0)`, and the
+        # `short * 8` term NEVER BOUND. Measured across three runs:
+        #
+        #     short=2.67ms -> short*8=21.4ms   bound stayed 60.0
+        #     short=1.40ms -> short*8=11.2ms   bound stayed 60.0
+        #     short=1.39ms -> short*8=11.1ms   bound stayed 60.0
+        #
+        # The floor dominated every time, so a test named for GROWTH asserted
+        # only an absolute ceiling — one its neighbour above already asserts on
+        # the identical shape. It could not fail independently, and the 13x
+        # match_down regression (R1-08) sailed straight through it.
+        #
+        # Warm up first: the first pass pays import and allocation costs that
+        # inflate `short` and would mask real growth behind a slow baseline.
+        _time_pass(_armed(threshold=3.0), 512)
         short = _time_pass(_armed(threshold=3.0), 512)
         long_ = _time_pass(_armed(threshold=3.0), 4096)
-        # 8x the tokens must not cost anywhere near 8x, let alone 64x.
-        assert long_ < max(short * 8.0, 60.0), (
-            f"512-tok={short:.1f}ms 4096-tok={long_:.1f}ms — growth suggests "
-            "the positions x edges scan has returned"
+        ratio = long_ / max(short, 1e-9)
+        # Measured over five runs after warm-up: 7.69x - 8.45x for 8x the
+        # tokens. Growth here is LINEAR, not sublinear — the cost of this shape
+        # is dominated by the per-position encode, not by matching — so the
+        # threshold is set to catch the QUADRATIC blowup a restored
+        # positions x edges scan would produce (~64x), not to assert
+        # sublinearity the code never had. The original comment claimed "must
+        # not cost anywhere near 8x", which was never true of this measurement.
+        #
+        # 16x leaves ~2x headroom over the observed maximum and still fails an
+        # order of magnitude below a nested scan.
+        #
+        # KNOWN LIMIT, recorded rather than hidden: at threshold=3.0 few
+        # positions fire, so this shape does not exercise the matcher hard
+        # enough to catch a quadratic-in-FIRES regression — verified by
+        # mutation (an O(fires^2) loop passes here and is caught instead by
+        # test_a_saturated_long_prefill_sheds_and_stays_cheap, where the fire
+        # count is the point). What this test does protect is growth in
+        # SEQUENCE LENGTH. The two are complementary; neither alone covers the
+        # matcher's cost.
+        assert ratio < 16.0, (
+            f"512-tok={short:.2f}ms 4096-tok={long_:.2f}ms ({ratio:.1f}x for "
+            "8x the tokens) — superlinear growth suggests the positions x "
+            "edges scan has returned"
         )
+        # Absolute backstop, so a pathologically slow machine fails loudly
+        # rather than silently inflating the ratio's denominator.
+        assert long_ < 60.0, f"4096-tok pass took {long_:.1f}ms"
 
 
 class TestMatchDownIsLogarithmicOnTheCrossLayerPath:

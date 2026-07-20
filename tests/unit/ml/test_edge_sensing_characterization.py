@@ -524,9 +524,27 @@ class TestThePerCircuitBudgetIsWiredNotJustDeclared:
         for s in saes:
             self._fire(s)
         total = sum(len(s._sensed_edges) for s in saes)
-        assert total <= 3, (
-            f"{total} events emitted against a per-circuit cap of 3 — the "
-            "budget is not wired and each layer is spending its own"
+        # R1-11: this asserted `total <= 3`, which `total == 0` satisfies. Break
+        # the matcher completely — return early, null the ring, emit nothing —
+        # and the test named for the budget stayed green while the headline
+        # feature was dark. A cap test must bound BOTH sides, or it is a
+        # liveness test that has been inverted into a silence test.
+        assert total == 3, (
+            f"{total} events against a per-circuit cap of 3 — "
+            + ("the budget is not wired and each layer is spending its own"
+               if total > 3 else
+               "sensing produced less than the cap allows; the matcher is "
+               "dark, not merely bounded")
+        )
+        # ...and prove the cap is what bound it: the same traffic uncapped
+        # produces strictly more, so `== 3` is a limit and not a coincidence.
+        loose_ctx, loose_saes = self._circuit(cap=1000)
+        for s in loose_saes:
+            self._fire(s)
+        loose_total = sum(len(s._sensed_edges) for s in loose_saes)
+        assert loose_total > 3, (
+            f"uncapped traffic produced only {loose_total} events, so capping "
+            "at 3 proves nothing about the budget"
         )
 
     def test_the_budget_actually_RECORDS_the_spend(self):

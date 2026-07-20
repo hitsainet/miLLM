@@ -406,11 +406,41 @@ class TestOffsetAndPhaseAccounting:
 class TestDeviceMigration:
     def test_to_device_moves_the_edge_caches(self):
         """011 R3: a device move on an armed SAE left the member slices behind
-        and every pass threw silently. The edge caches must move too."""
+        and every pass threw silently. The edge caches must move too.
+
+        R1-12: this used to assert only `device == "cpu"` after a CPU->CPU
+        move. `Tensor.to("cpu")` on a CPU tensor returns `self`, so the
+        assertions held whether or not the move ran — verified by deleting the
+        move entirely, which left the test GREEN. A test for a device migration
+        that never migrates anything is a fixture agreeing with itself.
+
+        Spying on `.to()` observes the move actually happening, which is the
+        one thing a same-device test cannot see."""
         sae = real_sae()
         cfg = make_config()
         sae.arm_edge_sensing(cfg)
+
+        moved: list[str] = []
+
+        def spy(tensor, name):
+            real_to = tensor.to
+
+            def wrapped(*args, **kwargs):
+                moved.append(name)
+                return real_to(*args, **kwargs)
+
+            tensor.to = wrapped
+            return tensor
+
+        spy(sae._W_enc_e, "_W_enc_e")
+        spy(sae._b_enc_e, "_b_enc_e")
+        spy(cfg.thresholds, "thresholds")
+
         sae.to_device("cpu")
+
+        assert "_W_enc_e" in moved, "the encoder slice was never moved"
+        assert "_b_enc_e" in moved, "the encoder bias slice was never moved"
+        assert "thresholds" in moved, "the thresholds were never moved"
         assert sae._W_enc_e is not None and sae._b_enc_e is not None
         assert str(sae._W_enc_e.device) == "cpu"
         assert str(cfg.thresholds.device) == "cpu"

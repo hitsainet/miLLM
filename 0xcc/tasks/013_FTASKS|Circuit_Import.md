@@ -92,8 +92,17 @@
   - [ ] 7.2 Incomplete SAE set → slice-fallback via cluster path; serving_mode="slice_fallback"; rung<2 refusal without ack then success with ack; single-active manual↔cluster↔circuit; re-export equality
   - [ ] 7.3 Round-trip fixture: real miStudio-exported circuit definition checked into tests/fixtures
 
+- [ ] 7.5 **Inherited from Feature 12 review (REQUIRED — do not drop)**
+  - [ ] 7.5.1 **Circuit/cluster co-tenancy guard:** serving/clearing a circuit must not silently clobber an active cluster steering the same attached SAE. Detect an active cluster/profile on any target layer and refuse (409) or explicitly deactivate + warn. (F12 R2/R3 finding)
+  - [ ] 7.5.2 **Cluster binds to `entries[0]`:** `cluster_service._bind_sae` / `profile_service` resolve via `state.attached_sae` (first entry) and only WARN on layer mismatch — once a multi-SAE circuit is attached this can bind a cluster to the wrong layer's SAE. Resolve via `by_layer(declared_layer)` and hard-block the mismatch. (F12 R3 architect finding — F12's "never a silent wrong-basis serve" must hold for clusters too)
+  - [ ] 7.5.3 **`attach_set` side-effect parity:** it omits `SAEStatus.ATTACHED`, `create_attachment`, model auto-lock and sensing re-arm that `attach_sae` performs. At minimum take the model lock + write status so an unload can't tear out live hooks and `delete_sae`'s attached-guard works. Extract a shared `_post_attach()`. (F12 R3)
+  - [ ] 7.5.4 **Composing attach/detach/serve lock:** the `SAEService` docstring claims a `_attachment_lock` that does not exist; resolve-then-apply and pre-check-then-load are check-then-act windows. Add the lock (or correct the docstring). (F12 R2/R3)
+  - [ ] 7.5.5 **Hazard presentation:** `_cross_layer_hazards` is O(n²) and mostly `heuristic:co-steer-sign` (a 6/6 two-layer circuit → 36 low-signal warnings). Rank validated (rung≥2, |ES|) first and cap/aggregate the heuristic tail before rendering. (F12 R3 product)
+  - [ ] 7.5.6 `/health/detailed` still reports a singular `sae_id` for an N-SAE set (metrics was fixed in F12) — add `sae_count`/`sae_ids` additively. (F12 R3)
+
 - [ ] 8.0 Feature Acceptance (per instruct 007)
   - [ ] 8.1 Verify every FPRD §9 success criterion + §2 acceptance checkbox one-by-one
+  - [ ] 8.1b **Re-verify Feature 12 §9.1/9.3/9.4 end-to-end** (two-layer circuit serves; SAE_SET_INCOMPLETE at submit AND activation; hazards surface at activation) — F12 verified these at service level only because activation lands here. (F12 R3 product finding)
   - [ ] 8.2 Manual: Circuits page docs (import, per-SAE compatibility, evidence ladder, slice-fallback, activation gate)
   - [ ] 8.3 Full test suite green; update CLAUDE.md Document Inventory + Current Status
 

@@ -8,8 +8,24 @@ import { Layers, AlertTriangle } from 'lucide-react';
 import { Badge, Spinner, EmptyState } from '@components/common';
 import { useAttachments } from '@/hooks/useAttachments';
 
-export function AttachmentPanel() {
+interface AttachmentPanelProps {
+  /**
+   * Only render once MORE than this many SAEs are attached. Defaults to 0
+   * (always render). The SAE page passes 1 so the single-SAE case is covered
+   * by the existing AttachedSAECard and is not shown twice.
+   */
+  minCount?: number;
+}
+
+export function AttachmentPanel({ minCount = 0 }: AttachmentPanelProps = {}) {
   const { attachments, isLoading, error } = useAttachments();
+
+  // Below the render threshold (e.g. the single-SAE case on the SAE page,
+  // already covered by AttachedSAECard) — render nothing at all, including
+  // while loading/erroring, rather than a duplicate or empty panel.
+  if (minCount > 0 && (attachments?.count ?? 0) <= minCount) {
+    return null;
+  }
 
   if (isLoading) {
     return (

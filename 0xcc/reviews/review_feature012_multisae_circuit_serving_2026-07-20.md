@@ -54,4 +54,28 @@ The singular properties returning `entries[0]` mean health/cluster/monitoring/se
 
 +7 tests (sign rule ×2, λ=0 disable, sae_id disambiguation, +R1 adjustments). Backend 1002 passed / 1 skipped; admin-ui 217 passed; tsc clean.
 
-## Round 3 — pending.
+## Round 3 (2026-07-20) — /review 4 perspectives (product + architect / QA + test engineer)
+
+**23 findings, 3 of them REPRODUCED live bugs that survived both prior rounds.**
+
+### Confirmed & FIXED in R3
+1. **[CRITICAL] R2's sae_id fix was defeated by a layer-keyed cache** — `resolved.get(m.layer)` short-circuited before the sae_id branch, so with two SAEs on one layer the FIRST member's SAE captured every later member on that layer (**reproduced**: sae-b's member applied to sae-a's decoder). R2's test passed only because it used a single member. → cache keyed by `(sae_id, layer)`; grouping/apply keyed by the RESOLVED entry `(entry.sae_id, entry.layer)`; `applied_per_layer` still reported per-layer for the caller contract. Regression test added (2 members, 2 SAEs, 1 layer).
+2. **[HIGH] Empty member list was a silent no-op** leaving the PREVIOUS circuit armed and firing while returning success (**reproduced**). → empty members now clears + disables every attached layer (explicit OFF).
+3. **[HIGH] A member naming an unattached sae_id silently fell back** to whatever SAE is on that layer — a wrong-basis serve with no signal. → the substitution is recorded and surfaced in the result (`clamp_warnings`) + logged.
+4. **[HIGH] `attach_set` service body had ZERO direct tests** — the R2 rollback + free-VRAM gate were entirely unverified (route tests mock attach_set away). → new `test_attach_set_service.py`: 11 tests covering happy path, idempotent skip, dedup, pre-validation (incompatible/missing → nothing loaded), hook-install failure rollback, load failure rollback, pre-existing attachment preserved, VRAM refusal before loading, NULL file_size_bytes still gated, sufficient-VRAM proceed.
+5. **[MED] Step 2 re-iterated the raw `members` list**, discarding step 1's dedup/bounds guarantees (a trap if duplicate ever downgrades to a warning). → step 2 now iterates the `validated` list carrying each member's resolved entry.
+6. **[MED] SAEPage rendered the panel unconditionally** → duplicate/empty display for the single- and zero-SAE cases (contradicting its own comment). → `AttachmentPanel` gained `minCount` (returns null below threshold, before loading/error branches); SAEPage passes `minCount={1}`. 2 tests added.
+7. **[LOW] `is_attached`/`count` read `_entries` unlocked**, inconsistent with every other accessor. → both now take the lock (verified no reentrancy).
+
+### Assessed & deliberately NOT changed (recorded, not dropped)
+- **[HIGH] Cluster activation binds to `entries[0]` with only a WARNING on layer mismatch** — the singular back-compat property means cluster serving can pick the wrong SAE once a circuit set is attached, i.e. F12's "never a silent wrong-basis serve" holds for circuits but not for clusters. This is a **pre-existing cluster-path behavior** that F12's registry makes reachable. Correct home is **F13** (which owns circuit/cluster activation + the co-tenancy ownership guard) — recorded there as a REQUIRED task, not deferred silently.
+- **[HIGH] `attach_set` omits attach_sae's side effects** (DB `SAEStatus.ATTACHED`, `create_attachment`, model auto-lock, sensing re-arm). Real inconsistency. Attachment for circuits is in-memory by FPRD §4 design, but the model-lock omission is a genuine risk. → **F13 task** (activation is where a circuit's attachment becomes user-visible/persistent).
+- **[MED] `set_circuit_steering` has no route/MCP caller in F12** — activation is F13 by FPRD §12 design. FTASKS 7.1 amended to state §9.1/9.3/9.4 are **service-level verified**, user-observable verification deferred to F13 acceptance (rather than claiming them verified).
+- **[MED] Hazards are O(n²) and mostly `heuristic:co-steer-sign`** — a 6/6 two-layer circuit emits 36 low-signal warnings. Contract is correct; **presentation/ranking is F13's** (it renders them). Recorded.
+- **[MED] No composing attach/detach/serve lock** (the docstring's `_attachment_lock` never existed) — recorded for F13; the stale docstring claim should be corrected there.
+- **[LOW]** Shared `clamp_intensity` helper (cluster vs circuit envelopes), `/health/detailed` singular `sae_id`, dead `steering_apply_count`/`monitoring_enabled` render, detach drain `except: pass` breadth, concurrency stress test — all recorded as follow-ups.
+
++16 tests (3 R3 regressions + 11 attach_set service + 2 panel minCount). **Backend 1016 passed / 1 skipped; admin-ui 219 passed; tsc clean.**
+
+## Outcome
+3 rounds · **80 findings surfaced** (36 + 21 + 23) · **27 fixed** · zero regressions · every deferral has a named owner (F13) rather than being dropped. The three reproduced serving bugs (layer-keyed cache, empty-members no-op, silent SAE substitution) were only findable because each round attacked the *previous round's fixes* — R2's own fix contained R3's critical bug.

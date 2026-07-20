@@ -4,7 +4,7 @@
 
 **Document Version:** 1.0
 **Created:** July 20, 2026
-**Status:** ✅ IMPLEMENTED 2026-07-20 — tasks 1.0–6.0 done, 50 new tests (backend 994 passed / 1 skipped; admin-ui 217 passed); VRAM spike measured (128 MB fp16 / 256 MB fp32, two SAEs). Review rounds pending.
+**Status:** ✅ COMPLETE 2026-07-20 — tasks 1.0–7.0 done + **3 review rounds (80 findings surfaced, 27 fixed)**. Backend 1016 passed / 1 skipped; admin-ui 219 passed; tsc clean. VRAM spike measured (128 MB fp16 within envelope / 256 MB fp32 exceeds → fp16 attach). Six cross-cutting items handed to F013 task 7.5 (co-tenancy guard, cluster entries[0] binding, attach_set side-effect parity, composing lock, hazard ranking, /health/detailed plural).
 **References:** `012_FPRD|MultiSAE_Circuit_Serving.md` · `012_FTDD|MultiSAE_Circuit_Serving.md` · `012_FTID|MultiSAE_Circuit_Serving.md`
 
 ## Relevant Files
@@ -81,10 +81,10 @@
   - [x] 6.2 Incomplete-set 422; detach clears per-layer; single-layer degenerate case; two-member-same-layer conflict (EC-12.2)
   - [x] 6.3 Perf/VRAM harness (env-gated, GPU host): latency single-SAE vs two-SAE; peak VRAM two Gemma-2-2B SAEs fp16 vs envelope
 
-- [ ] 7.0 Feature Acceptance (per instruct 007)
-  - [ ] 7.1 Verify every FPRD §9 success criterion + §2 acceptance checkbox one-by-one
-  - [ ] 7.2 Manual: multi-SAE attach + circuit serving; `docs/mcp-contract.md` cross-ref (circuit category); attachment-status shape-change note
-  - [ ] 7.3 Full test suite green; update CLAUDE.md Document Inventory + Current Status
+- [x] 7.0 Feature Acceptance (per instruct 007)
+  - [x] 7.1 FPRD §9 criteria verified. **§9.2 (per-layer allocation/λ), §9.5 (VRAM envelope), §9.6 (attachment status) verified end-to-end.** §9.1 (two-layer circuit serves), §9.3 (SAE_SET_INCOMPLETE at submit AND activation) and §9.4 (hazards at activation) are **verified at the SERVICE level** (unit + real-LoadedSAE integration tests); user-observable verification is deferred to **F13 acceptance task 8.1b** because circuit activation (the route/MCP surface) is F013 by FPRD §12 design. Not claimed as user-verified here.
+  - [x] 7.2 `docs/mcp-contract.md` v1.1 cross-ref already lands the circuit category; attachment-status shape change documented in the plural DTOs + review record. (User-facing manual page lands with F013's Circuits UI.)
+  - [x] 7.3 Full test suite green (backend 1016 passed / 1 skipped; admin-ui 219 passed; tsc clean); CLAUDE.md updated
 
 ## Coverage Audit
 - FR-12.1..12.7 each covered by ≥1 parent task (1.0–6.0 mapped above) ✓
@@ -94,11 +94,11 @@
 - Open questions: none blocking (FPRD §13); the highest-uncertainty item (VRAM) is the run-before-build spike (task 1.0, DONE) ✓
 - First task is the run-before-build spike; final task is Feature Acceptance ✓
 
-## Review rounds (goal: 3 rounds, ≥10 findings each)
-- Round 1 (multi-angle /code-review, 2 finder agents): pending.
-- Round 2 (post-fix verification + fresh angles): pending.
-- Round 3 (/review, 4 perspectives): pending.
-Record: `0xcc/reviews/review_feature012_multisae_circuit_serving_2026-07-*.md` (to be created).
+## Review rounds (goal: 3 rounds, ≥10 findings each) — ✅ DONE (80 findings, 27 fixed)
+- Round 1 (3 finder agents: correctness+concurrency / back-compat+resilience / UX+frontend+tests): **36 findings, 13 fixed** — stale-steering merge, by_layer TOCTOU, unclamped λ, multi-layer detach cleanup, unconditional model unlock, attach_set rollback+VRAM, key-aware attach guard, unlocked reads, duplicate members, panel null/error UX, health aggregation.
+- Round 2 (verify R1 fixes + fresh angles): **21 findings, 7 fixed** — CircuitMember double-negation (canonical sign rule), NULL file_size_bytes defeating the VRAM gate, λ=0 phantom-active, inverted intensity bounds, orphaned panel mounted, member.sae_id resolution, FTASKS route drift. All R1 fixes verified; hypothesized KeyError disproven.
+- Round 3 (/review 4 perspectives: product+architect / QA+test): **23 findings, 7 fixed + 11 tests** — **3 REPRODUCED live bugs**: layer-keyed cache defeating R2's sae_id fix (wrong-basis serve), empty-members no-op leaving the previous circuit armed, silent SAE substitution; plus attach_set's untested rollback/VRAM gate (now 11 tests), validated-list refactor, SAEPage duplicate render, lock consistency.
+Record: `0xcc/reviews/review_feature012_multisae_circuit_serving_2026-07-20.md`.
 
 ## Acceptance evidence (Task 7.0)
 - Pending implementation. VRAM spike (task 1.0) DONE: two Gemma-2-2B SAEs = 128 MB fp16 (within <200 MB) /

@@ -334,6 +334,54 @@ class TestR2Fixes:
         assert sa._applied == {}  # sae-a untouched
 
 
+class TestR3Fixes:
+    def test_two_saes_one_layer_each_member_to_its_own_sae(self):
+        """REGRESSION (R3): the resolution cache was keyed by LAYER, so the
+        first member's SAE captured every later member on that layer — a
+        wrong-basis serve. Cache is now keyed by (sae_id, layer)."""
+        service = _service()
+        sa, sb = _sae(), _sae()
+        _attach(service._sae_state, sa, "sae-a", 10)
+        _attach(service._sae_state, sb, "sae-b", 10)
+        members = [
+            CircuitMember(feature_idx=1, layer=10, budget=50.0, sign=1, sae_id="sae-a"),
+            CircuitMember(feature_idx=2, layer=10, budget=60.0, sign=1, sae_id="sae-b"),
+        ]
+        service.set_circuit_steering(members, intensity=1.0)
+        assert sa._applied == {1: 50.0}
+        assert sb._applied == {2: 60.0}
+
+    def test_empty_members_clears_previous_circuit(self):
+        """REGRESSION (R3): an empty member list was a silent no-op that left
+        the PREVIOUS circuit armed. It must now clear + disable."""
+        service = _service()
+        s10 = _sae()
+        _attach(service._sae_state, s10, "sae-10", 10)
+        service.set_circuit_steering(
+            [CircuitMember(feature_idx=9, layer=10, budget=99.0, sign=1)], intensity=1.0
+        )
+        assert s10._applied == {9: 99.0}
+        result = service.set_circuit_steering([], intensity=1.0)
+        assert s10._applied == {}
+        assert result.applied_per_layer == {}
+        s10.enable_steering.assert_called_with(False)
+
+    def test_unattached_declared_sae_id_records_substitution(self):
+        """A member naming an SAE that is NOT attached falls back to the
+        layer's unique SAE but the basis substitution is surfaced, not silent."""
+        service = _service()
+        s10 = _sae()
+        _attach(service._sae_state, s10, "sae-real", 10)
+        members = [
+            CircuitMember(feature_idx=1, layer=10, budget=50.0, sign=1,
+                          sae_id="sae-authored-elsewhere")
+        ]
+        result = service.set_circuit_steering(members, intensity=1.0)
+        assert s10._applied == {1: 50.0}
+        assert any("not attached" in w for w in result.clamp_warnings)
+        assert any("different feature basis" in w for w in result.clamp_warnings)
+
+
 class TestClearCircuitSteering:
     def test_clear_all_participating_layers(self):
         svc = _service()

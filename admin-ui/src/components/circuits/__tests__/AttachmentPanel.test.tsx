@@ -47,11 +47,11 @@ function makeStatus(overrides: Partial<AttachmentStatusSet> = {}): AttachmentSta
   };
 }
 
-function renderPanel() {
+function renderPanel(props: { minCount?: number } = {}) {
   const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } });
   return render(
     <QueryClientProvider client={qc}>
-      <AttachmentPanel />
+      <AttachmentPanel {...props} />
     </QueryClientProvider>,
   );
 }
@@ -93,6 +93,25 @@ describe('AttachmentPanel', () => {
       expect(screen.getAllByTestId('attachment-chip')).toHaveLength(2);
     });
     expect(screen.queryByTestId('vram-warning')).not.toBeInTheDocument();
+  });
+
+  it('renders nothing at or below minCount (single-SAE case on SAEPage)', async () => {
+    attachmentsMock.mockResolvedValue(
+      makeStatus({ count: 1, entries: [makeStatus().entries[0]] }),
+    );
+    const { container } = renderPanel({ minCount: 1 });
+    // Nothing rendered — the single-SAE case is covered by AttachedSAECard.
+    await waitFor(() => expect(attachmentsMock).toHaveBeenCalled());
+    expect(container).toBeEmptyDOMElement();
+    expect(screen.queryByText('No SAEs attached')).not.toBeInTheDocument();
+  });
+
+  it('renders above minCount (a real multi-SAE circuit)', async () => {
+    attachmentsMock.mockResolvedValue(makeStatus()); // count = 2
+    renderPanel({ minCount: 1 });
+    await waitFor(() => {
+      expect(screen.getAllByTestId('attachment-chip')).toHaveLength(2);
+    });
   });
 
   it('renders the empty state when nothing is attached', async () => {

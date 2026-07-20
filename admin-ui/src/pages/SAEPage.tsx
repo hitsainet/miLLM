@@ -132,12 +132,11 @@ export function SAEPage() {
         />
       )}
 
-      {/* Multi-SAE circuit attachment set (Feature 12) — shown when more than
-          one SAE is attached (a cross-layer circuit); the singular card above
-          covers the common single-SAE case. */}
-      <Card padding="sm">
-        <AttachmentPanel />
-      </Card>
+      {/* Multi-SAE circuit attachment set (Feature 12) — renders only when more
+          than one SAE is attached (a cross-layer circuit); the singular card
+          above covers the common single-SAE case, so nothing is shown twice.
+          AttachmentPanel returns null below the threshold. */}
+      <AttachmentPanel minCount={1} />
 
       {/* Download Form */}
       <SAEDownloadForm

@@ -226,12 +226,14 @@ class AttachedSAEState:
     @property
     def is_attached(self) -> bool:
         """Check if at least one SAE is currently attached."""
-        return bool(self._entries)
+        with self._lock:
+            return bool(self._entries)
 
     @property
     def count(self) -> int:
         """Number of attached ``(sae_id, layer)`` entries."""
-        return len(self._entries)
+        with self._lock:
+            return len(self._entries)
 
     def entries(self) -> list[AttachedEntry]:
         """Snapshot list of all attached entries, in insertion order."""
@@ -507,8 +509,23 @@ class SAEService:
         #    single consistent snapshot, and collect all offenders first so the
         #    error reports the complete set (fail-closed) — never re-resolve
         #    by_layer in the apply loop (that would be a TOCTOU wrong-basis risk).
-        resolved: dict[int, "AttachedEntry"] = {}
+        # An empty member set means the circuit is OFF — clear + disable every
+        # attached layer rather than silently leaving the PREVIOUS circuit armed.
+        if not members:
+            cleared = self.clear_circuit_steering()
+            logger.info("circuit_steering_cleared_empty_members", layers=cleared)
+            return CircuitSteeringResult(
+                applied_per_layer={}, hazards=[], clamp_warnings=[]
+            )
+
+        # Resolution cache keyed by the RESOLUTION IDENTITY (declared sae_id +
+        # layer), NOT by layer alone: two SAEs may be attached on one layer, and
+        # keying by layer would let the first member's SAE capture every later
+        # member on that layer (a wrong-basis serve).
+        resolved_cache: dict[tuple[Optional[str], int], "AttachedEntry"] = {}
+        validated: list[tuple["CircuitMember", "AttachedEntry"]] = []
         offenders: list[dict[str, Any]] = []
+        substitutions: list[str] = []
         seen_members: set[tuple[int, int]] = set()
         for m in members:
             # Duplicate (layer, feature_idx) members would silently last-write-
@@ -525,15 +542,28 @@ class SAEService:
                 continue
             seen_members.add(mkey)
 
-            entry = resolved.get(m.layer)
+            ckey = (m.sae_id or None, m.layer)
+            entry = resolved_cache.get(ckey)
             if entry is None:
                 # Prefer an exact (sae_id, layer) match when the member names
                 # its SAE — this disambiguates a layer with two attached SAEs
-                # AND ensures a member is served through the basis it was
-                # authored against (never a silent wrong-SAE serve).
+                # AND serves the member through the basis it was authored
+                # against.
                 if m.sae_id:
                     entry = self._sae_state.get(m.sae_id, m.layer)
-                if entry is None:
+                    if entry is None:
+                        # The declared SAE is not attached at this layer. Fall
+                        # back to the layer's unique SAE if there is one, but
+                        # record the substitution — a different SAE means a
+                        # different feature basis, which the caller must see.
+                        entry = self._sae_state.by_layer(m.layer)
+                        if entry is not None:
+                            substitutions.append(
+                                f"feature {m.feature_idx}@L{m.layer}: declared SAE "
+                                f"'{m.sae_id}' not attached; served through "
+                                f"'{entry.sae_id}' (different feature basis)"
+                            )
+                else:
                     entry = self._sae_state.by_layer(m.layer)
             if entry is None:
                 offenders.append(
@@ -545,7 +575,7 @@ class SAEService:
                     }
                 )
                 continue
-            resolved[m.layer] = entry
+            resolved_cache[ckey] = entry
             if not (0 <= m.feature_idx < entry.sae.d_sae):
                 offenders.append(
                     {
@@ -556,14 +586,20 @@ class SAEService:
                         "d_sae": entry.sae.d_sae,
                     }
                 )
+                continue
+            validated.append((m, entry))
         if offenders:
             raise SAESetIncompleteError(offenders)
 
-        # 2. Group by layer; compute effective (clamped) strengths under one λ.
-        #    γ=0 ⇒ B = B_dir, so serving only clamps budget·sign·λ.
-        per_layer: dict[int, dict[int, float]] = {}
+        # 2. Group by the RESOLVED SAE (sae_id, layer) so two SAEs on one layer
+        #    each get their own batch. Compute effective (clamped) strengths
+        #    under one λ; γ=0 ⇒ B = B_dir. Iterate the VALIDATED list so the
+        #    dedup/bounds guarantees are carried in the data, not in a
+        #    raise-before-reach argument.
+        per_entry: dict[tuple[str, int], dict[int, float]] = {}
+        entry_by_key: dict[tuple[str, int], "AttachedEntry"] = {}
         clamp_warnings: list[str] = []
-        for m in members:
+        for m, entry in validated:
             raw = _directional_budget(m.budget, m.sign) * intensity
             eff = clamp_steering(raw)
             if abs(raw) > STEERING_RANGE:
@@ -571,19 +607,21 @@ class SAEService:
                     f"feature {m.feature_idx}@L{m.layer} clamped "
                     f"{raw:+.3g}→{eff:+.3g} (±{STEERING_RANGE:g})"
                 )
-            per_layer.setdefault(m.layer, {})[m.feature_idx] = eff
+            key = (entry.sae_id, entry.layer)
+            entry_by_key[key] = entry
+            per_entry.setdefault(key, {})[m.feature_idx] = eff
 
-        # 3. Apply each layer's members through THAT layer's SAE only, using the
-        #    entry resolved in step 1 (never a second by_layer call). Clear the
-        #    layer's prior steering first so each serve is authoritative and no
-        #    stale features from a previous circuit/cluster/manual set leak in.
-        #    At λ=0 the circuit is OFF — clear and leave steering disabled rather
-        #    than reporting N features "active" at zero strength.
+        # 3. Apply each group through ITS OWN resolved SAE (never a second
+        #    by_layer call). Clear that SAE's prior steering first so each serve
+        #    is authoritative and no stale features from a previous
+        #    circuit/cluster/manual set leak in. At λ=0 the circuit is OFF —
+        #    clear and leave steering disabled rather than reporting N features
+        #    "active" at zero strength.
         disabled = intensity == 0 or all(
-            v == 0 for s in per_layer.values() for v in s.values()
+            v == 0 for s in per_entry.values() for v in s.values()
         )
-        for layer, steering in per_layer.items():
-            sae = resolved[layer].sae
+        for key, steering in per_entry.items():
+            sae = entry_by_key[key].sae
             sae.clear_steering()
             if disabled:
                 sae.enable_steering(False)
@@ -591,7 +629,17 @@ class SAEService:
                 sae.set_steering_batch(steering)  # bounds already gated in step 1
                 sae.enable_steering(True)
 
+        # Report per-LAYER for the caller-facing result (merging any same-layer
+        # groups), preserving the documented applied_per_layer shape.
+        per_layer: dict[int, dict[int, float]] = {}
+        for (_sid, layer), steering in per_entry.items():
+            per_layer.setdefault(layer, {}).update(steering)
+
         hazards = self._cross_layer_hazards(members, intensity, edges=edges)
+        if substitutions:
+            for note in substitutions:
+                logger.warning("circuit_member_sae_substituted", detail=note)
+            clamp_warnings.extend(substitutions)
         logger.info(
             "circuit_steering_applied",
             layers=sorted(per_layer.keys()),

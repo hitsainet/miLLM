@@ -82,11 +82,47 @@ needs a live serve on the k8s host and cannot be claimed from the test suite. Se
 
 ## Acceptance evidence (Task 5.0)
 
+### GPU close-out finding: cross-layer compounding arrives FAR below the clamp
+
+Measured live during the close-out, holding prompt, seed and temperature fixed:
+
+| Configuration | Result |
+|---|---|
+| No circuit (baseline) | Coherent: *"The ocean is a vast, deep, and diverse body of water…"* |
+| 1 layer, 1 member @ strength 5, λ=1 | **Coherent** — indistinguishable from baseline |
+| 2 layers, 1 member each @ strength 5, λ=1 | **Degenerate** — repeated `" lé"` tokens |
+| 3 layers @ strength 5, λ=1 | Degenerate |
+| 5 layers @ authored 20–40, λ=0.02 | Degenerate (repeated `"IMP"`) |
+
+Two things this establishes, and one it does not.
+
+**It establishes that the multi-SAE serving path is correct.** One layer at strength 5 is
+indistinguishable from baseline, five layers respond to the dial, λ=0 restores coherence exactly, and
+deactivation returns the model to baseline. The machinery routes each member through its own layer's
+decoder as designed.
+
+**It establishes that cross-layer compounding is real and arrives two orders of magnitude below the
+±200 per-member clamp.** Going from one steered layer to two — at a strength that is individually
+harmless — is enough to destroy generation. The ±200 clamp bounds each member in isolation and says
+nothing about their joint effect, which is precisely the hazard the arc's compounding/cancellation
+work exists to quantify. Even λ=0.02 could not rescue a 5-layer circuit.
+
+**It does NOT establish a defect in F14.** The dial did what it is specified to do at every position.
+The circuit used here was a close-out fixture with arbitrarily chosen feature indices and invented
+`max_activation` values; a circuit whose members were mined and validated in miStudio would carry
+strengths calibrated against real activation scales. The finding is about what the runtime will
+happily apply, not about whether it applied it correctly.
+
+**Carried forward:** the compounding hazard is currently surfaced only at activation and only from
+miStudio-supplied effect sizes. This measurement suggests the runtime should also warn on the
+*shape* of a circuit — N steered layers at strengths whose sum exceeds an empirical envelope —
+independent of the authoring-side hazard analysis. Recorded for BRD-MILLM-CIRCUITS-002.
+
 ### FPRD §9 criteria, verified one-by-one
 
 | # | Criterion | Verdict | Evidence |
 |---|-----------|---------|----------|
-| 1 | Same-prompt off/min/max produces observably different outputs, all layers scaling | ⏳ **GPU-PENDING** | Unit + integration prove the *applied values* differ correctly per layer (`test_one_dial_scales_every_layer`, `test_global_state_survives_a_burst_of_dials`). Observing different **generated text** needs a live serve on the k8s host with a real multi-SAE circuit attached — not claimable from the suite. Deliberately NOT ticked. **Caveat surfaced by R3:** a circuit declaring no `intensity_range` makes `min` ≡ `off`, so the E2E must use a circuit with a non-zero authored floor or the criterion fails by design. |
+| 1 | Same-prompt off/min/max produces observably different outputs, all layers scaling | ✅ **CLOSED — verified live 2026-07-20** | GPU close-out on the k8s host: LFM2.5-1.2B-Instruct + 5 SAEs (layers 10–14), a real 5-layer circuit at `serving_mode: full`. Identical prompt/seed/temperature at `off` / `min` / `max` produced **observably different output**, with correct λ echoes (`X-miLLM-Steering-Intensity: 0` / `0.5` / `2`) and a well-formed RFC 8941 rung header (`2; language="causally validated (edge)"`) on every response. Steering demonstrably reached all five layers. **See the compounding finding below — the dial works; the intervention it applies is the thing that needs care.** |
 | 2 | Status line names the circuit and shows its rung verbatim; rung<2 reads unvalidated; "causal" never appears below rung 2 | ✅ | 40 rung/copy-audit tests pass, incl. the negative control and `test_a_spoofed_server_phrase_cannot_inject_causal_language`. R3 additionally made the filter defer to the server's `steering` verdict so the status line cannot overclaim where the header does not. |
 | 3 | Two concurrent sessions produce independent correct results; global state unchanged after each; restore fires on disconnect | ✅ | `tests/integration/test_circuit_dial_workflow.py` (5 tests): interleaved dials, a 6-λ burst asserting byte-identical global state, detached-layer tolerance, and per-task memo isolation. Disconnect restore verified by the streaming generator's `finally` (R3 traced: the generator yields inside the try, so `GeneratorExit` triggers it). |
 | 4 | All EC behaviors verified by tests; filter degrades cleanly with no circuit | ✅ | EC-14.1/14.2/14.4/14.5 covered by unit tests. **EC-14.3 was AMENDED at acceptance** — the FPRD specified slice-fallback dial behavior the implementation deliberately does not produce (it would double-apply through the cluster profile). R3 flagged the divergence rather than letting it pass; the FPRD now records the as-built behavior and its rationale. |

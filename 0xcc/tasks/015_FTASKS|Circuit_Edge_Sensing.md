@@ -114,7 +114,7 @@ ground-truth capture rate (§9.1), which needs a live GPU serve.
 
 | # | Criterion | Verdict | Evidence |
 |---|-----------|---------|----------|
-| 1 | Scripted panel with known up→down ground truth: 100% capture, correct lag/ordering | ⏳ **GPU-PENDING** | `test_circuit_edge_sensing_workflow.py` drives the real hook path with synthetic activations and asserts exact positions and lag, so the *mechanism* is proven. A capture-RATE number against a real model on real prompts needs a live serve on the k8s host. Deliberately NOT ticked. |
+| 1 | Scripted panel with known up→down ground truth: 100% capture, correct lag/ordering | ⚠️ **PARTIAL — mechanism verified live, capture rate not measurable with this fixture** | **GPU close-out executed 2026-07-20** on the k8s host: LFM2.5-1.2B-Instruct + 5 SAEs (layers 10–14, 640 MB), a real 5-layer `circuit-definition/v1` imported and activated at `serving_mode: full`. Edge sensing armed across all 5 layers with **4 sensable edges, 0 unsensable**, `paused_reason: null`. Live traffic produced **0 events with a non-zero overhead counter (5.4–11.5 ms)** — i.e. the sensing pass genuinely ran and found no qualifying up→down pair, which is the correct result for a fixture whose feature indices were chosen arbitrarily rather than from co-firing ground truth. **A capture RATE still requires a circuit built from miStudio-mined features that are known to co-fire**; that is an authoring-side prerequisite, not a runtime gap. |
 | 2 | EC-15.1/15.2 honored: lone-upstream and reversed-order produce NO event | ✅ | 7 tests, unit and end-to-end. Also covers the third case the FPRD does not name: a same-position co-fire, which is co-activation rather than a sequence. |
 | 3 | Alone/within field correct when monitoring co-runs; NULL otherwise | ✅ | `_ambient_fired_count()` mirrors Feature 11 exactly: whole-SAE fired count, only when un-compacted monitoring co-ran, NULL otherwise — never estimated. 4 tests pin the contract incl. the compacted-subset and failing-probe cases. |
 | 4 | Context windows match expected tokens; span covers the up→down positions | ✅ | 22 tests. Uses prefix decodes + length slicing (the FTID's independent-segment sketch reintroduces Feature 11 R1's SentencePiece word-gluing bug), with a byte-level-BPE guard that degrades to plain text over a wrong mark. |
@@ -150,6 +150,31 @@ different), renamed so it can never be mistaken for the contract signal, with a 
 **How the error survived three review rounds:** all three treated the FPRD as the source of truth for
 what the field meant, and none checked the *existing* implementation of the same-named field one
 feature over. The MCP tool description stated the rule plainly the whole time.
+
+### GPU close-out finding: the overhead budget has no multi-layer denominator
+
+Measured live with 5 armed layers: **5.4 / 5.8 / 7.3 ms** per request (and 11.5 ms on a longer one),
+against `CIRCUIT_SENSING_MAX_OVERHEAD_MS = 5.0`. Every request logged an overhead warning.
+
+That is ~1.1–1.5 ms per armed layer, which is proportionate and in line with the unit-test
+measurements. The threshold is the problem: it was inherited from Feature 11, where exactly ONE SAE is
+ever armed, and it was never given a per-layer denominator. As written it guarantees a warning on any
+circuit with two or more layers — the only kind of circuit that exists.
+
+This is the same class of defect as the VRAM envelope corrected during the capability audit: a
+single-SAE-era constant applied to a multi-SAE world, producing an alarm that trains operators to
+ignore alarms. **Recorded for BRD-MILLM-CIRCUITS-002** — the threshold should scale with the armed
+layer count (or be expressed per-layer), not sit at a fixed 5 ms.
+
+Also confirmed live, and worth recording as positive evidence:
+
+- **Lifecycle works end to end.** `enable` on an inactive circuit persisted intent and returned
+  *"Enabled; the circuit will arm when it is activated"*; activation then armed all 5 layers with
+  **4 sensable edges, 0 unsensable**, `paused_reason: null`.
+- **Zero events with non-zero overhead is the honest result**, not a silent failure — the pass ran and
+  found no qualifying up→down pair, exactly as expected for arbitrarily-chosen feature indices.
+- **Clean teardown**: disable → deactivate → generation returns byte-identical to the pre-circuit
+  baseline.
 
 ### Deferred structural work — designs settled, not silently dropped
 

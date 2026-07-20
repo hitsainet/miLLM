@@ -493,11 +493,31 @@ class TestUpstreamNoiseDoesNotDestroyCrossLayerDetection:
     def test_no_hook_calls_prune_before(self):
         """Pruning is a REQUEST-level operation. A hook cannot know whether a
         sibling layer still needs a fire, so re-introducing a prune call into
-        the matcher would silently restore the bug above."""
-        import inspect
+        the matcher would silently restore the bug above.
 
-        src = inspect.getsource(LoadedSAE._match_edges)
-        assert "prune_before" not in src
+        R1-13: this used to grep `inspect.getsource(LoadedSAE._match_edges)`.
+        The matching loop moved to `_match_edges_impl` in F17 task 3.1, so
+        `LoadedSAE._match_edges` became a thin wrapper — a `prune_before` added
+        to the REAL matcher, resurrecting R1-01, left this green because it
+        inspected the wrong function. A source grep also cannot distinguish a
+        call from a mention in a comment.
+
+        Spy on the ring instead: it asserts the WIRING (nothing pruned during
+        the pass) rather than the text.
+        """
+        ring = EdgeFireRing(8)
+        pruned: list[int] = []
+        real_prune = ring.prune_before
+        ring.prune_before = lambda pos: (pruned.append(pos), real_prune(pos))[1]
+
+        rows = [[True, False], [False, True], [True, False], [False, True]]
+        sae = run(rows, config=make_config(max_lag=8), ring=ring)
+
+        assert sae._sensed_edges, "precondition: the pass must have matched"
+        assert pruned == [], (
+            f"the matcher pruned at {pruned} — a hook cannot know whether a "
+            "sibling layer still needs a fire (R1-01)"
+        )
 
     def test_the_ring_bounds_its_own_growth(self):
         """Without positional pruning the ring must still not grow without

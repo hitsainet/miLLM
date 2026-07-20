@@ -482,7 +482,13 @@ class TestEmitKeepsTheMostRecent:
             progress.progress_emitter.emit_circuit_sensing_event = original
 
         assert [p["id"] for p in sent] == [7, 8, 9, 10, 11]
-        assert svc._ws_dropped == 7
+        # R1-14: this asserted `_ws_dropped == 7`, PINNING the defect — it
+        # required a healthy flush to report the 7 events the per-flush cap
+        # declined as "dropped", which is a delivery-failure alarm on a system
+        # that is working. The cap is a throttle; those events are persisted
+        # and readable through the events API. Nothing was lost, so nothing is
+        # counted.
+        assert svc._ws_dropped == 0
 
 
 class TestWebSocketPayloadCarriesNoPromptText:
@@ -975,3 +981,63 @@ class TestR1RequestsSensedDistinguishesQuietFromDark:
         payload = svc.status(saes)
         model = CircuitSensingStatusResponse(**payload)
         assert model.model_dump()["requests_sensed"] == 1
+
+
+class TestR1WsDroppedCountsLossNotThrottling:
+    """F17 R1-14. `undelivered` was `len(payloads) - sent`, but the loop only
+    ATTEMPTS the last `_WS_MAX_PER_FLUSH`. A healthy 20-event flush reported
+    `ws_dropped: 15` — measured — conflating the intentional per-flush cap with
+    delivery failure and raising a dropped-events alarm on a working system.
+
+    The counter exists so a real discrepancy is observable; inflating it on the
+    happy path destroys that signal. Also the first coverage of the emit
+    FAILURE branch, which the R1 comment says it was written for."""
+
+    def _emitter(self, monkeypatch, fail_on=None):
+        import millm.sockets.progress as sp
+
+        sent: list[dict] = []
+        calls = {"n": 0}
+
+        def emit(payload):
+            calls["n"] += 1
+            if fail_on is not None and calls["n"] == fail_on:
+                raise RuntimeError("socket died")
+            sent.append(payload)
+
+        monkeypatch.setattr(
+            sp.progress_emitter, "emit_circuit_sensing_event", emit, raising=False
+        )
+        return sent
+
+    def test_a_healthy_flush_over_the_cap_drops_NOTHING(self, monkeypatch):
+        sent = self._emitter(monkeypatch)
+        svc = CircuitSensingService()
+        svc._emit([{"id": i} for i in range(20)])
+        assert len(sent) == svc._WS_MAX_PER_FLUSH
+        assert svc._ws_dropped == 0, (
+            f"ws_dropped={svc._ws_dropped} on a healthy flush — the per-flush "
+            "cap is a throttle, not a loss; those events are persisted and "
+            "readable through the events API"
+        )
+
+    def test_a_partial_failure_counts_only_what_was_attempted(self, monkeypatch):
+        """2 sent, then a raise: 3 of the 5 attempted did not land."""
+        self._emitter(monkeypatch, fail_on=3)
+        svc = CircuitSensingService()
+        svc._emit([{"id": i} for i in range(5)])
+        assert svc._ws_dropped == 3
+
+    def test_a_total_failure_counts_the_whole_attempt(self, monkeypatch):
+        self._emitter(monkeypatch, fail_on=1)
+        svc = CircuitSensingService()
+        svc._emit([{"id": i} for i in range(5)])
+        assert svc._ws_dropped == 5
+
+    def test_an_emit_failure_never_raises_into_the_caller(self, monkeypatch):
+        """`_emit` runs after persistence; a socket problem must not undo a
+        recorded observation."""
+        self._emitter(monkeypatch, fail_on=1)
+        svc = CircuitSensingService()
+        svc._emit([{"id": 1}])            # must not raise
+        assert svc.status({})["ws_dropped"] == 1

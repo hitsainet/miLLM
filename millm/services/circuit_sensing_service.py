@@ -852,6 +852,18 @@ class CircuitSensingService:
         if not payloads:
             return
         self.should_emit()
+        # R1-14: `undelivered` was `len(payloads) - sent`, but the loop only
+        # ever ATTEMPTS the last `_WS_MAX_PER_FLUSH`. A perfectly healthy
+        # 20-event flush therefore reported `ws_dropped: 15` — measured. That
+        # conflates the intentional per-flush cap with delivery FAILURE, and
+        # raises a dropped-events alarm on a system that is working. The
+        # counter exists to make a real discrepancy observable; inflating it on
+        # the happy path destroys exactly that signal.
+        #
+        # `ws_dropped` now counts only what was ATTEMPTED and did not land. The
+        # events the cap declined to send are a deliberate throttle, not a
+        # loss: they are persisted and readable through the events API.
+        attempted = payloads[-self._WS_MAX_PER_FLUSH :]
         sent = 0
         try:
             from millm.sockets.progress import progress_emitter
@@ -860,12 +872,12 @@ class CircuitSensingService:
             # the panel always showed a request's EARLIEST edges and never its
             # most recent — the opposite of the ring's own "recent history is
             # what matters" policy, and wrong for a live-observation surface.
-            for payload in payloads[-self._WS_MAX_PER_FLUSH :]:
+            for payload in attempted:
                 progress_emitter.emit_circuit_sensing_event(payload)
                 sent += 1
         except Exception:
             logger.warning("circuit_sensing_emit_failed", exc_info=False)
-        undelivered = len(payloads) - sent
+        undelivered = len(attempted) - sent
         if undelivered > 0:
             self.note_ws_dropped(undelivered)
 

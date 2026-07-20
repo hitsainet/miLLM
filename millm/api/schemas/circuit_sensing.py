@@ -78,6 +78,16 @@ class CircuitSensingStatusResponse(BaseModel):
     )
     events_recorded: int = 0
     ws_dropped: int = 0
+    ws_throttled: int = Field(
+        default=0,
+        description=(
+            "Events the per-flush cap declined to broadcast. NOT lost — they "
+            "are persisted and readable through the events API. Non-zero here "
+            "with `ws_dropped` zero means the live panel is showing a sample "
+            "of a busy request, which is working as designed; `ws_dropped` is "
+            "the field that indicates real delivery failure."
+        ),
+    )
     #: Persistent operator intent, distinct from runtime `armed`.
     enabled_circuits: list[dict[str, Any]] = Field(default_factory=list)
 

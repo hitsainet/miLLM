@@ -1513,3 +1513,58 @@ class TestR2TheCircuitBudgetIsDerivedHonestly:
             c.max_events_per_request = 0
         svc.begin_request("r", saes)
         assert svc._ctx.budget.cap >= 1
+
+
+class TestR2ThrottlingIsVisibleWithoutBeingCalledLoss:
+    """F17 R2-11. R1-14 correctly stopped counting cap-declined events as
+    DROPPED — they are persisted and readable through the events API, so
+    nothing is lost. But it left them invisible: with a 5-per-flush cap and a
+    20-event request, 75% of a busy request's events never reach the live panel
+    and no field said so. An operator comparing the panel against the events
+    API had no way to explain the gap."""
+
+    def _emitter(self, monkeypatch, fail_on=None):
+        import millm.sockets.progress as sp
+
+        calls = {"n": 0}
+
+        def emit(payload):
+            calls["n"] += 1
+            if fail_on is not None and calls["n"] == fail_on:
+                raise RuntimeError("socket died")
+
+        monkeypatch.setattr(
+            sp.progress_emitter, "emit_circuit_sensing_event", emit, raising=False
+        )
+
+    def test_throttling_is_counted_separately_from_loss(self, monkeypatch):
+        self._emitter(monkeypatch)
+        svc = CircuitSensingService()
+        svc._emit([{"id": i} for i in range(20)])
+        st = svc.status({})
+        assert st["ws_throttled"] == 15
+        assert st["ws_dropped"] == 0, "throttling must not read as delivery loss"
+
+    def test_a_healthy_small_flush_throttles_nothing(self, monkeypatch):
+        self._emitter(monkeypatch)
+        svc = CircuitSensingService()
+        svc._emit([{"id": i} for i in range(3)])
+        assert svc.status({})["ws_throttled"] == 0
+
+    def test_a_real_failure_still_counts_as_dropped_not_throttled(self, monkeypatch):
+        """The two must not blur: one is by design, the other is a fault."""
+        self._emitter(monkeypatch, fail_on=1)
+        svc = CircuitSensingService()
+        svc._emit([{"id": i} for i in range(5)])
+        st = svc.status({})
+        assert st["ws_dropped"] == 5
+        assert st["ws_throttled"] == 0
+
+    def test_ws_throttled_reaches_the_STATUS_PAYLOAD(self, monkeypatch):
+        from millm.api.schemas.circuit_sensing import CircuitSensingStatusResponse
+
+        self._emitter(monkeypatch)
+        svc = CircuitSensingService()
+        svc._emit([{"id": i} for i in range(20)])
+        model = CircuitSensingStatusResponse(**svc.status({}))
+        assert model.model_dump()["ws_throttled"] == 15

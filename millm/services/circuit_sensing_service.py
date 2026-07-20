@@ -106,6 +106,11 @@ class CircuitSensingService:
         #: -inf, not 0.0 — the FIRST flush must be allowed to emit.
         self._last_ws_emit_ts: float = float("-inf")
         self._ws_dropped: int = 0
+        #: R2-11: events the per-flush cap DECLINED to send. Distinct from
+        #: `ws_dropped`, which counts delivery FAILURES. Both are zero on a
+        #: healthy quiet system; only this one is non-zero on a healthy BUSY
+        #: one, which is the difference an operator needs to read the panel.
+        self._ws_throttled: int = 0
 
     _WS_MAX_PER_FLUSH = 5
     _WS_MIN_INTERVAL_S = 0.1
@@ -999,6 +1004,15 @@ class CircuitSensingService:
         # events the cap declined to send are a deliberate throttle, not a
         # loss: they are persisted and readable through the events API.
         attempted = payloads[-self._WS_MAX_PER_FLUSH :]
+        # R2-11: R1-14 correctly stopped counting these as DROPPED — they are
+        # persisted and readable through the events API, so nothing is lost.
+        # But it left them invisible: with a 5-per-flush cap and a 20-event
+        # request, 75% of a busy request's events never reach the live panel
+        # and no field said so. An operator comparing the panel with the events
+        # API had no way to explain the gap.
+        throttled = len(payloads) - len(attempted)
+        if throttled > 0:
+            self._ws_throttled += throttled
         sent = 0
         try:
             from millm.sockets.progress import progress_emitter
@@ -1084,6 +1098,10 @@ class CircuitSensingService:
             "requests_sensed": self._requests_sensed,
             "events_recorded": self._events_recorded,
             "ws_dropped": self._ws_dropped,
+            # Declined by the per-flush cap, NOT lost — they are in the events
+            # API. Non-zero here with ws_dropped zero means "the panel is
+            # showing a sample of a busy request", which is working as designed.
+            "ws_throttled": self._ws_throttled,
         }
 
     def note_paused(self, reason: Optional[str]) -> None:

@@ -2145,3 +2145,134 @@ class TestR3TheMergedDrainIsOrderedByPosition:
             "edges — the flush cap keeps the LAST entries, so order is what "
             "makes 'last' mean 'newest'"
         )
+
+
+class TestR3RoundOnesOwnFixesAreFinallyPinned:
+    """F17 R3-08/09/10. Three fixes made in earlier rounds had NO test at all —
+    each survives its mutation against the full 1796-test suite. The rounds
+    that made them verified the behaviour by hand and moved on, which is how an
+    unpinned fix gets silently reverted by the next refactor. Each protects an
+    operator-facing honesty signal."""
+
+    def test_the_LARGEST_max_activation_wins(self):
+        """R1's `_member_stats` fix. Reading the code exactly matters here: the
+        `max(prior, value)` branch is reached ONLY when `value` is a real
+        positive number, so `prior` is one too. The two versions therefore
+        differ only when a SMALLER value arrives after a larger one — my first
+        two fixtures used None, which takes the `setdefault` branch instead, and
+        both passed against the mutation.
+
+        Why it matters: theta is `epsilon * max_activation`. Keeping the
+        smaller value sets a threshold too low, so the member fires on
+        ordinary activity and the edge becomes a coincidence detector."""
+        svc = CircuitSensingService()
+        big = SimpleNamespace(feature_idx=1, max_activation=9.0)
+        small = SimpleNamespace(feature_idx=1, max_activation=1.0)
+        # SMALL first (via expanded_members), BIG second (the own feature).
+        # This order is the only one that distinguishes the two versions: with
+        # big first, `max(prior, value)` and `prior` both return big and the
+        # mutation is invisible. Determined by running both versions against
+        # every ordering rather than by reading the branch.
+        d = definition(
+            members=[
+                SimpleNamespace(layer=10, feature=big, expanded_members=[small]),
+                member(13, 2),
+            ]
+        )
+        assert svc._member_stats(d)[(10, 1)] == 9.0, (
+            "a later, smaller max_activation overwrote the real one — theta "
+            "would be set 9x too low and the member fires on anything"
+        )
+
+    def test_a_None_never_masks_a_real_max_activation(self):
+        """The other half of the same rule, via the `setdefault` branch: a None
+        from `expanded_members` must not hide the member's own real value, or a
+        sensable edge is dropped as `no_activation_threshold`."""
+        svc = CircuitSensingService()
+        blank = SimpleNamespace(feature_idx=1, max_activation=None)
+        real = SimpleNamespace(feature_idx=1, max_activation=4.0)
+        for members in (
+            [SimpleNamespace(layer=10, feature=real, expanded_members=[blank])],
+            [SimpleNamespace(layer=10, feature=blank, expanded_members=[real])],
+        ):
+            d = definition(members=members + [member(13, 2)])
+            assert svc._member_stats(d)[(10, 1)] == 4.0, (
+                "order-dependent masking: the edge would be dropped as "
+                "unsensable depending on iteration order"
+            )
+
+    def test_sensable_edges_counts_a_CROSS_LAYER_circuit_correctly(self):
+        """R1's fix: a circuit whose edges all flow L10->L13 reported
+        `sensable_edges=0` WHILE SENSING PERFECTLY, because the count came from
+        one layer's spec list. An operator reads 0 as 'sensing is broken'."""
+        svc = CircuitSensingService()
+        saes = two_saes()
+        svc.arm_for_circuit(circuit(), definition(), saes)
+        assert svc.is_armed is True
+        assert svc.status(saes)["sensable_edges"] == 1, (
+            "a cross-layer circuit reported zero sensable edges while armed "
+            "and sensing"
+        )
+
+    def test_overhead_does_not_carry_into_the_next_request(self):
+        """R1's fix: overhead was zeroed only at begin, so a layer that missed
+        begin re-contributed its stale overhead to the next request — inflating
+        the number that drives the `circuit_sensing_overhead_high` warning."""
+        svc = CircuitSensingService()
+        saes = two_saes()
+        svc.arm_for_circuit(circuit(), definition(), saes)
+        svc.begin_request("r1", saes)
+        saes[10]._edge_overhead_ms = 8.0
+        svc.collect_edges(saes)
+        assert svc.status(saes)["last_request_overhead_ms"] > 0
+
+        # Request 2 with layer 10 ABSENT from the begin map, so it never runs
+        # `begin_edge_sensing_request` and `_reset_edge_buffer` does not clear
+        # its overhead. That is the exact case R1's comment names — "a layer
+        # that missed begin re-contributed its stale overhead" — and the only
+        # one where the drain-time zeroing is observable. A test that gives
+        # every layer a clean begin passes against the mutation, because the
+        # reset already happened.
+        svc.close_request()
+        saes[10]._edge_overhead_ms = 8.0        # stale, as if from request 1
+        svc.begin_request("r2", {13: saes[13]})
+        svc.collect_edges(saes)
+        assert svc.status(saes)["last_request_overhead_ms"] == 0.0, (
+            "a layer that missed begin re-contributed its stale overhead, "
+            "inflating the number that drives the overhead_high warning"
+        )
+
+
+class TestR3TruncationCountsPerRequestNotPerDrain:
+    """F17 R3-07. `collect_edges` can run more than once for one boundary — a
+    retry, a second flush — and `_request_dark_layers` is reset only at begin.
+    So one request with a dark layer, drained three times, counted 1 -> 2 -> 3:
+    a counter on an evidence surface manufacturing data loss that never
+    happened.
+
+    R2-20 tested the drain-vs-reclaim pair for double-counting and missed this:
+    the same defect through the repeated-drain door."""
+
+    def _armed(self):
+        svc = CircuitSensingService()
+        saes = two_saes()
+        svc.arm_for_circuit(circuit(), definition(), saes)
+        return svc, saes
+
+    def test_repeated_drains_of_one_request_count_once(self):
+        svc, saes = self._armed()
+        svc.begin_request("r1", {10: saes[10]})     # layer 13 dark
+        for _ in range(3):
+            svc.collect_edges(saes)
+        assert svc.status(saes)["requests_truncated"] == 1, (
+            "one request counted once per drain — manufactured data loss"
+        )
+
+    def test_a_genuinely_second_request_still_counts(self):
+        """The guard must not swing the other way and stop counting."""
+        svc, saes = self._armed()
+        for rid in ("r1", "r2"):
+            svc.begin_request(rid, {10: saes[10]})
+            svc.collect_edges(saes)
+            svc.close_request()
+        assert svc.status(saes)["requests_truncated"] == 2

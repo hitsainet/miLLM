@@ -98,6 +98,9 @@ class CircuitSensingService:
         #: Armed layers with no usable SAE at begin time — dark for the
         #: current request, and reported as incomplete rather than complete.
         self._request_dark_layers: list[int] = []
+        #: Whether the OPEN request has already been counted as truncated, so a
+        #: second drain of the same boundary cannot count it again (R3-07).
+        self._request_counted_truncated: bool = False
         self._unsensable: list[UnsensableEdge] = []
         self._max_token_lag: int = settings.CIRCUIT_SENSING_MAX_TOKEN_LAG
         self._last_request_overhead_ms: float = 0.0
@@ -605,6 +608,7 @@ class CircuitSensingService:
                     pass
             if undrained:
                 self._requests_truncated += 1
+                self._request_counted_truncated = True
                 logger.warning(
                     "circuit_sensing_stale_observations_discarded",
                     events=undrained,
@@ -691,6 +695,7 @@ class CircuitSensingService:
         # dishonesty as R1-04's stale-after-disarm, inverted.
         self._last_request_truncated_layers = []
         self._request_dark_layers = []
+        self._request_counted_truncated = False
         began = False
         # R1-02: a layer that cannot be bound is DARK for this request, and
         # `began` used to be True if ANY layer began. Verified by execution
@@ -770,6 +775,10 @@ class CircuitSensingService:
         Overhead is SUMMED across the SAEs: one circuit request touches N
         hooks, so a per-SAE assignment would under-report by a factor of N.
         """
+        # Which SAEs actually opened this boundary. `_edge_began` is already
+        # cleared by `collect_sensed_edges` below, so the record kept at bind
+        # time (R3-02) is the only reliable answer here (R3-11).
+        begun = {id(s) for s in self._bound_saes}
         request_id = ""
         merged: list[Any] = []
         truncated = False
@@ -792,11 +801,28 @@ class CircuitSensingService:
             # becomes "maybe".
             if trunc:
                 truncated_layers.append(layer)
-            overhead += float(getattr(sae, "_edge_overhead_ms", 0.0) or 0.0)
             # R1: zeroed only at begin, so a layer that missed begin (the
             # `continue` in begin_request) re-contributed its stale overhead to
             # the next request, inflating the number that drives the warning.
+            #
+            # R3-11: and R1's fix zeroed it AFTER summing, so the stale value
+            # was still counted ONCE before being cleared — the very number the
+            # comment says it prevents. Measured: a layer absent from begin
+            # carried 8.0ms into the next request's total and tripped
+            # `circuit_sensing_overhead_high`. Only layers that BEGAN this
+            # request contribute; a layer that missed begin has no overhead
+            # belonging to this request, so its stale value is discarded rather
+            # than summed.
+            layer_overhead = float(getattr(sae, "_edge_overhead_ms", 0.0) or 0.0)
+            # Belt and braces: `_reset_edge_buffer` already clears this at
+            # begin for any layer that begins, so mutating this line away is
+            # harmless TODAY. Kept because a layer that misses begin has no
+            # other point of clearing, and its stale value would otherwise grow
+            # without bound across requests. Recorded rather than pinned — a
+            # test asserting a redundant line would pass for the wrong reason.
             sae._edge_overhead_ms = 0.0
+            if id(sae) in begun:
+                overhead += layer_overhead
             member_fires += int(getattr(sae, "_edge_member_fires", 0) or 0)
         self._last_request_overhead_ms = overhead
         self._last_request_member_fires = member_fires
@@ -821,7 +847,16 @@ class CircuitSensingService:
         self._last_request_truncated_layers = sorted(
             set(truncated_layers) | set(self._request_dark_layers)
         )
-        if self._last_request_truncated_layers:
+        # R3-07: count once per REQUEST, not once per drain. `collect_edges`
+        # can run more than once for one boundary (a retry, a second flush),
+        # and `_request_dark_layers` is reset only at begin — so one request
+        # with a dark layer, drained three times, read 1 -> 2 -> 3. A counter
+        # on an evidence surface manufacturing data loss that never happened.
+        #
+        # R2-20 tested the drain-vs-reclaim pair for double-counting and missed
+        # this one: the same defect through the repeated-drain door.
+        if self._last_request_truncated_layers and not self._request_counted_truncated:
+            self._request_counted_truncated = True
             self._requests_truncated += 1
         return request_id, merged, truncated
 

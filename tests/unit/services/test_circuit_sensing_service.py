@@ -571,7 +571,14 @@ class TestAmbientFiredCountHonoursTheContract:
         saes = two_saes()
         svc.arm_for_circuit(circuit(), definition(), saes)
         if probe is not None:
-            svc._armed_saes = {layer: probe for layer in svc._armed_layers}
+            # R1-15: this assigned the SAME probe to every layer, so the
+            # fixture agreed with itself and could never observe that
+            # `_ambient_fired_count` returned whichever layer came first.
+            # Exactly ONE layer answers here; the multi-answer case is tested
+            # explicitly below.
+            svc._armed_saes = {svc._armed_layers[0]: probe}
+            for layer in svc._armed_layers[1:]:
+                svc._armed_saes[layer] = self._Probe(enabled=False)
         return svc, saes
 
     def test_it_is_none_when_monitoring_is_not_running(self):
@@ -1041,3 +1048,57 @@ class TestR1WsDroppedCountsLossNotThrottling:
         svc = CircuitSensingService()
         svc._emit([{"id": 1}])            # must not raise
         assert svc.status({})["ws_dropped"] == 1
+
+
+class TestR1AmbientCountIsNeverOrderDependent:
+    """F17 R1-15. `_ambient_fired_count` returned the FIRST armed layer's
+    count. Measured with two monitored layers, the identical state produced 3
+    or 9 purely by reordering `_armed_layers`.
+
+    The field is documented as the count across the ENTIRE SAE and 'never
+    estimated', and it shares a column name with Feature 11 rows. A circuit
+    spans layers, so 'the entire SAE' has no single answer — picking one
+    layer's number is a fabricated value on a comparison column.
+
+    The old fixture could not see this: it assigned the SAME probe object to
+    every layer, so the answer agreed with itself no matter which layer won."""
+
+    class _P:
+        def __init__(self, n, enabled=True):
+            self.is_monitoring_enabled = enabled
+            self._monitored_features = None
+            self._n = n
+
+        def get_feature_activations_for_item(self, _i):
+            row = torch.zeros(10)
+            row[: self._n] = 1.0
+            return row.unsqueeze(0)
+
+    def _svc(self, probes):
+        svc = CircuitSensingService()
+        saes = two_saes()
+        svc.arm_for_circuit(circuit(), definition(), saes)
+        svc._armed_saes = probes
+        return svc
+
+    def test_two_answering_layers_produce_the_SAME_result_either_order(self):
+        svc = self._svc({10: self._P(3), 13: self._P(9)})
+        svc._armed_layers = [10, 13]
+        first = svc._ambient_fired_count()
+        svc._armed_layers = [13, 10]
+        second = svc._ambient_fired_count()
+        assert first == second, (
+            f"{first} vs {second} — the answer changed with layer order alone"
+        )
+
+    def test_an_ambiguous_count_is_declined_not_guessed(self):
+        """None means 'not knowable', which is the contract. Reporting one
+        layer's number would be an estimate on a column that promises never to
+        estimate."""
+        svc = self._svc({10: self._P(3), 13: self._P(9)})
+        assert svc._ambient_fired_count() is None
+
+    def test_exactly_one_answering_layer_still_reports(self):
+        """The fix must not silence the case that genuinely has one answer."""
+        svc = self._svc({10: self._P(3), 13: self._P(9, enabled=False)})
+        assert svc._ambient_fired_count() == 3

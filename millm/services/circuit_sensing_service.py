@@ -774,6 +774,19 @@ class CircuitSensingService:
         against everything else", and writing it to this column would make an
         F15 row incomparable with an F11 row carrying the same field name.
         """
+        # R1-15: this returned the FIRST armed layer's count. With two
+        # monitored layers the answer depended silently on layer ordering —
+        # measured, the identical state produced 3 or 9 purely by reordering
+        # `_armed_layers`. The field is documented as the count across the
+        # ENTIRE SAE and "never estimated"; an arbitrary layer's count IS an
+        # estimate, and one that changes under a stable state.
+        #
+        # A circuit spans layers, so "the entire SAE" has no single answer
+        # here. Answer only when exactly ONE layer can supply it; when several
+        # can, they are different SAEs measuring different feature spaces and
+        # picking one would be a fabricated number on a comparison column that
+        # F11 rows also use. None means "not knowable", which is the contract.
+        counts: list[int] = []
         for layer in self._armed_layers:
             sae = self._armed_saes.get(layer)
             if sae is None:
@@ -785,9 +798,20 @@ class CircuitSensingService:
                 acts = sae.get_feature_activations_for_item(0)
                 if acts is None:
                     continue
-                return int((acts[-1] > 0).sum().item())
+                counts.append(int((acts[-1] > 0).sum().item()))
             except Exception:
                 continue
+        if len(counts) == 1:
+            return counts[0]
+        if len(counts) > 1:
+            logger.info(
+                "circuit_ambient_count_ambiguous",
+                layers=len(counts),
+                detail=(
+                    "several armed layers can supply an ambient count; they "
+                    "measure different feature spaces, so none is reported"
+                ),
+            )
         return None
 
     @staticmethod

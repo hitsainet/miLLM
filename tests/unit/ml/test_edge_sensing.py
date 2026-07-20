@@ -389,3 +389,179 @@ class TestDeviceMigration:
         assert sae._W_enc_e is not None and sae._b_enc_e is not None
         assert str(sae._W_enc_e.device) == "cpu"
         assert str(cfg.thresholds.device) == "cpu"
+
+
+class TestUpstreamNoiseDoesNotDestroyCrossLayerDetection:
+    """R1 CRITICAL regression.
+
+    prune_before was called per position INSIDE _match_edges, so the upstream
+    layer's hook walked an entire prefill and pruned the ring down to
+    (last_pos - max_lag) before the downstream layer's hook ever ran. Any
+    ordinary traffic on the upstream layer therefore destroyed the fire the
+    downstream needed — cross-layer sensing, the whole point of the feature,
+    went silently dark while status still reported "armed".
+
+    The original tests missed it because they used single-layer edges and
+    quiet rows: _match_edges `continue`s on a row where nothing fired, so the
+    prune never ran in the fixtures.
+    """
+
+    def test_a_busy_upstream_layer_still_detects_the_edge(self):
+        spec = make_spec(up_layer=10, down_layer=13, key="1@10->2@13")
+        ring = EdgeFireRing(3)
+
+        # The upstream SAE walks the WHOLE prefill: the real fire is at
+        # position 2, then a sibling member keeps firing at 6..11.
+        up_spec = EdgeSpec(**{**spec.__dict__, "up_col": 0, "down_col": -1})
+        up_rows = [[False, False]] * 12
+        up_rows[2] = [True, False]
+        for p in range(6, 12):
+            up_rows[p] = [True, False]
+        run(up_rows, config=make_config(edges=[up_spec], max_lag=3, layer=10),
+            ring=ring, base=0)
+
+        # THEN the downstream SAE walks the same prefill and fires at 4.
+        down_spec = EdgeSpec(**{**spec.__dict__, "up_col": -1, "down_col": 1})
+        down_rows = [[False, False]] * 12
+        down_rows[4] = [False, True]
+        down = run(down_rows,
+                   config=make_config(edges=[down_spec], max_lag=3, layer=13),
+                   ring=ring, base=0)
+
+        assert len(down._sensed_edges) == 1, (
+            "the upstream layer pruned away the pos-2 fire before the "
+            "downstream hook ran"
+        )
+        ev = down._sensed_edges[0]
+        assert (ev.up_pos, ev.down_pos, ev.token_lag) == (2, 4, 2)
+
+    def test_no_hook_calls_prune_before(self):
+        """Pruning is a REQUEST-level operation. A hook cannot know whether a
+        sibling layer still needs a fire, so re-introducing a prune call into
+        the matcher would silently restore the bug above."""
+        import inspect
+
+        src = inspect.getsource(LoadedSAE._match_edges)
+        assert "prune_before" not in src
+
+    def test_the_ring_bounds_its_own_growth(self):
+        """Without positional pruning the ring must still not grow without
+        bound over a long request."""
+        ring = EdgeFireRing(4)
+        for pos in range(5000):
+            ring.record_up("e", pos, 1.0)
+        assert len(ring._fires["e"]) <= EdgeFireRing._MAX_FIRES_PER_EDGE
+
+    def test_bounding_keeps_the_newest_fires(self):
+        """match_down reports the nearest antecedent, so recent history is
+        what must survive."""
+        ring = EdgeFireRing(4)
+        for pos in range(EdgeFireRing._MAX_FIRES_PER_EDGE + 50):
+            ring.record_up("e", pos, 1.0)
+        newest = EdgeFireRing._MAX_FIRES_PER_EDGE + 49
+        assert ring.match_down("e", newest + 1) == (newest, 1.0)
+
+
+class TestPositionOffsetsStayInSync:
+    """R1 CRITICAL: the early returns skipped the `finally` that advances
+    _edge_token_offset, so a suppressed/unarmed/batched pass left one SAE's
+    offset behind its siblings'. The ring is keyed on ABSOLUTE position and
+    shared, so that silently shifts one layer's coordinates relative to
+    another's — fabricating matches and losing real ones."""
+
+    def test_a_suppressed_pass_still_advances_the_offset(self):
+        sae = real_sae()
+        sae.arm_edge_sensing(make_config(), EdgeFireRing(4))
+        sae.begin_edge_sensing_request("req-1")
+        with sae.suppressed():
+            sae._sense_edges(hidden({1: 2.0}, {2: 2.0}, {1: 0.0}))
+        assert sae._edge_token_offset == 3
+
+    def test_a_batched_pass_still_advances_the_offset(self):
+        sae = real_sae()
+        sae.arm_edge_sensing(make_config(), EdgeFireRing(4))
+        sae.begin_edge_sensing_request("req-1")
+        batched = hidden({1: 2.0}, {2: 2.0}).unsqueeze(0).repeat(3, 1, 1)
+        sae._sense_edges(batched)
+        assert sae._edge_token_offset == 2
+
+    def test_two_saes_stay_aligned_when_one_is_suppressed(self):
+        """The failure this prevents: sibling coordinates drift apart."""
+        up, down = real_sae(), real_sae()
+        ring = EdgeFireRing(8)
+        up.arm_edge_sensing(make_config(layer=10), ring)
+        down.arm_edge_sensing(make_config(layer=13), ring)
+        up.begin_edge_sensing_request("r")
+        down.begin_edge_sensing_request("r")
+
+        with up.suppressed():
+            up._sense_edges(hidden({1: 0.0}, {1: 0.0}))
+        down._sense_edges(hidden({1: 0.0}, {1: 0.0}))
+        assert up._edge_token_offset == down._edge_token_offset == 2
+
+
+class TestColumnValidation:
+    def test_an_out_of_range_column_is_refused_at_arm_time(self):
+        """R1 CRITICAL: an IndexError in the matcher was swallowed by the
+        broad except, abandoning the ENTIRE pass — every edge, including
+        upstream recording — rather than one bad spec."""
+        sae = real_sae()
+        bad = EdgeSpec(**{**make_spec().__dict__, "down_col": 99})
+        with pytest.raises(ValueError, match="column out of range"):
+            sae.arm_edge_sensing(make_config(edges=[bad]), EdgeFireRing(4))
+
+
+class TestSaturationLoadShedding:
+    """R1 CRITICAL: the per-request cap bounds OUTPUT, but the cost of finding
+    fires is paid first — a miscalibrated threshold on a long prefill cost
+    1430ms inside the forward hook against a 5ms budget."""
+
+    def _saturating(self, seq=512):
+        sae = real_sae()
+        cfg = make_config()
+        cfg.thresholds = torch.tensor([0.0001, 0.0001])
+        cfg.max_events_per_request = 20
+        sae.arm_edge_sensing(cfg, EdgeFireRing(4))
+        sae.begin_edge_sensing_request("r")
+        return sae, torch.rand(seq, D_IN) + 1.0
+
+    def test_a_saturated_pass_is_shed_and_flagged(self):
+        sae, hs = self._saturating(seq=4096)
+        sae._sense_edges(hs)
+        assert sae._edge_truncated is True, "shedding must be visible, not silent"
+        assert sae._edge_saturation_warned is True
+
+    def test_a_saturated_pass_stays_inside_the_latency_budget(self):
+        import time
+
+        sae, hs = self._saturating(seq=4096)
+        t = time.perf_counter()
+        sae._sense_edges(hs)
+        ms = (time.perf_counter() - t) * 1000
+        assert ms < 50.0, f"saturated pass cost {ms:.1f}ms in the forward hook"
+
+    def test_an_ordinary_pass_is_not_shed(self):
+        sae = real_sae()
+        sae.arm_edge_sensing(make_config(max_lag=16), EdgeFireRing(16))
+        sae.begin_edge_sensing_request("r")
+        sae._sense_edges(hidden({1: 2.0}, {2: 2.0}))
+        assert len(sae._sensed_edges) == 1
+        assert sae._edge_saturation_warned is False
+
+    def test_warn_flags_reset_per_request(self):
+        """R1: never reset, so a later independent violation went unlogged."""
+        sae, hs = self._saturating(seq=4096)
+        sae._sense_edges(hs)
+        assert sae._edge_saturation_warned is True
+        sae.begin_edge_sensing_request("r2")
+        assert sae._edge_saturation_warned is False
+        assert sae._edge_batch_warned is False
+
+
+class TestCollectRequiresABoundary:
+    def test_collect_without_begin_returns_nothing(self):
+        """F11 parity: draining without an open boundary would surface stale
+        edges attributed to an empty request_id."""
+        sae = real_sae()
+        sae.arm_edge_sensing(make_config(), EdgeFireRing(4))
+        assert sae.collect_sensed_edges() == ("", [], False)

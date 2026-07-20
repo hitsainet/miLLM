@@ -22,6 +22,10 @@ from millm.ml.sae_config import SAEConfig
 
 logger = logging.getLogger(__name__)
 
+#: Floor for the per-pass fire budget (see _match_edges). Below this even a
+#: tiny cap should still tolerate an ordinarily busy pass.
+_EDGE_FIRE_BUDGET_MIN = 2048
+
 
 @dataclass
 class SensingConfig:
@@ -132,8 +136,18 @@ class EdgeFireRing:
         #: edge_key -> list of (abs_pos, activation), ascending by position.
         self._fires: dict[str, list[tuple[int, float]]] = {}
 
+    #: Per-edge upstream-fire retention. The ring cannot prune by position —
+    #: see prune_before — so it bounds memory by count instead. Generous
+    #: relative to any plausible lag window; the matcher filters by window.
+    _MAX_FIRES_PER_EDGE = 512
+
     def record_up(self, edge_key: str, pos: int, act: float) -> None:
-        self._fires.setdefault(edge_key, []).append((pos, float(act)))
+        fires = self._fires.setdefault(edge_key, [])
+        fires.append((pos, float(act)))
+        if len(fires) > self._MAX_FIRES_PER_EDGE:
+            # Drop the OLDEST: the newest antecedent is the one match_down
+            # reports, so recent history is what matters.
+            del fires[: len(fires) - self._MAX_FIRES_PER_EDGE]
 
     def match_down(self, edge_key: str, down_pos: int) -> Optional[tuple[int, float]]:
         """Newest upstream fire STRICTLY before down_pos and within the lag.
@@ -154,7 +168,19 @@ class EdgeFireRing:
         return best
 
     def prune_before(self, pos: int) -> None:
-        """Drop fires that can no longer match anything at or after `pos`."""
+        """Drop fires that can no longer match anything at or after `pos`.
+
+        MUST NOT be called from a hook. R1 CRITICAL: this was called per
+        position inside `_match_edges`, so the UPSTREAM layer's hook walked an
+        entire prefill and pruned the ring down to (last_pos - max_lag) before
+        the DOWNSTREAM layer's hook ever ran — destroying the very fires the
+        downstream needed and silently killing cross-layer detection, the
+        whole point of the feature, while status still reported "armed".
+
+        A hook cannot know whether a sibling layer still needs a fire, so
+        pruning is a REQUEST-level operation: only CircuitSensingService, which
+        knows when every layer has finished a request, may call it.
+        """
         cutoff = pos - self._max_lag
         for key, fires in list(self._fires.items()):
             kept = [f for f in fires if f[0] >= cutoff]
@@ -318,6 +344,7 @@ class LoadedSAE:
         self._edge_began: bool = False
         self._edge_request_id: str = ""
         self._edge_batch_warned: bool = False
+        self._edge_saturation_warned: bool = False
         self._edge_overhead_ms: float = 0.0
 
         # Monitoring state
@@ -705,6 +732,9 @@ class LoadedSAE:
         self._sensing_done = False
         self._sensing_truncated = False
         self._sensing_overhead_ms = 0.0
+        # Pre-existing (F11): never reset, so after one warning a later
+        # independent batching violation went unlogged for the SAE's lifetime.
+        self._sensing_batch_warned = False
 
     def begin_sensing_request(self, request_id: str) -> None:
         """
@@ -897,6 +927,22 @@ class LoadedSAE:
             self._edge_thresholds_cpu = [
                 float(v) for v in config.thresholds.to("cpu", torch.float32)
             ]
+        # R1 CRITICAL: an out-of-range up_col/down_col raised IndexError inside
+        # the matcher, which the broad `except` swallowed — abandoning the
+        # ENTIRE pass (every edge, including upstream recording) rather than
+        # one bad spec. Refuse at arm time where it is a clean error.
+        width = len(config.member_indices)
+        bad_cols = [
+            spec.edge_key
+            for spec in config.edges
+            if spec.up_col >= width or spec.down_col >= width
+        ]
+        if bad_cols:
+            raise ValueError(
+                f"edge sensing column out of range for layer {config.layer} "
+                f"(slice width={width}): {bad_cols[:5]}"
+            )
+
         self._edge_sensing = config
         self._edge_ring = ring
         self._reset_edge_buffer()
@@ -929,6 +975,11 @@ class LoadedSAE:
         self._edge_began = False
         self._edge_request_id = ""
         self._edge_overhead_ms = 0.0
+        # R1: these were never reset, so after one warning a LATER independent
+        # violation went unlogged for the SAE's lifetime. (Feature 11 has the
+        # identical latent bug in _sensing_batch_warned — fixed there too.)
+        self._edge_batch_warned = False
+        self._edge_saturation_warned = False
 
     def begin_edge_sensing_request(self, request_id: str) -> None:
         """Open a request boundary. The CALLER clears the shared ring once for
@@ -940,6 +991,10 @@ class LoadedSAE:
 
     def collect_sensed_edges(self) -> tuple[str, list["SensedEdge"], bool]:
         """Drain this SAE's edges and close the boundary."""
+        if not self._edge_began:
+            # F11 parity: draining without an open boundary would surface stale
+            # edges attributed to an empty request_id.
+            return "", [], False
         request_id = self._edge_request_id
         edges = self._sensed_edges
         truncated = self._edge_truncated
@@ -954,9 +1009,25 @@ class LoadedSAE:
         Called from the hook BEFORE apply_steering so positions reflect the
         pre-steer residual read. Never raises into the forward pass.
         """
+        # R1 CRITICAL: these early returns skip the `finally` that advances
+        # _edge_token_offset, so a single suppressed or unarmed pass left THIS
+        # SAE's offset behind its siblings'. Because the ring is keyed on
+        # absolute position and SHARED, that silently shifts one layer's
+        # coordinates relative to another's for the rest of the request —
+        # fabricating matches and losing real ones. Feature 11 tolerates the
+        # same drift because its buffer is self-contained; F15 cannot.
+        # Advance the offset on EVERY pass, then decide whether to sense.
+        seq = (
+            hidden_states.shape[1]
+            if hidden_states.dim() == 3
+            else hidden_states.shape[0]
+        )
         if (self._suppressed or self._edge_sensing is None
                 or not self._edge_began or self._W_enc_e is None
                 or self._edge_ring is None):
+            self._edge_token_offset += seq
+            if self._edge_phase == "prefill":
+                self._edge_phase = "decode"
             return
         import time as _time
 
@@ -972,6 +1043,12 @@ class LoadedSAE:
                     "edge_sensing_skipped_batched_pass: batch=%d — armed edge "
                     "sensing expects the serial path", hidden_states.shape[0],
                 )
+            # Advance here too — see the guard above. A batched pass that left
+            # the offset behind would desynchronise this SAE from its siblings
+            # for the remainder of the request.
+            self._edge_token_offset += seq
+            if self._edge_phase == "prefill":
+                self._edge_phase = "decode"
             return
         x = hidden_states[0] if hidden_states.dim() == 3 else hidden_states
         seq_len = x.shape[0]
@@ -1016,24 +1093,70 @@ class LoadedSAE:
             return
         phase = self._edge_phase
 
-        for local in range(seq_len):
-            abs_pos = base + local
-            row_fired = fired_cpu[local]
-            if not bool(row_fired.any()):
-                continue
-            row_acts = acts_cpu[local]
+        # R1 CRITICAL: the previous shape was a positions x edges Python loop
+        # doing a scalar tensor read per edge per position — measured at 1430ms
+        # inside the forward hook on a 4096-token prefill against a 5ms budget
+        # (286x). Vectorise: find the fired positions PER COLUMN once, then
+        # iterate only over actual fires. Cost now scales with the number of
+        # fires, not with sequence_length x edge_count.
+        n_cols = fired_cpu.shape[-1] if fired_cpu.dim() > 1 else 0
 
-            for spec in config.edges:
-                # Upstream half — only if this SAE owns the upstream layer.
-                if spec.up_col >= 0 and bool(row_fired[spec.up_col]):
-                    ring.record_up(
-                        spec.edge_key, abs_pos, float(row_acts[spec.up_col])
-                    )
-                # Downstream half — only if this SAE owns the downstream layer.
-                if spec.down_col >= 0 and bool(row_fired[spec.down_col]):
-                    match = ring.match_down(spec.edge_key, abs_pos)
-                    if match is None:
-                        continue
+        # Shed load BEFORE building the event list. The per-request cap bounds
+        # the OUTPUT, but the cost of finding fires is paid first — a
+        # pathologically low threshold on a long prefill fired on nearly every
+        # (position, member) pair and cost 189ms inside the forward hook even
+        # though only 20 events survived. When a pass is this saturated the
+        # thresholds are miscalibrated and the observations are noise, so
+        # skipping is strictly better than stalling generation to collect it.
+        total_fires = int(fired_cpu.sum())
+        budget = max(
+            config.max_events_per_request * 8, _EDGE_FIRE_BUDGET_MIN
+        )
+        if total_fires > budget:
+            if not self._edge_saturation_warned:
+                self._edge_saturation_warned = True
+                logger.warning(
+                    "edge_sensing_pass_saturated: fires=%d budget=%d seq=%d — "
+                    "thresholds are likely miscalibrated; skipping this pass",
+                    total_fires, budget, seq_len,
+                )
+            self._edge_truncated = True
+            return
+
+        fired_positions: list[list[int]] = [[] for _ in range(n_cols)]
+        for col in range(n_cols):
+            nz = fired_cpu[:, col].nonzero()
+            if nz.numel():
+                fired_positions[col] = nz.flatten().tolist()
+
+        # (local_pos, spec, is_upstream) events, processed in position order so
+        # an upstream fire at p is visible to a downstream fire at p+1 within
+        # the same pass.
+        events: list[tuple[int, int, bool]] = []
+        for spec_i, spec in enumerate(config.edges):
+            if 0 <= spec.up_col < n_cols:
+                for local in fired_positions[spec.up_col]:
+                    events.append((local, spec_i, True))
+            if 0 <= spec.down_col < n_cols:
+                for local in fired_positions[spec.down_col]:
+                    events.append((local, spec_i, False))
+        if not events:
+            return
+        # Upstream before downstream at the same position, so a same-position
+        # co-fire still does NOT match (match_down requires strictly before).
+        events.sort(key=lambda e: (e[0], not e[2]))
+
+        for local, spec_i, is_up in events:
+            abs_pos = base + local
+            spec = config.edges[spec_i]
+            row_acts = acts_cpu[local]
+            if is_up:
+                ring.record_up(
+                    spec.edge_key, abs_pos, float(row_acts[spec.up_col])
+                )
+            else:
+                match = ring.match_down(spec.edge_key, abs_pos)
+                if match is not None:
                     up_pos, up_act = match
                     if len(self._sensed_edges) >= config.max_events_per_request:
                         self._edge_truncated = True
@@ -1057,8 +1180,6 @@ class LoadedSAE:
                             edge_type=spec.edge_type,
                         )
                     )
-            # Fires older than the window can never match again.
-            ring.prune_before(abs_pos)
 
     @contextmanager
     def suppressed(self) -> Iterator[None]:

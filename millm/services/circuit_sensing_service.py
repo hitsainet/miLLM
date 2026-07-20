@@ -73,6 +73,7 @@ class CircuitSensingService:
         self._armed_layers: list[int] = []
         self._configs: dict[int, CircuitSensingConfig] = {}
         self._ring: Optional[EdgeFireRing] = None
+        self._armed_saes: dict[int, LoadedSAE] = {}
         self._unsensable: list[UnsensableEdge] = []
         self._max_token_lag: int = settings.CIRCUIT_SENSING_MAX_TOKEN_LAG
         self._last_request_overhead_ms: float = 0.0
@@ -242,9 +243,21 @@ class CircuitSensingService:
                 idx = getattr(feat, "feature_idx", None)
                 if idx is None:
                     continue
-                out.setdefault(
-                    (member.layer, int(idx)), getattr(feat, "max_activation", None)
-                )
+                key = (member.layer, int(idx))
+                value = getattr(feat, "max_activation", None)
+                # R1: setdefault let a None from expanded_members mask the
+                # member's own real max_activation, declaring a perfectly
+                # sensable edge unsensable depending on iteration order. Keep
+                # the LARGEST usable value seen for a key.
+                try:
+                    value = float(value) if value is not None else None
+                except (TypeError, ValueError):
+                    value = None
+                if value is not None and value > 0:
+                    prior = out.get(key)
+                    out[key] = value if prior is None else max(prior, value)
+                else:
+                    out.setdefault(key, None)
         return out
 
     def _assemble(
@@ -336,6 +349,14 @@ class CircuitSensingService:
             )
             return unsensable
 
+        # R1: arming never released the PREVIOUS set, so re-arming (a second
+        # circuit, or the same one after an SAE change) left the old SAEs
+        # hooked forever — leaking GPU work and letting a stale layer keep
+        # writing into a ring nobody reads. This makes several other R1
+        # findings reachable in practice rather than in theory.
+        if self.is_armed:
+            self.disarm(self._armed_saes or layer_saes)
+
         ring = EdgeFireRing(self._max_token_lag)
         armed: list[int] = []
         try:
@@ -355,6 +376,9 @@ class CircuitSensingService:
         self._circuit_id = circuit.id
         self._circuit_name = getattr(circuit, "name", None)
         self._armed_layers = sorted(configs)
+        # Remember the exact SAEs armed: a later disarm must reach THESE, not
+        # whatever happens to be attached at that moment.
+        self._armed_saes = {lay: layer_saes[lay] for lay in configs}
         self._configs = configs
         self._ring = ring
         self._unsensable = unsensable
@@ -362,15 +386,19 @@ class CircuitSensingService:
             "circuit_sensing_armed",
             circuit_id=circuit.id,
             layers=self._armed_layers,
-            sensable_edges=sum(
-                1 for s in configs[self._armed_layers[0]].edges if s.up_col >= 0
+            sensable_edges=len(
+                {spec.edge_key for cfg in configs.values() for spec in cfg.edges}
             ),
             unsensable_edges=len(unsensable),
         )
         return unsensable
 
     def disarm(self, layer_saes: Optional[dict[int, LoadedSAE]] = None) -> None:
-        for sae in (layer_saes or {}).values():
+        # Union of what was armed and what the caller offers: an SAE swapped
+        # out from under us must still be released.
+        targets = dict(self._armed_saes)
+        targets.update(layer_saes or {})
+        for sae in targets.values():
             try:
                 sae.disarm_edge_sensing()
             except Exception:
@@ -380,6 +408,7 @@ class CircuitSensingService:
         self._armed_layers = []
         self._configs = {}
         self._ring = None
+        self._armed_saes = {}
         self._unsensable = []
 
     # ------------------------------------------------------------------
@@ -435,6 +464,10 @@ class CircuitSensingService:
             merged.extend(edges)
             truncated = truncated or trunc
             overhead += float(getattr(sae, "_edge_overhead_ms", 0.0) or 0.0)
+            # R1: zeroed only at begin, so a layer that missed begin (the
+            # `continue` in begin_request) re-contributed its stale overhead to
+            # the next request, inflating the number that drives the warning.
+            sae._edge_overhead_ms = 0.0
         self._last_request_overhead_ms = overhead
         if overhead > settings.CIRCUIT_SENSING_MAX_OVERHEAD_MS:
             logger.warning(
@@ -576,22 +609,29 @@ class CircuitSensingService:
             return None, None, None
 
     def _emit(self, payloads: list[dict[str, Any]]) -> None:
-        """Broadcast at most _WS_MAX_PER_FLUSH events, throttled."""
+        """Broadcast at most _WS_MAX_PER_FLUSH events per flush.
+
+        Everything not delivered is COUNTED. R1: an emit failure was swallowed
+        without incrementing ws_dropped, so status reported events recorded,
+        ws_dropped=0, and the UI showed nothing — the discrepancy was
+        unobservable, which is the "silently dark" mode this feature exists to
+        avoid.
+        """
         if not payloads:
             return
-        if not self.should_emit():
-            self.note_ws_dropped(len(payloads))
-            return
+        self.should_emit()
+        sent = 0
         try:
             from millm.sockets.progress import progress_emitter
 
             for payload in payloads[: self._WS_MAX_PER_FLUSH]:
                 progress_emitter.emit_circuit_sensing_event(payload)
-            overflow = len(payloads) - self._WS_MAX_PER_FLUSH
-            if overflow > 0:
-                self.note_ws_dropped(overflow)
+                sent += 1
         except Exception:
             logger.warning("circuit_sensing_emit_failed", exc_info=False)
+        undelivered = len(payloads) - sent
+        if undelivered > 0:
+            self.note_ws_dropped(undelivered)
 
     def summarize(self, edge: Any) -> str:
         """One-line human summary. The rung phrase is carried VERBATIM.
@@ -628,11 +668,17 @@ class CircuitSensingService:
                 )
                 self.disarm(layer_saes)
                 armed = False
-        sensable = 0
-        if self._configs:
-            first = self._configs[self._armed_layers[0]] if self._armed_layers else None
-            if first is not None:
-                sensable = sum(1 for s in first.edges if s.up_col >= 0)
+        # R1: this counted only the LOWEST armed layer's upstream specs, so a
+        # circuit whose edges all flow from a higher layer (L13->L20) reported
+        # sensable_edges=0 while sensing perfectly — an operator would read
+        # that as "sensing is broken". Count DISTINCT edge keys across layers.
+        sensable = len(
+            {
+                spec.edge_key
+                for cfg in self._configs.values()
+                for spec in cfg.edges
+            }
+        )
         return {
             "armed": armed,
             "circuit_id": self._circuit_id,
@@ -650,11 +696,15 @@ class CircuitSensingService:
         self._events_recorded += int(count)
 
     def should_emit(self) -> bool:
-        """WS throttle: at most one flush per _WS_MIN_INTERVAL_S."""
-        now = time.monotonic()
-        if (now - self._last_ws_emit_ts) < self._WS_MIN_INTERVAL_S:
-            return False
-        self._last_ws_emit_ts = now
+        """Kept for compatibility; the flush-level time throttle is gone.
+
+        R1: this dropped ENTIRE flushes inside the interval, so two back-to-back
+        requests lost the second one's events wholesale — an F15 invention that
+        diverged from Feature 11, which only caps count-per-flush and never
+        discards a flush on timing. Live observation is the point of the panel;
+        silently withholding a whole request's events defeats it.
+        """
+        self._last_ws_emit_ts = time.monotonic()
         return True
 
     def note_ws_dropped(self, count: int) -> None:

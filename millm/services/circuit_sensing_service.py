@@ -523,35 +523,15 @@ class CircuitSensingService:
         self._request_circuit_id = None
         self._request_context_tokens = 0
 
-    def prune_ring(self, through_position: int) -> None:
-        """Drop upstream fires that can no longer match, at a safe boundary.
-
-        R1 moved pruning out of the hooks (a hook cannot know whether a sibling
-        layer still needs a fire) and declared it request-level — but never
-        added this call, so the ring only ever bounded by count. The service is
-        the only component that knows when every layer has passed a position,
-        so it is the only safe caller.
-        """
-        if self._ring is not None:
-            self._ring.prune_before(through_position)
-
-    def safe_prune_boundary(self, layer_saes: dict[int, LoadedSAE]) -> Optional[int]:
-        """The lowest position every armed layer has already walked past.
-
-        Pruning above this would discard a fire a lagging sibling still needs.
-        """
-        offsets = [
-            int(getattr(sae, "_edge_token_offset", 0) or 0)
-            for layer, sae in layer_saes.items()
-            if layer in self._armed_layers and sae.is_edge_sensing_armed
-        ]
-        return min(offsets) if offsets else None
-
-    def prune_between_passes(self, layer_saes: dict[int, LoadedSAE]) -> None:
-        """Bound ring growth mid-request without racing a lagging layer."""
-        boundary = self.safe_prune_boundary(layer_saes)
-        if boundary is not None:
-            self.prune_ring(boundary)
+    # F17 task 3.5: `prune_ring`, `safe_prune_boundary` and
+    # `prune_between_passes` were DELETED here. They were R2's design for
+    # request-level pruning and had ZERO production callers — R2 fixed R1's
+    # "declared a mechanism and never wired it" finding by declaring a
+    # mechanism and never wiring it. R3 superseded both with the ring tracking
+    # layer progress itself (`note_layer_progress`), which works precisely
+    # because no caller needs to know about siblings. Carrying two pruning
+    # designs, one live and one dead, is how the next reader picks the wrong
+    # one.
 
     # ------------------------------------------------------------------
     # Reporting

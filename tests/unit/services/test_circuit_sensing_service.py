@@ -398,31 +398,41 @@ class TestLagWindowDoesNotLeakBetweenCircuits:
         assert svc._max_token_lag == default
 
 
-class TestRingPruningIsWired:
-    """R2: R1 declared pruning request-level and then never added the call, so
-    the ring only ever bounded by count — and R1 even wrote a test enforcing
-    that no hook calls it, permanently pinning the dead state."""
+class TestTheDeadPruneTrioIsGone:
+    """F17 task 3.5. `prune_ring`, `safe_prune_boundary` and
+    `prune_between_passes` were R2's request-level pruning design and had ZERO
+    production callers — R2 fixed R1's "declared a mechanism and never wired
+    it" finding by declaring a mechanism and never wiring it.
 
-    def test_the_service_exposes_a_prune_entry_point(self):
+    The tests that used to live here were named `TestRingPruningIsWired` while
+    asserting only that the entry points EXISTED, which is the precise
+    anti-pattern BR-005 now forbids. R3 superseded the whole design with the
+    ring tracking layer progress itself, so the trio is deleted rather than
+    carried alongside the live mechanism."""
+
+    def test_the_superseded_entry_points_are_removed(self):
+        svc = CircuitSensingService()
+        for name in ("prune_ring", "safe_prune_boundary", "prune_between_passes"):
+            assert not hasattr(svc, name), (
+                f"{name} is R2's superseded design; carrying two pruning "
+                "mechanisms is how the next reader picks the wrong one"
+            )
+
+    def test_pruning_still_happens_via_layer_progress(self):
+        """The live mechanism: the ring prunes to the SLOWEST layer itself, so
+        no caller has to know about siblings — which is exactly why this design
+        was wireable when the previous two were not."""
         svc = CircuitSensingService()
         saes = two_saes()
         svc.arm_for_circuit(circuit(), definition(), saes)
         svc.begin_request("r", saes)
         svc._ring.record_up("e", 0, 1.0)
-        svc.prune_ring(1000)
+
+        svc._ring.note_layer_progress(10, 1000)
+        svc._ring.note_layer_progress(13, 900)
         assert svc._ring.match_down("e", 1001) is None
 
-    def test_the_prune_boundary_is_the_slowest_layer(self):
-        """Pruning above this would discard a fire a lagging sibling needs."""
-        svc = CircuitSensingService()
-        saes = two_saes()
-        svc.arm_for_circuit(circuit(), definition(), saes)
-        svc.begin_request("r", saes)
-        saes[10]._edge_token_offset = 100
-        saes[13]._edge_token_offset = 40
-        assert svc.safe_prune_boundary(saes) == 40
-
-    def test_pruning_between_passes_respects_the_lagging_layer(self):
+    def test_a_lagging_layer_still_holds_the_boundary_back(self):
         svc = CircuitSensingService()
         saes = two_saes()
         svc.arm_for_circuit(
@@ -432,11 +442,11 @@ class TestRingPruningIsWired:
         )
         svc.begin_request("r", saes)
         svc._ring.record_up("e", 38, 1.0)
-        saes[10]._edge_token_offset = 100
-        saes[13]._edge_token_offset = 40
-        svc.prune_between_passes(saes)
-        # 38 is within max_lag of the slowest layer's position, so it survives.
-        assert svc._ring.match_down("e", 41) == (38, 1.0)
+        svc._ring.note_layer_progress(10, 5000)
+        svc._ring.note_layer_progress(13, 40)
+        assert svc._ring.match_down("e", 41) == (38, 1.0), (
+            "pruned past a fire the lagging layer still needed"
+        )
 
 
 class TestEmitKeepsTheMostRecent:

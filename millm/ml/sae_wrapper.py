@@ -380,7 +380,6 @@ class LoadedSAE:
         self._edge_sensing: Optional["CircuitSensingConfig"] = None
         self._W_enc_e: Optional[Tensor] = None
         self._b_enc_e: Optional[Tensor] = None
-        self._edge_thresholds_cpu: list[float] = []
         self._sensed_edges: list["SensedEdge"] = []
         self._edge_ring: Optional["EdgeFireRing"] = None
         self._edge_token_offset: int = 0
@@ -969,11 +968,12 @@ class LoadedSAE:
             config.thresholds = config.thresholds.to(
                 device=self.W_enc.device, dtype=self.W_enc.dtype
             )
-            # float32 first so inf survives — fp16 would overflow it to a
-            # finite value and an unsensable member would start firing.
-            self._edge_thresholds_cpu = [
-                float(v) for v in config.thresholds.to("cpu", torch.float32)
-            ]
+            # F17 task 3.4: `_edge_thresholds_cpu` was built here and read by
+            # NOTHING — dead since F15 R1-14, re-recorded in R2 and R3, and
+            # kept alive only by two tests asserting its contents, which lent
+            # it false legitimacy. Deleted rather than carried through the
+            # extraction. (Feature 11's equivalent IS consumed, for its
+            # act/theta score; F15 computes no such score.)
         # R1 CRITICAL: an out-of-range up_col/down_col raised IndexError inside
         # the matcher, which the broad `except` swallowed — abandoning the
         # ENTIRE pass (every edge, including upstream recording) rather than
@@ -1005,7 +1005,6 @@ class LoadedSAE:
         self._edge_sensing = None
         self._W_enc_e = None
         self._b_enc_e = None
-        self._edge_thresholds_cpu = []
         self._edge_ring = None
         self._reset_edge_buffer()
 

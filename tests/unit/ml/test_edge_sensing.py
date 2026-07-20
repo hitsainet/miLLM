@@ -271,13 +271,20 @@ class TestReportedEvidence:
 
 
 class TestArmingAgainstARealSAE:
-    def test_arming_builds_the_member_slice_and_cpu_mirror(self):
+    def test_arming_builds_the_member_slice(self):
         sae = real_sae()
         cfg = make_config()
         sae.arm_edge_sensing(cfg, EdgeFireRing(4))
         assert sae.is_edge_sensing_armed is True
         assert sae._W_enc_e is not None and sae._W_enc_e.shape == (D_IN, 2)
-        assert sae._edge_thresholds_cpu == [0.5, 0.5]
+
+    def test_no_dead_cpu_threshold_mirror_is_built(self):
+        """F17 task 3.4: `_edge_thresholds_cpu` was written in three places and
+        read by none — dead since F15 R1-14, re-recorded twice, and kept alive
+        only by tests asserting its contents, which lent it false legitimacy."""
+        sae = real_sae()
+        sae.arm_edge_sensing(make_config(), EdgeFireRing(4))
+        assert not hasattr(sae, "_edge_thresholds_cpu")
 
     def test_edge_arming_is_independent_of_cluster_sensing(self):
         """A deployment may run both; is_edge_sensing_armed is deliberately
@@ -303,7 +310,7 @@ class TestArmingAgainstARealSAE:
         sae.disarm_edge_sensing()
         assert sae.is_edge_sensing_armed is False
         assert sae._W_enc_e is None and sae._b_enc_e is None
-        assert sae._edge_ring is None and sae._edge_thresholds_cpu == []
+        assert sae._edge_ring is None
 
     def test_arming_is_idempotent(self):
         sae = real_sae()

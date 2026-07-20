@@ -9,6 +9,28 @@
 
 import { describe, expect, it, vi } from 'vitest';
 import { fireEvent, render, screen } from '@testing-library/react';
+import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
+
+// The card embeds EdgeSensingToggle (Feature 15), which reads sensing status.
+// Stubbed so these tests stay about the card's evidence contract.
+vi.mock('@/services/api', () => ({
+  circuitSensingApi: {
+    status: vi.fn().mockResolvedValue({
+      armed: false,
+      circuit_id: null,
+      circuit_name: null,
+      layers: [],
+      sensable_edges: 0,
+      unsensable_edges: [],
+      max_token_lag: 4,
+      last_request_overhead_ms: 0,
+      events_recorded: 0,
+      ws_dropped: 0,
+      enabled_circuits: [],
+    }),
+    setEnabled: vi.fn(),
+  },
+}));
 
 import { CircuitCard } from '../CircuitCard';
 import type { CircuitSummary } from '@/types/circuits';
@@ -36,14 +58,19 @@ function makeCircuit(overrides: Partial<CircuitSummary> = {}): CircuitSummary {
 const noop = () => {};
 
 function renderCard(circuit: CircuitSummary, onActivate = vi.fn()) {
+  const queryClient = new QueryClient({
+    defaultOptions: { queries: { retry: false } },
+  });
   render(
-    <CircuitCard
-      circuit={circuit}
-      onActivate={onActivate}
-      onDeactivate={noop}
-      onDelete={noop}
-      onExport={noop}
-    />,
+    <QueryClientProvider client={queryClient}>
+      <CircuitCard
+        circuit={circuit}
+        onActivate={onActivate}
+        onDeactivate={noop}
+        onDelete={noop}
+        onExport={noop}
+      />
+    </QueryClientProvider>,
   );
   return onActivate;
 }

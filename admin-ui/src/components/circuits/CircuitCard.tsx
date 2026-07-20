@@ -8,7 +8,7 @@
  */
 
 import { useState } from 'react';
-import { AlertTriangle, Download, Play, Share2, Square, Trash2 } from 'lucide-react';
+import { AlertTriangle, Download, Share2, Square, Trash2 } from 'lucide-react';
 
 import { Badge, Button } from '@components/common';
 import type { CircuitSummary, PerSAEVerdictKind } from '@/types/circuits';

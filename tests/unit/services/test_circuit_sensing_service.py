@@ -1634,3 +1634,44 @@ class TestR2ARareTruncationCannotBeRacedAway:
         svc.collect_edges(saes)
         model = CircuitSensingStatusResponse(**svc.status(saes))
         assert model.model_dump()["requests_truncated"] == 1
+
+
+class TestR2APauseReasonCannotLagARequestBehind:
+    """F17 R2-14, found by attacking R2-02's own fix. `_pause_is_current` was
+    set by `reason is not None` — so ANY reason counted as current, including
+    ones recorded OUTSIDE a request. The skip reasons (`speculative_decoding`,
+    `no_attached_saes`) are set precisely when no boundary opens, so they
+    survived the next request's clear and showed one request late."""
+
+    def _armed(self):
+        svc = CircuitSensingService()
+        saes = two_saes()
+        svc.arm_for_circuit(circuit(), definition(), saes)
+        return svc, saes
+
+    def test_a_reason_set_outside_a_request_clears_on_the_first_try(self):
+        svc, saes = self._armed()
+        svc.note_paused("speculative_decoding")     # no boundary open
+        svc.clear_stale_pause()
+        assert svc._paused_reason is None, (
+            "a skip reason survived its clear and will show one request late"
+        )
+
+    def test_a_reason_set_DURING_a_request_still_survives(self):
+        """R2-02's guarantee must not be lost while fixing R2-14."""
+        svc, saes = self._armed()
+        svc.begin_request("r", saes)
+        svc.note_paused("layer_unavailable")        # boundary IS open
+        svc.clear_stale_pause()
+        assert svc._paused_reason == "layer_unavailable"
+
+    def test_an_in_request_reason_clears_on_the_NEXT_request(self):
+        """It is current for its own request and stale afterwards."""
+        svc, saes = self._armed()
+        svc.begin_request("r1", saes)
+        svc.note_paused("layer_unavailable")
+        svc.collect_edges(saes)
+        svc.close_request()
+        svc.begin_request("r2", saes)
+        svc.clear_stale_pause()
+        assert svc._paused_reason is None

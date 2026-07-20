@@ -1130,7 +1130,13 @@ class CircuitSensingService:
         # Reasons set for the CURRENT request must survive `clear_stale_pause`
         # (R2-02). A bare `note_paused(None)` from the caller was wiping the
         # `layer_unavailable` this same request had just recorded.
-        self._pause_is_current = reason is not None
+        #
+        # R2-14: "current" means set while a boundary is OPEN, not merely set.
+        # This used to be `reason is not None`, so a reason recorded OUTSIDE a
+        # request — the speculative-decoding and no-attached-SAEs skips, which
+        # by definition never open one — survived the next request's clear and
+        # showed one request late. Found by attacking R2-02's own fix.
+        self._pause_is_current = reason is not None and self._ctx is not None
 
     def clear_stale_pause(self) -> None:
         """Clear a pause reason left over from a PREVIOUS request.

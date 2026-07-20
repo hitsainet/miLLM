@@ -10,6 +10,7 @@ co-activation, and getting either wrong would silently overclaim direction.
 import pytest
 import torch
 
+from millm.ml.edge_sensing import EdgeSensingRequestContext
 from millm.ml.sae_config import SAEConfig
 from millm.ml.sae_wrapper import (
     CircuitSensingConfig,
@@ -79,43 +80,43 @@ def make_config(edges=None, max_lag=4, cap=20, layer=10):
     )
 
 
-class FakeSAE:
-    """Exercises the real _match_edges against a controlled fire matrix.
-
-    R3 flagged this harness as the round's most important finding: it grafts
-    _match_edges onto a hand-written stub, so these tests never run
-    `_sense_edges` — and BOTH R1's and R2's criticals lived in _sense_edges,
-    not in _match_edges. The stub made them unrepresentable.
-
-    It is kept for the matcher-ordering cases it tests well, but its fields are
-    now derived from a REAL LoadedSAE, so a new attribute cannot silently
-    diverge (as `_edge_ambient_fired` did). The end-to-end coverage lives in
-    the real-SAE classes below and in the integration workflow.
-    """
-
-    def __init__(self, config, ring):
-        from millm.ml.sae_wrapper import LoadedSAE
-
-        # Copy the real per-instance edge state, then override what the test
-        # controls. A field added to LoadedSAE arrives here automatically.
-        template = real_sae()
-        for name, value in vars(template).items():
-            if name.startswith("_edge") or name == "_sensed_edges":
-                setattr(self, name, value)
-        self._edge_sensing = config
-        self._edge_ring = ring
-        self._sensed_edges = []
-        self._edge_truncated = False
-        self._edge_done = False
-        self._edge_phase = "decode"
-        self._match_edges = LoadedSAE._match_edges.__get__(self)
+# FakeSAE is GONE (F17 task 3.8).
+#
+# It grafted `_match_edges` onto a hand-written stub, so none of these tests
+# ever ran `_sense_edges` — and BOTH F15 R1's and R2's criticals lived in
+# `_sense_edges`, not in the matcher. The stub made those defects
+# unrepresentable: the suite could not have caught them however carefully it
+# was read. R3 called this the round's most important finding and kept the
+# stub anyway, with its fields derived from a real LoadedSAE to stop them
+# drifting. Deriving fields from the real class narrows the gap; it does not
+# close it, because the code path is still not the production one.
+#
+# `run()` now drives a REAL LoadedSAE through the REAL entry point.
 
 
 def run(fires, config=None, ring=None, base=0):
-    """fires: list of per-position [bool, bool] over the 2 armed members."""
+    """fires: list of per-position [bool, bool] over the 2 armed members.
+
+    Drives the real matcher on a real LoadedSAE. `base` is honoured by seeding
+    the SAE's position, so callers that pin absolute positions still get them.
+    """
     config = config or make_config()
-    ring = ring or EdgeFireRing(config.max_token_lag)
-    sae = FakeSAE(config, ring)
+    sae = real_sae()
+    sae.arm_edge_sensing(config)
+    ctx = EdgeSensingRequestContext(
+        request_id="run",
+        circuit_ids=frozenset({config.circuit_id}),
+        cap=config.max_events_per_request,
+    )
+    if ring is not None:
+        ctx._rings[config.circuit_id] = ring
+    sae.bind_context(ctx)
+    sae.begin_edge_sensing_request("run")
+    # These cases characterise the matcher mid-request, after prefill.
+    sae._edge_phase = "decode"
+    sae._edge_token_offset = base
+    ctx.position = base
+    ctx.phase = "decode"
     fired = torch.tensor(fires, dtype=torch.bool)
     acts = torch.where(fired, torch.tensor(2.0), torch.tensor(0.1))
     sae._match_edges(base, len(fires), acts, fired)
@@ -274,7 +275,7 @@ class TestArmingAgainstARealSAE:
     def test_arming_builds_the_member_slice(self):
         sae = real_sae()
         cfg = make_config()
-        sae.arm_edge_sensing(cfg, EdgeFireRing(4))
+        sae.arm_edge_sensing(cfg)
         assert sae.is_edge_sensing_armed is True
         assert sae._W_enc_e is not None and sae._W_enc_e.shape == (D_IN, 2)
 
@@ -283,14 +284,14 @@ class TestArmingAgainstARealSAE:
         read by none — dead since F15 R1-14, re-recorded twice, and kept alive
         only by tests asserting its contents, which lent it false legitimacy."""
         sae = real_sae()
-        sae.arm_edge_sensing(make_config(), EdgeFireRing(4))
+        sae.arm_edge_sensing(make_config())
         assert not hasattr(sae, "_edge_thresholds_cpu")
 
     def test_edge_arming_is_independent_of_cluster_sensing(self):
         """A deployment may run both; is_edge_sensing_armed is deliberately
         distinct from is_sensing_armed."""
         sae = real_sae()
-        sae.arm_edge_sensing(make_config(), EdgeFireRing(4))
+        sae.arm_edge_sensing(make_config())
         assert sae.is_edge_sensing_armed is True
         assert sae.is_sensing_armed is False
 
@@ -302,11 +303,11 @@ class TestArmingAgainstARealSAE:
         cfg = make_config()
         cfg.member_indices = [1, D_SAE + 5]
         with pytest.raises(ValueError, match="out of range"):
-            sae.arm_edge_sensing(cfg, EdgeFireRing(4))
+            sae.arm_edge_sensing(cfg)
 
     def test_disarm_releases_every_cache(self):
         sae = real_sae()
-        sae.arm_edge_sensing(make_config(), EdgeFireRing(4))
+        sae.arm_edge_sensing(make_config())
         sae.disarm_edge_sensing()
         assert sae.is_edge_sensing_armed is False
         assert sae._W_enc_e is None and sae._b_enc_e is None
@@ -315,7 +316,7 @@ class TestArmingAgainstARealSAE:
     def test_arming_is_idempotent(self):
         sae = real_sae()
         for _ in range(3):
-            sae.arm_edge_sensing(make_config(), EdgeFireRing(4))
+            sae.arm_edge_sensing(make_config())
         assert sae._W_enc_e.shape == (D_IN, 2)
 
 
@@ -324,14 +325,14 @@ class TestBufferHygiene:
         """FTID pitfall 2: omitting _edge_began from the guard would buffer
         stale cross-request edges."""
         sae = real_sae()
-        sae.arm_edge_sensing(make_config(), EdgeFireRing(4))
+        sae.arm_edge_sensing(make_config())
         sae._sense_edges(hidden({1: 2.0}, {2: 2.0}))
         assert sae._sensed_edges == []
 
     def test_begin_then_sense_then_collect_closes_the_boundary(self):
         sae = real_sae()
         ring = EdgeFireRing(4)
-        sae.arm_edge_sensing(make_config(), ring)
+        sae.arm_edge_sensing(make_config())
         sae.begin_edge_sensing_request("req-1")
         sae._sense_edges(hidden({1: 2.0}, {2: 2.0}))
 
@@ -345,7 +346,7 @@ class TestBufferHygiene:
 
     def test_begin_resets_a_previous_request_buffer(self):
         sae = real_sae()
-        sae.arm_edge_sensing(make_config(), EdgeFireRing(4))
+        sae.arm_edge_sensing(make_config())
         sae.begin_edge_sensing_request("req-1")
         sae._sense_edges(hidden({1: 2.0}, {2: 2.0}))
         sae.begin_edge_sensing_request("req-2")
@@ -354,7 +355,7 @@ class TestBufferHygiene:
 
     def test_suppressed_blocks_sensing(self):
         sae = real_sae()
-        sae.arm_edge_sensing(make_config(), EdgeFireRing(4))
+        sae.arm_edge_sensing(make_config())
         sae.begin_edge_sensing_request("req-1")
         with sae.suppressed():
             sae._sense_edges(hidden({1: 2.0}, {2: 2.0}))
@@ -362,7 +363,7 @@ class TestBufferHygiene:
 
     def test_a_batched_pass_is_skipped_not_sensed_as_row_zero(self):
         sae = real_sae()
-        sae.arm_edge_sensing(make_config(), EdgeFireRing(4))
+        sae.arm_edge_sensing(make_config())
         sae.begin_edge_sensing_request("req-1")
         batched = hidden({1: 2.0}, {2: 2.0}).unsqueeze(0).repeat(3, 1, 1)
         sae._sense_edges(batched)
@@ -373,7 +374,7 @@ class TestBufferHygiene:
 class TestOffsetAndPhaseAccounting:
     def test_offset_and_phase_advance_across_passes(self):
         sae = real_sae()
-        sae.arm_edge_sensing(make_config(max_lag=16), EdgeFireRing(16))
+        sae.arm_edge_sensing(make_config(max_lag=16))
         sae.begin_edge_sensing_request("req-1")
 
         sae._sense_edges(hidden({1: 2.0}, {0: 0.0}, {0: 0.0}))   # prefill, 3 tok
@@ -388,7 +389,7 @@ class TestOffsetAndPhaseAccounting:
 
     def test_offset_still_advances_when_the_cap_short_circuits(self):
         sae = real_sae()
-        sae.arm_edge_sensing(make_config(cap=0), EdgeFireRing(4))
+        sae.arm_edge_sensing(make_config(cap=0))
         sae.begin_edge_sensing_request("req-1")
         sae._edge_done = True
         sae._sense_edges(hidden({1: 2.0}, {2: 2.0}))
@@ -396,7 +397,7 @@ class TestOffsetAndPhaseAccounting:
 
     def test_overhead_is_accumulated(self):
         sae = real_sae()
-        sae.arm_edge_sensing(make_config(), EdgeFireRing(4))
+        sae.arm_edge_sensing(make_config())
         sae.begin_edge_sensing_request("req-1")
         sae._sense_edges(hidden({1: 2.0}, {2: 2.0}))
         assert sae._edge_overhead_ms > 0.0
@@ -408,7 +409,7 @@ class TestDeviceMigration:
         and every pass threw silently. The edge caches must move too."""
         sae = real_sae()
         cfg = make_config()
-        sae.arm_edge_sensing(cfg, EdgeFireRing(4))
+        sae.arm_edge_sensing(cfg)
         sae.to_device("cpu")
         assert sae._W_enc_e is not None and sae._b_enc_e is not None
         assert str(sae._W_enc_e.device) == "cpu"
@@ -495,7 +496,7 @@ class TestPositionOffsetsStayInSync:
 
     def test_a_suppressed_pass_still_advances_the_offset(self):
         sae = real_sae()
-        sae.arm_edge_sensing(make_config(), EdgeFireRing(4))
+        sae.arm_edge_sensing(make_config())
         sae.begin_edge_sensing_request("req-1")
         with sae.suppressed():
             sae._sense_edges(hidden({1: 2.0}, {2: 2.0}, {1: 0.0}))
@@ -503,7 +504,7 @@ class TestPositionOffsetsStayInSync:
 
     def test_a_batched_pass_still_advances_the_offset(self):
         sae = real_sae()
-        sae.arm_edge_sensing(make_config(), EdgeFireRing(4))
+        sae.arm_edge_sensing(make_config())
         sae.begin_edge_sensing_request("req-1")
         batched = hidden({1: 2.0}, {2: 2.0}).unsqueeze(0).repeat(3, 1, 1)
         sae._sense_edges(batched)
@@ -513,8 +514,8 @@ class TestPositionOffsetsStayInSync:
         """The failure this prevents: sibling coordinates drift apart."""
         up, down = real_sae(), real_sae()
         ring = EdgeFireRing(8)
-        up.arm_edge_sensing(make_config(layer=10), ring)
-        down.arm_edge_sensing(make_config(layer=13), ring)
+        up.arm_edge_sensing(make_config(layer=10))
+        down.arm_edge_sensing(make_config(layer=13))
         up.begin_edge_sensing_request("r")
         down.begin_edge_sensing_request("r")
 
@@ -532,7 +533,7 @@ class TestColumnValidation:
         sae = real_sae()
         bad = EdgeSpec(**{**make_spec().__dict__, "down_col": 99})
         with pytest.raises(ValueError, match="column out of range"):
-            sae.arm_edge_sensing(make_config(edges=[bad]), EdgeFireRing(4))
+            sae.arm_edge_sensing(make_config(edges=[bad]))
 
 
 class TestSaturationLoadShedding:
@@ -545,7 +546,7 @@ class TestSaturationLoadShedding:
         cfg = make_config()
         cfg.thresholds = torch.tensor([0.0001, 0.0001])
         cfg.max_events_per_request = 20
-        sae.arm_edge_sensing(cfg, EdgeFireRing(4))
+        sae.arm_edge_sensing(cfg)
         sae.begin_edge_sensing_request("r")
         return sae, torch.rand(seq, D_IN) + 1.0
 
@@ -566,7 +567,7 @@ class TestSaturationLoadShedding:
 
     def test_an_ordinary_pass_is_not_shed(self):
         sae = real_sae()
-        sae.arm_edge_sensing(make_config(max_lag=16), EdgeFireRing(16))
+        sae.arm_edge_sensing(make_config(max_lag=16))
         sae.begin_edge_sensing_request("r")
         sae._sense_edges(hidden({1: 2.0}, {2: 2.0}))
         assert len(sae._sensed_edges) == 1
@@ -587,7 +588,7 @@ class TestCollectRequiresABoundary:
         """F11 parity: draining without an open boundary would surface stale
         edges attributed to an empty request_id."""
         sae = real_sae()
-        sae.arm_edge_sensing(make_config(), EdgeFireRing(4))
+        sae.arm_edge_sensing(make_config())
         assert sae.collect_sensed_edges() == ("", [], False)
 
 
@@ -643,7 +644,15 @@ class TestShedStillFeedsSiblings:
             max_lag=64, layer=10,
         )
         up_cfg.thresholds = torch.tensor([0.0001, 0.0001])
-        up.arm_edge_sensing(up_cfg, ring)
+        up.arm_edge_sensing(up_cfg)
+        # One context, one ring, both layers — the F17 shape of "the SAEs of a
+        # circuit cooperate". Previously the ring was passed to each arm call.
+        shared = EdgeSensingRequestContext(
+            request_id="r", circuit_ids=frozenset({up_cfg.circuit_id}),
+            cap=up_cfg.max_events_per_request,
+        )
+        shared._rings[up_cfg.circuit_id] = ring
+        up.bind_context(shared)
         up.begin_edge_sensing_request("r")
         up._sense_edges(torch.rand(4096, D_IN) + 1.0)
         assert up._edge_truncated is True, "the saturated layer must flag it"
@@ -655,7 +664,8 @@ class TestShedStillFeedsSiblings:
             edges=[EdgeSpec(**{**spec.__dict__, "up_col": -1, "down_col": 1})],
             max_lag=64, layer=13,
         )
-        down.arm_edge_sensing(down_cfg, ring)
+        down.arm_edge_sensing(down_cfg)
+        down.bind_context(shared)
         down.begin_edge_sensing_request("r")
         rows = [{2: 0.0}] * 4095 + [{2: 5.0}]
         down._sense_edges(hidden(*rows))
@@ -670,7 +680,7 @@ class TestColumnSentinelValidation:
     def test_minus_one_is_a_legitimate_not_my_half_sentinel(self):
         sae = real_sae()
         spec = EdgeSpec(**{**make_spec().__dict__, "up_col": -1})
-        sae.arm_edge_sensing(make_config(edges=[spec]), EdgeFireRing(4))
+        sae.arm_edge_sensing(make_config(edges=[spec]))
         assert sae.is_edge_sensing_armed is True
 
     def test_a_column_below_minus_one_is_refused(self):
@@ -680,7 +690,7 @@ class TestColumnSentinelValidation:
         sae = real_sae()
         spec = EdgeSpec(**{**make_spec().__dict__, "down_col": -2})
         with pytest.raises(ValueError, match="column out of range"):
-            sae.arm_edge_sensing(make_config(edges=[spec]), EdgeFireRing(4))
+            sae.arm_edge_sensing(make_config(edges=[spec]))
 
 
 class TestSensingFailuresAreNotSilent:
@@ -694,7 +704,7 @@ class TestSensingFailuresAreNotSilent:
         import logging
 
         sae = real_sae()
-        sae.arm_edge_sensing(make_config(), EdgeFireRing(4))
+        sae.arm_edge_sensing(make_config())
         sae.begin_edge_sensing_request("r")
         sae._match_edges = lambda *a, **k: (_ for _ in ()).throw(
             RuntimeError("boom")
@@ -710,7 +720,7 @@ class TestSensingFailuresAreNotSilent:
         """Otherwise one failure desynchronises this SAE from its siblings for
         the rest of the request."""
         sae = real_sae()
-        sae.arm_edge_sensing(make_config(), EdgeFireRing(4))
+        sae.arm_edge_sensing(make_config())
         sae.begin_edge_sensing_request("r")
         sae._match_edges = lambda *a, **k: (_ for _ in ()).throw(
             RuntimeError("boom")
@@ -738,7 +748,13 @@ class TestCapDoesNotStarveSiblings:
             ],
             max_lag=64, cap=1, layer=10,
         )
-        up.arm_edge_sensing(up_cfg, ring)
+        up.arm_edge_sensing(up_cfg)
+        shared = EdgeSensingRequestContext(
+            request_id="r", circuit_ids=frozenset({up_cfg.circuit_id}),
+            cap=up_cfg.max_events_per_request,
+        )
+        shared._rings[up_cfg.circuit_id] = ring
+        up.bind_context(shared)
         up.begin_edge_sensing_request("r")
         # Two up->down pairs on this layer: the second trips the cap.
         up._sense_edges(hidden({1: 2.0}, {2: 2.0}, {1: 2.0}, {2: 2.0}))
@@ -754,7 +770,7 @@ class TestCapDoesNotStarveSiblings:
 
     def test_a_capped_layer_records_no_further_events_of_its_own(self):
         sae = real_sae()
-        sae.arm_edge_sensing(make_config(cap=1, max_lag=64), EdgeFireRing(64))
+        sae.arm_edge_sensing(make_config(cap=1, max_lag=64))
         sae.begin_edge_sensing_request("r")
         sae._sense_edges(hidden({1: 2.0}, {2: 2.0}, {1: 2.0}, {2: 2.0}))
         assert len(sae._sensed_edges) == 1
@@ -814,7 +830,7 @@ class TestMemberFireAccounting:
 
     def test_member_fires_accumulate_across_passes(self):
         sae = real_sae()
-        sae.arm_edge_sensing(make_config(max_lag=16), EdgeFireRing(16))
+        sae.arm_edge_sensing(make_config(max_lag=16))
         sae.begin_edge_sensing_request("r")
         sae._sense_edges(hidden({1: 2.0}, {2: 2.0}))
         first = sae._edge_member_fires
@@ -824,7 +840,7 @@ class TestMemberFireAccounting:
 
     def test_member_fires_reset_per_request(self):
         sae = real_sae()
-        sae.arm_edge_sensing(make_config(), EdgeFireRing(4))
+        sae.arm_edge_sensing(make_config())
         sae.begin_edge_sensing_request("r1")
         sae._sense_edges(hidden({1: 2.0}, {2: 2.0}))
         sae.begin_edge_sensing_request("r2")

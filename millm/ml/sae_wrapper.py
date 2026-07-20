@@ -30,8 +30,10 @@ from millm.ml.edge_sensing import (
     _EDGE_FIRE_BUDGET_MIN,
     _EDGE_SHED_POSITIONS_PER_COL,
     EdgeFireRing,
+    EdgeSensingRequestContext,
     EdgeSpec,
     SensedEdge,
+    _match_edges_impl,
 )
 from millm.ml.sae_config import SAEConfig
 
@@ -221,7 +223,10 @@ class LoadedSAE:
         self._W_enc_e: Optional[Tensor] = None
         self._b_enc_e: Optional[Tensor] = None
         self._sensed_edges: list["SensedEdge"] = []
-        self._edge_ring: Optional["EdgeFireRing"] = None
+        # The request-scoped context (F17). Owns the per-circuit rings; the
+        # ring is reached through the `_edge_ring` property below rather than
+        # stored, so there is no second copy to go stale when a request ends.
+        self._edge_ctx: Optional["EdgeSensingRequestContext"] = None
         self._edge_token_offset: int = 0
         self._edge_phase: str = "prefill"
         self._edge_done: bool = False
@@ -780,13 +785,15 @@ class LoadedSAE:
     # Feature 15: circuit edge sensing
     # ------------------------------------------------------------------
 
-    def arm_edge_sensing(
-        self, config: "CircuitSensingConfig", ring: "EdgeFireRing"
-    ) -> None:
+    def arm_edge_sensing(self, config: "CircuitSensingConfig") -> None:
         """Arm this SAE for one layer of a circuit's edge sensing.
 
-        `ring` is SHARED with the circuit's other SAEs — a cross-layer edge is
-        detected cooperatively, and the ring is the only state both hooks see.
+        Arming no longer takes a ring (F17 task 3.3). The ring is per
+        (request, circuit) and now lives on the request context, obtained via
+        ``bind_context``. Arming is a long-lived configuration step and a
+        request is not; binding the two together is what let one request's
+        upstream fires be visible to the next, and what made a shared ring
+        cross-match two circuits that happened to use the same edge_key.
         """
         if config.member_indices:
             bad = [i for i in config.member_indices if not 0 <= i < self.d_sae]
@@ -833,7 +840,6 @@ class LoadedSAE:
             )
 
         self._edge_sensing = config
-        self._edge_ring = ring
         self._reset_edge_buffer()
         logger.info(
             "edge sensing armed: circuit=%s layer=%d members=%d edges=%d",
@@ -841,11 +847,40 @@ class LoadedSAE:
             len(config.member_indices), len(config.edges),
         )
 
+    @property
+    def _edge_ring(self) -> Optional["EdgeFireRing"]:
+        """This circuit's ring for the CURRENT request, or None when unbound.
+
+        Derived, never stored. A stored ring outlives the request that owns it,
+        which is how one request's upstream fires stayed visible to the next.
+        Returns None when unarmed or unbound, so every existing guard against a
+        missing ring keeps working unchanged.
+        """
+        ctx = self._edge_ctx
+        cfg = self._edge_sensing
+        if ctx is None or cfg is None or ctx.is_closed:
+            return None
+        return ctx.ring(cfg.circuit_id, cfg.max_token_lag)
+
+    def bind_context(self, ctx: Optional["EdgeSensingRequestContext"]) -> None:
+        """Attach the request-scoped context this SAE senses into.
+
+        One context is shared by every SAE of every armed circuit for the
+        duration of one request; it owns the absolute position, the per-circuit
+        rings and the event budget. Binding to None detaches (used on disarm
+        and at request close).
+
+        Deliberately separate from ``arm_edge_sensing``: arming is per
+        deployment, binding is per request. See the arm docstring for why
+        conflating them was the defect.
+        """
+        self._edge_ctx = ctx
+
     def disarm_edge_sensing(self) -> None:
         self._edge_sensing = None
         self._W_enc_e = None
         self._b_enc_e = None
-        self._edge_ring = None
+        self._edge_ctx = None
         self._reset_edge_buffer()
 
     @property
@@ -871,10 +906,30 @@ class LoadedSAE:
         self._edge_member_fires = 0
 
     def begin_edge_sensing_request(self, request_id: str) -> None:
-        """Open a request boundary. The CALLER clears the shared ring once for
-        the whole circuit — clearing it here would wipe upstream fires recorded
-        by a sibling SAE that began first."""
+        """Open a request boundary.
+
+        Nothing is cleared here. Rings belong to the request context, so the
+        previous request's went out of scope with it — the old convention
+        ("the CALLER clears the shared ring once for the whole circuit") only
+        existed because one long-lived ring was shared by every SAE, and it
+        failed the moment a participant forgot which half of the rule it was on.
+
+        If no context is bound, a solo one is created here. Arming, beginning
+        and then sensing without a context would otherwise find no ring and
+        record NOTHING — sensing that reports a clean empty result while
+        observing nothing at all, which is the silent-failure mode this
+        feature exists to remove. A single-SAE circuit is also a legitimate
+        configuration, so this is the correct behaviour rather than a
+        convenience.
+        """
         self._reset_edge_buffer()
+        if self._edge_ctx is None or self._edge_ctx.is_closed:
+            cfg = self._edge_sensing
+            self._edge_ctx = EdgeSensingRequestContext(
+                request_id=request_id,
+                circuit_ids=frozenset({cfg.circuit_id} if cfg else set()),
+                cap=cfg.max_events_per_request if cfg else 20,
+            )
         self._edge_began = True
         self._edge_request_id = request_id
 
@@ -1072,84 +1127,33 @@ class LoadedSAE:
             # Upstream recording is cheap (a dict append) and is what siblings
             # depend on, so keep it and skip only the expensive matching.
 
-        fired_positions: list[list[int]] = [[] for _ in range(n_cols)]
-        for col in range(n_cols):
-            nz = fired_cpu[:, col].nonzero()
-            if nz.numel():
-                fired_positions[col] = nz.flatten().tolist()
+        # The MATCHING half is delegated. This method keeps only the
+        # load-shedding accounting above, because the counters it feeds
+        # (_edge_member_fires, the saturation latch, the shed truncation flag)
+        # are per-SAE and have no counterpart on the context. Moving the whole
+        # body would have silently zeroed _edge_member_fires, which
+        # circuit_sensing_service.py:503 reads for an operator-facing counter —
+        # a metric going quietly to zero, not a crash.
+        _match_edges_impl(
+            ring=ring,
+            config=config,
+            phase=phase,
+            base=base,
+            acts_cpu=acts_cpu,
+            fired_cpu=fired_cpu,
+            out=self._sensed_edges,
+            n_cols=n_cols,
+            shed=shed,
+            capped=self._edge_done,
+            on_cap=self._note_edge_cap,
+        )
 
-        if shed:
-            # F17 gate finding: shedding bounded the DOWNSTREAM matching but
-            # left the upstream half unbounded — and the upstream half is
-            # per-edge, so at the contract's 200-edge maximum a shed pass still
-            # built ~260k events and cost 544ms (vs 5ms at one edge). R2 was
-            # right that siblings depend on upstream recording; it just has to
-            # be bounded too.
-            #
-            # Keep the NEWEST fires per column: match_down reports the nearest
-            # antecedent, so recent history is what a sibling can still use.
-            # Cost now tracks distinct columns, not edge count.
-            for col in range(n_cols):
-                if len(fired_positions[col]) > _EDGE_SHED_POSITIONS_PER_COL:
-                    fired_positions[col] = fired_positions[col][
-                        -_EDGE_SHED_POSITIONS_PER_COL:
-                    ]
-
-        # (local_pos, spec, is_upstream) events, processed in position order so
-        # an upstream fire at p is visible to a downstream fire at p+1 within
-        # the same pass.
-        events: list[tuple[int, int, bool]] = []
-        for spec_i, spec in enumerate(config.edges):
-            if 0 <= spec.up_col < n_cols:
-                for local in fired_positions[spec.up_col]:
-                    events.append((local, spec_i, True))
-            # When shedding OR capped, record upstream halves only — siblings
-            # depend on them — and skip the downstream matching.
-            if not shed and not self._edge_done and 0 <= spec.down_col < n_cols:
-                for local in fired_positions[spec.down_col]:
-                    events.append((local, spec_i, False))
-        if not events:
-            return
-        # Upstream before downstream at the same position, so a same-position
-        # co-fire still does NOT match (match_down requires strictly before).
-        events.sort(key=lambda e: (e[0], not e[2]))
-
-        for local, spec_i, is_up in events:
-            abs_pos = base + local
-            spec = config.edges[spec_i]
-            row_acts = acts_cpu[local]
-            if is_up:
-                ring.record_up(
-                    spec.edge_key, abs_pos, float(row_acts[spec.up_col])
-                )
-            else:
-                match = ring.match_down(spec.edge_key, abs_pos)
-                if match is not None:
-                    up_pos, up_act = match
-                    if len(self._sensed_edges) >= config.max_events_per_request:
-                        self._edge_truncated = True
-                        self._edge_done = True
-                        # Do NOT return: the remaining upstream events in this
-                        # pass still need recording for sibling layers.
-                        continue
-                    self._sensed_edges.append(
-                        SensedEdge(
-                            edge_key=spec.edge_key,
-                            up_layer=spec.up_layer,
-                            up_feature_idx=spec.up_feature_idx,
-                            up_pos=up_pos,
-                            up_act=up_act,
-                            down_layer=spec.down_layer,
-                            down_feature_idx=spec.down_feature_idx,
-                            down_pos=abs_pos,
-                            down_act=float(row_acts[spec.down_col]),
-                            token_lag=abs_pos - up_pos,
-                            phase=phase,
-                            rung=spec.rung,
-                            rung_language=spec.rung_language,
-                            edge_type=spec.edge_type,
-                        )
-                    )
+    def _note_edge_cap(self) -> None:
+        """The per-request cap was reached. Latches so later passes skip the
+        downstream half entirely rather than re-walking it to reject every
+        event (the latch is a performance property, not a correctness one)."""
+        self._edge_truncated = True
+        self._edge_done = True
 
     @contextmanager
     def suppressed(self) -> Iterator[None]:

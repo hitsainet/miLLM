@@ -15,6 +15,7 @@ import time
 import pytest
 import torch
 
+from millm.ml.edge_sensing import EdgeSensingRequestContext
 from millm.ml.sae_config import SAEConfig
 from millm.ml.sae_wrapper import (
     CircuitSensingConfig,
@@ -58,7 +59,12 @@ def _armed(threshold: float, n_edges: int = CONTRACT_MAX_EDGES) -> LoadedSAE:
         edges=specs, max_token_lag=8, context_tokens=16,
         max_events_per_request=20,
     )
-    sae.arm_edge_sensing(cfg, EdgeFireRing(8))
+    sae.arm_edge_sensing(cfg)
+    sae.bind_context(EdgeSensingRequestContext(
+        request_id="baseline",
+        circuit_ids=frozenset({cfg.circuit_id}),
+        cap=cfg.max_events_per_request,
+    ))
     sae.begin_edge_sensing_request("baseline")
     return sae
 

@@ -19,9 +19,9 @@ from typing import Any, Optional
 from millm.core.circuit_evidence import rung_language
 from millm.core.config import settings
 from millm.core.logging import get_logger
+from millm.ml.edge_sensing import EdgeSensingRequestContext
 from millm.ml.sae_wrapper import (
     CircuitSensingConfig,
-    EdgeFireRing,
     EdgeSpec,
     LoadedSAE,
 )
@@ -72,7 +72,10 @@ class CircuitSensingService:
         self._circuit_name: Optional[str] = None
         self._armed_layers: list[int] = []
         self._configs: dict[int, CircuitSensingConfig] = {}
-        self._ring: Optional[EdgeFireRing] = None
+        # The CURRENT request's context, or None outside a boundary. Replaces
+        # the long-lived `_ring`: rings are per (request, circuit) now and are
+        # owned by the context, so they cannot outlive the request.
+        self._ctx: Optional[EdgeSensingRequestContext] = None
         self._armed_saes: dict[int, LoadedSAE] = {}
         #: Identity of the circuit that owns the OPEN request boundary.
         self._request_circuit_id: Optional[str] = None
@@ -372,11 +375,15 @@ class CircuitSensingService:
         # Commit the lag only now that we know we can arm.
         lag = next(iter(configs.values())).max_token_lag
         self._max_token_lag = lag
-        ring = EdgeFireRing(lag)
+        # No ring is built here any more (F17). Arming is per deployment; the
+        # ring is per (request, circuit) and is created by the request context
+        # on first use. A ring built at arm time outlives every request that
+        # uses it, which is what let one request's upstream fires match a
+        # later request's downstream fire.
         armed: list[int] = []
         try:
             for layer, config in configs.items():
-                layer_saes[layer].arm_edge_sensing(config, ring)
+                layer_saes[layer].arm_edge_sensing(config)
                 armed.append(layer)
         except Exception:
             # Partial arming would sense half a circuit and report edges whose
@@ -395,7 +402,6 @@ class CircuitSensingService:
         # whatever happens to be attached at that moment.
         self._armed_saes = {lay: layer_saes[lay] for lay in configs}
         self._configs = configs
-        self._ring = ring
         self._unsensable = unsensable
         logger.info(
             "circuit_sensing_armed",
@@ -422,7 +428,6 @@ class CircuitSensingService:
         self._circuit_name = None
         self._armed_layers = []
         self._configs = {}
-        self._ring = None
         self._armed_saes = {}
         self._unsensable = []
         self._request_circuit_id = None
@@ -446,9 +451,12 @@ class CircuitSensingService:
     def begin_request(self, request_id: str, layer_saes: dict[int, LoadedSAE]) -> bool:
         """Open one boundary across every armed layer.
 
-        The ring is cleared HERE, once for the whole circuit — clearing it in
-        each SAE's begin would wipe upstream fires recorded by a sibling that
-        began first.
+        A fresh context is built per request and bound to every armed SAE, so
+        nothing needs clearing: the previous request's rings went out of scope
+        with its context. The old shape — one long-lived ring cleared here by
+        convention — meant correctness depended on every participant
+        remembering NOT to clear it (a sibling that cleared on begin wiped
+        upstream fires recorded by a sibling that began first).
         """
         if not self.is_armed:
             return False
@@ -463,13 +471,29 @@ class CircuitSensingService:
             if self._armed_layers and self._configs
             else 0
         )
-        if self._ring is not None:
-            self._ring.clear()
+        # One context for this request, shared by every armed layer. Built over
+        # the armed circuit SET rather than a single id: Feature 19 lifts the
+        # single-active invariant, and building for one circuit now would
+        # repeat the assumption this feature exists to remove.
+        cap = (
+            self._configs[self._armed_layers[0]].max_events_per_request
+            if self._armed_layers and self._configs
+            else 20
+        )
+        ctx = EdgeSensingRequestContext(
+            request_id=request_id,
+            circuit_ids=frozenset(
+                {self._request_circuit_id} if self._request_circuit_id else set()
+            ),
+            cap=cap,
+        )
+        self._ctx = ctx
         began = False
         for layer in self._armed_layers:
             sae = layer_saes.get(layer)
             if sae is None or not sae.is_edge_sensing_armed:
                 continue
+            sae.bind_context(ctx)
             sae.begin_edge_sensing_request(request_id)
             began = True
         return began
@@ -511,8 +535,6 @@ class CircuitSensingService:
                 layers=self._armed_layers,
             )
         merged.sort(key=lambda e: (e.down_pos, e.up_pos))
-        if self._ring is not None:
-            self._ring.clear()
         return request_id, merged, truncated
 
     def close_request(self) -> None:
@@ -522,6 +544,23 @@ class CircuitSensingService:
         mis-attribution window without closing it."""
         self._request_circuit_id = None
         self._request_context_tokens = 0
+        # Close the context and unbind every SAE. Closing makes a late write
+        # from a hung generate thread log and return -1 rather than land in the
+        # next request's accounting (CTX-L2, EC-17.5); unbinding means a stale
+        # reference cannot resurrect a closed context's rings. Both, because
+        # either alone leaves a path where the next request inherits this one's
+        # state — the failure mode this whole feature exists to remove.
+        ctx, self._ctx = self._ctx, None
+        if ctx is not None:
+            try:
+                ctx.close()
+            except Exception:
+                logger.exception("circuit_sensing_context_close_failed")
+        for sae in list(self._armed_saes.values()):
+            try:
+                sae.bind_context(None)
+            except Exception:
+                logger.exception("circuit_sensing_unbind_failed")
 
     # F17 task 3.5: `prune_ring`, `safe_prune_boundary` and
     # `prune_between_passes` were DELETED here. They were R2's design for

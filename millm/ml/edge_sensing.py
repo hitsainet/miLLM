@@ -375,10 +375,58 @@ def match_edges(
     (total fires, the saturation warning, the shed truncation flag) belongs to
     the caller, which owns the counters those feed.
     """
-    ring = ctx.ring(circuit_id, config.max_token_lag)
-    phase = ctx.phase
-    n_cols = fired_cpu.shape[-1] if fired_cpu.dim() > 1 else 0
+    _match_edges_impl(
+        ring=ctx.ring(circuit_id, config.max_token_lag),
+        config=config,
+        phase=ctx.phase,
+        base=base,
+        acts_cpu=acts_cpu,
+        fired_cpu=fired_cpu,
+        out=out,
+        n_cols=fired_cpu.shape[-1] if fired_cpu.dim() > 1 else 0,
+        shed=shed,
+        capped=capped,
+        positions_per_col_when_shed=positions_per_col_when_shed,
+        try_spend=lambda spec: ctx.budget.try_spend(circuit_id, spec.down_layer),
+    )
 
+
+def _match_edges_impl(
+    *,
+    ring: EdgeFireRing,
+    config: Any,
+    phase: str,
+    base: int,
+    acts_cpu: Any,
+    fired_cpu: Any,
+    out: list[SensedEdge],
+    n_cols: int,
+    shed: bool,
+    capped: bool,
+    positions_per_col_when_shed: int = _EDGE_SHED_POSITIONS_PER_COL,
+    try_spend: Optional[Any] = None,
+    on_cap: Optional[Any] = None,
+) -> None:
+    """The single matching loop. ONE copy, two entry points.
+
+    Callers differ only in where the cap lives, so that is the only thing
+    parameterised:
+
+    * ``try_spend(spec) -> bool`` — the context path, where the budget is
+      per CIRCUIT and shared across its layers.
+    * ``on_cap()`` — the LoadedSAE path, where the cap is per SAE and reaching
+      it latches so later passes skip the downstream half.
+
+    Everything load-bearing — ordering, the shed cap, the strictly-before
+    match, the fourteen event fields — exists exactly once. This function was
+    briefly duplicated across two modules with the copies already diverging in
+    cap semantics and truncation shape; the divergence is the reason it is not
+    duplicated now.
+
+    Both cap paths CONTINUE rather than return: the remaining upstream events
+    in the pass still have to reach the ring, or a capped layer silently blinds
+    its siblings (R2-03, R3-02).
+    """
     fired_positions: list[list[int]] = [[] for _ in range(n_cols)]
     for col in range(n_cols):
         nz = fired_cpu[:, col].nonzero()
@@ -421,9 +469,13 @@ def match_edges(
         if match is None:
             continue
         up_pos, up_act = match
-        if not ctx.budget.try_spend(circuit_id, spec.down_layer):
+        if try_spend is not None and not try_spend(spec):
             # Budget exhausted for this circuit. CONTINUE — returning here
             # would stop this layer feeding the ring and blind its siblings.
+            continue
+        if on_cap is not None and len(out) >= config.max_events_per_request:
+            # Per-SAE cap reached. Latch, then CONTINUE for the same reason.
+            on_cap()
             continue
         out.append(
             SensedEdge(

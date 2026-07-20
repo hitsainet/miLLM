@@ -19,6 +19,7 @@ import pytest
 import torch
 
 from millm.ml.sae_config import SAEConfig
+from millm.ml.edge_sensing import EdgeSensingRequestContext
 from millm.ml.sae_wrapper import (
     CircuitSensingConfig,
     EdgeFireRing,
@@ -73,10 +74,31 @@ def config(edges=None, max_lag=4, cap=20, layer=10):
     )
 
 
-def armed(cfg=None, ring=None):
+def ctx_for(cfg, request_id="char"):
+    """A request context for one circuit — the F17 replacement for a bare ring.
+
+    Test BODIES are unchanged (CTX-V2); only these helpers were retargeted, per
+    task 3.8. Passing the same ctx to two `armed()` calls is now how two SAEs
+    cooperate on one circuit, exactly as passing the same ring used to be.
+    """
+    return EdgeSensingRequestContext(
+        request_id=request_id,
+        circuit_ids=frozenset({cfg.circuit_id}),
+        cap=cfg.max_events_per_request,
+    )
+
+
+def armed(cfg=None, ring=None, ctx=None):
     sae = real_sae()
     cfg = cfg or config()
-    sae.arm_edge_sensing(cfg, ring or EdgeFireRing(cfg.max_token_lag))
+    sae.arm_edge_sensing(cfg)
+    # `ring=` is still accepted so the pre-extraction test bodies read
+    # unchanged; a bare ring is wrapped in a context that hands it back.
+    if ctx is None:
+        ctx = ctx_for(cfg)
+        if ring is not None:
+            ctx._rings[cfg.circuit_id] = ring
+    sae.bind_context(ctx)
     sae.begin_edge_sensing_request("char")
     return sae
 
@@ -195,9 +217,12 @@ class TestFixedCriticalsStayFixed:
         ring = EdgeFireRing(3)
 
         up = real_sae()
-        up.arm_edge_sensing(
-            config(edges=[EdgeSpec(**{**s.__dict__, "up_col": 0, "down_col": -1})],
-                   max_lag=3, layer=10), ring)
+        up_cfg = config(edges=[EdgeSpec(**{**s.__dict__, "up_col": 0, "down_col": -1})],
+                        max_lag=3, layer=10)
+        shared = ctx_for(up_cfg, "c")
+        shared._rings[up_cfg.circuit_id] = ring
+        up.arm_edge_sensing(up_cfg)
+        up.bind_context(shared)
         up.begin_edge_sensing_request("c")
         rows = [{}] * 12
         rows[2] = {1: 2.0}
@@ -206,9 +231,10 @@ class TestFixedCriticalsStayFixed:
         up._sense_edges(hidden(*rows))
 
         down = real_sae()
-        down.arm_edge_sensing(
-            config(edges=[EdgeSpec(**{**s.__dict__, "up_col": -1, "down_col": 1})],
-                   max_lag=3, layer=13), ring)
+        down_cfg = config(edges=[EdgeSpec(**{**s.__dict__, "up_col": -1, "down_col": 1})],
+                          max_lag=3, layer=13)
+        down.arm_edge_sensing(down_cfg)
+        down.bind_context(shared)
         down.begin_edge_sensing_request("c")
         drows = [{}] * 12
         drows[4] = {2: 2.0}
@@ -244,7 +270,7 @@ class TestFixedCriticalsStayFixed:
         sae = real_sae()
         bad = EdgeSpec(**{**spec().__dict__, "down_col": 99})
         with pytest.raises(ValueError, match="column out of range"):
-            sae.arm_edge_sensing(config(edges=[bad]), EdgeFireRing(4))
+            sae.arm_edge_sensing(config(edges=[bad]))
 
     def test_F15R2_07_minus_one_is_the_only_valid_sentinel(self):
         """R2-07: validation checked only the upper bound, so -2 passed and the
@@ -252,13 +278,11 @@ class TestFixedCriticalsStayFixed:
         sae = real_sae()
         with pytest.raises(ValueError, match="column out of range"):
             sae.arm_edge_sensing(
-                config(edges=[EdgeSpec(**{**spec().__dict__, "down_col": -2})]),
-                EdgeFireRing(4))
+                config(edges=[EdgeSpec(**{**spec().__dict__, "down_col": -2})]))
         # -1 IS legitimate: "not my half"
         ok = real_sae()
         ok.arm_edge_sensing(
-            config(edges=[EdgeSpec(**{**spec().__dict__, "up_col": -1})]),
-            EdgeFireRing(4))
+            config(edges=[EdgeSpec(**{**spec().__dict__, "up_col": -1})]))
         assert ok.is_edge_sensing_armed is True
 
     def test_F15R2_03_a_shedding_layer_still_feeds_its_siblings(self):
@@ -273,7 +297,10 @@ class TestFixedCriticalsStayFixed:
             edges=[EdgeSpec(**{**s.__dict__, "up_col": 0, "down_col": -1})],
             max_lag=64, layer=10)
         up_cfg.thresholds = torch.tensor([0.0001, 0.0001])
-        up.arm_edge_sensing(up_cfg, ring)
+        up.arm_edge_sensing(up_cfg)
+        shared = ctx_for(up_cfg, "c")
+        shared._rings[up_cfg.circuit_id] = ring
+        up.bind_context(shared)
         up.begin_edge_sensing_request("c")
         up._sense_edges(torch.rand(4096, D_IN) + 1.0)
         assert up._edge_truncated is True
@@ -281,7 +308,8 @@ class TestFixedCriticalsStayFixed:
         down = real_sae()
         down.arm_edge_sensing(
             config(edges=[EdgeSpec(**{**s.__dict__, "up_col": -1, "down_col": 1})],
-                   max_lag=64, layer=13), ring)
+                   max_lag=64, layer=13))
+        down.bind_context(shared)
         down.begin_edge_sensing_request("c")
         down._sense_edges(hidden(*([{}] * 4095 + [{2: 5.0}])))
         assert down._sensed_edges, "the shedding layer starved its sibling"
@@ -293,7 +321,10 @@ class TestFixedCriticalsStayFixed:
         sae = real_sae()
         sae.arm_edge_sensing(
             config(edges=[EdgeSpec(**{**spec().__dict__, "up_col": 0, "down_col": 1})],
-                   max_lag=64, cap=1, layer=10), ring)
+                   max_lag=64, cap=1, layer=10))
+        capped_ctx = ctx_for(config(max_lag=64, cap=1, layer=10), "c")
+        capped_ctx._rings["circ_1"] = ring
+        sae.bind_context(capped_ctx)
         sae.begin_edge_sensing_request("c")
         sae._sense_edges(hidden({1: 2.0}, {2: 2.0}, {1: 2.0}, {2: 2.0}))
         assert sae._edge_done is True
@@ -326,7 +357,8 @@ class TestFixedCriticalsStayFixed:
         sae = real_sae()
         cfg = config()
         cfg.thresholds = torch.tensor([0.0001, 0.0001])
-        sae.arm_edge_sensing(cfg, EdgeFireRing(4))
+        sae.arm_edge_sensing(cfg)
+        sae.bind_context(ctx_for(cfg, "c"))
         sae.begin_edge_sensing_request("c")
         sae._sense_edges(torch.rand(4096, D_IN) + 1.0)
         assert sae._edge_truncated is True
@@ -335,13 +367,13 @@ class TestFixedCriticalsStayFixed:
     def test_a_pass_without_begin_senses_nothing(self):
         """Omitting the began-guard would buffer stale cross-request edges."""
         sae = real_sae()
-        sae.arm_edge_sensing(config(), EdgeFireRing(4))
+        sae.arm_edge_sensing(config())
         sae._sense_edges(hidden({1: 2.0}, {2: 2.0}))
         assert sae._sensed_edges == []
 
     def test_collect_without_begin_returns_nothing(self):
         sae = real_sae()
-        sae.arm_edge_sensing(config(), EdgeFireRing(4))
+        sae.arm_edge_sensing(config())
         assert sae.collect_sensed_edges() == ("", [], False)
 
     def test_the_rung_phrase_is_carried_verbatim(self):

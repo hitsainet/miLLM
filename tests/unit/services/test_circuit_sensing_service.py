@@ -245,15 +245,29 @@ class TestOverrides:
 
 
 class TestLifecycle:
-    def test_begin_clears_the_shared_ring_once(self):
-        """Clearing per-SAE would wipe fires a sibling already recorded."""
+    def test_begin_gives_the_request_a_ring_nothing_else_can_reach(self):
+        """F17 (CTX-V2 behaviour change, justified): the old contract was
+        "begin CLEARS the shared ring, once, for the whole circuit" — a rule
+        that had to be obeyed by every participant and silently corrupted the
+        request when one forgot. Clearing is now structurally unnecessary: the
+        ring belongs to the request context, so a previous request's fires are
+        unreachable rather than merely cleared.
+
+        The assertion is strictly stronger. Stale state cannot survive begin
+        because there is no shared object for it to survive in."""
         svc = CircuitSensingService()
         saes = two_saes()
         svc.arm_for_circuit(circuit(), definition(), saes)
-        svc._ring.record_up("stale", 1, 1.0)
 
         assert svc.begin_request("req-1", saes) is True
-        assert svc._ring.match_down("stale", 2) is None
+        first = svc._ctx
+        first.ring("circ_1", 8).record_up("stale", 1, 1.0)
+        svc.close_request()
+
+        # A second request must not see the first's fires.
+        assert svc.begin_request("req-2", saes) is True
+        assert svc._ctx is not first, "each request gets its own context"
+        assert svc._ctx.ring("circ_1", 8).match_down("stale", 2) is None
         assert all(s._edge_began for s in saes.values())
 
     def test_collect_merges_every_layer_and_sums_overhead(self):
@@ -426,11 +440,12 @@ class TestTheDeadPruneTrioIsGone:
         saes = two_saes()
         svc.arm_for_circuit(circuit(), definition(), saes)
         svc.begin_request("r", saes)
-        svc._ring.record_up("e", 0, 1.0)
+        ring = svc._ctx.ring("circ_1", 8)
+        ring.record_up("e", 0, 1.0)
 
-        svc._ring.note_layer_progress(10, 1000)
-        svc._ring.note_layer_progress(13, 900)
-        assert svc._ring.match_down("e", 1001) is None
+        ring.note_layer_progress(10, 1000)
+        ring.note_layer_progress(13, 900)
+        assert ring.match_down("e", 1001) is None
 
     def test_a_lagging_layer_still_holds_the_boundary_back(self):
         svc = CircuitSensingService()
@@ -441,10 +456,11 @@ class TestTheDeadPruneTrioIsGone:
             saes,
         )
         svc.begin_request("r", saes)
-        svc._ring.record_up("e", 38, 1.0)
-        svc._ring.note_layer_progress(10, 5000)
-        svc._ring.note_layer_progress(13, 40)
-        assert svc._ring.match_down("e", 41) == (38, 1.0), (
+        ring = svc._ctx.ring("circ_1", 4)
+        ring.record_up("e", 38, 1.0)
+        ring.note_layer_progress(10, 5000)
+        ring.note_layer_progress(13, 40)
+        assert ring.match_down("e", 41) == (38, 1.0), (
             "pruned past a fire the lagging layer still needed"
         )
 
@@ -575,3 +591,65 @@ class TestAmbientFiredCountHonoursTheContract:
     def test_a_failing_probe_declines_rather_than_guessing(self):
         svc, _ = self._armed(self._Probe(enabled=True, raises=True))
         assert svc._ambient_fired_count() is None
+
+
+class TestTheRequestBoundaryIsActuallyReleased:
+    """F17 mutation findings. Three load-bearing lines in the close path were
+    each unprotected: deleting `ctx.close()`, deleting the `bind_context(None)`
+    unbind, or weakening the auto-bind guard to ignore `is_closed` all left the
+    full suite green.
+
+    Every one of them fails the same way — a context outliving its request, so
+    the NEXT request inherits the previous one's rings and budget. That is the
+    precise defect F17 exists to remove, and nothing was pinning it."""
+
+    def test_close_request_closes_the_context(self):
+        """A closed context refuses late writes (CTX-L2/EC-17.5). If close is
+        skipped, a hung generate thread's write lands in the next request."""
+        svc = CircuitSensingService()
+        saes = two_saes()
+        svc.arm_for_circuit(circuit(), definition(), saes)
+        svc.begin_request("r", saes)
+        ctx = svc._ctx
+        svc.close_request()
+        assert ctx.is_closed is True, "close_request left the context OPEN"
+        # A late write is refused rather than silently accounted.
+        assert ctx.advance(10, 5) == -1
+
+    def test_close_request_unbinds_every_sae(self):
+        """Closing without unbinding leaves each SAE holding a closed context.
+        Sensing would go quietly dark rather than raise."""
+        svc = CircuitSensingService()
+        saes = two_saes()
+        svc.arm_for_circuit(circuit(), definition(), saes)
+        svc.begin_request("r", saes)
+        svc.close_request()
+        for layer, sae in saes.items():
+            assert sae._edge_ctx is None, f"layer {layer} still bound after close"
+
+    def test_a_closed_context_is_replaced_not_reused(self):
+        """The auto-bind guard must treat a CLOSED context as absent. Checking
+        only `is None` would rebind the dead context from the previous request,
+        whose rings still hold its fires."""
+        svc = CircuitSensingService()
+        saes = two_saes()
+        svc.arm_for_circuit(circuit(), definition(), saes)
+        svc.begin_request("r1", saes)
+        first = svc._ctx
+        first.ring("circ_1", 8).record_up("carryover", 1, 1.0)
+        svc.close_request()
+
+        # Bind the CLOSED context back on, simulating an SAE that holds one
+        # without having gone through close_request (a partially-armed layer,
+        # or any caller that binds directly). close_request's own unbind
+        # already sets _edge_ctx to None, so routing through it cannot
+        # exercise this guard — the first version of this test did, and the
+        # mutation survived it.
+        sae = next(iter(saes.values()))
+        sae.bind_context(first)
+        sae.begin_edge_sensing_request("r2")
+        assert sae._edge_ctx is not first, "reused the CLOSED context"
+        assert sae._edge_ctx.is_closed is False
+        assert sae._edge_ring.match_down("carryover", 2) is None, (
+            "the previous request's fires are visible to this one"
+        )

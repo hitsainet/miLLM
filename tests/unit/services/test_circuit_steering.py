@@ -125,7 +125,10 @@ class TestBudgetLambdaClamp:
         _attach(svc._sae_state, s10, "sae-10", 10)
         members = [CircuitMember(feature_idx=1, layer=10, budget=50.0, sign=1)]
         result = svc.set_circuit_steering(members, intensity=0.0)
-        assert s10._applied == {1: 0.0}
+        # λ=0 clears the layer and leaves steering disabled (R2 fix) — no
+        # zero-valued "active" features left behind.
+        assert s10._applied == {}
+        s10.enable_steering.assert_called_with(False)
         assert result.hazards == []  # λ=0 → no hazards
 
 
@@ -244,9 +247,10 @@ class TestR1Fixes:
         s10 = _sae()
         _attach(service._sae_state, s10, "sae-10", 10)
         members = [CircuitMember(feature_idx=1, layer=10, budget=50.0, sign=1)]
-        # Negative λ clamps to 0 → zero steering (not inverted).
+        # Negative λ clamps to 0 → circuit OFF (cleared + disabled, not inverted).
         service.set_circuit_steering(members, intensity=-3.0)
-        assert s10._applied == {1: 0.0}
+        assert s10._applied == {}
+        s10.enable_steering.assert_called_with(False)
         # λ above 2 clamps to 2.
         service.set_circuit_steering(members, intensity=9.0)
         assert s10._applied == {1: 100.0}  # 50*1*2
@@ -286,6 +290,48 @@ class TestR1Fixes:
             intensity=1.0,
         )
         assert s10.get_steering_values() == {5: 30.0}
+
+
+class TestR2Fixes:
+    def test_negative_budget_not_double_negated(self):
+        """Canonical sign rule: a negative budget is already directional; the
+        sign field must NOT be multiplied in (would flip suppression→amplify)."""
+        service = _service()
+        s10 = _sae()
+        _attach(service._sae_state, s10, "sae-10", 10)
+        # budget=-100, sign=-1 → served as -100 (suppression), NOT +100.
+        members = [CircuitMember(feature_idx=1, layer=10, budget=-100.0, sign=-1)]
+        service.set_circuit_steering(members, intensity=1.0)
+        assert s10._applied == {1: -100.0}
+
+    def test_positive_budget_takes_direction_from_sign(self):
+        service = _service()
+        s10 = _sae()
+        _attach(service._sae_state, s10, "sae-10", 10)
+        members = [CircuitMember(feature_idx=1, layer=10, budget=80.0, sign=-1)]
+        service.set_circuit_steering(members, intensity=1.0)
+        assert s10._applied == {1: -80.0}
+
+    def test_intensity_zero_disables_steering(self):
+        """λ=0 clears and leaves steering DISABLED (not 'enabled' with zeros)."""
+        service = _service()
+        s10 = _sae()
+        _attach(service._sae_state, s10, "sae-10", 10)
+        members = [CircuitMember(feature_idx=1, layer=10, budget=50.0, sign=1)]
+        service.set_circuit_steering(members, intensity=0.0)
+        s10.enable_steering.assert_called_with(False)
+
+    def test_member_sae_id_disambiguates_same_layer(self):
+        """Two SAEs on one layer: a member naming its sae_id serves through the
+        exact one (get(sae_id,layer)), not the ambiguous by_layer path."""
+        service = _service()
+        sa, sb = _sae(), _sae()
+        _attach(service._sae_state, sa, "sae-a", 10)
+        _attach(service._sae_state, sb, "sae-b", 10)
+        members = [CircuitMember(feature_idx=1, layer=10, budget=50.0, sign=1, sae_id="sae-b")]
+        service.set_circuit_steering(members, intensity=1.0)
+        assert sb._applied == {1: 50.0}
+        assert sa._applied == {}  # sae-a untouched
 
 
 class TestClearCircuitSteering:

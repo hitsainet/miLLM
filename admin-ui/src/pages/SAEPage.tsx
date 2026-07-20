@@ -7,6 +7,7 @@ import {
   SAEList,
   AttachedSAECard,
 } from '@components/sae';
+import { AttachmentPanel } from '@components/circuits';
 import { Card, Spinner } from '@components/common';
 import type { DownloadSAERequest, SAEInfo } from '@/types';
 
@@ -130,6 +131,13 @@ export function SAEPage() {
           isDetaching={isDetaching}
         />
       )}
+
+      {/* Multi-SAE circuit attachment set (Feature 12) — shown when more than
+          one SAE is attached (a cross-layer circuit); the singular card above
+          covers the common single-SAE case. */}
+      <Card padding="sm">
+        <AttachmentPanel />
+      </Card>
 
       {/* Download Form */}
       <SAEDownloadForm

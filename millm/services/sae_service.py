@@ -53,6 +53,19 @@ _ATTACH_DTYPES: dict[str, "torch.dtype"] = {
 }
 
 
+def _directional_budget(budget: float, sign: int) -> float:
+    """Apply the canonical member sign rule (shared with cluster_service).
+
+    A NEGATIVE budget is already directional — the ``sign`` field is redundant
+    there and must NOT be multiplied in (doing so double-negates a suppression
+    into an amplification). A non-negative budget takes its direction from
+    ``sign``. This mirrors ``cluster_service`` so circuits and clusters steer
+    identically for the same authored member.
+    """
+    b = float(budget)
+    return b if b < 0 else float(sign) * b
+
+
 def _resolve_attach_dtype(name: str) -> "torch.dtype":
     """Resolve a configured attach-dtype name to a torch dtype.
 
@@ -483,6 +496,11 @@ class SAEService:
         #    the dial ceiling. The apply-time ±200 clamp is a separate gate.
         lo = float(settings.CIRCUIT_INTENSITY_MIN)
         hi = float(settings.CIRCUIT_INTENSITY_MAX)
+        if lo > hi:
+            # Misconfigured envelope — fall back to the safe [0, 2] default
+            # rather than silently pinning every serve to `lo`.
+            logger.warning("circuit_intensity_bounds_inverted", min=lo, max=hi)
+            lo, hi = 0.0, 2.0
         intensity = max(lo, min(hi, float(intensity)))
 
         # 1. Resolve every member's layer to a UNIQUE attached SAE ONCE, under a
@@ -509,7 +527,14 @@ class SAEService:
 
             entry = resolved.get(m.layer)
             if entry is None:
-                entry = self._sae_state.by_layer(m.layer)
+                # Prefer an exact (sae_id, layer) match when the member names
+                # its SAE — this disambiguates a layer with two attached SAEs
+                # AND ensures a member is served through the basis it was
+                # authored against (never a silent wrong-SAE serve).
+                if m.sae_id:
+                    entry = self._sae_state.get(m.sae_id, m.layer)
+                if entry is None:
+                    entry = self._sae_state.by_layer(m.layer)
             if entry is None:
                 offenders.append(
                     {
@@ -539,7 +564,7 @@ class SAEService:
         per_layer: dict[int, dict[int, float]] = {}
         clamp_warnings: list[str] = []
         for m in members:
-            raw = m.budget * m.sign * intensity
+            raw = _directional_budget(m.budget, m.sign) * intensity
             eff = clamp_steering(raw)
             if abs(raw) > STEERING_RANGE:
                 clamp_warnings.append(
@@ -552,11 +577,19 @@ class SAEService:
         #    entry resolved in step 1 (never a second by_layer call). Clear the
         #    layer's prior steering first so each serve is authoritative and no
         #    stale features from a previous circuit/cluster/manual set leak in.
+        #    At λ=0 the circuit is OFF — clear and leave steering disabled rather
+        #    than reporting N features "active" at zero strength.
+        disabled = intensity == 0 or all(
+            v == 0 for s in per_layer.values() for v in s.values()
+        )
         for layer, steering in per_layer.items():
             sae = resolved[layer].sae
             sae.clear_steering()
-            sae.set_steering_batch(steering)  # bounds already gated in step 1
-            sae.enable_steering(True)
+            if disabled:
+                sae.enable_steering(False)
+            else:
+                sae.set_steering_batch(steering)  # bounds already gated in step 1
+                sae.enable_steering(True)
 
         hazards = self._cross_layer_hazards(members, intensity, edges=edges)
         logger.info(
@@ -638,8 +671,8 @@ class SAEService:
                     continue
                 seen.add(pair)
 
-                up_sign = 1 if (up.budget * up.sign) >= 0 else -1
-                down_sign = 1 if (down.budget * down.sign) >= 0 else -1
+                up_sign = 1 if _directional_budget(up.budget, up.sign) >= 0 else -1
+                down_sign = 1 if _directional_budget(down.budget, down.sign) >= 0 else -1
                 same_sign = up_sign == down_sign
 
                 edge = edge_index.get(pair)
@@ -1369,13 +1402,22 @@ class SAEService:
             prepared.append((sae_id, layer, sae, compat))
 
         # Free-VRAM pre-check: refuse the whole set if the projected cumulative
-        # footprint would not fit, rather than OOM'ing mid-load. Best-effort
-        # estimate from on-disk sizes (fp16 attach ≈ 0.5× fp32 file, plus 20%).
+        # footprint would not fit, rather than OOM'ing mid-load. Estimate each
+        # SAE's fp16 steering-weight footprint from its dimensions (W_enc+W_dec
+        # = 2·d_in·d_sae params × 2 bytes) — robust to a NULL file_size_bytes,
+        # which would otherwise collapse the projection to 0 and defeat the gate.
+        attach_bytes = torch.finfo(attach_dtype).bits // 8
         if torch.cuda.is_available() and prepared:
             free_mb = torch.cuda.mem_get_info()[0] / (1024 * 1024)
-            projected_mb = sum(
-                (sae.file_size_bytes or 0) / (1024 * 1024) * 0.6 for _, _, sae, _ in prepared
-            )
+
+            def _projected_mb(sae) -> float:
+                by_dims = 2 * int(sae.d_in) * int(sae.d_sae) * attach_bytes / (1024 * 1024)
+                by_file = ((sae.file_size_bytes or 0) / (1024 * 1024)) * 0.6
+                # Use the larger of the dim-based and file-based estimates so an
+                # unknown/under-reported file size never under-projects.
+                return max(by_dims, by_file) * 1.1  # 10% headroom for buffers
+
+            projected_mb = sum(_projected_mb(sae) for _, _, sae, _ in prepared)
             if projected_mb > free_mb:
                 raise InsufficientMemoryError(
                     f"Attaching {len(prepared)} SAE(s) needs ~{int(projected_mb)} MB "

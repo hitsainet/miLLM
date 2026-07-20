@@ -67,8 +67,8 @@
 
 - [x] 4.0 Attach + serve API surface (covers FR-12.1, FR-12.7 API)
   - [x] 4.1 `attach_set(sae_layers)`: referenced-only load in fp16, one hook per `(sae_id, layer)`, total memory + VRAM warning (EC-12.3)
-  - [x] 4.2 Routes on existing SAE router: `GET /api/sae/attachments`, `POST /api/sae/attach-set`, `POST /api/sae/detach`
-  - [x] 4.3 Route tests (service mocked): plural status shape, attach-set idempotency, detach one-vs-all, `SAE_SET_INCOMPLETE` → 422 envelope
+  - [x] 4.2 Routes on the existing SAE router (prefix `/api/saes`): `GET /api/saes/attachments`, `POST /api/saes/attach-set`; per-SAE detach reuses the existing `POST /api/saes/{sae_id}/detach` (now multi-SAE aware — detaches only that sae_id's layers, leaves others attached). No new plural detach route.
+  - [x] 4.3 Route tests (service mocked): plural status shape, attach-set idempotency, VRAM-warning flag, `SAE_SET_INCOMPLETE` → 422 envelope. (Non-first-SAE detach one-vs-all is covered at the service/registry level: `test_attached_state_registry::test_clear_one_by_key` + detach_sae R2 test.)
   - [x] 4.4 Config keys (`MULTISAE_VRAM_ENVELOPE_MB`, `MULTISAE_ATTACH_DTYPE`, `CIRCUIT_INTENSITY_MIN/MAX`)
 
 - [x] 5.0 Attachment Admin-UI panel (covers FR-12.7; MSA-A4)

@@ -93,10 +93,15 @@ healthy) mark the product unavailable; tools then return a structured
 
 ### `millm_circuits` (v1.1 — Circuit Runtime)
 
-**Implemented (Feature 13, shipped).** The hub and edge-sensing rows below are
-**reserved for Feature 15 and are NOT served yet** — calls to them 404 today.
-They are listed so the tool surface is stable when F15 lands; do not register
-them against an F13-only deployment.
+**Implemented (Features 13 + 15, shipped).** The HUB rows below remain
+reserved and are NOT served — calls to them 404 today. They are listed so the
+tool surface stays stable; do not register them against a deployment that has
+not shipped them.
+
+Edge sensing (Feature 15) shipped under the prefix **`/api/circuit-sensing`**,
+not the `/api/circuits/…/sensing` paths this table originally reserved: it is
+its own resource with its own retention and event store rather than a
+sub-collection of a circuit, and the flat prefix matches `/api/sensing`.
 
 | Tool | Endpoint | Status |
 |---|---|---|
@@ -109,9 +114,11 @@ them against an F13-only deployment.
 | `millm_deactivate_circuit` | `POST /api/circuits/{id}/deactivate` | F13 ✅ |
 | `millm_export_circuit` | `GET /api/circuits/{id}/export` (raw circuit document — no envelope) | F13 ✅ |
 | `millm_set_circuit_intensity` | `PUT /api/circuits/active/intensity` (`{intensity, reapply}`; one global λ scales all layers) | F13 ✅ |
-| `millm_circuit_sensing_status` | `GET /api/circuits/sensing/status` | **F15 — not served** |
-| `millm_circuit_sensing_events` | `GET /api/circuits/sensing/events?circuit_id=&limit=&since=` (edge co-fire rows: up/down member, activations, alone/within, ±K context, edge rung) | **F15 — not served** |
-| `millm_circuit_sensing_enable` / `_disable` | `POST /api/circuits/{circuit_id}/sensing/enable` / `/disable` (edge sensing; off by default, opt-in) | **F15 — not served** |
+| `millm_circuit_sensing_status` | `GET /api/circuit-sensing/status` (armed state, layers, **`sensable_edges` + `unsensable_edges[{edge_key,reason,detail}]`**, `max_token_lag`, overhead, `enabled_circuits`) | F15 ✅ |
+| `millm_circuit_sensing_events` | `GET /api/circuit-sensing/events?circuit_id=&edge_key=&limit=&since=` (rows carry nested `up`/`down` `{layer,feature_idx,pos,act}`, `token_lag`, ±K `context_parts`, `edge_rung` + `edge_rung_language`) | F15 ✅ |
+| `millm_circuit_sensing_enable` / `_disable` | `POST /api/circuit-sensing/{circuit_id}/enable` / `/disable` (off by default, opt-in) | F15 ✅ |
+| `millm_circuit_sensing_event` | `GET /api/circuit-sensing/events/{event_id}` (one observation with its context window) | F15 ✅ |
+| `millm_circuit_sensing_clear` | `DELETE /api/circuit-sensing/events?circuit_id=` | F15 ✅ |
 
 ### 4a. Circuit evidence-rung rule (v1.1)
 Every circuit and edge field carries `rung` (0–3 int) and `rung_language`
@@ -123,6 +130,34 @@ must never appear for a rung below 2** — clients surface `rung_language`
 verbatim, never re-phrase. Activating a circuit whose rung < 2 requires
 `acknowledge_unvalidated=true`; without it the route refuses with
 `UNVALIDATED_CIRCUIT` (200 + `success:false`, house style).
+
+### 4a-bis. What an edge observation is — and is not (v1.1 — Feature 15)
+
+An edge sensing row records that an edge's UPSTREAM member fired and its
+DOWNSTREAM partner then fired within the lag window, in the authored
+direction. Three cases deliberately produce NO row: a lone upstream fire, a
+reversed pair, and a same-position co-fire (simultaneous firing is
+co-activation, not a sequence — reporting it as up→down would assert an
+ordering never observed).
+
+**An observation is not validation.** It is co-activation evidence in the
+authored direction; it never raises an edge's rung, and clients must not
+present a high observation count as evidence of causality. Each row stores
+`edge_rung_language` AS OF THE MOMENT OF OBSERVATION, so a later
+re-validation in miStudio cannot retroactively upgrade old rows — clients
+render the stored phrase, never today's.
+
+**Absence of rows is not absence of firing.** `unsensable_edges` on the status
+route lists every edge that could not be watched, with a reason
+(`layer_not_attached` — common under slice-fallback, which serves one layer;
+`no_activation_threshold`; `endpoint_not_a_feature` for a cluster-supernode
+endpoint). A client that shows an empty event list without also surfacing
+these is presenting absence of observation as evidence of absence.
+
+Exclusions a client should expect: an armed circuit forces serial routing
+(batched rows cannot be attributed to a request), speculative decoding is
+skipped entirely (absolute positions diverge), and a request is capped at 20
+observations with a `truncated` flag.
 
 ### 4b. Circuit per-request dial (v1.1 — Feature 14)
 
@@ -211,7 +246,7 @@ verbatim — messages are written to be user/agent-safe.
 match the attached SAE at that layer), `UNVALIDATED_CIRCUIT` (200+envelope —
 rung < 2 activation without `acknowledge_unvalidated=true`), `NO_ACTIVE_CIRCUIT`
 (200+envelope — intensity/sensing call with no active circuit). Reused as-is:
-`UNKNOWN_KIND`, `PAYLOAD_TOO_LARGE`, `HUB_UNAVAILABLE`.
+`UNKNOWN_KIND`, `PAYLOAD_TOO_LARGE`, `HUB_UNAVAILABLE`. `CIRCUIT_SENSING_EVENT_NOT_FOUND` (404 — an edge sensing event id that does not exist; F15).
 
 ## 6. Auth posture & deployment guidance (Task 1.3)
 

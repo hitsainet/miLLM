@@ -1098,6 +1098,11 @@ class LoadedSAE:
                     "edge_sensing_skipped_batched_pass: batch=%d — armed edge "
                     "sensing expects the serial path", hidden_states.shape[0],
                 )
+            # This return is ABOVE the try, so it skips the `finally` and would
+            # report no progress at all — the same EC-17.1 stall as the
+            # suppressed path, on a second path. Found by execution while
+            # extracting: offset advanced to 5, `_progress` stayed {}.
+            self._report_edge_progress()
             return
         x = hidden_states[0] if hidden_states.dim() == 3 else hidden_states
         seq_len = x.shape[0]

@@ -421,3 +421,24 @@ class TestPositionAdvancesBeforeGuardsProgressReportsAfterWork:
         except RuntimeError:
             pass
         assert sae._edge_token_offset == 2
+
+    def test_a_batched_pass_still_reports_progress(self):
+        """The batched-pass bail returns from ABOVE the try, so it skips the
+        `finally`. Found by execution during the task-3.2 extraction: the
+        offset advanced to 5 while `_progress` stayed empty — the same EC-17.1
+        stall as the suppressed path, surviving on a second path."""
+        import torch
+        sae = armed()
+        layer = sae._edge_sensing.layer
+        sae._sense_edges(torch.zeros(2, 5, sae._W_enc_e.shape[0]))
+        assert sae._edge_token_offset == 5
+        assert sae._edge_ring._progress.get(layer) == 5
+
+    def test_a_pass_with_no_fires_still_reports_progress(self):
+        """The quiet path is the common one in production — most passes fire
+        nothing. If it did not report, pruning would stall on ordinary traffic
+        rather than on an edge case."""
+        sae = armed()
+        layer = sae._edge_sensing.layer
+        sae._sense_edges(hidden({}, {}, {}))
+        assert sae._edge_ring._progress.get(layer) == 3

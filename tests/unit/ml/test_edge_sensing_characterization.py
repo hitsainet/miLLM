@@ -808,3 +808,44 @@ class TestR2ASiblingsSpendingNeverStarvesAQuietLayer:
         ctx, saes = self._circuit(cap=2, layers=(10,))
         saes[10]._sense_edges(self._busy())
         assert ctx.budget.truncated_layers("circ_1") == [10]
+
+
+class TestR3StrictlyBeforeHoldsThroughTheREALPath:
+    """F17 R3-17. The strictly-before invariant is enforced by two mutually
+    redundant guards (`-inf` sentinel, `pos < down_pos`), so each masks the
+    other and neither can be pinned alone — documented in R2 with an in-process
+    pair-mutation control.
+
+    That control operates on a reconstruction of `match_down`. These assert the
+    same invariant through the REAL matcher on the REAL production path, so a
+    future rewrite that replaces both guards with a third mechanism is still
+    covered: what is pinned is the BEHAVIOUR, not either implementation."""
+
+    def test_a_same_position_co_fire_produces_no_event(self):
+        """Simultaneous firing is co-activation. Reporting it as up->down
+        would overclaim direction on an evidence surface."""
+        sae = armed()
+        sae._sense_edges(hidden({1: 2.0, 2: 2.0}))
+        assert sae._sensed_edges == []
+
+    def test_a_co_fire_does_not_become_an_antecedent_for_ITSELF(self):
+        """The subtler case: the co-fire is recorded upstream, then a LATER
+        downstream fire legitimately matches it. The co-fire must father the
+        later event and not one at its own position."""
+        sae = armed(config(max_lag=8), EdgeFireRing(8))
+        sae._sense_edges(hidden({1: 2.0, 2: 2.0}, {2: 2.0}))
+        assert len(sae._sensed_edges) == 1
+        ev = sae._sensed_edges[0]
+        assert (ev.up_pos, ev.down_pos) == (0, 1)
+        assert ev.token_lag >= 1, "an event claimed zero-token causation"
+
+    def test_no_emitted_event_ever_has_zero_token_lag(self):
+        """The invariant stated directly: every emitted edge asserts that the
+        upstream fire came FIRST, so a lag of 0 is a contradiction."""
+        sae = armed(config(max_lag=8), EdgeFireRing(8))
+        sae._sense_edges(hidden({1: 2.0, 2: 2.0}, {1: 2.0, 2: 2.0},
+                                {2: 2.0}, {1: 2.0}, {2: 2.0}))
+        assert sae._sensed_edges, "precondition: some events must be emitted"
+        assert all(e.token_lag >= 1 for e in sae._sensed_edges), (
+            f"zero-lag events: {[e.token_lag for e in sae._sensed_edges]}"
+        )

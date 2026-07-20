@@ -578,6 +578,20 @@ def _match_edges_impl(
                 events.append((local, spec_i, False))
     if not events:
         return
+    # Upstream before downstream at equal positions, so an upstream fire at p
+    # is visible to a downstream fire at p+1 within the same pass.
+    #
+    # R3-16: the `not e[2]` TIEBREAK itself is behaviourally INERT — verified by
+    # running both orderings against a same-position co-fire, an intra-pass
+    # up@0/down@1, and a co-fire followed by a later downstream fire: identical
+    # results in all three. `match_down` requires STRICTLY before, so which of
+    # two equal-position events is processed first cannot change any match.
+    #
+    # Kept because it makes the intent readable and costs nothing, and because
+    # a future `match_down` that relaxed strictly-before would need it. NOT
+    # given a test: an assertion on an inert line passes for the wrong reason.
+    # The position ordering it rides on IS load-bearing and IS pinned, by the
+    # characterization gate's intra-pass tests.
     events.sort(key=lambda e: (e[0], not e[2]))
 
     for local, spec_i, is_up in events:

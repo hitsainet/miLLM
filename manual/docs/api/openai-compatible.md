@@ -68,6 +68,8 @@ The rung is a bare integer and the phrase a quoted-string, so ladder punctuation
 
 The header is **omitted** whenever the circuit is not actually steering — no active circuit, a slice-fallback serve, an unparseable definition, or no SAE attached on any member layer. Its absence never means "rung 0"; it means "no circuit-attributable steering on this response". Clients displaying evidence language must read this header (or the `steering` field on `GET /api/circuits/active`) rather than deriving it from whether a circuit row is active.
 
+An operator changing steering through the management API **while a request is generating** wins: the request's restore is skipped rather than reverting them, and the management response reports whether the value is actually live. A per-request dial therefore never silently undoes a concurrent operator action.
+
 Responses to dialed requests carry an `X-miLLM-Steering-Intensity` header echoing the resolved λ. The echo is best-effort: it is omitted whenever the dial will not change steering (no SAE attached, unknown profile, steering disabled with a dial-only request, or an empty steering base), and a concurrent profile switch while the request queues can in rare cases make a symbolic echo differ from the applied λ.
 
 ```bash

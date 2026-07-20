@@ -205,6 +205,7 @@ class AttachedSAEState:
                     # writes. Initialised here (not __init__) because this is a
                     # singleton constructed via __new__.
                     cls._instance._steering_epoch: int = 0
+                    cls._instance._reverted_epochs: set[int] = set()
         return cls._instance
 
     @property
@@ -219,6 +220,29 @@ class AttachedSAEState:
         """
         with _ATTACHMENT_LOCK:
             return self._steering_epoch
+
+    def note_restore_reverted(self, epoch: int) -> None:
+        """Record that a per-request restore wrote over epoch ``epoch``.
+
+        R1 finding: `set_intensity` could not detect the very case it was
+        written for. The restore does not (and must not) bump the epoch, so an
+        operator whose write was reverted by an in-flight restore still saw
+        `reapplied: true`. The restore now RECORDS the epoch it clobbered, and
+        `set_intensity` checks whether its own epoch appears here.
+        """
+        with _ATTACHMENT_LOCK:
+            self._reverted_epochs.add(int(epoch))
+            # Bounded: only recent epochs can still be queried.
+            if len(self._reverted_epochs) > 256:
+                self._reverted_epochs = {
+                    e for e in self._reverted_epochs
+                    if e > self._steering_epoch - 256
+                }
+
+    def was_reverted(self, epoch: int) -> bool:
+        """True if a per-request restore overwrote the write at ``epoch``."""
+        with _ATTACHMENT_LOCK:
+            return int(epoch) in self._reverted_epochs
 
     def bump_steering_epoch(self, reason: str) -> int:
         """Record an authoritative steering write.
@@ -516,6 +540,7 @@ class SAEService:
         intensity: float,
         *,
         edges: Optional[list[dict[str, Any]]] = None,
+        authoritative: bool = True,
     ) -> CircuitSteeringResult:
         """Serve a circuit: apply every member through ITS OWN layer's SAE at
         the member's frozen budget scaled by one global intensity (λ).
@@ -545,10 +570,15 @@ class SAEService:
             outcome = self._set_circuit_steering_locked(
                 members, intensity, edges=edges
             )
-            # Feature 16: authoritative write. Bumped INSIDE the lock so a
-            # concurrent restore cannot read a stale epoch between the write
-            # landing and the counter advancing.
-            self._sae_state.bump_steering_epoch('set_circuit_steering')
+            # Feature 16: bump ONLY for an authoritative write. The
+            # per-request dial passes authoritative=False, because a
+            # per-request apply that bumped would make every request supersede
+            # its OWN restore — silently disabling per-request isolation
+            # entirely (TID pitfall 2). Bumped INSIDE the lock so a concurrent
+            # restore cannot read a stale epoch between the write landing and
+            # the counter advancing.
+            if authoritative:
+                self._sae_state.bump_steering_epoch("set_circuit_steering")
             return outcome
 
     def _set_circuit_steering_locked(
@@ -738,9 +768,13 @@ class SAEService:
                 entry.sae.clear_steering()
                 entry.sae.enable_steering(False)
                 cleared.append(layer)
-        # Feature 16: clearing is authoritative too — a request must not
-        # restore steering over a deliberate clear.
-        self._sae_state.bump_steering_epoch('clear_circuit_steering')
+        # Feature 16: clearing is authoritative — a request must not restore
+        # steering over a deliberate clear. R1: bump ONLY if something was
+        # actually cleared. An unconditional bump made every no-op clear
+        # supersede all in-flight restores, stranding their transient values
+        # in global state with no compensating write.
+        if cleared:
+            self._sae_state.bump_steering_epoch("clear_circuit_steering")
         return cleared
 
     def _cross_layer_hazards(
@@ -1919,6 +1953,10 @@ class SAEService:
         sae = self._sae_state.attached_sae
         self._check_feature_idx(feature_idx, sae)
         sae.set_steering(feature_idx, value)
+        # Feature 16 R1: these are the OPERATOR-facing steering routes —
+        # the exact actor in the feature's own narrative. Their windows
+        # were left open by the original nine-writer enumeration.
+        self._sae_state.bump_steering_epoch("operator_set_steering")
 
     def set_steering_batch(self, steering: dict[int, float]) -> None:
         """
@@ -1937,6 +1975,10 @@ class SAEService:
         for idx in steering:
             self._check_feature_idx(idx, sae)
         sae.set_steering_batch(steering)
+        # Feature 16 R1: these are the OPERATOR-facing steering routes —
+        # the exact actor in the feature's own narrative. Their windows
+        # were left open by the original nine-writer enumeration.
+        self._sae_state.bump_steering_epoch("operator_set_steering_batch")
 
     def clear_steering(self, feature_idx: Optional[int] = None) -> None:
         """
@@ -1951,6 +1993,10 @@ class SAEService:
         if not self._sae_state.is_attached:
             raise SAENotAttachedError("No SAE attached")
         self._sae_state.attached_sae.clear_steering(feature_idx)
+        # Feature 16 R1: these are the OPERATOR-facing steering routes —
+        # the exact actor in the feature's own narrative. Their windows
+        # were left open by the original nine-writer enumeration.
+        self._sae_state.bump_steering_epoch("operator_clear_steering")
 
     def enable_steering(self, enabled: bool = True) -> None:
         """
@@ -1965,6 +2011,10 @@ class SAEService:
         if not self._sae_state.is_attached:
             raise SAENotAttachedError("No SAE attached")
         self._sae_state.attached_sae.enable_steering(enabled)
+        # Feature 16 R1: these are the OPERATOR-facing steering routes —
+        # the exact actor in the feature's own narrative. Their windows
+        # were left open by the original nine-writer enumeration.
+        self._sae_state.bump_steering_epoch("operator_enable_steering")
 
     def get_steering_values(self) -> dict[int, float]:
         """

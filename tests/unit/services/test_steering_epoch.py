@@ -22,9 +22,11 @@ def clean():
     state = AttachedSAEState()
     state._entries.clear()
     state._steering_epoch = 0
+    state._reverted_epochs.clear()
     yield
     state._entries.clear()
     state._steering_epoch = 0
+    state._reverted_epochs.clear()
 
 
 def make_sae(values=None, enabled=True):
@@ -204,3 +206,215 @@ class TestAuthoritativeWritersBump:
         repo = Path(__file__).resolve().parents[3]
         src = (repo / "millm/ml/sae_wrapper.py").read_text()
         assert "bump_steering_epoch" not in src
+
+
+class TestWritersBumpBehaviourally:
+    """R1 finding 3: the enumeration test grepped SOURCE TEXT, so all nine
+    writers could be commented out or wrapped in `if False:` and it stayed
+    green — the TestRingPruningIsWired anti-pattern this project has shipped
+    before. These call the writers and observe the counter."""
+
+    def test_operator_set_steering_bumps(self):
+        from millm.services.sae_service import SAEService
+
+        svc = SAEService.__new__(SAEService)
+        svc._sae_state = AttachedSAEState()
+        sae = make_sae()
+        AttachedSAEState().set(sae, "sae-10", 10, None)
+
+        before = AttachedSAEState().steering_epoch
+        svc.set_steering(1, 40.0)
+        assert AttachedSAEState().steering_epoch == before + 1
+
+    def test_operator_batch_and_enable_each_bump(self):
+        from millm.services.sae_service import SAEService
+
+        svc = SAEService.__new__(SAEService)
+        svc._sae_state = AttachedSAEState()
+        AttachedSAEState().set(make_sae(), "sae-10", 10, None)
+
+        before = AttachedSAEState().steering_epoch
+        svc.set_steering_batch({1: 10.0})
+        svc.enable_steering(True)
+        assert AttachedSAEState().steering_epoch == before + 2
+
+    def test_a_no_op_circuit_clear_does_NOT_bump(self):
+        """R1 finding 8: an unconditional bump made every no-op clear
+        supersede all in-flight restores, stranding their transient values in
+        global state with no compensating write."""
+        from millm.services.sae_service import SAEService
+
+        svc = SAEService.__new__(SAEService)
+        svc._sae_state = AttachedSAEState()
+        before = AttachedSAEState().steering_epoch
+        svc.clear_circuit_steering()          # nothing attached -> cleared == []
+        assert AttachedSAEState().steering_epoch == before
+
+    def test_a_per_request_apply_does_NOT_bump(self):
+        """TID pitfall 2: a per-request apply that bumped would make every
+        request supersede its OWN restore, silently disabling isolation."""
+        from millm.services.sae_service import SAEService
+        from millm.api.schemas.circuit import CircuitMember
+
+        svc = SAEService.__new__(SAEService)
+        svc._sae_state = AttachedSAEState()
+        AttachedSAEState().set(make_sae(), "sae-10", 10, None)
+        member = CircuitMember(feature_idx=1, layer=10, budget=10.0,
+                               sign=1, sae_id="sae-10")
+
+        before = AttachedSAEState().steering_epoch
+        svc.set_circuit_steering([member], 1.0, authoritative=False)
+        assert AttachedSAEState().steering_epoch == before, (
+            "the per-request apply bumped and will supersede its own restore"
+        )
+
+        svc.set_circuit_steering([member], 1.0, authoritative=True)
+        assert AttachedSAEState().steering_epoch == before + 1
+
+
+class TestCaptureHappensAtSnapshotTime:
+    """R1 finding 1: the circuit epoch was read at RETURN, after the apply —
+    so an operator write landing during the apply window was absorbed and the
+    restore reverted them. The TID forbids the late read by name."""
+
+    def test_the_capture_precedes_the_apply(self):
+        import inspect
+
+        src = inspect.getsource(
+            InferenceService._apply_request_circuit_steering
+        )
+        capture = src.index("saved_epoch = state.steering_epoch")
+        apply_call = src.index("set_circuit_steering(")
+        assert capture < apply_call, (
+            "the epoch is captured after the apply; an operator write during "
+            "the apply window would be absorbed and then reverted"
+        )
+
+
+class TestReappliedTruthfulness:
+    """R1 finding 2: FR-16.4 — the feature's stated reason for existing — had
+    ZERO tests. Reverting it to the original defect left 1609/1609 green."""
+
+    def test_a_reverted_write_is_not_reported_as_reapplied(self):
+        state = AttachedSAEState()
+        applied = state.bump_steering_epoch("operator_set_intensity")
+
+        # An in-flight restore proceeds and writes over that epoch. It cannot
+        # bump (that would make every request supersede itself), so it records.
+        state.note_restore_reverted(applied)
+
+        assert state.was_reverted(applied) is True, (
+            "set_intensity cannot detect the case it exists for"
+        )
+
+    def test_an_unreverted_write_is_clean(self):
+        state = AttachedSAEState()
+        applied = state.bump_steering_epoch("operator_set_intensity")
+        assert state.was_reverted(applied) is False
+
+    def test_the_ledger_is_bounded(self):
+        """It must not grow without bound over a long-lived process."""
+        state = AttachedSAEState()
+        for _ in range(1000):
+            e = state.bump_steering_epoch("x")
+            state.note_restore_reverted(e)
+        assert len(state._reverted_epochs) <= 256
+
+    def test_superseded_is_a_plain_bool_on_the_response_model(self):
+        """R1 findings 1 and 9: the field was computed by the service, omitted
+        from the response model (so Pydantic silently DROPPED it), and
+        tri-state (True|None, never False)."""
+        from millm.api.schemas.circuit import CircuitIntensityResponse
+
+        assert "superseded" in CircuitIntensityResponse.model_fields
+        field = CircuitIntensityResponse.model_fields["superseded"]
+        assert field.annotation is bool
+        assert field.default is False
+
+
+class TestSkipLogIsDiagnosable:
+    def test_the_skip_log_carries_the_request_id_and_stranded_layers(self):
+        """FR-16.3 requires the request id. R1 finding 8: skipping leaves the
+        request's transient values live on layers the operator never touched,
+        and nothing named them."""
+        from unittest.mock import patch
+
+        sae = make_sae({1: 99.0})
+        AttachedSAEState().set(sae, "sae-10", 10, None)
+        saved = {
+            "circuit": True, "epoch": 0, "request_id": "cmpl-abc",
+            "layers": [{"sae_id": "sae-10", "layer": 10,
+                        "values": {1: 40.0}, "enabled": True}],
+        }
+        AttachedSAEState().bump_steering_epoch("operator")
+
+        import millm.services.inference_service as mod
+
+        with patch.object(mod.logger, "info") as info:
+            service()._restore_request_profile(saved)
+
+        ev = [c for c in info.call_args_list
+              if c.args and "superseded" in str(c.args[0])][0]
+        assert ev.kwargs["request_id"] == "cmpl-abc"
+        assert ev.kwargs["layers_left_dialled"] == [10]
+
+
+class TestSetIntensityReturnIsTruthful:
+    """MUT-A control: reverting FR-16.4 to the original defect
+    (`"reapplied": reapplied` unconditional) must FAIL here. The ledger tests
+    above exercise the primitives; this pins the RETURN VALUE a client reads,
+    which is the behaviour FR-16.4 actually promises."""
+
+    def _service(self):
+        from unittest.mock import AsyncMock, MagicMock
+
+        from millm.services.circuit_service import CircuitService
+
+        svc = CircuitService.__new__(CircuitService)
+        circuit = MagicMock(
+            id="circ_1", rung=2, is_active=True, serving_mode="full",
+            circuit_meta={}, intensity=1.0,
+        )
+        repo = MagicMock()
+        repo.get = AsyncMock(return_value=circuit)
+        repo.update = AsyncMock(return_value=circuit)
+        svc.repository = repo
+        svc._sae_service = MagicMock()
+        svc.summarize = lambda c: {"id": "circ_1"}
+        svc._parse_stored = lambda c: MagicMock(edges=[], members=[])
+        svc._serving_members = staticmethod(lambda d: [])
+        return svc, circuit
+
+    async def test_reapplied_is_false_when_a_restore_reverted_it(self):
+        import millm.services.circuit_service as mod
+
+        svc, _ = self._service()
+        state = AttachedSAEState()
+
+        # Make the steering call land, then simulate an in-flight restore
+        # writing over the epoch it produced.
+        def _steer(*a, **k):
+            e = state.steering_epoch
+            state.note_restore_reverted(e)
+            return MagicMock(hazards=[], clamp_warnings=[])
+
+        svc._sae_service.set_circuit_steering = _steer
+        out = await svc.set_intensity("circ_1", 1.5)
+
+        assert out["reapplied"] is False, (
+            "reapplied stayed true for a value a restore reverted — the exact "
+            "falsehood FR-16.4 exists to correct"
+        )
+        assert out["superseded"] is True
+        assert any("superseded" in w for w in out["warnings"])
+
+    async def test_reapplied_is_true_for_a_clean_write(self):
+        from unittest.mock import MagicMock
+
+        svc, _ = self._service()
+        svc._sae_service.set_circuit_steering = MagicMock(
+            return_value=MagicMock(hazards=[], clamp_warnings=[])
+        )
+        out = await svc.set_intensity("circ_1", 1.5)
+        assert out["reapplied"] is True
+        assert out["superseded"] is False

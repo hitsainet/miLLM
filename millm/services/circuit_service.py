@@ -817,18 +817,31 @@ class CircuitService:
                 "profile keeps its own intensity, so this dial was recorded but "
                 "not applied. Adjust the slice cluster's intensity instead."
             )
-        # Feature 16: an intensity change is authoritative. Capture the epoch
-        # OUR write produced, so the truthfulness check below tests whether
-        # something landed AFTER us — not merely "is anything newer than the
-        # snapshot", which would report superseded for our own bump.
-        applied_epoch = AttachedSAEState().bump_steering_epoch(
-            "circuit_set_intensity"
-        )
+        # Feature 16: an intensity change is authoritative. R1: when the
+        # steering call above ran it ALREADY bumped, so bumping again made one
+        # operator action advance the epoch by 2 and any snapshot taken between
+        # the two saw a spurious mismatch. Bump here only when nothing else
+        # did (the slice-fallback and no-op branches), and either way capture
+        # the epoch OUR action produced so the check below tests whether
+        # something landed AFTER us rather than reporting our own bump.
+        if reapplied:
+            applied_epoch = AttachedSAEState().steering_epoch
+        else:
+            applied_epoch = AttachedSAEState().bump_steering_epoch(
+                "circuit_set_intensity"
+            )
         # `reapplied: true` used to be unconditional whenever the steering call
         # was made — an affirmative claim that survived an in-flight request
         # restoring the pre-request snapshot over it moments later. It now
         # means what a caller reads it to mean: the value is live.
-        still_current = AttachedSAEState().steering_epoch == applied_epoch
+        # R1: "is the epoch still current" could never catch the target case,
+        # because the restore that reverts us does not bump. Ask the ledger
+        # whether OUR epoch was overwritten by a restore as well.
+        _state = AttachedSAEState()
+        still_current = (
+            _state.steering_epoch == applied_epoch
+            and not _state.was_reverted(applied_epoch)
+        )
         if reapplied and not still_current:
             warnings.append(
                 "The intensity was applied but immediately superseded by "
@@ -837,7 +850,7 @@ class CircuitService:
         return {
             **self.summarize(refreshed),
             "reapplied": reapplied and still_current,
-            "superseded": (reapplied and not still_current) or None,
+            "superseded": bool(reapplied and not still_current),
             "warnings": warnings,
         }
 

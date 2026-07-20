@@ -860,6 +860,7 @@ class InferenceService:
     async def _apply_request_circuit_steering(
         self,
         intensity_raw: "float | str | None",
+        request_id: Optional[str] = None,
     ) -> Optional[dict]:
         """Per-request dial over an ACTIVE CIRCUIT (Feature 14).
 
@@ -910,6 +911,13 @@ class InferenceService:
                         circuit_id=circuit.id)
             return None
 
+        # Feature 16 R1: capture the epoch HERE, with the snapshot it belongs
+        # to — not at the return. Reading it after the apply absorbed any
+        # operator write that landed during the apply window, so the restore
+        # compared equal and reverted them: the exact defect F16 exists to fix
+        # (TID §3.2 forbids the late read by name).
+        saved_epoch = state.steering_epoch
+
         # Save EVERY participating layer before touching any of them, so the
         # restore is complete even if a later layer fails.
         saved_layers: list[dict] = [
@@ -932,7 +940,8 @@ class InferenceService:
                 e.sae.enable_steering(False)
             logger.info("circuit_dial_disabled", circuit_id=circuit.id,
                         layers=[e.layer for e in entries])
-            return {"circuit": True, "epoch": state.steering_epoch,
+            return {"circuit": True, "epoch": saved_epoch,
+                    "request_id": request_id,
                     "layers": saved_layers}
 
         # Re-derive from the AUTHORED basis rather than rescaling the live
@@ -957,6 +966,9 @@ class InferenceService:
                 members,
                 lam,
                 edges=[e.model_dump(mode="json") for e in definition.edges],
+                # A per-request apply is NOT authoritative: bumping here would
+                # make this request supersede its own restore.
+                authoritative=False,
             )
         except Exception as e:
             # The dial must never fail a chat request: restore what we saved
@@ -991,7 +1003,8 @@ class InferenceService:
                 hazards=[str(h) for h in hazards],
                 clamp_warnings=[str(c) for c in clamps],
             )
-        return {"circuit": True, "epoch": state.steering_epoch,
+        return {"circuit": True, "epoch": saved_epoch,
+                "request_id": request_id,
                 "layers": saved_layers}
 
     @classmethod
@@ -1055,6 +1068,7 @@ class InferenceService:
         self,
         profile_name: Optional[str],
         intensity_raw: "float | str | None" = None,
+        request_id: Optional[str] = None,
     ) -> Optional[dict]:
         """
         Apply per-request steering override: a named profile, an intensity
@@ -1102,7 +1116,9 @@ class InferenceService:
         # A named profile still wins: the client asked for that profile
         # explicitly.
         if not profile_name and intensity_raw is not None:
-            circuit_saved = await self._apply_request_circuit_steering(intensity_raw)
+            circuit_saved = await self._apply_request_circuit_steering(
+                intensity_raw, request_id=request_id
+            )
             if circuit_saved is not None:
                 return circuit_saved
 
@@ -1195,6 +1211,7 @@ class InferenceService:
                 "values": sae.get_steering_values(),
                 "enabled": True,
                 "epoch": AttachedSAEState().steering_epoch,
+                "request_id": request_id,
             }
             sae.enable_steering(False)
             logger.info(
@@ -1244,6 +1261,7 @@ class InferenceService:
             "values": sae.get_steering_values(),
             "enabled": sae.is_steering_enabled,
             "epoch": AttachedSAEState().steering_epoch,
+            "request_id": request_id,
         }
 
         # set_steering_batch MERGES into the live dict (sae_wrapper) — clear
@@ -1290,12 +1308,29 @@ class InferenceService:
             # rollback which restores a snapshot from microseconds ago within
             # the same epoch) proceeds exactly as before.
             saved_epoch = saved.get("epoch")
-            if saved_epoch is not None and saved_epoch != state.steering_epoch:
+            current_epoch = state.steering_epoch
+            if saved_epoch is not None and saved_epoch == current_epoch:
+                # Proceeding: this restore is about to write over whatever the
+                # current authoritative epoch represents. Record it so
+                # set_intensity can answer "was my write reverted?" — the
+                # restore itself must NOT bump (that would make every request
+                # supersede its own restore), so a ledger is the only way it
+                # can report what it did (R1 finding).
+                state.note_restore_reverted(current_epoch)
+            if saved_epoch is not None and saved_epoch != current_epoch:
                 logger.info(
                     "request_restore_skipped_superseded",
                     saved_epoch=saved_epoch,
-                    current_epoch=state.steering_epoch,
+                    current_epoch=current_epoch,
                     path="circuit" if saved.get("circuit") else "profile",
+                    # FR-16.3: without this a skip cannot be correlated to the
+                    # request that caused it in a concurrent log stream.
+                    request_id=saved.get("request_id"),
+                    # R1: name the layers left holding this request's transient
+                    # values, since skipping means they are NOT restored.
+                    layers_left_dialled=[
+                        lay.get("layer") for lay in (saved.get("layers") or [])
+                    ] or None,
                 )
                 return
 
@@ -1871,7 +1906,8 @@ class InferenceService:
             _saved_steering = None
             if request.profile or request.steering_intensity is not None:
                 _saved_steering = await self._apply_request_steering(
-                    request.profile, request.steering_intensity
+                    request.profile, request.steering_intensity,
+                    request_id=completion_id,
                 )
 
             # Sensing boundary (Feature 11): n==1 only — with n>1 the
@@ -2020,7 +2056,8 @@ class InferenceService:
             if request.profile or request.steering_intensity is not None:
                 try:
                     _saved_steering = await self._apply_request_steering(
-                        request.profile, request.steering_intensity
+                        request.profile, request.steering_intensity,
+                        request_id=completion_id,
                     )
                 except MiLLMError as exc:
                     # The 200 + headers are already committed (route-level

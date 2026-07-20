@@ -171,6 +171,22 @@ Exclusions a client should expect: an armed circuit forces serial routing
 skipped entirely (absolute positions diverge), and a request is capped at 20
 observations with a `truncated` flag.
 
+### 4a-ter. `reapplied` is authoritative (v1.2 — Feature 16)
+
+`PUT /api/circuits/active/intensity` returns `reapplied` and `superseded`.
+**`reapplied: true` means the value is LIVE**, not merely that a steering call
+was made. It was previously unconditional, so an operator whose change was
+overwritten by an in-flight request's steering restore still saw `true`.
+
+- `reapplied: false, superseded: true` — the write landed and was then reverted
+  by a per-request restore. Re-issue it.
+- `reapplied: false, superseded: false` — it was never pushed to the model at
+  all; the accompanying warning says why (typically a slice-fallback circuit,
+  whose backing cluster profile owns its own intensity).
+
+A concurrent operator change WINS over an in-flight request: the request's
+restore is skipped rather than overwriting the newer authoritative write.
+
 ### 4b. Circuit per-request dial (v1.1 — Feature 14)
 
 `POST /v1/chat/completions` accepts the miLLM extension field

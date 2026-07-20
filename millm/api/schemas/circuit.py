@@ -296,6 +296,17 @@ class CircuitIntensityResponse(CircuitSummary):
     """
 
     reapplied: bool = False
+    superseded: bool = Field(
+        default=False,
+        description=(
+            "True when the intensity was written but immediately superseded by "
+            "another authoritative steering change, so it is NOT live. "
+            "Distinguishes that case from slice-fallback, where reapplied is "
+            "also false but for an entirely different reason. Declared here "
+            "deliberately: a field the service computes but the response model "
+            "omits is silently dropped by Pydantic and never reaches a client."
+        ),
+    )
     warnings: list[str] = Field(default_factory=list)
 
 

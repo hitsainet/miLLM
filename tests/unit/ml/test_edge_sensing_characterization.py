@@ -448,11 +448,20 @@ class TestPositionAdvancesBeforeGuardsProgressReportsAfterWork:
             raise RuntimeError("matcher exploded")
 
         sae._match_edges = boom
-        try:
-            sae._sense_edges(hidden({1: 2.0}, {2: 2.0}))
-        except RuntimeError:
-            pass
+        # R1-19: this used to wrap the call in `try/except RuntimeError`, so it
+        # passed whether `_sense_edges` SWALLOWED the failure or PROPAGATED it.
+        # Propagating would break generation itself — an observation path must
+        # never do that — and the escape hatch made the contract untestable.
+        # Calling it bare asserts the swallow.
+        sae._sense_edges(hidden({1: 2.0}, {2: 2.0}))
         assert sae._edge_token_offset == 2
+        # And the ring is left consistent: a pass that died mid-match must not
+        # leave half-recorded upstream fires for positions it never finished,
+        # or a sibling matches against an antecedent that was never fully
+        # observed.
+        assert sae._edge_ring._fires == {}, (
+            f"partial state survived a failed pass: {dict(sae._edge_ring._fires)}"
+        )
 
     def test_a_batched_pass_still_reports_progress(self):
         """The batched-pass bail returns from ABOVE the try, so it skips the
@@ -698,3 +707,28 @@ class TestUncoveredPathsThatBehaveCorrectly:
         sae._sense_edges(hidden({1: 2.0}, {2: 2.0}))
         assert len(sae._sensed_edges) > first, "sensing went dark after a move"
         assert sae._edge_token_offset == 4, "positions did not stay absolute"
+
+    def test_a_re_run_pass_double_counts_positions_which_is_why_speculative_is_excluded(self):
+        """R1-20. Documents WHY speculative decoding must be excluded, rather
+        than leaving the reason in a comment nobody can test.
+
+        `_advance_edge_position` is monotonic: it has no notion of a rejected
+        token, so re-running a pass over the same tokens advances the offset
+        AGAIN. Under speculative decoding a verification pass advances by a
+        whole candidate block and rejected tokens re-run, so two layers that
+        see different acceptance counts would silently disagree about absolute
+        position — the shared-by-construction invariant that replaced
+        `ctx.advance()` depends on every layer counting the same tokens once.
+
+        If this ever becomes false — if the offset learns to roll back — the
+        exclusion in `_circuit_sensing_begin` can be revisited. Until then this
+        pins the reason."""
+        sae = armed()
+        sae._sense_edges(hidden({1: 2.0}, {2: 2.0}))
+        assert sae._edge_token_offset == 2
+        # The SAME two tokens again, as a rejected-then-re-run block would be.
+        sae._sense_edges(hidden({1: 2.0}, {2: 2.0}))
+        assert sae._edge_token_offset == 4, (
+            "the offset rolled back — if re-runs are now handled, revisit the "
+            "speculative-decoding exclusion in _circuit_sensing_begin"
+        )

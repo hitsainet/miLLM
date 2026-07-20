@@ -111,7 +111,7 @@ class TestDegradation:
         with pytest.raises(Exception):
             filter_module.Filter.UserValves(custom_lambda=3.0)
 
-    def test_no_millm_imports(self):
+    def test_no_millm_imports(self, filter_module):
         source = FILTER_PATH.read_text()
         assert "from millm" not in source and "import millm" not in source
 
@@ -168,3 +168,87 @@ class TestChipAndStatus:
 
     def test_no_emitter_still_works(self, f):
         assert inlet(f, {}, {"valves": {"dial": "min"}})["steering_intensity"] == "min"
+
+
+# =============================================================================
+# Feature 14: circuit-aware status copy (filter v1.4.0)
+# =============================================================================
+
+
+class TestCircuitRungStatus:
+    """The dial must say WHAT it is steering with, and must never describe a
+    rung<2 circuit as causal."""
+
+    @staticmethod
+    def _mk(filter_module, **valve_overrides):
+        f = filter_module.Filter()
+        for k, v in valve_overrides.items():
+            setattr(f.valves, k, v)
+        return f
+
+    def test_rung_language_map_mirrors_the_contract_verbatim(self, filter_module):
+        f = self._mk(filter_module)
+        assert f.RUNG_LANGUAGE[0] == "associated"
+        assert f.RUNG_LANGUAGE[1] == "suggested (attribution-supported)"
+        assert f.RUNG_LANGUAGE[2] == "causally validated (edge)"
+        assert f.RUNG_LANGUAGE[3] == "faithfulness-tested (circuit)"
+
+    def test_no_circuit_adds_no_suffix(self, filter_module):
+        assert self._mk(filter_module)._circuit_suffix(None) == ""
+        assert self._mk(filter_module)._circuit_suffix({}) == ""
+
+    def test_validated_circuit_named_with_its_phrase(self, filter_module):
+        s = self._mk(filter_module)._circuit_suffix(
+            {"name": "fear→threat", "rung": 2,
+             "rung_language": "causally validated (edge)"}
+        )
+        assert 'circuit "fear→threat"' in s
+        assert "causally validated (edge)" in s
+        assert "UNVALIDATED" not in s
+
+    @pytest.mark.parametrize(
+        "rung,phrase", [(0, "associated"), (1, "suggested (attribution-supported)")]
+    )
+    def test_unvalidated_circuit_is_marked_and_never_causal(self, filter_module, rung, phrase):
+        s = self._mk(filter_module)._circuit_suffix(
+            {"name": "c", "rung": rung, "rung_language": phrase}
+        )
+        assert "[UNVALIDATED]" in s
+        assert "causal" not in s.lower()
+
+    def test_server_phrase_wins_over_the_local_mirror(self, filter_module):
+        """The server is the source of truth for evidence language."""
+        s = self._mk(filter_module)._circuit_suffix(
+            {"name": "c", "rung": 0, "rung_language": "associated (server wording)"}
+        )
+        assert "associated (server wording)" in s
+
+    def test_missing_rung_language_falls_back_to_the_mirror(self, filter_module):
+        s = self._mk(filter_module)._circuit_suffix({"name": "c", "rung": 1})
+        assert "suggested (attribution-supported)" in s
+
+    def test_malformed_rung_degrades_to_unvalidated_not_causal(self, filter_module):
+        s = self._mk(filter_module)._circuit_suffix({"name": "c", "rung": "garbage"})
+        assert "[UNVALIDATED]" in s
+        assert "causal" not in s.lower()
+
+    def test_slice_fallback_is_disclosed(self, filter_module):
+        s = self._mk(filter_module)._circuit_suffix(
+            {"name": "c", "rung": 2, "rung_language": "causally validated (edge)",
+             "serving_mode": "slice_fallback"}
+        )
+        assert "per-layer SLICE" in s
+        assert "not the whole circuit" in s
+
+    async def test_probe_disabled_by_valve(self, filter_module):
+        f = self._mk(filter_module, show_circuit_rung=False)
+        assert await f._circuit_status() is None
+
+    async def test_probe_failure_degrades_silently(self, filter_module):
+        """miLLM down / older build without the route must not break chat."""
+        f = self._mk(filter_module, millm_base_url="http://127.0.0.1:9")  # nothing listening
+        assert await f._circuit_status() is None
+
+    async def test_empty_base_url_skips_the_probe(self, filter_module):
+        f = self._mk(filter_module, millm_base_url="")
+        assert await f._circuit_status() is None

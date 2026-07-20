@@ -84,6 +84,68 @@ dial — it persists and affects everyone. The OWUI dial is **per request**: it 
 Older miLLM builds without the dial simply ignore the field — enabling the Function against them
 is safe and has no effect.
 
+
+## Step 6 — Dialling a Circuit (Feature 14)
+
+When a **circuit** is serving (Circuits page → Activate), the same dial scales
+**every layer of the circuit together** under one λ. You do not dial layers
+individually — a circuit is one intervention spanning several SAEs, and the
+budgets it was authored with keep their relative proportions as you move the
+dial.
+
+Nothing changes in how you use it: pick `off` / `min` / `max` / `custom` in
+⚙ Valves exactly as with a cluster. What changes is what the status line tells
+you:
+
+```
+miLLM steering: max (circuit's declared bound) · circuit "fear→threat" — causally validated (edge)
+miLLM steering: λ=1.2 · circuit "hedging" — associated [UNVALIDATED]
+```
+
+### Reading the evidence rung
+
+The phrase after the circuit name is its **evidence rung**, rendered by the
+server from the evidence ladder — the filter never composes it:
+
+| Rung | Phrase | Meaning |
+|---|---|---|
+| 0 | `associated` | a statistical association survived a null test |
+| 1 | `suggested (attribution-supported)` | gradient attribution agrees |
+| 2 | `causally validated (edge)` | a real intervention confirmed the edge |
+| 3 | `faithfulness-tested (circuit)` | circuit-level necessity was tested |
+
+A circuit **below rung 2 is marked `[UNVALIDATED]`** and is never described as
+"causal". That is deliberate: a mined or attribution-supported circuit is an
+*association*, and presenting it as causal at the point where it actually
+influences generation would be an overclaim. Activating such a circuit in the
+Admin UI requires an explicit acknowledgement for the same reason.
+
+If you see `(serving a per-layer SLICE, not the whole circuit)`, only some of
+the circuit's SAEs are attached, so miLLM is serving a single-layer projection
+rather than the full cross-layer intervention.
+
+### The response header
+
+Every reply also carries the rung as a header, so scripted clients can read it
+without the status line:
+
+```
+X-miLLM-Circuit-Rung: 2 causally validated (edge)
+X-miLLM-Steering-Intensity: 1.5
+```
+
+### Configuration
+
+The circuit probe is read-only and optional. In the Filter's operator valves:
+
+- `show_circuit_rung` (default on) — show the rung in the status line.
+- `millm_base_url` (default `http://localhost:8000`) — used **only** for the
+  `GET /api/circuits/active` probe.
+
+If miLLM is unreachable or running an older build without the route, the probe
+degrades silently and the dial behaves exactly as it did for clusters — it
+never blocks your message.
+
 ## Troubleshooting
 
 | Symptom | Cause / Fix |

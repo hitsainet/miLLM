@@ -626,6 +626,17 @@ class InferenceService:
         try:
             from millm.services.sae_service import AttachedSAEState
 
+            # Feature 14: mirror apply's ordering — a dial-only request over an
+            # ACTIVE CIRCUIT resolves against the circuit's envelope, not the
+            # profile's. Resolving it here (rather than only at apply) is what
+            # keeps the echo header from drifting away from what actually runs,
+            # which is exactly the class of bug Feature 10 R3 fixed by making
+            # ONE decision core serve both.
+            if not getattr(request, "profile", None):
+                circuit_lam = await self._resolve_active_circuit_intensity(raw)
+                if circuit_lam is not None:
+                    return circuit_lam
+
             sae = AttachedSAEState().attached_sae
             if sae is None:
                 return None  # apply will no-op; an echoed lambda would lie
@@ -669,6 +680,186 @@ class InferenceService:
                 error=str(exc),
             )
             return None
+
+    async def _active_full_circuit(self) -> Optional[Any]:
+        """The active circuit when it is serving in FULL multi-SAE mode.
+
+        A slice-fallback circuit is steered by a cluster profile, so the
+        ordinary profile path owns it — returning it here would double-apply.
+        Best-effort: a DB hiccup must not fail a chat request.
+        """
+        try:
+            from millm.db.base import async_session_factory
+            from millm.db.repositories.circuit_repository import CircuitRepository
+
+            async with async_session_factory() as session:
+                circuit = await CircuitRepository(session).get_active()
+            # The serving-mode read is inside the guard too: a stubbed or
+            # partially-initialised session can yield something that is not a
+            # Circuit, and no observability/dial nicety may fail a chat request.
+            if circuit is None or getattr(circuit, "serving_mode", None) != "full":
+                return None
+            return circuit
+        except Exception as e:
+            logger.warning("active_circuit_lookup_failed", error=str(e))
+            return None
+
+    async def _resolve_active_circuit_intensity(
+        self, raw: "float | str | None"
+    ) -> Optional[float]:
+        """Echo-side twin of the apply-side circuit resolution (same core)."""
+        circuit = await self._active_full_circuit()
+        if circuit is None:
+            return None
+        from millm.services.sae_service import AttachedSAEState
+
+        state = AttachedSAEState()
+        if not [e for e in state.entries() if e.layer in (circuit.layers or [])]:
+            return None  # apply will no-op; an echoed lambda would lie
+        return self._resolve_circuit_intensity(raw, circuit)
+
+    async def active_circuit_rung(self) -> Optional[tuple[int, str]]:
+        """`(rung, rung_language)` of the active full-serving circuit, or None.
+
+        Feeds the ``X-miLLM-Circuit-Rung`` echo so a dial client can show what
+        it is steering with. The phrase is rendered from the evidence ladder —
+        never composed here — so the header can never overclaim.
+        """
+        circuit = await self._active_full_circuit()
+        if circuit is None:
+            return None
+        from millm.core.circuit_evidence import rung_language
+
+        return int(circuit.rung), rung_language(circuit.rung)
+
+    async def _apply_request_circuit_steering(
+        self,
+        intensity_raw: "float | str | None",
+    ) -> Optional[dict]:
+        """Per-request dial over an ACTIVE CIRCUIT (Feature 14).
+
+        A circuit spans layers, so one global λ scales EVERY member together —
+        each through its own layer's SAE. This is why the circuit dial cannot
+        reuse the single-SAE path above: that one saves and restores exactly
+        one SAE, which would leave the other layers permanently dialled.
+
+        Returns the per-layer saved state for ``_restore_request_profile``, or
+        None when there is no active circuit to dial (the caller then falls
+        through to the profile/live-values path unchanged).
+
+        Only ``serving_mode="full"`` is dialled here. A slice-fallback circuit
+        is steered by a cluster PROFILE, which the ordinary profile path
+        already handles correctly — dialling it here would double-apply.
+        """
+        from millm.services.sae_service import AttachedSAEState
+
+        circuit = await self._active_full_circuit()
+        if circuit is None:
+            return None
+
+        lam = self._resolve_circuit_intensity(intensity_raw, circuit)
+        if lam is None:
+            return None
+
+        state = AttachedSAEState()
+        entries = [e for e in state.entries() if e.layer in (circuit.layers or [])]
+        if not entries:
+            logger.info("circuit_dial_noop_no_attached_layers",
+                        circuit_id=circuit.id)
+            return None
+
+        # Save EVERY participating layer before touching any of them, so the
+        # restore is complete even if a later layer fails.
+        saved_layers: list[dict] = [
+            {
+                "sae_id": e.sae_id,
+                "layer": e.layer,
+                "values": e.sae.get_steering_values(),
+                "enabled": e.sae.is_steering_enabled,
+            }
+            for e in entries
+        ]
+
+        if lam == 0.0:
+            for e in entries:
+                e.sae.enable_steering(False)
+            logger.info("circuit_dial_disabled", circuit_id=circuit.id,
+                        layers=[e.layer for e in entries])
+            return {"circuit": True, "layers": saved_layers}
+
+        # Scale each layer's CURRENT (λ=1-basis) values by the one dial. The
+        # active circuit already applied its authored budgets at activation, so
+        # the live values ARE the base — mirroring the live-values branch of
+        # the single-SAE path.
+        from millm.core.steering_range import clamp_steering
+
+        applied_any = False
+        for e in entries:
+            live = e.sae.get_steering_values()
+            if not live:
+                continue
+            base_lam = circuit.intensity if circuit.intensity else 1.0
+            scaled = {
+                int(i): clamp_steering(float(v) / base_lam * lam)
+                for i, v in live.items()
+            }
+            e.sae.clear_steering()
+            e.sae.set_steering_batch(scaled)
+            e.sae.enable_steering(True)
+            applied_any = True
+
+        if not applied_any:
+            logger.info("circuit_dial_noop_no_live_values", circuit_id=circuit.id)
+            return None
+
+        logger.info(
+            "circuit_dial_applied",
+            circuit_id=circuit.id,
+            intensity=lam,
+            layers=[e.layer for e in entries],
+        )
+        return {"circuit": True, "layers": saved_layers}
+
+    @classmethod
+    def _resolve_circuit_intensity(
+        cls, raw: "float | str | None", circuit: Any
+    ) -> Optional[float]:
+        """Resolve a dial value against the CIRCUIT's intensity envelope.
+
+        Symbolic values resolve against the circuit's authored range when the
+        stored document declares one, else the configured circuit envelope.
+        A numeric dial is capped at the same ceiling so /v1 can never exceed
+        what an authenticated ``PUT /api/circuits/active/intensity`` accepts.
+        """
+        from millm.core.config import settings
+
+        if raw is None:
+            return None
+
+        lo = float(settings.CIRCUIT_INTENSITY_MIN)
+        hi = float(settings.CIRCUIT_INTENSITY_MAX)
+        budget = ((circuit.circuit_meta or {}).get("budget") or {})
+        declared = budget.get("intensity_range")
+        if isinstance(declared, list) and len(declared) == 2:
+            try:
+                d_lo, d_hi = float(declared[0]), float(declared[1])
+                if d_lo > d_hi:
+                    d_lo, d_hi = d_hi, d_lo
+                # Intersect with the config envelope — an authored range must
+                # not smuggle overdrive past the dial's own bounds.
+                lo, hi = max(lo, d_lo), min(hi, d_hi)
+                if lo > hi:
+                    lo, hi = float(settings.CIRCUIT_INTENSITY_MIN), float(
+                        settings.CIRCUIT_INTENSITY_MAX
+                    )
+            except (TypeError, ValueError):
+                pass
+
+        if isinstance(raw, (int, float)):
+            lam = float(raw)
+            # Dialling to 0 (off) is ALWAYS allowed, even below an authored floor.
+            return 0.0 if lam == 0.0 else max(0.0, min(hi, lam))
+        return {"off": 0.0, "min": lo, "max": hi}.get(raw)
 
     async def _apply_request_steering(
         self,
@@ -714,6 +905,16 @@ class InferenceService:
             InvalidFeatureIndexError,
             ProfileNotFoundError,
         )
+
+        # Feature 14: an ACTIVE CIRCUIT is the base for a dial-only request —
+        # its members span layers, so scaling them needs the multi-SAE path
+        # (this function's single-SAE base would only ever reach layer[0]).
+        # A named profile still wins: the client asked for that profile
+        # explicitly.
+        if not profile_name and intensity_raw is not None:
+            circuit_saved = await self._apply_request_circuit_steering(intensity_raw)
+            if circuit_saved is not None:
+                return circuit_saved
 
         sae = AttachedSAEState().attached_sae
         if sae is None:
@@ -883,7 +1084,29 @@ class InferenceService:
         try:
             from millm.services.sae_service import AttachedSAEState
 
-            sae = AttachedSAEState().attached_sae
+            state = AttachedSAEState()
+
+            # Feature 14: a circuit dial saved EVERY participating layer.
+            # Restoring only the first would leave the other layers dialled
+            # for every subsequent request — a per-request override leaking
+            # into global state.
+            if saved.get("circuit"):
+                for entry_state in saved.get("layers", []):
+                    entry = state.get(entry_state["sae_id"], entry_state["layer"])
+                    if entry is None or entry.sae is None:
+                        # Detached mid-request; nothing to restore on that layer.
+                        continue
+                    entry.sae.clear_steering()
+                    if entry_state["values"]:
+                        entry.sae.set_steering_batch(entry_state["values"])
+                    entry.sae.enable_steering(entry_state["enabled"])
+                logger.debug(
+                    "request_circuit_steering_restored",
+                    layers=[s["layer"] for s in saved.get("layers", [])],
+                )
+                return
+
+            sae = state.attached_sae
             if sae is None:
                 return
 

@@ -84,6 +84,17 @@ async def create_chat_completion(
     # returns None (no header) when nothing can apply (no SAE, unknown
     # profile, DB hiccup), and a concurrent profile switch while the request
     # queues can still skew a symbolic echo — documented in the API reference.
+    # X-miLLM-Circuit-Rung tells a dial client WHAT it is steering with
+    # (Feature 14). The phrase comes from the evidence ladder, never composed
+    # here, so the header can never describe a rung<2 circuit as causal.
+    echo_circuit_rung = None
+    try:
+        rung_info = await inference.active_circuit_rung()
+        if rung_info is not None:
+            echo_circuit_rung = f"{rung_info[0]} {rung_info[1]}"
+    except Exception:  # observability must never fail a chat request
+        echo_circuit_rung = None
+
     echo_intensity = None
     if request.steering_intensity is not None:
         # For streaming, the echo resolution doubles as the pre-commit 404
@@ -118,6 +129,8 @@ async def create_chat_completion(
         stream_headers = {"X-miLLM-Backend": backend}
         if echo_intensity is not None:
             stream_headers["X-miLLM-Steering-Intensity"] = echo_intensity
+        if echo_circuit_rung is not None:
+            stream_headers["X-miLLM-Circuit-Rung"] = echo_circuit_rung
         return StreamingResponse(
             inference.stream_chat_completion(request),
             media_type="text/event-stream",
@@ -129,4 +142,6 @@ async def create_chat_completion(
         response.headers["X-miLLM-Backend"] = backend
         if echo_intensity is not None:
             response.headers["X-miLLM-Steering-Intensity"] = echo_intensity
+        if echo_circuit_rung is not None:
+            response.headers["X-miLLM-Circuit-Rung"] = echo_circuit_rung
         return await inference.create_chat_completion(request)

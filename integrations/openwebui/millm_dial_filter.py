@@ -1,7 +1,7 @@
 """
 title: miLLM Cluster Dial
 author: miLLM
-version: 1.3.0
+version: 1.4.0
 description: Per-chat steering-intensity dial for a miLLM backend. Injects the
   miLLM extension field `steering_intensity` (off | min | max, or a numeric
   lambda in [0, 2]) into /v1/chat/completions requests so each user can dial
@@ -73,6 +73,18 @@ class Filter:
             default=True,
             description="Emit a one-line status into the chat showing the dial applied.",
         )
+        show_circuit_rung: bool = Field(
+            default=True,
+            description=(
+                "When a CIRCUIT is steering, show its evidence rung in the status "
+                "line and mark an unvalidated (rung<2) circuit. Requires "
+                "millm_base_url; degrades silently when unreachable."
+            ),
+        )
+        millm_base_url: str = Field(
+            default="http://localhost:8000",
+            description="miLLM base URL used only for the read-only circuit-status probe.",
+        )
 
     class UserValves(BaseModel):
         dial: DialPosition = Field(
@@ -124,6 +136,68 @@ class Filter:
             return lam if 0.0 <= lam <= 2.0 else None
         return None
 
+    #: Mirrors docs/mcp-contract.md §4a VERBATIM. The server also sends the
+    #: phrase in X-miLLM-Circuit-Rung; this local copy is only a fallback for
+    #: the status line, and it must never be paraphrased — "causal" may not
+    #: describe a circuit below rung 2.
+    RUNG_LANGUAGE = {
+        0: "associated",
+        1: "suggested (attribution-supported)",
+        2: "causally validated (edge)",
+        3: "faithfulness-tested (circuit)",
+    }
+
+    async def _circuit_status(self) -> Optional[dict]:
+        """Read-only probe of GET /api/circuits/active.
+
+        Best-effort and STRICTLY optional: a short timeout, and any failure
+        (miLLM down, older build without the route, bad JSON) returns None so
+        the dial degrades to the Feature 10 copy rather than blocking the
+        user's message.
+        """
+        if not self.valves.show_circuit_rung:
+            return None
+        base = (self.valves.millm_base_url or "").rstrip("/")
+        if not base:
+            return None
+        try:
+            import json as _json
+            import urllib.request
+
+            req = urllib.request.Request(
+                f"{base}/api/circuits/active", headers={"Accept": "application/json"}
+            )
+            with urllib.request.urlopen(req, timeout=1.5) as resp:
+                payload = _json.loads(resp.read().decode("utf-8"))
+            data = payload.get("data") if isinstance(payload, dict) else None
+            return data if isinstance(data, dict) else None
+        except Exception:
+            return None
+
+    def _circuit_suffix(self, circuit: Optional[dict]) -> str:
+        """' · circuit "X" — <rung phrase> [UNVALIDATED]' or ''.
+
+        The phrase is taken from the SERVER's rung_language when present and
+        only falls back to the local mirror; either way a rung<2 circuit is
+        marked UNVALIDATED and never described as causal.
+        """
+        if not circuit:
+            return ""
+        try:
+            rung = int(circuit.get("rung", 0))
+        except (TypeError, ValueError):
+            rung = 0
+        phrase = circuit.get("rung_language") or self.RUNG_LANGUAGE.get(
+            rung, self.RUNG_LANGUAGE[0]
+        )
+        name = circuit.get("name") or "circuit"
+        mark = "" if rung >= 2 else " [UNVALIDATED]"
+        mode = circuit.get("serving_mode")
+        slice_note = " (serving a per-layer SLICE, not the whole circuit)" if (
+            mode == "slice_fallback"
+        ) else ""
+        return f' · circuit "{name}" — {phrase}{mark}{slice_note}'
+
     async def _status(self, emitter, text: str) -> None:
         """Best-effort status line — a broken emitter must never break chat."""
         if emitter is None or not self.valves.show_status:
@@ -166,13 +240,16 @@ class Filter:
             )
         if dial is not None:
             body["steering_intensity"] = dial
+            circuit = await self._circuit_status()
+            suffix = self._circuit_suffix(circuit)
             if dial == "off" or dial == 0.0:
                 text = "miLLM steering: off for this reply"
             elif dial in ("min", "max"):
-                text = f"miLLM steering: {dial} (cluster's declared bound)"
+                bound = "circuit's" if circuit else "cluster's"
+                text = f"miLLM steering: {dial} ({bound} declared bound)"
             else:
                 text = f"miLLM steering: λ={dial:g}"
-            await self._status(__event_emitter__, text)
+            await self._status(__event_emitter__, text + suffix)
         else:
             await self._status(
                 __event_emitter__,

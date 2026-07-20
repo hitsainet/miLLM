@@ -16,8 +16,22 @@ round found a critical regression in the previous round's fix — twelve rounds,
 That is not variance; it is a structure in which correctness is maintained by convention rather than
 enforced by construction, and the next feature to touch circuits will pay the same tax.
 
-Clarifying-question round with the product owner is **PENDING** (see `next_steps`); the three themes
-below are proposed, not locked.
+Clarifying-question round completed with the product owner 2026-07-20. **Stated goal: "as mature and
+bullet-proof a product as possible."** That answer settles the document's headline question — whether a
+consolidation increment with little demo surface is worth running at all — in the affirmative, and
+reframes every remaining decision as *how much assurance*, not *whether*. Locked decisions:
+**(1)** **refactor first, then agent reach** — the MCP circuit surface is built on settled ground rather
+than against three serving derivations that are about to move, so nothing is written twice and a tool
+bug is never confusable with a refactor bug;
+**(2)** **implement alone-vs-within properly** — computed per event from the ring's fired-position
+sets, rather than retired or deferred a third time;
+**(3)** **highest verification tier for the edge matcher** — characterization tests written and green
+BEFORE any code moves, the mutation practice applied to the result, then the full three review rounds;
+**(4)** **three previously out-of-scope gaps folded in** — detach from the attach-set dialog, SAE
+compatibility pre-filtering, and concurrent multi-circuit serving. The third is a genuine design change,
+not a cleanup: the single-active invariant is enforced by a partial unique index (`uq_circuits_active`)
+at the database level, so lifting it requires a migration and a contention model for layers claimed by
+more than one circuit.
 
 ```yaml
 brd:
@@ -27,7 +41,7 @@ brd:
     version: "0.1"
     author: "Sean"
     last_updated: "2026-07-20"
-    status: "draft — clarifying round not yet held"
+    status: "draft — clarifying round held 2026-07-20; decisions locked, awaiting approval to execute"
     increment_of: "miLLM (000_PPRD|miLLM.md)"
     successor_to: "BRD-MILLM-CIRCUITS-001"
 
@@ -129,18 +143,26 @@ brd:
       - "Resolving alone-vs-within: either compute it per-event from the ring, or formally retire the
          requirement in favour of ambient_fired_count."
       - "Per-row truncation attribution plus truncated_layers in the edge-sensing status payload."
+      - "Detach from the attach-set dialog — either a detach fan-out over deselected keys or
+         set-semantics server-side, so the control's mental model matches its behaviour."
+      - "SAE compatibility pre-filtering in the picker, which requires the SAE list endpoint to expose
+         a compatibility verdict the client can act on before a round trip."
+      - "Concurrent multi-circuit serving: lifting F13's single-active invariant, including the
+         uq_circuits_active partial unique index, the migration to drop it, and a contention model for
+         layers claimed by more than one active circuit."
     out_of_scope:
       - "New interpretability capability — no new discovery, validation or steering mathematics."
       - "Changes to the frozen v1 cluster/circuit schemas (miStudio owns them; miLLM consumes)."
-      - "Multiple concurrently-served circuits (F13's single-active invariant stands this increment)."
       - "Re-litigating the evidence ladder vocabulary or the rung<2 acknowledgement gate."
       - "The Open WebUI filter's UX, beyond not regressing it."
     assumptions:
       - "miStudio remains the owner of the MCP server; circuit tools are additive to it, mirroring how
          cluster tools were added (no new server, no new repo)."
       - "The 16-layer / 200-edge contract maxima remain the sizing envelope."
-      - "The single-active-circuit invariant from F13 holds, so a request-scoped context has exactly
-         one circuit to reason about."
+      - "The request-scoped context (BR-001) must be designed for MORE than one active circuit from the
+         start, since BR-011 lifts the single-active invariant in this same increment. Designing it
+         around one circuit and generalising later would repeat the exact mistake this increment
+         exists to correct."
     constraints:
       - "Additive-only at the API boundary; docs/mcp-contract.md moves to v1.2 with no breaking change."
       - "Refactors must be behaviour-preserving and provable as such — the existing 1597 backend / 272
@@ -162,9 +184,15 @@ brd:
     - id: BR-006
       text: "The edge-sensing truncation signal SHALL identify WHICH layer shed data rather than marking an entire request's observations truncated when any single layer did."
     - id: BR-007
-      text: "The alone-vs-within distinction SHALL either be computed per-event and honestly gated, or SHALL be formally retired from the requirement set in favour of the existing ambient_fired_count — it SHALL NOT remain nominally required and unimplemented."
+      text: "Each recorded edge observation SHALL carry a per-event alone-vs-within classification, computed from the fired-position sets already held at match time, so the distinction does not depend on full-width monitoring co-running; where a classification genuinely cannot be made it SHALL be NULL and never estimated."
     - id: BR-008
       text: "The two acceptance criteria deferred from 001 for want of a live GPU serve SHALL be closed against a real multi-SAE circuit, or SHALL be restated as criteria the test suite can honestly discharge."
+    - id: BR-009
+      text: "The attach-set control SHALL be able to REMOVE an SAE from the attached set, not only add to it, so that the control's behaviour matches the mental model its multi-select presents; today unchecking a row does nothing because attach_set is purely additive."
+    - id: BR-010
+      text: "The SAE picker SHALL indicate which SAEs are compatible with the loaded model BEFORE submission, using a compatibility verdict exposed by the SAE listing rather than discovering incompatibility through a server rejection."
+    - id: BR-011
+      text: "miLLM SHALL serve MORE THAN ONE circuit concurrently, replacing the single-active invariant (enforced today by the uq_circuits_active partial unique index) with an explicit contention model that defines what happens when two active circuits claim the same layer, and SHALL never silently disarm or override one circuit because another was activated."
 
   success_metrics:
     - metric: "Regression-free review rounds"
@@ -183,6 +211,14 @@ brd:
       target: >
         0 shipped capabilities without a reachability test (baseline: 3 found post-hoc by an operator,
         not by review).
+    - metric: "Concurrent circuits served"
+      target: >
+        ≥2 circuits serving simultaneously with a defined, tested outcome for a contended layer
+        (baseline: 1; activating a second silently disarms the first).
+    - metric: "Alone-vs-within coverage"
+      target: >
+        A classification present on every observation where one is derivable, independent of whether
+        monitoring co-ran (baseline: NULL unless full-width monitoring happened to be running).
     - metric: "Behaviour preservation"
       target: "Backend ≥1597 and frontend ≥272 tests green throughout; no acceptance criterion regresses."
 
@@ -207,7 +243,26 @@ brd:
         all three audit findings before an operator did.
     - theme: "Acceptance close-out"
       covers: [BR-007, BR-008]
-      note: "Retires the two honest gaps left open at the end of 001."
+      note: >
+        Retires the two honest gaps left open at the end of 001. BR-007 is now an implementation
+        rather than a decision: alone-vs-within is computed per event from the ring's fired-position
+        sets, which are already in hand at match time, so it no longer depends on monitoring being on.
+    - theme: "Operator-facing completeness"
+      covers: [BR-009, BR-010]
+      note: >
+        Folded in at the clarifying round. Both are consequences of the attach-set control being built
+        under time pressure during the capability audit: it can add but not remove, and it discovers
+        incompatibility by round trip. Neither is deep, and both are the difference between a control
+        that works and one that behaves as it looks.
+    - theme: "Concurrent circuit serving"
+      covers: [BR-011]
+      note: >
+        The one genuinely NEW design work in this increment, and the largest single risk in it. This
+        is not a cleanup: the invariant is enforced at the database level by a partial unique index, so
+        lifting it needs a migration, a contention model for layers claimed by more than one circuit,
+        and a decision about what per-layer budgets mean when two circuits both steer L13. It also
+        forces BR-001's context to be designed for N circuits from the outset — which is the right
+        order, but only if the design work happens BEFORE the context lands, not after.
 
   considerations:
     technical:
@@ -271,6 +326,26 @@ brd:
         The in-flight generation necessarily finishes under the old value (the hook is already
         installed); what changes is that the operator's value SURVIVES afterwards instead of being
         reverted. Log the supersession explicitly so the behaviour is observable.
+    - id: RSK-007
+      risk: >
+        Concurrent multi-circuit serving (BR-011) is scoped as a fold-in but is the largest design
+        change in the increment, and it lands in the same code the refactor is moving.
+      severity: "high"
+      mitigation: >
+        Sequence it as DESIGN-FIRST: the contention model must be settled before BR-001's context is
+        implemented, so the context is built for N circuits rather than generalised afterwards.
+        If the contention model proves contentious, BR-011 is the one item that can be split into a
+        follow-on WITHOUT invalidating the rest of the increment — provided the context's interface
+        is designed for N from the start regardless.
+    - id: RSK-008
+      risk: >
+        Lifting a database-enforced invariant (uq_circuits_active) is irreversible in deployed data
+        once two circuits have been active simultaneously.
+      severity: "medium"
+      mitigation: >
+        The migration must be paired with a tested downgrade path, and the contention model must
+        define a deterministic resolution for pre-existing rows. Treat the first concurrent activation
+        as a one-way door and gate it behind explicit acceptance.
     - id: RSK-006
       risk: "GPU close-out (BR-008) blocks on host availability and stalls the increment."
       severity: "low"
@@ -279,13 +354,54 @@ brd:
         unavailable, BR-008's fallback clause applies: restate the criteria as suite-dischargeable.
 
   next_steps:
-    - "Hold the clarifying-question round with the product owner — this draft locks nothing."
-    - "Decide the headline question: is this increment worth running before new capability? The case
-       for is the 12-of-12 regression rate; the case against is zero demo surface outside BR-004."
-    - "Decide whether BR-004 (agent reach) should be split into its own smaller increment that could
-       ship immediately, leaving the refactor to follow."
-    - "Resolve BR-007 by product decision: implement alone-vs-within, or retire it."
-    - "On approval, proceed to PPRD/PADR updates and the per-feature FPRD/FTDD/FTID/FTASKS chain."
+    - "Design the contention model for BR-011 FIRST — what happens when two active circuits claim the
+       same layer, and what a per-layer budget means under two claimants. This gates BR-001, because
+       the request-scoped context must be built for N circuits rather than generalised later."
+    - "Write characterization tests for the edge matcher and get them green BEFORE any code moves;
+       apply the mutation practice to the result (locked decision 3)."
+    - "Proceed to PPRD/PADR updates, then the per-feature FPRD/FTDD/FTID/FTASKS chain in the locked
+       order: structural consolidation → operator-facing completeness → concurrent serving →
+       agent reach → acceptance close-out."
+    - "Close BR-008 opportunistically whenever the GPU host is free; it is independent of every other
+       theme and need not gate the increment."
+    - "Re-run the capability audit at acceptance: every BR must have a reachability test, per BR-005."
+
+  execution_order:
+    rationale: >
+      Locked at the clarifying round: refactor before agent reach, so the MCP surface is written
+      against settled code. Within the refactor, smallest-and-independent first, largest-surface last.
+    sequence:
+      - step: 1
+        item: "Steering epoch (BR-003)"
+        why: >
+          Small, independent of the other refactors, and it fixes an operator-visible falsehood today
+          (set_intensity reporting "reapplied": true when the change was reverted). Covers the
+          Feature 10 profile path in the same change.
+      - step: 2
+        item: "Contention model design for concurrent serving (BR-011, design only)"
+        why: "Gates step 3 — the context must be designed for N circuits, not retrofitted."
+      - step: 3
+        item: "Request-scoped context + edge-machinery extraction (BR-001)"
+        why: "The heart of the consolidation; highest verification tier applies here."
+      - step: 4
+        item: "Single serving derivation (BR-002)"
+        why: "Largest surface area; lands once the context beneath it is stable."
+      - step: 5
+        item: "Concurrent serving implementation + migration (BR-011)"
+        why: "Built on the settled context. The one item splittable into a follow-on if needed."
+      - step: 6
+        item: "Operator-facing completeness (BR-009, BR-010) and truncation attribution (BR-006)"
+        why: "Independent of the refactor; can run in parallel if capacity allows."
+      - step: 7
+        item: "Alone-vs-within (BR-007)"
+        why: "Touches the matcher, so it follows the extraction rather than preceding it."
+      - step: 8
+        item: "MCP circuit surface (BR-004)"
+        why: "Written against settled ground — the locked sequencing decision."
+      - step: 9
+        item: "Reachability rule enforcement (BR-005) and acceptance close-out (BR-008)"
+        why: "The rule applies to everything above; close-out lands whenever the GPU host is free."
+
 ```
 
 ## Provenance note

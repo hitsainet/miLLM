@@ -843,11 +843,11 @@ Structural consolidation of the shipped circuit runtime plus the agent surface i
 | 13. Circuit Import, Slice-Fallback & Evidence Ladder | | | ✓ | | | ✓ | | ✓ | | | | ✓ | ✓ | | | | | | | |
 | 14. Circuit-Aware OWUI Dial | | | ✓ | | ✓ | | | | | ✓ | | ✓ | | ✓ | | | | | | |
 | 15. Circuit Edge Sensing | | | | ✓ | | | | | ✓ | | ✓ | | ✓ | | ✓ | | | | | |
-| 16. Steering Epoch | | | | | | | | | | | | | | | ✅ | | | | | |
-| 17. Request-Scoped Sensing Context | | | | | | | | | | | | | | | | ✅ | | | | |
-| 18. Single Serving Derivation | | | | | | | | | | | | | | | | | ✅ | | | |
-| 19. Concurrent Circuit Serving | | | | | | | | | | | | | | | | | | ✅ | | |
-| 20. MCP Circuit Surface | | | | | | | | | | | | | | | | | | | ✅ | |
+| 16. Steering Epoch | | | | | | | | | | | | | | |   | ✅ | | | | |
+| 17. Request-Scoped Sensing Context | | | | | | | | | | | | | | | |   | ✅ | | | |
+| 18. Single Serving Derivation | | | | | | | | | | | | | | | | |   | ✅ | | |
+| 19. Concurrent Circuit Serving | | | | | | | | | | | | | | | | | |   | ✅ | |
+| 20. MCP Circuit Surface | | | | | | | | | | | | | | | | | | |   | ✅ |
 
 ---
 

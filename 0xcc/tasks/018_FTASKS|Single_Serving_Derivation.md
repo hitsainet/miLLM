@@ -5,62 +5,135 @@
 **Document Version:** 1.0
 **Created:** July 20, 2026
 **Status:** 📋 DOCS COMPLETE 2026-07-20 — implementation not started
-**References:** `018_FPRD|Single_Serving_Derivation.md` · `018_FTDD|Single_Serving_Derivation.md` · `018_FTID|Single_Serving_Derivation.md`
+**References:** `018_FPRD|Single_Serving_Derivation.md` · `018_FTDD|Single_Serving_Derivation.md` · `018_FTID|Single_Serving_Derivation.md` · `BRD-MILLM-CIRCUITS-002.md` (BR-002)
 
 ## Relevant Files
-- `millm/services/circuit_steering_engine.py` — NEW, the one derivation
-- `millm/services/circuit_service.py` — sites at `:424` and `:799`; `_serving_members` (`:624`) moves out
-- `millm/services/inference_service.py` — site at `:955`; `_sae_service_for_dial` (`:743`) DELETED
-- `tests/unit/services/test_serving_characterization.py` — NEW, written FIRST
-- `tests/unit/services/test_circuit_steering_engine.py` — NEW
+- `millm/ml/circuit_steering.py` — NEW; `ServingPlan` + `CircuitSteeringEngine`, the one derivation
+- `millm/services/circuit_service.py` — `_serving_members` (:623-662) deleted; `_serve_full` (:415-433) and `set_intensity` (:798-803) consume the engine
+- `millm/services/inference_service.py` — `_circuit_serving_members` (:720-731) and `_sae_service_for_dial` (:733-745) deleted; dial (:890-985) and `_steering_circuit_uncached` (:806-822) consume the engine
+- `millm/services/sae_service.py` — `for_registry` classmethod added; `set_circuit_steering` (:481-513) and `_directional_budget` (:66-76) UNCHANGED
+- `tests/unit/ml/test_circuit_steering_engine.py` — NEW; characterization, claim set, honest construction
+- `tests/unit/services/test_circuit_service.py`, `test_circuit_dial.py` — repointed at the engine
+- `tests/unit/services/test_circuit_steering.py` — must need NO change (the apply is untouched)
+- `tests/integration/test_single_serving_derivation.py` — NEW; four-way identity, F14 regressions, reachability
+- `0xcc/adrs/000_PADR|miLLM.md` — new §10 decision entry (F18 has none today)
+
+### Notes
+- Depends on **Feature 17** (request-scoped context) and is sequenced strictly AFTER it, per BRD `execution_order` steps 3→4 — F18 lands on the settled context. Also depends on F12 (`set_circuit_steering`, `AttachedSAEState`), F13 (`CircuitService`, `CircuitDefinitionV1`) and F14 (the dial and echo paths).
+- **Four derivations, not three.** The BRD/PPRD baseline of 3 is understated; `inference_service.py:806-822` is a fourth, on the evidence surface. Verified by `grep -n "_serving_members\|_circuit_serving_members\|set_circuit_steering"`.
+- No migration, no config key, no contract change. Any API response-shape delta is a defect, not a feature.
+- Test commands: `pytest` (backend), `npm test` in admin-ui (Vitest).
+
+### Category Checklist Results
+- Data: none — no schema change; `circuits.layers` keeps its column and loses only its serving read (1.4) ✓
+- Backend/API: 3.x (call-site rewiring), 4.x (contract-parity tests); no new endpoints ✓
+- Frontend/UI: none — internal feature; frontend suite is a regression gate only (5.2) ✓
+- Business logic: 2.x (flattening, intensity, claim set, sign rule delegation) ✓
+- Integration wiring: 3.x (four call sites), 2.5 (`for_registry` replacing the `__new__` bypass) ✓
+- Error handling & logging: 3.5 (dial `except Exception` no longer masks a construction defect), 4.4 (offender/422 parity) ✓
+- Testing: characterization BEFORE the move (1.x), paired per parent, 4.x integration, 5.x reachability + mutation ✓
+- Performance & security: 4.5 (zero hot-path latency delta; engine strictly cheaper than the bypassed service) ✓
+- Config/deploy: none — no key, no flag, no migration; rollback is a revert (1.5) ✓
+- Documentation: 6.x (manual note + PADR decision of record) ✓
 
 ## Tasks
 
-- [ ] 1.0 Characterization FIRST (covers NFR-18.1) — **gate: do not start 2.0 until green**
-  - [ ] 1.1 Pin `_serve_full`'s current behaviour: members applied, per-layer routing, edges passed
-  - [ ] 1.2 Pin `set_intensity`'s re-serve behaviour
-  - [ ] 1.3 Pin the dial's behaviour incl. the F14 R1-01 authored-basis rule and R2-01 snapshot source
-  - [ ] 1.4 All three green against UNCHANGED code
+- [ ] 1.0 Behaviour preservation harness — BEFORE any code moves (covers ENG-V1; BR-002)
+  - [ ] 1.1 Record the baseline: full backend + frontend suite green, counts captured, at the pre-refactor commit
+  - [ ] 1.2 Characterization tests against the LIVE `CircuitService._serving_members` (:623-662): both-sources (EC-18.1), dedupe first-wins (EC-18.2), empty (EC-18.6), definition order, per-layer `sae_id` resolution — written and passing against the OLD code
+  - [ ] 1.3 Characterization of intensity resolution against live `_serve_full` (:421-423): document field wins over the DB column when both are present and differ (EC-18.4)
+  - [ ] 1.4 Characterization of today's participating-layer sets at all four sites, asserting they currently agree — the pre-move witness that the move preserves agreement rather than creating it
+  - [ ] 1.5 Confirm rollback safety: no migration, no config key, no contract change; every commit independently revertible
 
-- [ ] 2.0 The engine (covers FR-18.1, FR-18.2)
-  - [ ] 2.1 `CircuitSteeringEngine(state)` — attachment registry only, no repository, no session
-  - [ ] 2.2 Absorb `_serving_members` verbatim, preserving both-sources collection and dedupe
-  - [ ] 2.3 `serve(definition, intensity)` calling `set_circuit_steering`; the sign rule stays where it is
-  - [ ] 2.4 Unit tests incl. EC-18.3 (dupes), EC-18.4 (negative strength), EC-18.5 (both sources)
+- [ ] 2.0 The engine (covers FR-18.1, FR-18.3; ENG-D1..D5, ENG-C1, ENG-C3, ENG-K1..K3)
+  - [ ] 2.1 `millm/ml/circuit_steering.py`: `ServingPlan` frozen dataclass (members, intensity, claimed_layers, attached_layers, `unattached_layers`, `is_serveable`)
+  - [ ] 2.2 `CircuitSteeringEngine.__init__(state: AttachedSAEState | None = None)` — one defaulted arg; no repository, cache dir, emitter, downloader or loader (ENG-C1)
+  - [ ] 2.3 `serving_members` — the verbatim move of `:639-662`; RULES docstring carried over, `@staticmethod`-by-contract paragraph dropped (it documented a workaround being retired)
+  - [ ] 2.4 `serving_intensity` (ENG-D3) and `claim_set` defined AS the layers of `serving_members` (ENG-K1), plus `plan_for` deriving both from ONE member list
+  - [ ] 2.5 `SAEService.for_registry` classmethod — total construction, replacing the `__new__` bypass; `apply()` routes through it when no DI service is supplied (ENG-C2)
+  - [ ] 2.6 Verify the sign rule is DELEGATED: engine carries `budget`/`sign` untouched, `_directional_budget` keeps exactly its two current call sites (ENG-D5, EC-18.3)
+  - [ ] 2.7 Unit tests: repoint 1.2/1.3 characterizations at the engine and confirm they pass UNCHANGED; add claim-set identity, attached/unattached split (EC-18.7), and "no reachable method reads an unset field" (ENG-C3)
 
-- [ ] 3.0 Migrate the call sites, ONE AT A TIME (covers FR-18.1)
-  - [ ] 3.1 `_serve_full` (`:424`) → engine; suite green
-  - [ ] 3.2 `set_intensity` (`:799`) → engine; suite green
-  - [ ] 3.3 Dial (`:955`) → engine; suite green
-  - [ ] 3.4 DELETE `_sae_service_for_dial` (`:743`) and the `SAEService.__new__` call — delete, do not wrap
-  - [ ] 3.5 Structural test: `set_circuit_steering` has exactly ONE caller
-  - [ ] 3.6 Structural test: no `__new__` constructor bypass in the serving path
+- [ ] 3.0 Rewire the four call sites (covers FR-18.1, FR-18.2; ENG-D4, ENG-C2)
+  - [ ] 3.1 `_serve_full` (:415-433) → `plan_for` + `apply`; `bound_layers` from `plan.claimed_layers`, not `definition.layers()`
+  - [ ] 3.2 `set_intensity` (:798-803) → `plan_for(intensity=…)` + `apply`; `reapplied`/`warnings` shapes unchanged
+  - [ ] 3.3 The per-request dial (:890-985) → `plan_for`; **snapshot derived from `plan.claimed_layers`**, the same field the apply drives (closes F14-R2-01 structurally)
+  - [ ] 3.4 The echo predicate `_steering_circuit_uncached` (:806-822) → `plan.is_serveable`; `_STEERING_CIRCUIT_MEMO` wrapper (:798-804) left exactly as it is
+  - [ ] 3.5 DELETE `CircuitService._serving_members`, `InferenceService._circuit_serving_members` and `_sae_service_for_dial` — no shims (ENG-D4); confirm `SAEService.__new__` appears nowhere
+  - [ ] 3.6 Confirm `sae_service.py` diff is ADDITIVE only (`for_registry`); `set_circuit_steering`, `_set_circuit_steering_locked` and `_directional_budget` untouched (ENG-C4)
 
-- [ ] 4.0 Claim set (covers FR-18.3)
-  - [ ] 4.1 `claim_set(definition)` derived from serving members, NOT `circuit.layers`
-  - [ ] 4.2 Test that it matches the layers `serve` actually touches
-  - [ ] 4.3 Test the column-vs-definition divergence case (the F14 R2-01 shape)
+- [ ] 4.0 Integration & contract parity (covers ENG-V1; BR-002)
+  - [ ] 4.1 `test_single_serving_derivation.py`: one definition through activation, `set_intensity`, dial and echo — identical serving members AND identical applied per-layer values from all four
+  - [ ] 4.2 F14-R1-01 regression: authored 150 at λ=2, dial to 1.0, assert **150 not 100**; plus a circuit whose document intensity differs from the DB column
+  - [ ] 4.3 F14-R2-01 regression: a member layer absent from the `circuits.layers` column is claimed, dialled AND restored
+  - [ ] 4.4 Offender/422 parity: duplicate `(layer, feature_idx)` and `SAE_SET_INCOMPLETE` produce byte-identical responses pre- and post-refactor
+  - [ ] 4.5 Zero hot-path latency delta; rung-header suppression parity when nothing is steering (EC-18.7)
+  - [ ] 4.6 Slice-fallback boundary (EC-18.9): a partially-bound circuit still routes through `_serve_slices` and the cluster path, the engine is NOT involved, and `set_intensity` still reports recorded-but-not-applied
 
-- [ ] 5.0 Verification
-  - [ ] 5.1 Full backend suite green; F14 R1-01 and R2-01 regression tests still pass
-  - [ ] 5.2 **Mutation (BR-005)**: removing dedupe, or both-sources collection, MUST fail a test
-  - [ ] 5.3 EC-18.1: slice-fallback still routes through the cluster path
+- [ ] 5.0 Reachability & mutation (covers ENG-V2..V4; BR-005, BRD locked decision 3 / RSK-001)
+  - [ ] 5.1 Four reachability tests — one per call site — each FAILING when its engine wiring is cut; invocation asserted, never existence (the F15 `TestRingPruningIsWired` anti-pattern is explicitly excluded)
+  - [ ] 5.2 Single-derivation guard: a test that FAILS if a second flattening implementation appears; frontend suite green as a regression gate
+  - [ ] 5.3 Mutation testing on `millm/ml/circuit_steering.py`; every survivor pinned by a new test or recorded with a rationale
+  - [ ] 5.4 Assert the derivation count is exactly 1 and `SAEService.__new__` is absent from the tree
 
-- [ ] 6.0 Feature Acceptance
-  - [ ] 6.1 Verify FPRD §9 criteria 1–5 and all US/EC boxes one-by-one
-  - [ ] 6.2 Update CLAUDE.md + PPRD Feature 18 status
+- [ ] 6.0 Documentation (covers FPRD §14)
+  - [ ] 6.1 Manual: a short circuits-architecture note naming the one derivation, so "where does serving happen" has one answer
+  - [ ] 6.2 Update the PPRD Feature 18 block if the four-vs-three baseline is corrected upstream (see Upstream defects below)
+  - [ ] 6.3 **New PADR §10 decision entry** — `#### Single serving derivation vs four coordinated call sites`: engine shape, `__new__` retirement, and the canonical sign rule promoted to normative architecture text (it lives today only in `_directional_budget`'s docstring)
+
+- [ ] 7.0 Feature Acceptance (per instruct 008)
+  - [ ] 7.1 Verify FPRD §9 criteria 1–7 + all US/EC boxes one-by-one
+  - [ ] 7.2 Confirm behaviour preservation: backend + frontend suites green at EVERY commit of the extraction, not only at the end
+  - [ ] 7.3 Full suite green; update CLAUDE.md Document Inventory + Current Status; confirm `docs/mcp-contract.md` needs no change
 
 ## Coverage Audit
-| FR | Tasks |
-|---|---|
-| FR-18.1 | 2.1–2.4, 3.1–3.3, 3.5 |
-| FR-18.2 | 2.1, 3.4, 3.6 |
-| FR-18.3 | 4.1, 4.2, 4.3 |
+- FR-18.1→2.x/3.x/5.2/5.4; FR-18.2→2.2/2.5/3.5/5.4; FR-18.3→2.4/2.7/4.1 ✓
+- US-18.1→3.x/5.2; US-18.2→2.2/2.5/3.5; US-18.3→2.4/2.7 — implementing + testing sub-tasks each ✓
+- EC-18.1→1.2/2.3/2.7; EC-18.2→1.2/2.3/4.4; EC-18.3→2.6; EC-18.4→1.3/2.4/4.2; EC-18.5→2.4/3.3/4.3; EC-18.6→1.2/2.7; EC-18.7→2.7/4.5; EC-18.8→3.6; EC-18.9→4.6 ✓
+- BRD: BR-002→ENG-D1..D5/C1..C4/K1; BR-005→5.1/5.2; BR-011→2.4/2.7 (claim set as F19's input) ✓
+- TDD/TID sections all mapped (engine→2.x, rewiring→3.x, what-doesn't-change→3.6, testing→4.x/5.x) ✓
+- Open questions: none — no spike tasks ✓
+- Final task is Feature Acceptance ✓
 
 ## Review rounds (goal: 3 rounds, ≥10 findings each)
-- [ ] Round 1 (multi-angle `/code-review`): ≥10 findings. **Watch:** `_serving_members` simplified during the move (dedupe or both-sources dropped); the sign rule relocated into the engine and double-negating; the claim set taken from `circuit.layers`; the bypass wrapped rather than deleted.
-- [ ] Round 2 (attack Round 1's fixes + fresh angles): ≥10 findings. **Watch:** a call site migrated but its characterization test loosened to match; the engine acquiring a repository "just for one thing"; slice-fallback drifting into the engine; edges dumped differently at one site.
-- [ ] Round 3 (`/review`, 4 perspectives): ≥10 findings. **Watch:** whether the structural tests actually fail when a second caller is added; whether the claim set is genuinely consumed by contention rather than recomputed; mutation coverage on the flattening rules.
+- [ ] Round 1 (multi-angle /code-review, 2 finder agents): ≥10 findings — fix criticals, document deferrals.
+      Watch for: a fifth derivation reintroduced by a "convenience" helper; the dial's snapshot re-deriving
+      its layer set instead of reading `plan.claimed_layers` (F14-R2-01's exact shape); `serving_intensity`
+      called with the DB column by one caller and the document field by another (F14-R1-01); an engine-side
+      `sign` multiplication double-negating suppression; `for_registry` leaving a field unset and merely
+      relocating the swallowed AttributeError; the echo predicate (`:806-822`) missed entirely because the
+      BRD said three call sites; dedupe dropped as "redundant" (it 422s, it does not double-apply).
+- [ ] Round 2 (post-fix verification + fresh angles): ≥10 findings — verify R1 fixes hold; hunt regressions.
+      Watch for: R1's own fixes drifting — the F14 premise held twelve rounds for twelve, and F14-R2-01 was
+      R1's fix hardening a loop while leaving its input incomplete. Specifically: a fix that repoints one
+      caller and leaves a sibling; a characterization test rewritten to match new behaviour rather than
+      pinning old; `set_circuit_steering` edited to accommodate the engine (the premise-violating change);
+      the ContextVar memo folded into the engine, giving a process singleton request state.
+- [ ] Round 3 (/review, 4 perspectives): ≥10 findings — fix, pin mutation survivors.
+      Watch for: reachability tests that assert existence rather than invocation (the F15
+      `TestRingPruningIsWired` anti-pattern); mutation survivors in the flattening dedupe and the claim-set
+      identity; `claim_set` correct but unexercised until F19 and therefore under-tested.
+- [ ] Record: `.claude/context/sessions/review_feature018_R{1,2,3}_2026-07-*.md`.
+- Directive: fix latent/pre-existing defects surfaced during review, not only regressions.
 
 ## Acceptance evidence
-_(to be completed at 6.0)_
+
+### FPRD §9 criteria, verified one-by-one
+*(completed at feature close; each criterion gets a verdict and evidence cell)*
+
+| # | Criterion | Verdict | Evidence |
+|---|-----------|---------|----------|
+| 1 | Derivation count exactly 1, down from 4; guard test fails if it rises | — | |
+| 2 | `SAEService.__new__` absent; dial constructs its engine normally | — | |
+| 3 | `claim_set` == distinct layers of `serving_members` on every fixture | — | |
+| 4 | Flattening byte-identical: pre-move characterizations pass unchanged | — | |
+| 5 | Sign rule holds — negative strength served without `sign` multiplication | — | |
+| 6 | Suite green at every commit; reachability test per call site fails when wiring is cut | — | |
+| 7 | Mutation run on the engine; survivors pinned or recorded | — | |
+
+### Upstream defects found while authoring — recorded, not propagated
+1. **The BRD/PPRD baseline of three derivations is understated.** There are four: `inference_service.py:806-822` (`_steering_circuit_uncached`) independently flattens members and derives a participating-layer set to gate the rung header. The BRD's success metric reads "baseline: 3". F18 treats it as four; the metric should be corrected by its owner.
+2. **BR-005 is the reachability requirement, not the mutation-testing one.** Mutation testing anchors to BRD locked decision (3) / RSK-001 and lands as FR-17.6 (Feature 17). Task 5.3 is anchored accordingly; 5.1/5.2 cite BR-005.
+3. **The PPRD Feature-Requirements Matrix rows 16–20 are off by one column** — Feature 18's ✅ sits under FR-17.x. The prose blocks are authoritative and correct (F18 ↔ FR-18.x); the matrix needs a fix in the PPRD rather than propagation here.
+4. **Feature 18 has no PADR decision of record** — the only Circuit Consolidation feature without one (v1.3 §10 covers F16, F17, F19). Task 6.3 authors it. Note also that miLLM's PADR uses named `####` decisions under §10, NOT miStudio's IDL-N numbering; cross-references must use increment + decision name.
+5. **The canonical sign rule exists in miLLM only as a docstring** (`sae_service.py:66-76`), not in any architecture record, despite being load-bearing for both circuits and clusters. Task 6.3 promotes it to normative text.

@@ -204,7 +204,14 @@ brd:
         The three review rounds for this increment complete with ZERO criticals that are regressions
         in a prior round's fix (baseline across 001: 12 of 12 rounds had one).
     - metric: "Derivation count for circuit serving"
-      target: "Exactly 1 (baseline: 3, verified at circuit_service.py:424, :799 and inference_service.py:955)."
+      target: >
+        Exactly 1. **Baseline corrected to 4 during F18 authoring**: beyond
+        circuit_service.py:424, :799 and inference_service.py:955, a FOURTH
+        independent derivation lives in _steering_circuit_uncached
+        (inference_service.py:806-822), which flattens members and builds
+        member_layers to gate the RUNG HEADER. That is a serving derivation on
+        the evidence surface — the worst place to leave one, and the exact
+        F14-R2-02 defect class. Scoped into Feature 18.
     - metric: "Position-accounting counters per request"
       target: "Exactly 1 request-scoped counter (baseline: N per-SAE counters)."
     - metric: "Agent-reachable circuit capability"

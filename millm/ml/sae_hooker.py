@@ -175,6 +175,13 @@ class SAEHooker:
                 with torch.no_grad():
                     sae._sense(hidden_states)
 
+            # Feature 15 edge sensing — a SIBLING of the F11 branch above, not
+            # nested under it: a deployment may run cluster sensing and circuit
+            # edge sensing simultaneously, and each arms independently.
+            if sae.is_edge_sensing_armed:
+                with torch.no_grad():
+                    sae._sense_edges(hidden_states)
+
             # ── Steering ──────────────────────────────────────────────────────
             modified = sae.apply_steering(hidden_states)
 

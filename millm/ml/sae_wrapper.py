@@ -44,6 +44,130 @@ class SensingConfig:
 
 
 @dataclass
+class EdgeSpec:
+    """One sensable edge, resolved against the SAEs actually attached.
+
+    ``up_col``/``down_col`` are COLUMN OFFSETS into this SAE's armed member
+    slice, not feature indices — the slice is what `_W_enc_e` selects, so the
+    activation lookup must use the offset. ``up_feature_idx``/
+    ``down_feature_idx`` keep the real indices for reporting.
+
+    An edge whose endpoints live on different layers is sensed COOPERATIVELY:
+    the upstream SAE records the fire into a shared ring and the downstream
+    SAE matches against it. Both SAEs therefore hold the same EdgeSpec, and
+    each uses only the half that belongs to its own layer.
+    """
+
+    edge_key: str
+    up_layer: int
+    up_feature_idx: int
+    up_col: int                            # offset into THIS SAE's slice, or -1
+    down_layer: int
+    down_feature_idx: int
+    down_col: int                          # offset into THIS SAE's slice, or -1
+    rung: int
+    rung_language: str
+    edge_type: Optional[str] = None
+
+
+@dataclass
+class CircuitSensingConfig:
+    """Armed edge-sensing parameters for ONE SAE of a circuit (Feature 15).
+
+    ``member_indices`` are this SAE's own features that participate in any
+    sensable edge; ``thresholds`` is aligned with it, built by the same
+    theta = max(floor, epsilon * max_activation) rule Feature 11 uses.
+    """
+
+    circuit_id: str
+    layer: int
+    member_indices: list[int]
+    thresholds: Tensor                     # (m,)
+    threshold_mode: str                    # 'epsilon_max' | 'floor_only'
+    edges: list[EdgeSpec]
+    max_token_lag: int
+    context_tokens: int
+    max_events_per_request: int = 20
+
+
+@dataclass
+class SensedEdge:
+    """One observed up->down firing within the lag window.
+
+    NOT a causal observation. It says the upstream member fired and the
+    downstream partner then fired within ``token_lag`` tokens, in the
+    authored direction. The rung carried here is the only claim about
+    causality and it comes from miStudio, never from this observation.
+    """
+
+    edge_key: str
+    up_layer: int
+    up_feature_idx: int
+    up_pos: int
+    up_act: float
+    down_layer: int
+    down_feature_idx: int
+    down_pos: int
+    down_act: float
+    token_lag: int
+    phase: str                             # phase of the DOWNSTREAM fire
+    rung: int
+    rung_language: str
+    edge_type: Optional[str] = None
+
+
+class EdgeFireRing:
+    """Per-request record of upstream fires, shared across a circuit's SAEs.
+
+    A cross-layer edge cannot be detected inside one SAE: the upstream fire
+    happens in layer L's hook and the downstream fire in layer M's, on
+    different passes for decode tokens and different rows of the same pass for
+    prefill. The ring is the only shared state, and it is keyed by ABSOLUTE
+    token position so the two hooks agree on ordering regardless of which ran
+    first.
+    """
+
+    def __init__(self, max_lag: int):
+        self._max_lag = max(1, int(max_lag))
+        #: edge_key -> list of (abs_pos, activation), ascending by position.
+        self._fires: dict[str, list[tuple[int, float]]] = {}
+
+    def record_up(self, edge_key: str, pos: int, act: float) -> None:
+        self._fires.setdefault(edge_key, []).append((pos, float(act)))
+
+    def match_down(self, edge_key: str, down_pos: int) -> Optional[tuple[int, float]]:
+        """Newest upstream fire STRICTLY before down_pos and within the lag.
+
+        Strictly before: a same-position co-fire is co-activation, not an
+        up->down sequence, and reporting it as one would overclaim direction
+        (EC-15.2). Newest-first because the closest antecedent is the most
+        defensible attribution.
+        """
+        fires = self._fires.get(edge_key)
+        if not fires:
+            return None
+        best: Optional[tuple[int, float]] = None
+        for pos, act in fires:
+            if pos < down_pos and (down_pos - pos) <= self._max_lag:
+                if best is None or pos > best[0]:
+                    best = (pos, act)
+        return best
+
+    def prune_before(self, pos: int) -> None:
+        """Drop fires that can no longer match anything at or after `pos`."""
+        cutoff = pos - self._max_lag
+        for key, fires in list(self._fires.items()):
+            kept = [f for f in fires if f[0] >= cutoff]
+            if kept:
+                self._fires[key] = kept
+            else:
+                del self._fires[key]
+
+    def clear(self) -> None:
+        self._fires.clear()
+
+
+@dataclass
 class SensedHit:
     """A debounced co-activation span within one request.
 
@@ -179,6 +303,22 @@ class LoadedSAE:
         # Cumulative per-request overhead accumulator (ms) — read by the
         # sensing status endpoint (SEN-S2); reset at begin.
         self._sensing_overhead_ms: float = 0.0
+
+        # --- Feature 15: circuit edge sensing (independent of F11 above) ---
+        self._edge_sensing: Optional["CircuitSensingConfig"] = None
+        self._W_enc_e: Optional[Tensor] = None
+        self._b_enc_e: Optional[Tensor] = None
+        self._edge_thresholds_cpu: list[float] = []
+        self._sensed_edges: list["SensedEdge"] = []
+        self._edge_ring: Optional["EdgeFireRing"] = None
+        self._edge_token_offset: int = 0
+        self._edge_phase: str = "prefill"
+        self._edge_done: bool = False
+        self._edge_truncated: bool = False
+        self._edge_began: bool = False
+        self._edge_request_id: str = ""
+        self._edge_batch_warned: bool = False
+        self._edge_overhead_ms: float = 0.0
 
         # Monitoring state
         self._monitoring_enabled: bool = False
@@ -720,6 +860,206 @@ class LoadedSAE:
                 score=score,
             ))
 
+    # ------------------------------------------------------------------
+    # Feature 15: circuit edge sensing
+    # ------------------------------------------------------------------
+
+    def arm_edge_sensing(
+        self, config: "CircuitSensingConfig", ring: "EdgeFireRing"
+    ) -> None:
+        """Arm this SAE for one layer of a circuit's edge sensing.
+
+        `ring` is SHARED with the circuit's other SAEs — a cross-layer edge is
+        detected cooperatively, and the ring is the only state both hooks see.
+        """
+        if config.member_indices:
+            bad = [i for i in config.member_indices if not 0 <= i < self.d_sae]
+            if bad:
+                # An out-of-range index_select on CUDA is a device-side assert
+                # that poisons the context for the whole process — refuse here
+                # where it is a clean error. More exposed than F11: a circuit's
+                # members are keyed by layer, so a mis-keyed lookup would index
+                # into the WRONG SAE's feature space.
+                raise ValueError(
+                    f"edge sensing members out of range for layer {config.layer} "
+                    f"(d_sae={self.d_sae}): {bad[:5]}"
+                )
+            idx = torch.tensor(
+                config.member_indices, dtype=torch.long, device=self.W_enc.device
+            )
+            self._W_enc_e = self.W_enc.index_select(1, idx).contiguous()
+            self._b_enc_e = self.b_enc.index_select(0, idx).contiguous()
+            config.thresholds = config.thresholds.to(
+                device=self.W_enc.device, dtype=self.W_enc.dtype
+            )
+            # float32 first so inf survives — fp16 would overflow it to a
+            # finite value and an unsensable member would start firing.
+            self._edge_thresholds_cpu = [
+                float(v) for v in config.thresholds.to("cpu", torch.float32)
+            ]
+        self._edge_sensing = config
+        self._edge_ring = ring
+        self._reset_edge_buffer()
+        logger.info(
+            "edge sensing armed: circuit=%s layer=%d members=%d edges=%d",
+            config.circuit_id, config.layer,
+            len(config.member_indices), len(config.edges),
+        )
+
+    def disarm_edge_sensing(self) -> None:
+        self._edge_sensing = None
+        self._W_enc_e = None
+        self._b_enc_e = None
+        self._edge_thresholds_cpu = []
+        self._edge_ring = None
+        self._reset_edge_buffer()
+
+    @property
+    def is_edge_sensing_armed(self) -> bool:
+        """Deliberately distinct from is_sensing_armed — a deployment may run
+        cluster sensing and circuit edge sensing at the same time."""
+        return self._edge_sensing is not None
+
+    def _reset_edge_buffer(self) -> None:
+        self._sensed_edges = []
+        self._edge_token_offset = 0
+        self._edge_phase = "prefill"
+        self._edge_done = False
+        self._edge_truncated = False
+        self._edge_began = False
+        self._edge_request_id = ""
+        self._edge_overhead_ms = 0.0
+
+    def begin_edge_sensing_request(self, request_id: str) -> None:
+        """Open a request boundary. The CALLER clears the shared ring once for
+        the whole circuit — clearing it here would wipe upstream fires recorded
+        by a sibling SAE that began first."""
+        self._reset_edge_buffer()
+        self._edge_began = True
+        self._edge_request_id = request_id
+
+    def collect_sensed_edges(self) -> tuple[str, list["SensedEdge"], bool]:
+        """Drain this SAE's edges and close the boundary."""
+        request_id = self._edge_request_id
+        edges = self._sensed_edges
+        truncated = self._edge_truncated
+        self._sensed_edges = []
+        self._edge_began = False
+        self._edge_request_id = ""
+        return request_id, edges, truncated
+
+    def _sense_edges(self, hidden_states: Tensor) -> None:
+        """Per-pass edge predicate: record upstream fires, match downstream.
+
+        Called from the hook BEFORE apply_steering so positions reflect the
+        pre-steer residual read. Never raises into the forward pass.
+        """
+        if (self._suppressed or self._edge_sensing is None
+                or not self._edge_began or self._W_enc_e is None
+                or self._edge_ring is None):
+            return
+        import time as _time
+
+        started = _time.perf_counter()
+        config = self._edge_sensing
+        if hidden_states.dim() == 3 and hidden_states.shape[0] > 1:
+            # Batched pass while a boundary is open: positions cannot be
+            # attributed to a request. Routing forces serial when armed; make
+            # the violation observable rather than sensing row 0 silently.
+            if not self._edge_batch_warned:
+                self._edge_batch_warned = True
+                logger.warning(
+                    "edge_sensing_skipped_batched_pass: batch=%d — armed edge "
+                    "sensing expects the serial path", hidden_states.shape[0],
+                )
+            return
+        x = hidden_states[0] if hidden_states.dim() == 3 else hidden_states
+        seq_len = x.shape[0]
+        base = self._edge_token_offset
+        try:
+            if self._edge_done:
+                return  # cap hit — still advance the offset in finally
+            if x.dtype != self._W_enc_e.dtype:
+                x = x.to(self._W_enc_e.dtype)
+            acts = torch.relu(x @ self._W_enc_e + self._b_enc_e)   # (seq, m)
+            fired = acts > config.thresholds                        # (seq, m)
+            if not bool(fired.any()):
+                return
+            # ONE device->host transfer per pass. Reading float(acts[p, c])
+            # inside the per-position x per-edge loop below would cost a CUDA
+            # sync EACH TIME — the regression 011 R1 fixed for _sense.
+            fired_cpu = fired.detach().to("cpu", non_blocking=False)
+            acts_cpu = acts.detach().to("cpu", torch.float32, non_blocking=False)
+            self._match_edges(base, seq_len, acts_cpu, fired_cpu)
+        except Exception:
+            # An observation path must never break generation.
+            logger.exception("edge_sensing_pass_failed")
+        finally:
+            self._edge_token_offset += seq_len
+            if self._edge_phase == "prefill":
+                self._edge_phase = "decode"
+            self._edge_overhead_ms += ((_time.perf_counter() - started) * 1000.0)
+
+    def _match_edges(
+        self, base: int, seq_len: int, acts_cpu: Tensor, fired_cpu: Tensor
+    ) -> None:
+        """Record upstream fires and match downstream ones, in position order.
+
+        Both halves run per position and IN ORDER so that within a single
+        prefill pass an upstream fire at position p is visible to a downstream
+        fire at p+1 — the intra-pass case that a record-all-then-match-all
+        split would miss for same-layer edges.
+        """
+        config = self._edge_sensing
+        ring = self._edge_ring
+        if config is None or ring is None:
+            return
+        phase = self._edge_phase
+
+        for local in range(seq_len):
+            abs_pos = base + local
+            row_fired = fired_cpu[local]
+            if not bool(row_fired.any()):
+                continue
+            row_acts = acts_cpu[local]
+
+            for spec in config.edges:
+                # Upstream half — only if this SAE owns the upstream layer.
+                if spec.up_col >= 0 and bool(row_fired[spec.up_col]):
+                    ring.record_up(
+                        spec.edge_key, abs_pos, float(row_acts[spec.up_col])
+                    )
+                # Downstream half — only if this SAE owns the downstream layer.
+                if spec.down_col >= 0 and bool(row_fired[spec.down_col]):
+                    match = ring.match_down(spec.edge_key, abs_pos)
+                    if match is None:
+                        continue
+                    up_pos, up_act = match
+                    if len(self._sensed_edges) >= config.max_events_per_request:
+                        self._edge_truncated = True
+                        self._edge_done = True
+                        return
+                    self._sensed_edges.append(
+                        SensedEdge(
+                            edge_key=spec.edge_key,
+                            up_layer=spec.up_layer,
+                            up_feature_idx=spec.up_feature_idx,
+                            up_pos=up_pos,
+                            up_act=up_act,
+                            down_layer=spec.down_layer,
+                            down_feature_idx=spec.down_feature_idx,
+                            down_pos=abs_pos,
+                            down_act=float(row_acts[spec.down_col]),
+                            token_lag=abs_pos - up_pos,
+                            phase=phase,
+                            rung=spec.rung,
+                            rung_language=spec.rung_language,
+                            edge_type=spec.edge_type,
+                        )
+                    )
+            # Fires older than the window can never match again.
+            ring.prune_before(abs_pos)
+
     @contextmanager
     def suppressed(self) -> Iterator[None]:
         """Temporarily disable steering application and monitoring capture.
@@ -813,6 +1153,15 @@ class LoadedSAE:
             self._b_enc_m = self._b_enc_m.to(device)
         if self._sensing is not None:
             self._sensing.thresholds = self._sensing.thresholds.to(device)
+
+        # Same for the edge-sensing slices (Feature 15) — an armed SAE that
+        # left these behind would throw on every pass and be swallowed.
+        if self._W_enc_e is not None:
+            self._W_enc_e = self._W_enc_e.to(device)
+        if self._b_enc_e is not None:
+            self._b_enc_e = self._b_enc_e.to(device)
+        if self._edge_sensing is not None:
+            self._edge_sensing.thresholds = self._edge_sensing.thresholds.to(device)
 
         logger.debug(f"LoadedSAE moved to {device}")
 

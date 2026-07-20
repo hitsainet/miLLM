@@ -13,7 +13,7 @@ from typing import Any
 
 from sqlalchemy import Boolean, DateTime, Float, Index, Integer, String, Text, func
 from sqlalchemy.dialects.postgresql import JSONB
-from sqlalchemy.orm import Mapped, mapped_column
+from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from millm.db.base import Base
 
@@ -67,6 +67,22 @@ class Circuit(Base):
         Float, default=1.0, server_default="1.0", nullable=False
     )
     provenance: Mapped[dict[str, Any] | None] = mapped_column(JSONB, nullable=True)
+
+    #: Persistent operator INTENT for edge sensing (Feature 15), reported
+    #: distinctly from runtime ``armed``: a circuit can be enabled but unarmed
+    #: because it is not active, or because its SAE set is not attached.
+    sensing_enabled: Mapped[bool] = mapped_column(
+        Boolean, default=False, server_default="false", nullable=False
+    )
+
+    # Mirrors Profile.sensing_events: the ORM cascade covers SQLite (FK pragma
+    # off by default); postgres ALSO has the migration's FK ondelete=CASCADE
+    # for bulk/non-ORM deletes. Bounded load: retention caps events per circuit.
+    edge_sensing_events = relationship(
+        "CircuitEdgeSensingEvent",
+        cascade="all, delete-orphan",
+        lazy="select",
+    )
 
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=False

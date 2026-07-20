@@ -1058,25 +1058,31 @@ class LoadedSAE:
         Called from the hook BEFORE apply_steering so positions reflect the
         pre-steer residual read. Never raises into the forward pass.
         """
-        # R1 CRITICAL: these early returns skip the `finally` that advances
-        # _edge_token_offset, so a single suppressed or unarmed pass left THIS
-        # SAE's offset behind its siblings'. Because the ring is keyed on
-        # absolute position and SHARED, that silently shifts one layer's
-        # coordinates relative to another's for the rest of the request —
-        # fabricating matches and losing real ones. Feature 11 tolerates the
-        # same drift because its buffer is self-contained; F15 cannot.
-        # Advance the offset on EVERY pass, then decide whether to sense.
+        # F17 task 3.2: ONE advance, above every guard.
+        #
+        # The offset advance used to be triplicated — once in each early-return
+        # branch and once in the `finally`. That shape caused F15 R1-03: a
+        # suppressed or unarmed pass took a branch whose copy was missing, so
+        # THIS SAE's offset fell behind its siblings', and because the ring is
+        # keyed on absolute position and shared, one layer's coordinates
+        # silently shifted relative to another's for the rest of the request.
+        # F15 R3's own fix then inherited the same shape one level down, with
+        # `note_layer_progress` sitting below the returns.
+        #
+        # There is now no path that reaches sensing without advancing, and no
+        # second copy to forget.
         seq = (
             hidden_states.shape[1]
             if hidden_states.dim() == 3
             else hidden_states.shape[0]
         )
+        base = self._advance_edge_position(seq)
         if (self._suppressed or self._edge_sensing is None
                 or not self._edge_began or self._W_enc_e is None
                 or self._edge_ring is None):
-            self._edge_token_offset += seq
-            if self._edge_phase == "prefill":
-                self._edge_phase = "decode"
+            # A suppressed pass still reports progress, or `_progress` stays
+            # under the ring's len<2 guard and pruning never runs (EC-17.1).
+            self._report_edge_progress()
             return
         import time as _time
 
@@ -1092,16 +1098,9 @@ class LoadedSAE:
                     "edge_sensing_skipped_batched_pass: batch=%d — armed edge "
                     "sensing expects the serial path", hidden_states.shape[0],
                 )
-            # Advance here too — see the guard above. A batched pass that left
-            # the offset behind would desynchronise this SAE from its siblings
-            # for the remainder of the request.
-            self._edge_token_offset += seq
-            if self._edge_phase == "prefill":
-                self._edge_phase = "decode"
             return
         x = hidden_states[0] if hidden_states.dim() == 3 else hidden_states
         seq_len = x.shape[0]
-        base = self._edge_token_offset
         try:
             # R3: this used to `return`, so a layer that hit its cap stopped
             # recording UPSTREAM fires for the rest of the request — silently
@@ -1125,19 +1124,47 @@ class LoadedSAE:
             # An observation path must never break generation.
             logger.exception("edge_sensing_pass_failed")
         finally:
-            self._edge_token_offset += seq_len
-            if self._edge_phase == "prefill":
-                self._edge_phase = "decode"
-            # Report progress so the ring can prune to the slowest layer. This
-            # is the wiring R1 and R2 each declared and never added.
-            if self._edge_ring is not None and self._edge_sensing is not None:
-                try:
-                    self._edge_ring.note_layer_progress(
-                        self._edge_sensing.layer, self._edge_token_offset
-                    )
-                except Exception:
-                    logger.exception("edge_ring_progress_failed")
+            # Position advanced ONCE at the top, above every guard. Progress is
+            # reported HERE, after the match — reporting it earlier lets this
+            # layer's advance prune the ring out from under a sibling that has
+            # not read it yet (caught by the characterization gate).
+            self._report_edge_progress()
             self._edge_overhead_ms += ((_time.perf_counter() - started) * 1000.0)
+
+    def _advance_edge_position(self, seq: int) -> int:
+        """Advance past `seq` tokens and report progress. Returns the position
+        this pass STARTS at.
+
+        Called unconditionally at the top of `_sense_edges`, before any guard,
+        so no return path can skip it. Advancing in three places (two early
+        returns plus a `finally`) is what produced F15 R1-03 and then survived
+        one level down into R3's own fix.
+        """
+        base = self._edge_token_offset
+        self._edge_token_offset += seq
+        if self._edge_phase == "prefill":
+            self._edge_phase = "decode"
+        return base
+
+    def _report_edge_progress(self) -> None:
+        """Tell the ring how far THIS layer has walked, so it prunes to the
+        slowest.
+
+        Deliberately separate from `_advance_edge_position` and called AFTER
+        matching. The characterization gate caught this: reporting progress
+        before the match let an upstream layer's advance prune the ring out
+        from under the downstream layer that had not read it yet — resurrecting
+        F15 R1-01, the exact defect that made cross-layer sensing go dark.
+        Position must advance before the guards; progress must be reported
+        after the work.
+        """
+        if self._edge_ring is not None and self._edge_sensing is not None:
+            try:
+                self._edge_ring.note_layer_progress(
+                    self._edge_sensing.layer, self._edge_token_offset
+                )
+            except Exception:
+                logger.exception("edge_ring_progress_failed")
 
     def _match_edges(
         self, base: int, seq_len: int, acts_cpu: Tensor, fired_cpu: Tensor

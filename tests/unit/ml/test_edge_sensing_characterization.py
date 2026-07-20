@@ -353,3 +353,71 @@ class TestFixedCriticalsStayFixed:
         ev = sae._sensed_edges[0]
         assert ev.rung == 0 and ev.rung_language == "associated"
         assert "causal" not in ev.rung_language.lower()
+
+
+# ─────────────────────────────────────────────────────────────────────────
+# 3.2 — the advance/report split, pinned directly
+#
+# Task 3.2 collapsed a triplicated offset advance into one call above every
+# guard. The first attempt also hoisted the ring PROGRESS report to the same
+# place, which resurrected F15 R1-01: this layer's own advance pruned the ring
+# before the downstream layer had read it, and cross-layer sensing went dark.
+# test_F15R1_01 caught it, but only end-to-end. These pin the ordering itself,
+# so the next refactor fails here — at the cause, not three layers away.
+# ─────────────────────────────────────────────────────────────────────────
+
+
+class TestPositionAdvancesBeforeGuardsProgressReportsAfterWork:
+
+    def test_progress_is_NOT_reported_before_the_match_runs(self):
+        """The load-bearing order. If progress were reported at advance time,
+        the ring would prune to this layer's new position while an unread
+        sibling still needed the older entries."""
+        seen: list[str] = []
+        sae = armed()
+        ring = sae._edge_ring
+        real_note = ring.note_layer_progress
+
+        def spy(layer, pos):
+            seen.append("progress")
+            return real_note(layer, pos)
+
+        ring.note_layer_progress = spy
+        real_match = sae._match_edges
+
+        def match_spy(*a, **kw):
+            seen.append("match")
+            return real_match(*a, **kw)
+
+        sae._match_edges = match_spy
+        sae._sense_edges(hidden({1: 2.0}, {2: 2.0}))
+
+        assert "match" in seen, "the matcher never ran; this test proves nothing"
+        assert seen.index("match") < seen.index("progress"), (
+            "progress was reported before matching — this is F15 R1-01, the "
+            "defect that made cross-layer sensing go dark"
+        )
+
+    def test_a_suppressed_pass_still_reports_progress(self):
+        """A suppressed layer that never reports leaves `_progress` under the
+        ring's len<2 guard, so pruning never runs at all and the ring grows
+        unbounded (EC-17.1)."""
+        sae = armed()
+        with sae.suppressed():
+            sae._sense_edges(hidden({}, {}, {}))
+        assert sae._edge_ring._progress.get(sae._edge_sensing.layer) == 3
+
+    def test_position_advances_even_when_the_matcher_raises(self):
+        """Position must survive a matcher failure, or this SAE silently
+        desynchronises from its siblings on the SHARED absolute-position key."""
+        sae = armed()
+
+        def boom(*a, **kw):
+            raise RuntimeError("matcher exploded")
+
+        sae._match_edges = boom
+        try:
+            sae._sense_edges(hidden({1: 2.0}, {2: 2.0}))
+        except RuntimeError:
+            pass
+        assert sae._edge_token_offset == 2

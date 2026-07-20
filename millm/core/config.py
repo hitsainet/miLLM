@@ -65,6 +65,16 @@ class Settings(BaseSettings):
     CLUSTER_INTENSITY_MIN: float = 0.5
     CLUSTER_INTENSITY_MAX: float = 1.5
 
+    # ── Multi-SAE circuit serving (Feature 12) ─────────────────────────
+    # Documented VRAM close-out envelope for the attached SAE steering set.
+    # Measured: two Gemma-2-2B SAEs = 128 MB fp16 (within) / 256 MB fp32.
+    MULTISAE_VRAM_ENVELOPE_MB: int = 200
+    # Dtype for the attached steering-weight set (fp16 ≈ 64 MB/SAE measured).
+    MULTISAE_ATTACH_DTYPE: str = "float16"
+    # Global circuit intensity (λ) bounds — shared with the Feature 14 dial.
+    CIRCUIT_INTENSITY_MIN: float = 0.0
+    CIRCUIT_INTENSITY_MAX: float = 2.0
+
     # Co-activation sensing (Feature 11)
     SENSING_EPSILON: float = 0.1              # theta_i = max(floor, eps*max_act_i)
     SENSING_THETA_FLOOR: float = 0.0

@@ -229,6 +229,71 @@ class AttachmentStatus(BaseModel):
     )
 
 
+class AttachSetItem(BaseModel):
+    """One (sae_id, layer) pair to attach in a multi-SAE set (Feature 12)."""
+
+    sae_id: str = Field(..., min_length=1, description="SAE id to attach")
+    layer: int = Field(..., ge=0, description="Layer index to attach it to")
+
+
+class AttachSetRequest(BaseModel):
+    """Request schema for attaching several SAEs at once (Feature 12)."""
+
+    saes: list[AttachSetItem] = Field(
+        ..., min_length=1, max_length=16, description="SAEs to attach (1–16)"
+    )
+
+
+class AttachSetResponse(BaseModel):
+    """Response schema for the multi-SAE attach-set operation."""
+
+    status: str = Field(..., description="'attached'")
+    entries: list[dict] = Field(
+        default_factory=list, description="Per-request attach outcome"
+    )
+    attached_count: int = Field(..., description="Total attached entries after the call")
+    total_memory_usage_mb: int = Field(..., description="Summed attached-set VRAM in MB")
+    vram_envelope_mb: int = Field(..., description="Configured VRAM envelope in MB")
+    vram_warning: bool = Field(..., description="True when the set exceeds the envelope")
+
+
+class AttachedEntrySchema(BaseModel):
+    """One attached ``(sae_id, layer)`` entry in the multi-SAE set (Feature 12)."""
+
+    sae_id: str = Field(..., description="Attached SAE id")
+    layer: int = Field(..., description="Layer the SAE is attached to")
+    memory_usage_mb: int | None = Field(
+        default=None, description="GPU memory used by this SAE in MB"
+    )
+    steering_enabled: bool = Field(default=False)
+    monitoring_enabled: bool = Field(default=False)
+    steering_apply_count: int = Field(default=0)
+
+
+class AttachmentStatusSet(BaseModel):
+    """Plural attachment status across all attached SAEs (Feature 12).
+
+    Back-compat: single-SAE clients keep using ``AttachmentStatus``; this is
+    the additive plural view for multi-SAE circuit serving.
+    """
+
+    is_attached: bool = Field(..., description="Whether any SAE is attached")
+    count: int = Field(..., description="Number of attached (sae_id, layer) entries")
+    entries: list[AttachedEntrySchema] = Field(
+        default_factory=list, description="Per-SAE attachment entries"
+    )
+    total_memory_usage_mb: int | None = Field(
+        default=None, description="Summed GPU memory of the attached set in MB"
+    )
+    vram_envelope_mb: int | None = Field(
+        default=None, description="Configured VRAM close-out envelope"
+    )
+    vram_warning: bool = Field(
+        default=False,
+        description="True when the attached-set memory exceeds the envelope",
+    )
+
+
 class CompatibilityResult(BaseModel):
     """Response schema for SAE-model compatibility check."""
 

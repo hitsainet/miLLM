@@ -40,6 +40,30 @@ from millm.sockets.progress import ProgressEmitter
 
 logger = structlog.get_logger()
 
+# Attach-dtype names accepted for the multi-SAE steering weight cache.
+_ATTACH_DTYPES: dict[str, "torch.dtype"] = {
+    "float16": torch.float16,
+    "fp16": torch.float16,
+    "half": torch.float16,
+    "bfloat16": torch.bfloat16,
+    "bf16": torch.bfloat16,
+    "float32": torch.float32,
+    "fp32": torch.float32,
+}
+
+
+def _resolve_attach_dtype(name: str) -> "torch.dtype":
+    """Resolve a configured attach-dtype name to a torch dtype.
+
+    Defaults to fp16 (the measured ~64 MB/SAE footprint) for an unknown name
+    rather than raising — a bad config value must not block attachment.
+    """
+    dtype = _ATTACH_DTYPES.get(str(name).strip().lower())
+    if dtype is None:
+        logger.warning("unknown_attach_dtype_falling_back_fp16", requested=name)
+        return torch.float16
+    return dtype
+
 
 @dataclass
 class AttachmentStatus:
@@ -1222,6 +1246,114 @@ class SAEService:
             "layer_module_path": getattr(
                 self._hooker, "last_resolved_module_path", None
             ),
+        }
+
+    async def attach_set(
+        self,
+        sae_layers: list[tuple[str, int]],
+    ) -> dict[str, Any]:
+        """Attach several SAEs at once for multi-SAE circuit serving (Feature 12).
+
+        Loads ONLY the referenced SAEs (referenced-only loading), each in the
+        configured attach dtype (fp16 by default — the measured ~64 MB/SAE
+        footprint), and installs one forward hook per ``(sae_id, layer)`` bound
+        to that SAE's own decoder. Idempotent per key: re-attaching a
+        ``(sae_id, layer)`` already present is skipped. Reports the total
+        attached-set VRAM and a warning when it exceeds the configured
+        envelope.
+
+        Unlike ``attach_sae`` this does NOT enforce the single-attach guard —
+        it is the deliberate multi-SAE path. It coexists with a previously
+        single-attached SAE (that SAE stays in the registry).
+
+        Args:
+            sae_layers: list of ``(sae_id, layer)`` pairs to attach.
+
+        Returns:
+            Dict with per-entry status, total_memory_usage_mb, the envelope,
+            and a vram_warning flag.
+
+        Raises:
+            ModelNotLoadedError: If no model is loaded.
+            SAENotFoundError: If a referenced SAE does not exist.
+            SAEIncompatibleError: If a referenced SAE is incompatible.
+        """
+        from millm.core.config import settings
+
+        model_state = LoadedModelState()
+        if not model_state.is_loaded:
+            raise ModelNotLoadedError(
+                "No model loaded. Load a model before attaching SAEs.",
+            )
+
+        # Dedup requested keys, preserving order.
+        requested: list[tuple[str, int]] = list(
+            dict.fromkeys((sid, int(layer)) for sid, layer in sae_layers)
+        )
+        attach_dtype = _resolve_attach_dtype(settings.MULTISAE_ATTACH_DTYPE)
+        model = model_state.current.model
+
+        results: list[dict[str, Any]] = []
+        for sae_id, layer in requested:
+            # Idempotent: skip a key already attached.
+            if self._sae_state.get(sae_id, layer) is not None:
+                results.append(
+                    {"sae_id": sae_id, "layer": layer, "status": "already_attached"}
+                )
+                continue
+
+            sae = await self.get_sae(sae_id)  # raises SAENotFoundError
+            compat = await self.check_compatibility(sae_id, layer)
+            if not compat.compatible:
+                raise SAEIncompatibleError(
+                    f"SAE '{sae_id}' incompatible with model: {compat.errors[0]}",
+                    details={"errors": compat.errors, "warnings": compat.warnings},
+                )
+            for warning in compat.warnings:
+                logger.warning("sae_compatibility_warning", sae_id=sae_id, warning=warning)
+
+            loaded_sae = self._loader.load(
+                cache_path=sae.cache_path,
+                device="cuda" if torch.cuda.is_available() else "cpu",
+                dtype=attach_dtype,
+            )
+            handle = self._hooker.install(model, layer, loaded_sae)
+            self._reset_dynamo_for_hook_change()
+            self._sae_state.set(loaded_sae, sae_id, layer, handle)
+            results.append(
+                {
+                    "sae_id": sae_id,
+                    "layer": layer,
+                    "status": "attached",
+                    "memory_usage_mb": int(loaded_sae.estimate_memory_mb()),
+                    "warnings": compat.warnings,
+                }
+            )
+
+        status_set = self.get_attachment_status_set()
+        envelope = int(settings.MULTISAE_VRAM_ENVELOPE_MB)
+        total_mb = status_set.total_memory_usage_mb or 0
+        vram_warning = total_mb > envelope
+        if vram_warning:
+            logger.warning(
+                "multisae_vram_over_envelope",
+                total_mb=total_mb,
+                envelope_mb=envelope,
+                attached=status_set.count,
+            )
+        logger.info(
+            "sae_set_attached",
+            requested=len(requested),
+            attached=status_set.count,
+            total_mb=total_mb,
+        )
+        return {
+            "status": "attached",
+            "entries": results,
+            "attached_count": status_set.count,
+            "total_memory_usage_mb": total_mb,
+            "vram_envelope_mb": envelope,
+            "vram_warning": vram_warning,
         }
 
     async def detach_sae(self, sae_id: str) -> dict[str, Any]:

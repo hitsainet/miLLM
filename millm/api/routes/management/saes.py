@@ -12,8 +12,12 @@ from millm.api.dependencies import MonitoringServiceDep, SAEServiceDep
 from millm.sockets.progress import progress_emitter
 from millm.api.schemas.common import ApiResponse
 from millm.api.schemas.sae import (
+    AttachedEntrySchema,
+    AttachmentStatusSet,
     AttachResponse,
     AttachSAERequest,
+    AttachSetRequest,
+    AttachSetResponse,
     CancelResponse,
     CompatibilityResult,
     DeleteResponse,
@@ -196,6 +200,73 @@ async def get_attachment_status(
         steering_enabled=status.steering_enabled,
         monitoring_enabled=status.monitoring_enabled,
         steering_apply_count=status.steering_apply_count,
+    ))
+
+
+@router.get(
+    "/attachments",
+    response_model=ApiResponse[AttachmentStatusSet],
+    summary="Get multi-SAE attachment status",
+    description=(
+        "Get the plural attachment status across all attached (sae_id, layer) "
+        "entries (Feature 12 multi-SAE circuit serving)."
+    ),
+)
+async def get_attachment_status_set(
+    service: SAEServiceDep,
+) -> ApiResponse[AttachmentStatusSet]:
+    """Get the plural attachment status (all attached SAEs)."""
+    from millm.core.config import settings
+
+    status = service.get_attachment_status_set()
+    return ApiResponse.ok(AttachmentStatusSet(
+        is_attached=status.is_attached,
+        count=status.count,
+        entries=[
+            AttachedEntrySchema(
+                sae_id=e.sae_id,
+                layer=e.layer,
+                memory_usage_mb=e.memory_usage_mb,
+                steering_enabled=e.steering_enabled,
+                monitoring_enabled=e.monitoring_enabled,
+                steering_apply_count=e.steering_apply_count,
+            )
+            for e in status.entries
+        ],
+        total_memory_usage_mb=status.total_memory_usage_mb,
+        vram_envelope_mb=int(settings.MULTISAE_VRAM_ENVELOPE_MB),
+        vram_warning=(
+            status.total_memory_usage_mb is not None
+            and status.total_memory_usage_mb > int(settings.MULTISAE_VRAM_ENVELOPE_MB)
+        ),
+    ))
+
+
+@router.post(
+    "/attach-set",
+    response_model=ApiResponse[AttachSetResponse],
+    summary="Attach a set of SAEs (multi-SAE)",
+    description=(
+        "Attach several SAEs at once for cross-layer circuit serving. Loads "
+        "only the referenced SAEs (fp16) and installs one hook per "
+        "(sae_id, layer). Idempotent per key."
+    ),
+)
+async def attach_sae_set(
+    request: AttachSetRequest,
+    service: SAEServiceDep,
+) -> ApiResponse[AttachSetResponse]:
+    """Attach a multi-SAE set for circuit serving (Feature 12)."""
+    result = await service.attach_set(
+        [(item.sae_id, item.layer) for item in request.saes]
+    )
+    return ApiResponse.ok(AttachSetResponse(
+        status=result["status"],
+        entries=result["entries"],
+        attached_count=result["attached_count"],
+        total_memory_usage_mb=result["total_memory_usage_mb"],
+        vram_envelope_mb=result["vram_envelope_mb"],
+        vram_warning=result["vram_warning"],
     ))
 
 

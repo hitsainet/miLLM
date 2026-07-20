@@ -745,6 +745,21 @@ class ModelLoader:
         """Get the currently loaded model."""
         return self.state.current
 
+    @property
+    def model_name(self) -> Optional[str]:
+        """Human-readable name of the loaded model, or None.
+
+        The /health route reads this to report which model is serving. It was
+        never defined, so the read raised AttributeError inside the health
+        check's try/except and the route reported
+        `model_loader: unhealthy — "Component check failed"` with a null
+        model_name for EVERY successfully loaded model. The load itself was
+        fine; only the reporting was broken, which is the worst shape for a
+        health signal — it cried wolf on a healthy runtime.
+        """
+        current = self.state.current
+        return current.model_name if current is not None else None
+
     def load(
         self,
         model_id: int,

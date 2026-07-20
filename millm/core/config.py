@@ -92,6 +92,21 @@ class Settings(BaseSettings):
     SENSING_DEDUP_HISTORY: bool = True        # report re-read chat history once, not per turn
     SENSING_MAX_OVERHEAD_MS: float = 5.0      # warn threshold per request
 
+    # --- Feature 15: circuit edge sensing -------------------------------
+    #: Max tokens between an upstream fire and its downstream partner for the
+    #: pair to count as one edge observation. Too wide and unrelated fires get
+    #: attributed to each other; too narrow and real multi-token effects are
+    #: missed. 8 is the authored default, overridable per circuit.
+    CIRCUIT_SENSING_MAX_TOKEN_LAG: int = 8
+    CIRCUIT_SENSING_EPSILON: float = 0.1
+    CIRCUIT_SENSING_THETA_FLOOR: float = 0.0
+    CIRCUIT_SENSING_CONTEXT_TOKENS: int = 16
+    CIRCUIT_SENSING_MAX_EVENTS_PER_REQUEST: int = 20
+    CIRCUIT_SENSING_MAX_EVENTS_PER_CIRCUIT: int = 1000
+    CIRCUIT_SENSING_MAX_AGE_DAYS: int = 7
+    CIRCUIT_SENSING_FORCE_SERIAL: bool = True
+    CIRCUIT_SENSING_MAX_OVERHEAD_MS: float = 5.0
+
     # Performance: Inference concurrency.
     # MUST stay 1 for correctness of everything built on the global SAE
     # state: per-request steering overrides (Features 8/10), monitoring

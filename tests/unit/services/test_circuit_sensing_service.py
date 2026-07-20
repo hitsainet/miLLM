@@ -2403,3 +2403,66 @@ class TestR3AnInconsistentArmingIsRefusedNotDegraded:
         saes = two_saes()
         svc.arm_for_circuit(circuit(), definition(), saes)
         assert svc.begin_request("r", saes) is True
+
+
+class TestR3TheBroadcastCarriesNoUserTextAtAll:
+    """F17 R3-19. The WebSocket broadcast leaves the box, so it is the highest-
+    stakes surface in this feature — and a previous increment leaked user prompt
+    text on exactly this kind of path while a review round had marked it
+    'verified clean' by reading.
+
+    R1-16 pinned the `include_context=False` CALL. These pin the RESULT: that
+    no field of the context-free payload can carry prompt text, including
+    `summary`, which is generated prose and the one field where it could hide."""
+
+    def _row(self, **over):
+        from millm.db.models.circuit_edge_sensing_event import (
+            CircuitEdgeSensingEvent,
+        )
+
+        base = dict(
+            circuit_id="c", request_id="r", phase="prefill", edge_key="e",
+            up_layer=10, up_feature_idx=1, up_pos=2, up_act=1.0,
+            down_layer=13, down_feature_idx=2, down_pos=4, down_act=2.0,
+            token_lag=2, edge_rung=0, edge_rung_language="associated",
+            context_text="SECRET PROMPT TEXT",
+            context_token_ids=[1, 2, 3],
+            context_parts={"before": "a", "span": "SECRET", "after": "b"},
+            summary="edge 1@L10 → 2@L13 fired 2 token(s) apart [associated]",
+        )
+        base.update(over)
+        return CircuitEdgeSensingEvent(**base)
+
+    def test_no_broadcast_field_contains_prompt_text(self):
+        payload = self._row().to_dict(include_context=False)
+        leaked = [k for k, v in payload.items() if "SECRET" in str(v)]
+        assert leaked == [], f"prompt text left the box in {leaked}"
+
+    def test_the_context_fields_are_absent_not_merely_empty(self):
+        """Present-but-null still tells a listener the shape exists and invites
+        a future change to populate it."""
+        payload = self._row().to_dict(include_context=False)
+        for field in ("context_text", "context_token_ids", "context_parts"):
+            assert field not in payload
+
+    def test_the_summary_is_built_only_from_structure(self):
+        """`summary` is generated prose riding the broadcast. It must be
+        composed from indices, layers, lag and the rung phrase — never from
+        anything the user typed."""
+        svc = CircuitSensingService()
+        edge = SimpleNamespace(
+            up_feature_idx=1, up_layer=10, down_feature_idx=2, down_layer=13,
+            token_lag=2, rung_language="associated",
+        )
+        text = svc.summarize(edge)
+        assert "associated" in text
+        assert "causal" not in text.lower(), "the summary upgraded the rung"
+        for token in ("1", "10", "2", "13"):
+            assert token in text
+
+    def test_the_full_payload_DOES_carry_context(self):
+        """The negative half: the context fields must still be available to the
+        events API, or the privacy fix has simply deleted the feature."""
+        payload = self._row().to_dict(include_context=True)
+        assert payload["context_text"] == "SECRET PROMPT TEXT"
+        assert payload["context_parts"]["span"] == "SECRET"

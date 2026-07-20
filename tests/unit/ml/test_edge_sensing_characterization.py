@@ -849,3 +849,99 @@ class TestR3StrictlyBeforeHoldsThroughTheREALPath:
         assert all(e.token_lag >= 1 for e in sae._sensed_edges), (
             f"zero-lag events: {[e.token_lag for e in sae._sensed_edges]}"
         )
+
+
+class TestR3TheFeatureStillDoesTheThingItExistsFor:
+    """F17 R3-20. Sixty findings across three rounds changed the matcher, the
+    ring, the budget, the context, the service and the routes. Every one was
+    verified in isolation. This asserts the CAPABILITY end to end — two SAEs on
+    different layers cooperating to observe one edge — because a feature can
+    pass every unit test and still not do its job.
+
+    Deliberately last and deliberately whole: if this breaks, something in the
+    chain broke regardless of which unit test still passes."""
+
+    def _cross_layer_pair(self, max_lag=8):
+        s = spec(up_layer=10, down_layer=13, key="1@10->2@13")
+        ring = EdgeFireRing(max_lag)
+        up_cfg = config(
+            edges=[EdgeSpec(**{**s.__dict__, "up_col": 0, "down_col": -1})],
+            max_lag=max_lag, layer=10,
+        )
+        ctx = ctx_for(up_cfg, "e2e")
+        ctx._rings[up_cfg.circuit_id] = ring
+
+        up = real_sae()
+        up.arm_edge_sensing(up_cfg)
+        up.bind_context(ctx)
+        up.begin_edge_sensing_request("e2e")
+
+        down_cfg = config(
+            edges=[EdgeSpec(**{**s.__dict__, "up_col": -1, "down_col": 1})],
+            max_lag=max_lag, layer=13,
+        )
+        down = real_sae()
+        down.arm_edge_sensing(down_cfg)
+        down.bind_context(ctx)
+        down.begin_edge_sensing_request("e2e")
+        return ctx, up, down
+
+    def test_two_layers_cooperate_to_observe_one_edge(self):
+        ctx, up, down = self._cross_layer_pair()
+        up._sense_edges(hidden({1: 2.0}, {}, {}, {}))
+        down._sense_edges(hidden({}, {2: 2.0}, {}, {}))
+
+        assert len(down._sensed_edges) == 1, (
+            "cross-layer sensing produced nothing — the capability F15 exists "
+            "for is dark"
+        )
+        ev = down._sensed_edges[0]
+        assert (ev.up_layer, ev.up_pos) == (10, 0)
+        assert (ev.down_layer, ev.down_pos) == (13, 1)
+        assert ev.token_lag == 1
+
+    def test_the_evidence_claim_survives_the_whole_chain(self):
+        """The honesty guarantee end to end: the rung is carried VERBATIM from
+        arm time to the emitted event, and never upgraded by having watched the
+        edge fire."""
+        ctx, up, down = self._cross_layer_pair()
+        up._sense_edges(hidden({1: 2.0}, {}, {}, {}))
+        down._sense_edges(hidden({}, {2: 2.0}, {}, {}))
+
+        ev = down._sensed_edges[0]
+        assert ev.rung == 2
+        assert ev.rung_language == "causally validated (edge)"
+
+    def test_a_rung_zero_edge_is_never_described_as_causal(self):
+        """The build-failing copy rule, asserted on a real emitted event."""
+        s = spec(up_layer=10, down_layer=13, key="1@10->2@13", rung=0)
+        s.rung_language = "associated"
+        ring = EdgeFireRing(8)
+        up_cfg = config(
+            edges=[EdgeSpec(**{**s.__dict__, "up_col": 0, "down_col": -1})],
+            max_lag=8, layer=10,
+        )
+        ctx = ctx_for(up_cfg, "e2e")
+        ctx._rings[up_cfg.circuit_id] = ring
+        up = real_sae()
+        up.arm_edge_sensing(up_cfg)
+        up.bind_context(ctx)
+        up.begin_edge_sensing_request("e2e")
+        up._sense_edges(hidden({1: 2.0}, {}, {}, {}))
+
+        down_cfg = config(
+            edges=[EdgeSpec(**{**s.__dict__, "up_col": -1, "down_col": 1})],
+            max_lag=8, layer=13,
+        )
+        down = real_sae()
+        down.arm_edge_sensing(down_cfg)
+        down.bind_context(ctx)
+        down.begin_edge_sensing_request("e2e")
+        down._sense_edges(hidden({}, {2: 2.0}, {}, {}))
+
+        ev = down._sensed_edges[0]
+        assert ev.rung == 0
+        assert "causal" not in ev.rung_language.lower(), (
+            "a rung-0 observation was described as causal — the one claim this "
+            "system must never make"
+        )

@@ -442,6 +442,20 @@ class CircuitSensingService:
         self._unsensable = []
         self._request_circuit_id = None
         self._request_context_tokens = 0
+        # R2-01: disarm did NOT release an open boundary, so R1-03's
+        # concurrency guard turned a hung request into a PERMANENT outage —
+        # verified: after one request that never closed, every subsequent
+        # begin was refused, and disarm + re-arm did not clear it. A guard that
+        # cannot be recovered from is worse than the race it prevents.
+        #
+        # Disarming is an explicit operator action that ends the circuit's
+        # observation entirely, so any boundary it owned is over by definition.
+        if self._ctx is not None:
+            try:
+                self._ctx.close()
+            except Exception:
+                logger.exception("circuit_sensing_context_close_failed")
+        self._ctx = None
         # R1-04: these survived disarm, so status reported `layers: []` with
         # `truncated_layers: [13]` — accusing a layer the armed circuit does
         # not contain, and falsifying the contract's "an empty list means every
@@ -512,6 +526,33 @@ class CircuitSensingService:
                 ),
             )
             self.note_paused("concurrent_request")
+            # R2-01: RECLAIM the stale boundary instead of leaving it open.
+            #
+            # Refusing alone made a hung request a PERMANENT outage: every
+            # later begin was refused and even disarm+re-arm did not clear it
+            # (verified). A guard that cannot be recovered from is worse than
+            # the race it prevents.
+            #
+            # Reclaiming is safe because generation is serialised on the
+            # request queue: reaching `begin_request` at all means the previous
+            # request is no longer running, so its boundary is stale rather
+            # than concurrent. This request is still refused — its observations
+            # would be unattributable — but the NEXT one starts clean.
+            #
+            # If MAX_CONCURRENT_REQUESTS is ever raised above 1, this becomes
+            # the wrong call: it would then be a genuinely concurrent request
+            # and reclaiming would corrupt the live one. That setting is the
+            # documented invariant this whole guard exists to enforce.
+            stale, self._ctx = self._ctx, None
+            try:
+                stale.close()
+            except Exception:
+                logger.exception("circuit_sensing_stale_close_failed")
+            for sae in list(self._armed_saes.values()):
+                try:
+                    sae.bind_context(None)
+                except Exception:
+                    logger.exception("circuit_sensing_stale_unbind_failed")
             return False
 
         # One context for this request, shared by every armed layer. Built over

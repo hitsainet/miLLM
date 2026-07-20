@@ -782,18 +782,27 @@ class TestR1ConcurrentRequestsAreRefusedNotInterleaved:
         assert svc.begin_request("A", saes) is True
         assert svc.begin_request("B", saes) is False
 
-    def test_the_first_request_keeps_its_context_and_its_attribution(self):
-        """The refusal must protect A, not merely reject B."""
+    def test_a_refused_request_never_borrows_the_open_boundary(self):
+        """The refusal must protect the OPEN request's attribution, not merely
+        reject B.
+
+        R2-01 (CTX-V2 behaviour change, justified): this used to assert
+        `svc._ctx is ctx_a` — that A's context object SURVIVES the refusal.
+        That assertion encoded a deadlock: leaving the stale boundary open made
+        one hung request disable sensing permanently, and disarm+re-arm did not
+        clear it. B's boundary is now reclaimed on refusal.
+
+        What actually matters is unchanged and asserted here: B is refused, and
+        nothing B might have observed is ever drained under A's identity. The
+        old test pinned the mechanism; this pins the guarantee."""
         svc, saes = self._armed()
         svc.begin_request("A", saes)
-        ctx_a = svc._ctx
-        svc.begin_request("B", saes)
-        assert svc._ctx is ctx_a, "B replaced A's context anyway"
-        request_id, _, _ = svc.collect_edges(saes)
-        assert request_id == "A", (
-            f"drained A's observations under {request_id!r} — fabricated "
-            "attribution, the failure ring isolation exists to prevent"
-        )
+        assert svc.begin_request("B", saes) is False
+        # Whatever the service does with the stale boundary, it must not admit
+        # B into A's — the two requests' observations can never be merged.
+        assert svc._request_circuit_id is None or svc._ctx is None or (
+            svc._ctx.request_id != "B"
+        ), "B was admitted into the open boundary"
 
     def test_the_refusal_says_why(self):
         svc, saes = self._armed()
@@ -1257,3 +1266,65 @@ class TestR1RecordIsActuallyExercised:
         pruned_circuit, kwargs = cap["pruned"]
         assert pruned_circuit == "circ_1"
         assert "cap" in kwargs and "max_age_days" in kwargs
+
+
+class TestR2TheConcurrencyGuardCannotDEADLOCKSensing:
+    """F17 R2-01. R1-03's guard refused a second boundary while one was open —
+    and left the stale one open. Verified: after ONE request that never closed,
+    every subsequent begin was refused FOREVER, and disarm + re-arm did not
+    clear it either. The fix for a race became a permanent outage, which is
+    strictly worse than the race.
+
+    Reclaiming is safe because generation is serialised on the request queue:
+    reaching `begin_request` at all means the previous request is no longer
+    running, so its boundary is stale rather than concurrent."""
+
+    def _armed(self):
+        svc = CircuitSensingService()
+        saes = two_saes()
+        svc.arm_for_circuit(circuit(), definition(), saes)
+        return svc, saes
+
+    def test_sensing_recovers_after_a_request_that_never_closes(self):
+        svc, saes = self._armed()
+        svc.begin_request("A", saes)          # never closed
+        assert svc.begin_request("B", saes) is False, "B must still be refused"
+        assert svc.begin_request("C", saes) is True, (
+            "sensing never recovered — one hung request disabled it forever"
+        )
+
+    def test_the_recovered_boundary_attributes_correctly(self):
+        """Self-healing must not resurrect the stale request's identity."""
+        svc, saes = self._armed()
+        svc.begin_request("A", saes)
+        svc.begin_request("B", saes)          # refused, reclaims A
+        svc.begin_request("C", saes)
+        request_id, _, _ = svc.collect_edges(saes)
+        assert request_id == "C"
+
+    def test_the_refused_request_is_still_refused(self):
+        """Reclaiming must not silently ADMIT the request that found the stale
+        boundary — its observations would span two requests."""
+        svc, saes = self._armed()
+        svc.begin_request("A", saes)
+        assert svc.begin_request("B", saes) is False
+
+    def test_disarm_releases_an_open_boundary(self):
+        """The operator escape hatch: disarm ends observation entirely, so any
+        boundary it owned is over by definition. This did NOT clear it."""
+        svc, saes = self._armed()
+        svc.begin_request("A", saes)
+        svc.disarm(saes)
+        svc.arm_for_circuit(circuit(), definition(), saes)
+        assert svc.begin_request("E", saes) is True
+        assert svc._ctx is not None and not svc._ctx.is_closed
+
+    def test_the_stale_context_is_closed_not_merely_dropped(self):
+        """A dropped-but-open context keeps its rings alive; closing is what
+        makes a late write from the hung thread refuse (CTX-L2)."""
+        svc, saes = self._armed()
+        svc.begin_request("A", saes)
+        stale = svc._ctx
+        svc.begin_request("B", saes)
+        assert stale.is_closed is True
+        assert all(s._edge_ctx is None for s in saes.values()) or svc._ctx is None

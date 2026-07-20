@@ -186,13 +186,17 @@ brd:
     - id: BR-007
       text: "Each recorded edge observation SHALL carry a per-event alone-vs-within classification, computed from the fired-position sets already held at match time, so the distinction does not depend on full-width monitoring co-running; where a classification genuinely cannot be made it SHALL be NULL and never estimated."
     - id: BR-008
-      text: "The two acceptance criteria deferred from 001 for want of a live GPU serve SHALL be closed against a real multi-SAE circuit, or SHALL be restated as criteria the test suite can honestly discharge."
+      text: "The two acceptance criteria deferred from 001 SHALL be closed. F14 §9.1 was CLOSED at the 2026-07-20 GPU close-out. F15 §9.1 remains partial: sensing armed correctly across 5 layers with 4 sensable edges and ran with non-zero overhead, but a capture RATE requires a circuit built from miStudio-mined features known to co-fire — an authoring-side prerequisite this increment SHALL either satisfy or restate."
     - id: BR-009
       text: "The attach-set control SHALL be able to REMOVE an SAE from the attached set, not only add to it, so that the control's behaviour matches the mental model its multi-select presents; today unchecking a row does nothing because attach_set is purely additive."
     - id: BR-010
       text: "The SAE picker SHALL indicate which SAEs are compatible with the loaded model BEFORE submission, using a compatibility verdict exposed by the SAE listing rather than discovering incompatibility through a server rejection."
     - id: BR-011
-      text: "miLLM SHALL serve MORE THAN ONE circuit concurrently, replacing the single-active invariant (enforced today by the uq_circuits_active partial unique index) with an explicit contention model that defines what happens when two active circuits claim the same layer, and SHALL never silently disarm or override one circuit because another was activated."
+      text: "miLLM SHALL serve MORE THAN ONE circuit concurrently, replacing the single-active invariant (enforced today by the uq_circuits_active partial unique index) with LAYER-EXCLUSIVE CLAIMS: a layer is claimed by at most one active circuit, activation is refused with CIRCUIT_LAYER_CONTENTION naming the incumbent when claim sets overlap, and an operator may override with an explicit allow_layer_overlap acknowledgement — under which the circuit-rung header is OMITTED, because no single circuit's evidence describes a composed response. Two circuits naming the same (layer, feature_idx) SHALL be refused unconditionally, since the merge would silently serve a strength belonging to neither author. Design of record: 0xcc/docs/circuit-contention-model.md."
+    - id: BR-012
+      text: "miLLM SHALL warn on circuit SHAPE — the number of steered layers and their aggregate strength — independently of miStudio-supplied effect sizes, because the GPU close-out measured generation collapsing at TWO steered layers at individually-harmless strengths, two orders of magnitude below the per-member clamp that is the only aggregate bound today."
+    - id: BR-013
+      text: "Runtime thresholds inherited from the single-SAE era SHALL be expressed with a per-layer denominator or scaled by the armed layer count; a constant that guarantees an alarm on every multi-layer circuit trains operators to ignore alarms (measured: 5.4-7.3 ms sensing overhead across 5 armed layers against a fixed 5 ms threshold)."
 
   success_metrics:
     - metric: "Regression-free review rounds"
@@ -241,6 +245,13 @@ brd:
       note: >
         Process plus enforcement. The acceptance rule is cheap; the value is that it would have caught
         all three audit findings before an operator did.
+    - theme: "Aggregate-hazard awareness"
+      covers: [BR-012]
+      note: >
+        Added after the GPU close-out measured 2-layer collapse. Distinct from the contention model:
+        this hazard exists for a SINGLE circuit spanning several layers, so it is not solved by
+        layer-exclusive claims. The runtime currently has no opinion about circuit shape independent
+        of miStudio's authoring-side effect sizes.
     - theme: "Acceptance close-out"
       covers: [BR-007, BR-008]
       note: >
@@ -248,9 +259,9 @@ brd:
         rather than a decision: alone-vs-within is computed per event from the ring's fired-position
         sets, which are already in hand at match time, so it no longer depends on monitoring being on.
     - theme: "Operator-facing completeness"
-      covers: [BR-009, BR-010]
+      covers: [BR-009, BR-010, BR-013]
       note: >
-        Folded in at the clarifying round. Both are consequences of the attach-set control being built
+        Folded in at the clarifying round; BR-013 added after the GPU close-out. Both are consequences of the attach-set control being built
         under time pressure during the capability audit: it can add but not remove, and it discovers
         incompatibility by round trip. Neither is deep, and both are the difference between a control
         that works and one that behaves as it looks.
@@ -378,8 +389,14 @@ brd:
           (set_intensity reporting "reapplied": true when the change was reverted). Covers the
           Feature 10 profile path in the same change.
       - step: 2
-        item: "Contention model design for concurrent serving (BR-011, design only)"
-        why: "Gates step 3 — the context must be designed for N circuits, not retrofitted."
+        item: "Contention model design for concurrent serving (BR-011, design only) — ✅ DONE 2026-07-20"
+        why: >
+          Gates step 3 — the context must be designed for N circuits, not retrofitted. Settled in
+          0xcc/docs/circuit-contention-model.md: layer-exclusive claims, refuse-by-default with a
+          named incumbent, explicit override that omits the rung header, unconditional refusal on
+          same-key collision. Its section 4 specifies the context's required shape, including ONE
+          RING PER (request, circuit) — a shared ring would let one circuit's upstream fire match
+          another's downstream and record an edge that never fired in either.
       - step: 3
         item: "Request-scoped context + edge-machinery extraction (BR-001)"
         why: "The heart of the consolidation; highest verification tier applies here."

@@ -1328,3 +1328,81 @@ class TestR2TheConcurrencyGuardCannotDEADLOCKSensing:
         svc.begin_request("B", saes)
         assert stale.is_closed is True
         assert all(s._edge_ctx is None for s in saes.values()) or svc._ctx is None
+
+
+class TestR2APartiallyDarkRequestKeepsItsReason:
+    """F17 R2-02. R1-06 added `note_paused(None)` on the success path to clear
+    a stale reason; R1-02 made `begin_request` set `layer_unavailable` when
+    some layers are dark. `begin_request` returns True when SOME layers began,
+    so a partially dark circuit reached the clear and had its reason ERASED —
+    one round-1 fix deleting another's signal.
+
+    Verified before the fix: reason went to None while layer 13 was dark."""
+
+    def _wire(self, monkeypatch, layers_for_begin):
+        import millm.api.dependencies as deps
+        from millm.services.inference_service import InferenceService
+
+        svc = CircuitSensingService()
+        saes = two_saes()
+        svc.arm_for_circuit(circuit(), definition(), saes)
+        monkeypatch.setattr(deps, "_circuit_sensing_service", svc, raising=False)
+        chosen = {k: saes[k] for k in layers_for_begin}
+
+        class Stub(InferenceService):
+            _tokenizer = None
+
+            def __init__(self):
+                self._speculative_model_id = None
+
+            def is_model_loaded(self):
+                return False
+
+            def _circuit_sensing_layer_saes(self):
+                return chosen
+
+        return svc, saes, Stub()
+
+    def test_a_dark_layer_reason_survives_the_stale_clear(self, monkeypatch):
+        svc, saes, stub = self._wire(monkeypatch, [10])      # layer 13 dark
+        assert stub._circuit_sensing_begin("r1") is not None, "partial success"
+        assert svc.status(saes)["paused_reason"] == "layer_unavailable", (
+            "the reason for THIS request was wiped by the stale-clear"
+        )
+
+    def test_a_healthy_request_still_clears_a_stale_reason(self, monkeypatch):
+        """The clear must keep working — otherwise the operator sees why
+        sensing was paused long after it resumed."""
+        svc, saes, stub = self._wire(monkeypatch, [10, 13])
+        svc.note_paused("speculative_decoding")             # stale, prior request
+        assert stub._circuit_sensing_begin("r1") is not None
+        assert svc.status(saes)["paused_reason"] is None
+
+    def test_a_reason_does_not_outlive_its_own_request(self, monkeypatch):
+        """`layer_unavailable` from request 1 must not still be showing during
+        a healthy request 2 — that would be the stale-reason bug in reverse."""
+        import millm.api.dependencies as deps
+        from millm.services.inference_service import InferenceService
+
+        svc, saes, stub_partial = self._wire(monkeypatch, [10])
+        stub_partial._circuit_sensing_begin("r1")
+        assert svc.status(saes)["paused_reason"] == "layer_unavailable"
+        svc.close_request()
+
+        # Request 2 on the SAME service, this time with every layer present.
+        class HealthyStub(InferenceService):
+            _tokenizer = None
+
+            def __init__(self):
+                self._speculative_model_id = None
+
+            def is_model_loaded(self):
+                return False
+
+            def _circuit_sensing_layer_saes(self):
+                return saes
+
+        assert HealthyStub()._circuit_sensing_begin("r2") is not None
+        assert svc.status(saes)["paused_reason"] is None, (
+            "request 1's reason is still showing during a healthy request 2"
+        )

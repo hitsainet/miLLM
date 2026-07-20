@@ -1595,10 +1595,18 @@ class InferenceService:
                 # begin_request records its own, more specific reason
                 # (concurrent_request / layer_unavailable) — do not overwrite it.
                 return None
-            # Observing normally: clear any stale reason from a previous
+            # Observing normally: clear any stale reason from a PREVIOUS
             # request, or the operator keeps seeing why sensing was paused
             # after it has resumed.
-            service.note_paused(None)
+            #
+            # R2-02: this cleared unconditionally, which wiped the reason
+            # `begin_request` had just set for THIS request. `begin_request`
+            # returns True when SOME layers began, so a partially dark circuit
+            # succeeded here and its `layer_unavailable` reason was erased —
+            # R1-06's fix (say why sensing is degraded) deleted by R1-02's
+            # (say which layers are dark). Verified: reason went to None while
+            # layer 13 was dark.
+            service.clear_stale_pause()
             return layer_saes
         except Exception:
             logger.warning("circuit_sensing_begin_failed", exc_info=False)

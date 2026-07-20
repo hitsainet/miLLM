@@ -83,6 +83,9 @@ class CircuitSensingService:
         #: Why an armed circuit is nonetheless not observing (R3: an operator
         #: saw armed=true and zero events with nothing explaining it).
         self._paused_reason: Optional[str] = None
+        #: True when `_paused_reason` was set during the CURRENT request, so a
+        #: caller's stale-clear must not wipe it (R2-02).
+        self._pause_is_current: bool = False
         #: Fires among the armed circuit's OWN members in the last request.
         #: Deliberately NOT ambient_fired_count — see _ambient_fired_count().
         self._last_request_member_fires: int = 0
@@ -573,6 +576,8 @@ class CircuitSensingService:
         )
         self._ctx = ctx
         self._requests_sensed += 1
+        # A new boundary: reasons from earlier requests are stale from here.
+        self._pause_is_current = False
         began = False
         # R1-02: a layer that cannot be bound is DARK for this request, and
         # `began` used to be True if ANY layer began. Verified by execution
@@ -1019,6 +1024,26 @@ class CircuitSensingService:
     def note_paused(self, reason: Optional[str]) -> None:
         """Record why an armed circuit is not observing (or None to clear)."""
         self._paused_reason = reason
+        # Reasons set for the CURRENT request must survive `clear_stale_pause`
+        # (R2-02). A bare `note_paused(None)` from the caller was wiping the
+        # `layer_unavailable` this same request had just recorded.
+        self._pause_is_current = reason is not None
+
+    def clear_stale_pause(self) -> None:
+        """Clear a pause reason left over from a PREVIOUS request.
+
+        R2-02: the caller used `note_paused(None)` on the success path, which
+        cleared unconditionally. `begin_request` returns True when SOME layers
+        began, so a partially dark circuit reached that line and had its
+        `layer_unavailable` reason erased — R1-06's "say why sensing is
+        degraded" deleted by R1-02's "say which layers are dark".
+
+        A reason recorded during THIS request is current, not stale, and stays.
+        """
+        if getattr(self, "_pause_is_current", False):
+            self._pause_is_current = False
+            return
+        self._paused_reason = None
 
     def note_events_recorded(self, count: int) -> None:
         self._events_recorded += int(count)

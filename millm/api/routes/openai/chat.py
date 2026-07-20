@@ -94,7 +94,8 @@ async def create_chat_completion(
             # Structured (RFC 8941): the rung stays trivially parseable as an
             # int and the phrase is a quoted-string, so punctuation in the
             # ladder vocabulary can never break a naive parser.
-            echo_circuit_rung = f'{rung_info[0]}; language="{rung_info[1]}"' 
+            echo_circuit_rung = f'{rung_info[0]}; language="{rung_info[1]}"'
+
     except Exception:  # observability must never fail a chat request
         echo_circuit_rung = None
 

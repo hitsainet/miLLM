@@ -263,13 +263,21 @@ class TestIntensityResolution:
 
 
 class TestRungEcho:
+    def _steering(self, **kw):
+        """A circuit that is genuinely steering — the rung echo now requires
+        it, so the fixture must attach the SAEs the definition names."""
+        attach(make_sae({1: 40.0}), "sae-10", 10)
+        attach(make_sae({2: 30.0}), "sae-13", 13)
+        return service_with_circuit(make_circuit(**kw))
+
     async def test_rung_language_comes_from_the_ladder(self):
-        svc = service_with_circuit(make_circuit(rung=2))
+        svc = self._steering(rung=2)
         assert await svc.active_circuit_rung() == (2, "causally validated (edge)")
 
     async def test_rung_below_two_is_never_described_as_causal(self):
         for rung, expected in ((0, "associated"), (1, "suggested (attribution-supported)")):
-            svc = service_with_circuit(make_circuit(rung=rung))
+            AttachedSAEState()._entries.clear()
+            svc = self._steering(rung=rung)
             got = await svc.active_circuit_rung()
             assert got == (rung, expected)
             assert "causal" not in got[1].lower()
@@ -277,3 +285,64 @@ class TestRungEcho:
     async def test_no_circuit_no_header(self):
         svc = service_with_circuit(None)
         assert await svc.active_circuit_rung() is None
+
+    async def test_rung_header_suppressed_when_nothing_is_actually_steering(self):
+        """R2: R1 fixed the lambda echo's no-op rules and left the RUNG echo
+        re-deriving its own, so a response could advertise
+        'X-miLLM-Circuit-Rung: 2' while the dial no-opped. Both surfaces now
+        ask the one _steering_circuit predicate."""
+        svc = service_with_circuit(make_circuit(rung=2))  # nothing attached
+        assert await svc.active_circuit_rung() is None
+
+    async def test_rung_header_suppressed_for_an_unparseable_definition(self):
+        attach(make_sae({1: 40.0}), "sae-10", 10)
+        svc = service_with_circuit(make_circuit(circuit_meta={"garbage": True}))
+        assert await svc.active_circuit_rung() is None
+
+
+class TestSnapshotCoversEveryDialledLayer:
+    async def test_a_layer_absent_from_the_db_column_is_still_restored(self):
+        """R2 CRITICAL: the snapshot filtered on circuit.layers (the DB column)
+        while the apply drove off the definition's member layers. Any layer in
+        one and not the other was dialled and never restored — a per-request
+        override leaking PERMANENTLY into global state."""
+        s10, s13 = make_sae({1: 40.0}), make_sae({2: 30.0})
+        attach(s10, "sae-10", 10)
+        attach(s13, "sae-13", 13)
+        # The row's column disagrees with the document: only L10 is listed.
+        svc = service_with_circuit(make_circuit(layers=[10]))
+
+        saved = await svc._apply_request_circuit_steering(2.0)
+        assert s13._applied == {2: 60.0}, "L13 must be dialled (it is a member)"
+
+        svc._restore_request_profile(saved)
+        assert s10._applied == {1: 40.0}
+        assert s13._applied == {2: 30.0}, "L13 leaked: dialled but not restored"
+
+    async def test_lambda_zero_clears_rather_than_only_disabling(self):
+        """R2: set_circuit_steering (the lambda>0 path) clears each SAE first,
+        so disabling alone left stale values resident behind a false flag."""
+        s10 = make_sae({1: 40.0})
+        attach(s10, "sae-10", 10)
+        svc = service_with_circuit(make_circuit(layers=[10]))
+        await svc._apply_request_circuit_steering(0.0)
+        assert s10.is_steering_enabled is False
+        assert s10._applied == {}, "values stayed resident behind a disabled flag"
+
+
+class TestDialInputValidation:
+    def test_a_bool_is_not_a_dial_value(self):
+        """R2: bool is an int subclass, so {"steering_intensity": true}
+        silently dialled lambda=1.0 instead of being rejected."""
+        svc = InferenceService.__new__(InferenceService)
+        c = make_circuit()
+        assert svc._resolve_circuit_intensity(True, c) is None
+        assert svc._resolve_circuit_intensity(False, c) is None
+
+    def test_numeric_respects_the_authored_floor(self):
+        """R2: the numeric path capped at `hi` but ignored `lo`, so it could
+        sit below a floor that "min" itself refuses to go below."""
+        svc = InferenceService.__new__(InferenceService)
+        c = make_circuit(circuit_meta={"budget": {"intensity_range": [0.5, 1.5]}})
+        assert svc._resolve_circuit_intensity(0.1, c) == 0.5
+        assert svc._resolve_circuit_intensity(0.0, c) == 0.0   # off still allowed

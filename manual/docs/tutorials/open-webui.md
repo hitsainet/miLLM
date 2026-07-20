@@ -167,3 +167,15 @@ never blocks your message.
 | `429` errors under load | Serial queue full (`MAX_PENDING_REQUESTS`); Open WebUI parallel title-generation requests can pile up — raise the limit or disable title generation |
 | CORS errors (browser direct) | Set `CORS_ORIGINS` to include your Open WebUI origin — see [Configuration](/reference/configuration) |
 | Dial has no effect | All by-design silent no-ops — check in order: Function enabled on *this model*? master valve on? SAE attached? steering enabled in miLLM (a dial never re-enables disabled steering)? an active cluster or live steering values to scale? miLLM build new enough (older builds ignore the field)? Scripted clients can check for the `X-miLLM-Steering-Intensity` response header — absent means the dial didn't apply |
+
+## Upgrading from an earlier filter version
+
+As of **v1.4.1** the filter is titled **miLLM Steering Dial** (it was "miLLM
+Cluster Dial"): it now dials whole circuits as well as clusters. Open WebUI
+keys filters by their internal id, not their title, so **pasting the new
+version over the existing filter upgrades it in place** — your valve settings
+and per-model assignments are preserved. Creating a *new* filter instead would
+leave the old one still enabled and both would apply.
+
+One valve needs attention on upgrade: `millm_base_url` is **empty by default**,
+so the circuit-rung disclosure stays off until you set it. See Step 6.

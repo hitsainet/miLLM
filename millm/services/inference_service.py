@@ -567,7 +567,7 @@ class InferenceService:
         """
         if raw is None:
             return None
-        if isinstance(raw, (int, float)):
+        if isinstance(raw, (int, float)) and not isinstance(raw, bool):
             return float(raw)
         from millm.core.config import settings
 
@@ -691,8 +691,8 @@ class InferenceService:
         """
         from millm.services.circuit_service import CircuitService
 
-        # _serving_members is pure (no repository access) — call it unbound.
-        return CircuitService._serving_members(None, definition)
+        # _serving_members is a @staticmethod by contract — see its docstring.
+        return CircuitService._serving_members(definition)
 
     @staticmethod
     def _sae_service_for_dial() -> Any:
@@ -731,28 +731,62 @@ class InferenceService:
             logger.warning("active_circuit_lookup_failed", error=str(e))
             return None
 
+    @staticmethod
+    def _circuit_definition(circuit: Any) -> Optional[Any]:
+        """Parse a circuit row's stored ``circuit-definition/v1`` document."""
+        from millm.api.schemas.circuit import CircuitDefinitionV1
+
+        try:
+            return CircuitDefinitionV1.model_validate(circuit.circuit_meta)
+        except Exception:
+            return None
+
+    async def _steering_circuit(self) -> Optional[Any]:
+        """The active circuit IF it is genuinely steering right now.
+
+        Memoised per InferenceService instance (which is request-scoped): the
+        rung echo, the λ echo and the apply all ask this, and each answer cost
+        its own session checkout + SELECT. R2 flagged the resulting per-request
+        DB fan-out on deployments that use no circuits at all.
+
+        The single predicate behind all three surfaces — the apply, the λ echo,
+        and the rung echo. R1 fixed the λ echo's copy of these rules and left
+        the rung echo's, so a response could still advertise
+        ``X-miLLM-Circuit-Rung: 2`` while nothing was steering. Any surface that
+        answers "what is steering" must ask THIS, never re-derive it.
+        """
+        sentinel = object()
+        cached = getattr(self, "_steering_circuit_memo", sentinel)
+        if cached is not sentinel:
+            return cached
+        result = await self._steering_circuit_uncached()
+        self._steering_circuit_memo = result
+        return result
+
+    async def _steering_circuit_uncached(self) -> Optional[Any]:
+        circuit = await self._active_full_circuit()
+        if circuit is None:
+            return None
+        definition = self._circuit_definition(circuit)
+        if definition is None:
+            return None
+        members = self._circuit_serving_members(definition)
+        if not members:
+            return None
+
+        from millm.services.sae_service import AttachedSAEState
+
+        member_layers = {m.layer for m in members}
+        if not any(e.layer in member_layers for e in AttachedSAEState().entries()):
+            return None  # apply will no-op; an echoed header would lie
+        return circuit
+
     async def _resolve_active_circuit_intensity(
         self, raw: "float | str | None"
     ) -> Optional[float]:
         """Echo-side twin of the apply-side circuit resolution (same core)."""
-        circuit = await self._active_full_circuit()
+        circuit = await self._steering_circuit()
         if circuit is None:
-            return None
-        from millm.api.schemas.circuit import CircuitDefinitionV1
-        from millm.services.sae_service import AttachedSAEState
-
-        state = AttachedSAEState()
-        if not [e for e in state.entries() if e.layer in (circuit.layers or [])]:
-            return None  # apply will no-op; an echoed lambda would lie
-        # Mirror apply's remaining no-op rules EXACTLY (R1: the echo checked
-        # attached layers but not serveable members, so an attached-but-empty
-        # circuit emitted a λ header for a request that no-ops — the very
-        # echo/apply drift Feature 10 R3 eliminated for the profile path).
-        try:
-            definition = CircuitDefinitionV1.model_validate(circuit.circuit_meta)
-        except Exception:
-            return None
-        if not self._circuit_serving_members(definition):
             return None
         return self._resolve_circuit_intensity(raw, circuit)
 
@@ -763,7 +797,7 @@ class InferenceService:
         it is steering with. The phrase is rendered from the evidence ladder —
         never composed here — so the header can never overclaim.
         """
-        circuit = await self._active_full_circuit()
+        circuit = await self._steering_circuit()
         if circuit is None:
             return None
         from millm.core.circuit_evidence import rung_language
@@ -800,8 +834,24 @@ class InferenceService:
         if lam is None:
             return None
 
+        # R2: derive the participating layers from the DEFINITION, the same
+        # source the apply below uses. Keying the snapshot on circuit.layers
+        # (the DB column) while applying to the definition's member layers let
+        # any layer present in one and not the other be dialled but never
+        # restored — a per-request override leaking permanently into global
+        # state. The two must not be allowed to drift.
+        definition = self._circuit_definition(circuit)
+        if definition is None:
+            return None
+        members = self._circuit_serving_members(definition)
+        if not members:
+            logger.info("circuit_dial_noop_no_serving_members",
+                        circuit_id=circuit.id)
+            return None
+        member_layers = {m.layer for m in members}
+
         state = AttachedSAEState()
-        entries = [e for e in state.entries() if e.layer in (circuit.layers or [])]
+        entries = [e for e in state.entries() if e.layer in member_layers]
         if not entries:
             logger.info("circuit_dial_noop_no_attached_layers",
                         circuit_id=circuit.id)
@@ -820,7 +870,12 @@ class InferenceService:
         ]
 
         if lam == 0.0:
+            # Clear as well as disable: set_circuit_steering (the λ>0 path)
+            # clears each target SAE first, so disabling alone would leave the
+            # previous values resident behind a false flag — visible to
+            # get_steering_values and re-armed by any later enable.
             for e in entries:
+                e.sae.clear_steering()
                 e.sae.enable_steering(False)
             logger.info("circuit_dial_disabled", circuit_id=circuit.id,
                         layers=[e.layer for e in entries])
@@ -910,10 +965,16 @@ class InferenceService:
             except (TypeError, ValueError):
                 pass
 
-        if isinstance(raw, (int, float)):
+        if isinstance(raw, (int, float)) and not isinstance(raw, bool):
             lam = float(raw)
             # Dialling to 0 (off) is ALWAYS allowed, even below an authored floor.
-            return 0.0 if lam == 0.0 else max(0.0, min(hi, lam))
+            if lam == 0.0:
+                return 0.0
+            # Clamp to BOTH ends of the intersected envelope. R2: this capped
+            # at `hi` but ignored `lo`, so a numeric dial could sit below an
+            # authored floor that "min" itself refuses to go below — the
+            # symbolic and numeric paths disagreeing about the same envelope.
+            return max(lo, min(hi, lam))
         return {"off": 0.0, "min": lo, "max": hi}.get(raw)
 
     async def _apply_request_steering(

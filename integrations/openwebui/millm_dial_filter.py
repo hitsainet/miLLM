@@ -1,7 +1,7 @@
 """
-title: miLLM Cluster Dial
+title: miLLM Steering Dial
 author: miLLM
-version: 1.4.0
+version: 1.4.1
 description: Per-chat steering-intensity dial for a miLLM backend. Injects the
   miLLM extension field `steering_intensity` (off | min | max, or a numeric
   lambda in [0, 2]) into /v1/chat/completions requests so each user can dial
@@ -208,7 +208,11 @@ class Filter:
         try:
             data = await asyncio.to_thread(self._probe_sync, base)
         except Exception:
-            data = None
+            # Do NOT cache a failure. Caching None for the full TTL would blank
+            # the [UNVALIDATED] disclosure for 10s of messages after miLLM
+            # recovers — suppressing the exact safety surface this exists for.
+            # A failed probe simply retries on the next message.
+            return None
         self._probe_cache = (base, now, data)
         return data
 

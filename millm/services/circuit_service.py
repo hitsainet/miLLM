@@ -614,8 +614,15 @@ class CircuitService:
             },
         }
 
-    def _serving_members(self, definition: CircuitDefinitionV1) -> list[CircuitMember]:
+    @staticmethod
+    def _serving_members(definition: CircuitDefinitionV1) -> list[CircuitMember]:
         """Flatten the circuit's members into the Feature 12 serving shape.
+
+        STATIC BY CONTRACT: the inference dial calls this to flatten members by
+        exactly the same rules activation uses. R2 flagged that calling it
+        unbound relied on an unwritten purity promise — one future ``self.``
+        reference would turn every dialled request into an AttributeError.
+        @staticmethod makes that a compile-time guarantee instead.
 
         A ``cluster_ref`` contributes its frozen ``expanded_members`` AND its own
         ``feature`` when both are present — taking only one silently dropped

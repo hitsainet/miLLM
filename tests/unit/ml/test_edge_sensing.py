@@ -797,24 +797,39 @@ class TestRingPrunesItself:
         assert ring._progress == {}
 
 
-class TestAmbientFiredCount:
-    """R3: EDGE-R2's column, migration, model and API field all shipped and
-    nothing ever wrote them — a permanently-NULL field the API advertised."""
+class TestMemberFireAccounting:
+    """The circuit's own member-fire total. Deliberately NOT
+    `ambient_fired_count`: that field is defined (Feature 11, and the
+    millm_sensing_events MCP contract) as the WHOLE-SAE fired count, populated
+    only when un-compacted monitoring co-ran and NULL otherwise. R3 shipped
+    this number into that column, which would have made an F15 row
+    incomparable with an F11 row carrying the same field name."""
 
-    def test_ambient_accumulates_across_passes(self):
+    def test_member_fires_accumulate_across_passes(self):
         sae = real_sae()
         sae.arm_edge_sensing(make_config(max_lag=16), EdgeFireRing(16))
         sae.begin_edge_sensing_request("r")
         sae._sense_edges(hidden({1: 2.0}, {2: 2.0}))
-        first = sae._edge_ambient_fired
+        first = sae._edge_member_fires
         assert first > 0
         sae._sense_edges(hidden({1: 2.0}))
-        assert sae._edge_ambient_fired > first
+        assert sae._edge_member_fires > first
 
-    def test_it_resets_per_request(self):
+    def test_member_fires_reset_per_request(self):
         sae = real_sae()
         sae.arm_edge_sensing(make_config(), EdgeFireRing(4))
         sae.begin_edge_sensing_request("r1")
         sae._sense_edges(hidden({1: 2.0}, {2: 2.0}))
         sae.begin_edge_sensing_request("r2")
-        assert sae._edge_ambient_fired == 0
+        assert sae._edge_member_fires == 0
+
+    def test_member_fires_are_not_written_to_the_ambient_column(self):
+        """Pins the separation itself: the record path must not reach for the
+        member-fire total when filling ambient_fired_count."""
+        import inspect
+
+        from millm.services.circuit_sensing_service import CircuitSensingService
+
+        src = inspect.getsource(CircuitSensingService.record)
+        assert "_last_request_member_fires" not in src
+        assert "ambient_fired_count=ambient" in src

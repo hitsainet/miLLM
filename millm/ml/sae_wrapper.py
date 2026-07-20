@@ -385,7 +385,7 @@ class LoadedSAE:
         self._edge_request_id: str = ""
         self._edge_batch_warned: bool = False
         self._edge_saturation_warned: bool = False
-        self._edge_ambient_fired: int = 0
+        self._edge_member_fires: int = 0
         self._edge_overhead_ms: float = 0.0
 
         # Monitoring state
@@ -1023,7 +1023,7 @@ class LoadedSAE:
         # identical latent bug in _sensing_batch_warned — fixed there too.)
         self._edge_batch_warned = False
         self._edge_saturation_warned = False
-        self._edge_ambient_fired = 0
+        self._edge_member_fires = 0
 
     def begin_edge_sensing_request(self, request_id: str) -> None:
         """Open a request boundary. The CALLER clears the shared ring once for
@@ -1166,12 +1166,13 @@ class LoadedSAE:
         # thresholds are miscalibrated and the observations are noise, so
         # skipping is strictly better than stalling generation to collect it.
         total_fires = int(fired_cpu.sum())
-        # EDGE-R2 ambient context: how many armed members fired anywhere in
-        # this pass. Lets a reader judge whether an edge firing was
-        # distinctive or whether everything was firing at once. R3 found the
-        # column, migration, model and API field all shipped with nothing
-        # ever writing them.
-        self._edge_ambient_fired += total_fires
+        # Fires among the ARMED CIRCUIT MEMBERS in this pass. NOT the
+        # contract's alone-vs-within signal: `ambient_fired_count` is defined
+        # (F11, and the millm_sensing_events MCP contract) as the count across
+        # the WHOLE SAE, populated only when un-compacted monitoring co-ran and
+        # left NULL otherwise — "never estimated". This number answers a
+        # different question and must never be written to that column.
+        self._edge_member_fires += total_fires
         budget = max(
             config.max_events_per_request * 8, _EDGE_FIRE_BUDGET_MIN
         )

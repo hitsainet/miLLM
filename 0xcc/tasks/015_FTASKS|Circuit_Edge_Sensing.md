@@ -116,27 +116,40 @@ ground-truth capture rate (§9.1), which needs a live GPU serve.
 |---|-----------|---------|----------|
 | 1 | Scripted panel with known up→down ground truth: 100% capture, correct lag/ordering | ⏳ **GPU-PENDING** | `test_circuit_edge_sensing_workflow.py` drives the real hook path with synthetic activations and asserts exact positions and lag, so the *mechanism* is proven. A capture-RATE number against a real model on real prompts needs a live serve on the k8s host. Deliberately NOT ticked. |
 | 2 | EC-15.1/15.2 honored: lone-upstream and reversed-order produce NO event | ✅ | 7 tests, unit and end-to-end. Also covers the third case the FPRD does not name: a same-position co-fire, which is co-activation rather than a sequence. |
-| 3 | Alone/within field correct when monitoring co-runs; NULL otherwise | ❌ **NOT IMPLEMENTED** | See below. |
+| 3 | Alone/within field correct when monitoring co-runs; NULL otherwise | ✅ | `_ambient_fired_count()` mirrors Feature 11 exactly: whole-SAE fired count, only when un-compacted monitoring co-ran, NULL otherwise — never estimated. 4 tests pin the contract incl. the compacted-subset and failing-probe cases. |
 | 4 | Context windows match expected tokens; span covers the up→down positions | ✅ | 22 tests. Uses prefix decodes + length slicing (the FTID's independent-segment sketch reintroduces Feature 11 R1's SentencePiece word-gluing bug), with a byte-level-BPE guard that degrades to plain text over a wrong mark. |
 | 5 | Overhead within budget; zero delta un-armed; retention caps enforced | ✅ | 38 tests incl. a latency assertion on a 4096-token saturated pass (0.9 ms vs the 5 ms budget, after R1/R2/R3 each fixed a different blowout), an inert un-armed path, and cap+age retention. |
 | 6 | Every surfaced rung verbatim; no "causal" for any rung<2 edge | ✅ | 51 tests incl. the build-failing copy audit with its negative control. |
 
-### Criterion 3 — recorded as NOT MET, not waved through
+### Criterion 3 — CORRECTED at GPU close-out (2026-07-20)
 
-BR-007 and BR-008 both name an **alone-vs-within-larger-set** side channel: was this edge firing
-distinctive, or was everything firing at once? **It was never implemented in any recognizable form,
-and neither R1 nor R2 caught the omission** — R3 found the adjacent `ambient_fired_count` (EDGE-R2)
-had shipped as a column, migration, model field and API field with nothing ever writing it.
+This was first recorded as NOT MET on the belief that alone-vs-within was an unbuilt requirement.
+**That was wrong, and the error is worth recording.** The signal already had an established meaning:
+Feature 11's `_ambient_fired_count` and the `millm_sensing_events` MCP contract define
+`ambient_fired_count` as *the count of features that fired across the **whole SAE**, populated only
+when un-compacted monitoring co-ran, and **NULL otherwise — never estimated**.*
 
-R3 implemented `ambient_fired_count` (total armed-member fires observed in the request), which is a
-genuine *ambient* denominator and a reasonable partial answer to the same question. It is **not** the
-specified alone/within distinction, which requires knowing whether the *rest of the circuit* was
-quiet at that position. Recording the gap rather than claiming the criterion:
+R3's implementation used the same column and field name for a **different quantity**: fires among the
+armed circuit's own members, always non-null. Three defects in one:
 
-- **What ships:** `ambient_fired_count` per row, non-NULL, surfaced in the API and the detail view.
-- **What does not:** a per-event alone/within classification.
-- **Follow-on:** compute it from the ring at match time (the fired-position sets are already in hand),
-  or drop the requirement if the ambient count is judged sufficient. Needs a product decision.
+| Rule | Contract (F11) | R3 as shipped |
+|---|---|---|
+| Scope | whole SAE | the circuit's own members |
+| Gate | only when un-compacted monitoring co-ran | always |
+| Absent | `NULL` — never estimated | never null |
+
+A reader comparing an F15 row against an F11 row would have been comparing incompatible numbers under
+an identical field name, and a never-null value silently claims a denominator nobody measured — an
+honesty defect of exactly the kind this feature exists to prevent.
+
+**Fixed:** `CircuitSensingService._ambient_fired_count()` now mirrors F11's rule precisely. The
+circuit's own member-fire total still exists as `_edge_member_fires` (useful, and genuinely
+different), renamed so it can never be mistaken for the contract signal, with a test asserting
+`record()` does not reach for it when filling the column.
+
+**How the error survived three review rounds:** all three treated the FPRD as the source of truth for
+what the field meant, and none checked the *existing* implementation of the same-named field one
+feature over. The MCP tool description stated the rule plainly the whole time.
 
 ### Deferred structural work — designs settled, not silently dropped
 

@@ -93,7 +93,19 @@ healthy) mark the product unavailable; tools then return a structured
 
 ### `millm_circuits` (v1.1 — Circuit Runtime)
 
-**Implemented (Features 13 + 15, shipped).** The HUB rows below remain
+> ⚠️ **STATUS CORRECTION (2026-07-20).** The `F13 ✅` / `F15 ✅` marks below
+> describe the **REST endpoints**, which do ship and are covered by tests.
+> They do **NOT** mean an MCP tool is registered. miStudio's MCP server
+> registers exactly three miLLM categories — `millm_runtime`,
+> `millm_clusters`, `millm_sensing` (`backend/src/mcp_server/tools/__init__.py`
+> `MILLM_CATEGORY_MODULES`). **There is no `millm_circuits` module**, so none
+> of the circuit tools named here are callable by an agent today. An agent
+> reaching a circuit must call the REST route directly.
+>
+> This table read as a shipped tool surface for an entire increment. Wiring
+> the category is tracked in BRD-MILLM-CIRCUITS-002.
+
+**REST endpoints implemented (Features 13 + 15).** The HUB rows below remain
 reserved and are NOT served — calls to them 404 today. They are listed so the
 tool surface stays stable; do not register them against a deployment that has
 not shipped them.
@@ -105,20 +117,20 @@ sub-collection of a circuit, and the flat prefix matches `/api/sensing`.
 
 | Tool | Endpoint | Status |
 |---|---|---|
-| `millm_circuit_status` | `GET /api/circuits/active` (active circuit + attached-SAE set + rung; `null` when none) | F13 ✅ |
-| `millm_list_circuits` | `GET /api/circuits?promoted=&min_rung=&limit=&offset=` (slim rows carry `rung`, `rung_language`, layers, edge_count) | F13 ✅ |
-| `millm_import_circuit` (inline) | `POST /api/circuits/import?on_conflict=` (body = raw `mistudio.circuit-definition/v1` document). Import does NOT activate — call `/{id}/activate?acknowledge_unvalidated=` separately, so the evidence gate is always an explicit step. | F13 ✅ |
+| `millm_circuit_status` | `GET /api/circuits/active` (active circuit + attached-SAE set + rung; `null` when none) | REST ✅ · MCP not registered |
+| `millm_list_circuits` | `GET /api/circuits?promoted=&min_rung=&limit=&offset=` (slim rows carry `rung`, `rung_language`, layers, edge_count) | REST ✅ · MCP not registered |
+| `millm_import_circuit` (inline) | `POST /api/circuits/import?on_conflict=` (body = raw `mistudio.circuit-definition/v1` document). Import does NOT activate — call `/{id}/activate?acknowledge_unvalidated=` separately, so the evidence gate is always an explicit step. | REST ✅ · MCP not registered |
 | `millm_import_circuit` (hub) | `POST /api/circuits/hub/import` (`{repo_id, filename, revision?, activate?, on_conflict?, acknowledge_unvalidated?}`) | **F15 — not served** |
 | `millm_circuit_hub_search` | `GET /api/circuits/hub/search?q=&base_model=&limit=` (tag `mistudio-circuit-definition`) | **F15 — not served** |
-| `millm_activate_circuit` | `POST /api/circuits/{id}/activate?acknowledge_unvalidated=` (fully serveable, or slice-fallback when the SAE set is incomplete) | F13 ✅ |
-| `millm_deactivate_circuit` | `POST /api/circuits/{id}/deactivate` | F13 ✅ |
-| `millm_export_circuit` | `GET /api/circuits/{id}/export` (raw circuit document — no envelope) | F13 ✅ |
-| `millm_set_circuit_intensity` | `PUT /api/circuits/active/intensity` (`{intensity, reapply}`; one global λ scales all layers) | F13 ✅ |
-| `millm_circuit_sensing_status` | `GET /api/circuit-sensing/status` (armed state, layers, **`sensable_edges` + `unsensable_edges[{edge_key,reason,detail}]`**, `max_token_lag`, overhead, `enabled_circuits`) | F15 ✅ |
-| `millm_circuit_sensing_events` | `GET /api/circuit-sensing/events?circuit_id=&edge_key=&limit=&since=` (rows carry nested `up`/`down` `{layer,feature_idx,pos,act}`, `token_lag`, ±K `context_parts`, `edge_rung` + `edge_rung_language`) | F15 ✅ |
-| `millm_circuit_sensing_enable` / `_disable` | `POST /api/circuit-sensing/{circuit_id}/enable` / `/disable` (off by default, opt-in) | F15 ✅ |
-| `millm_circuit_sensing_event` | `GET /api/circuit-sensing/events/{event_id}` (one observation with its context window) | F15 ✅ |
-| `millm_circuit_sensing_clear` | `DELETE /api/circuit-sensing/events?circuit_id=` | F15 ✅ |
+| `millm_activate_circuit` | `POST /api/circuits/{id}/activate?acknowledge_unvalidated=` (fully serveable, or slice-fallback when the SAE set is incomplete) | REST ✅ · MCP not registered |
+| `millm_deactivate_circuit` | `POST /api/circuits/{id}/deactivate` | REST ✅ · MCP not registered |
+| `millm_export_circuit` | `GET /api/circuits/{id}/export` (raw circuit document — no envelope) | REST ✅ · MCP not registered |
+| `millm_set_circuit_intensity` | `PUT /api/circuits/active/intensity` (`{intensity, reapply}`; one global λ scales all layers) | REST ✅ · MCP not registered |
+| `millm_circuit_sensing_status` | `GET /api/circuit-sensing/status` (armed state, layers, **`sensable_edges` + `unsensable_edges[{edge_key,reason,detail}]`**, `max_token_lag`, overhead, `enabled_circuits`) | REST ✅ · MCP not registered |
+| `millm_circuit_sensing_events` | `GET /api/circuit-sensing/events?circuit_id=&edge_key=&limit=&since=` (rows carry nested `up`/`down` `{layer,feature_idx,pos,act}`, `token_lag`, ±K `context_parts`, `edge_rung` + `edge_rung_language`) | REST ✅ · MCP not registered |
+| `millm_circuit_sensing_enable` / `_disable` | `POST /api/circuit-sensing/{circuit_id}/enable` / `/disable` (off by default, opt-in) | REST ✅ · MCP not registered |
+| `millm_circuit_sensing_event` | `GET /api/circuit-sensing/events/{event_id}` (one observation with its context window) | REST ✅ · MCP not registered |
+| `millm_circuit_sensing_clear` | `DELETE /api/circuit-sensing/events?circuit_id=` | REST ✅ · MCP not registered |
 
 ### 4a. Circuit evidence-rung rule (v1.1)
 Every circuit and edge field carries `rung` (0–3 int) and `rung_language`

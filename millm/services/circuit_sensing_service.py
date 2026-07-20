@@ -80,8 +80,9 @@ class CircuitSensingService:
         #: Why an armed circuit is nonetheless not observing (R3: an operator
         #: saw armed=true and zero events with nothing explaining it).
         self._paused_reason: Optional[str] = None
-        #: Armed-member fires observed anywhere in the last request (EDGE-R2).
-        self._last_request_ambient: int = 0
+        #: Fires among the armed circuit's OWN members in the last request.
+        #: Deliberately NOT ambient_fired_count — see _ambient_fired_count().
+        self._last_request_member_fires: int = 0
         self._unsensable: list[UnsensableEdge] = []
         self._max_token_lag: int = settings.CIRCUIT_SENSING_MAX_TOKEN_LAG
         self._last_request_overhead_ms: float = 0.0
@@ -485,7 +486,7 @@ class CircuitSensingService:
         merged: list[Any] = []
         truncated = False
         overhead = 0.0
-        ambient = 0
+        member_fires = 0
         for layer in self._armed_layers:
             sae = layer_saes.get(layer)
             if sae is None:
@@ -499,9 +500,9 @@ class CircuitSensingService:
             # `continue` in begin_request) re-contributed its stale overhead to
             # the next request, inflating the number that drives the warning.
             sae._edge_overhead_ms = 0.0
-            ambient += int(getattr(sae, "_edge_ambient_fired", 0) or 0)
+            member_fires += int(getattr(sae, "_edge_member_fires", 0) or 0)
         self._last_request_overhead_ms = overhead
-        self._last_request_ambient = ambient
+        self._last_request_member_fires = member_fires
         if overhead > settings.CIRCUIT_SENSING_MAX_OVERHEAD_MS:
             logger.warning(
                 "circuit_sensing_overhead_high",
@@ -578,6 +579,13 @@ class CircuitSensingService:
             return []
         ctx_tokens = self._request_context_tokens
 
+        # EDGE-R2 alone-vs-within, to the SAME contract Feature 11 uses:
+        # whole-SAE fired count, ONLY when un-compacted monitoring co-ran,
+        # NULL otherwise. Never estimated — a number that looked like the
+        # signal but measured the circuit's own members would be compared
+        # against F11 rows as though it were the same quantity.
+        ambient = self._ambient_fired_count()
+
         rows: list[dict[str, Any]] = []
         for edge in edges:
             text, window, parts = self._context(full_ids, edge, ctx_tokens, tokenizer)
@@ -602,10 +610,7 @@ class CircuitSensingService:
                     # that was true when it was observed.
                     edge_rung_language=edge.rung_language,
                     edge_type=edge.edge_type,
-                    # EDGE-R2: total armed-member fires this request, so a
-                    # reader can judge whether this edge firing was
-                    # distinctive or whether everything fired at once.
-                    ambient_fired_count=self._last_request_ambient or None,
+                    ambient_fired_count=ambient,
                     context_text=text,
                     context_token_ids=window,
                     context_parts=parts,
@@ -633,6 +638,35 @@ class CircuitSensingService:
         self.note_events_recorded(len(payloads))
         self._emit(payloads)
         return payloads
+
+    def _ambient_fired_count(self) -> Optional[int]:
+        """Whole-SAE fired count for the alone-vs-within signal, or None.
+
+        Mirrors ``InferenceService._ambient_counts`` (Feature 11) and the
+        ``millm_sensing_events`` MCP contract: this is how many features fired
+        across the ENTIRE SAE, which is only knowable when un-compacted
+        monitoring co-ran. Anything else stays None — **never estimated**.
+
+        The circuit's own member-fire total is deliberately NOT used here: it
+        answers "how busy was this circuit", not "was this firing distinctive
+        against everything else", and writing it to this column would make an
+        F15 row incomparable with an F11 row carrying the same field name.
+        """
+        for layer in self._armed_layers:
+            sae = self._armed_saes.get(layer)
+            if sae is None:
+                continue
+            try:
+                if (not getattr(sae, "is_monitoring_enabled", False)
+                        or getattr(sae, "_monitored_features", None) is not None):
+                    continue
+                acts = sae.get_feature_activations_for_item(0)
+                if acts is None:
+                    continue
+                return int((acts[-1] > 0).sum().item())
+            except Exception:
+                continue
+        return None
 
     @staticmethod
     def _context(

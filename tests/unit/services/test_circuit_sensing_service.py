@@ -506,3 +506,62 @@ class TestWebSocketPayloadCarriesNoPromptText:
 
         src = inspect.getsource(CircuitSensingService.record)
         assert "include_context=False" in src
+
+
+class TestAmbientFiredCountHonoursTheContract:
+    """`ambient_fired_count` is the alone-vs-within signal, defined by Feature
+    11 and the millm_sensing_events MCP contract as the WHOLE-SAE fired count,
+    populated ONLY when un-compacted monitoring co-ran and NULL otherwise —
+    "never estimated".
+
+    R3 populated it with the circuit's own armed-member fires, always non-null.
+    That is a different quantity under the same field name: a reader comparing
+    an F15 row against an F11 row would be comparing incompatible numbers, and
+    a never-null value silently claims a denominator nobody measured."""
+
+    class _Probe:
+        """Minimal stand-in: is_monitoring_enabled is a read-only property on
+        the real LoadedSAE, so the monitoring states are modelled here."""
+
+        def __init__(self, enabled=False, subset=None, acts=None, raises=False):
+            self.is_monitoring_enabled = enabled
+            self._monitored_features = subset
+            self._acts = acts
+            self._raises = raises
+
+        def get_feature_activations_for_item(self, _i):
+            if self._raises:
+                raise RuntimeError("boom")
+            return self._acts
+
+    def _armed(self, probe=None):
+        svc = CircuitSensingService()
+        saes = two_saes()
+        svc.arm_for_circuit(circuit(), definition(), saes)
+        if probe is not None:
+            svc._armed_saes = {layer: probe for layer in svc._armed_layers}
+        return svc, saes
+
+    def test_it_is_none_when_monitoring_is_not_running(self):
+        svc, _ = self._armed(self._Probe(enabled=False))
+        assert svc._ambient_fired_count() is None
+
+    def test_it_is_none_when_monitoring_is_compacted(self):
+        """A monitored-feature subset cannot answer "how many fired across the
+        WHOLE SAE", so it must decline rather than report the subset."""
+        svc, _ = self._armed(self._Probe(enabled=True, subset=[1, 2, 3]))
+        assert svc._ambient_fired_count() is None
+
+    def test_it_reports_the_whole_sae_count_when_monitoring_co_ran(self):
+        import torch
+
+        # 3 of 5 features positive on the last captured position.
+        probe = self._Probe(
+            enabled=True, acts=torch.tensor([[0.0, 1.0, 0.0, 2.0, 3.0]])
+        )
+        svc, _ = self._armed(probe)
+        assert svc._ambient_fired_count() == 3
+
+    def test_a_failing_probe_declines_rather_than_guessing(self):
+        svc, _ = self._armed(self._Probe(enabled=True, raises=True))
+        assert svc._ambient_fired_count() is None

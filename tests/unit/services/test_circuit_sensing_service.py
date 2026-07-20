@@ -533,7 +533,17 @@ class TestWebSocketPayloadCarriesNoPromptText:
 
     def test_record_broadcasts_the_context_free_shape(self):
         """Pins the call site itself, not just the serialiser: R3's mutation
-        changed record()'s argument, which the serialiser test would miss."""
+        changed record()'s argument, which the serialiser test would miss.
+
+        R1-16: this is a SOURCE GREP and was the ONLY coverage of the privacy
+        guarantee — it passes if the substring appears in a comment and fails
+        if someone writes `include_context = False` with spaces. It is kept
+        because it is cheap and catches a call site removed entirely, but the
+        real protection is now
+        `TestR1RecordIsActuallyExercised::test_the_broadcast_carries_NO_prompt_text`,
+        which drives `record()` and asserts the kwarg on the ACTUAL call —
+        verified by mutation, where flipping it to True fails that test and
+        this one too."""
         import inspect
 
         src = inspect.getsource(CircuitSensingService.record)
@@ -1102,3 +1112,148 @@ class TestR1AmbientCountIsNeverOrderDependent:
         """The fix must not silence the case that genuinely has one answer."""
         svc = self._svc({10: self._P(3), 13: self._P(9, enabled=False)})
         assert svc._ambient_fired_count() == 3
+
+
+class TestR1RecordIsActuallyExercised:
+    """F17 R1-16. `CircuitSensingService.record()` had NO test caller at all.
+    Untested: the row shape, `edge_rung_language` carried verbatim, the
+    `truncated` flag reaching every row, `ambient_fired_count` placement, the
+    persist-failure path, and — most importantly — the WebSocket privacy
+    guarantee, whose only coverage was an `inspect.getsource` string grep for
+    `"include_context=False"`. That grep passes if the substring appears in a
+    comment and fails if someone writes `include_context = False`."""
+
+    def _edge(self, **over):
+        base = dict(
+            edge_key="1@10->2@13", up_layer=10, up_feature_idx=1, up_pos=2,
+            up_act=1.5, down_layer=13, down_feature_idx=2, down_pos=4,
+            down_act=2.5, token_lag=2, phase="prefill", rung=0,
+            rung_language="associated", edge_type="computed",
+        )
+        base.update(over)
+        return SimpleNamespace(**base)
+
+    def _armed_svc(self):
+        svc = CircuitSensingService()
+        saes = two_saes()
+        svc.arm_for_circuit(circuit(), definition(), saes)
+        svc.begin_request("req-1", saes)
+        return svc
+
+    def _run(self, monkeypatch, svc, edges, truncated=False, fail=False):
+        """Drive record() against a stubbed session/repo, capturing the rows."""
+        import contextlib
+
+        captured = {"rows": None, "pruned": None, "broadcast_kwargs": []}
+
+        class _Saved:
+            def __init__(self, row):
+                self._row = row
+
+            def to_dict(self, **kwargs):
+                captured["broadcast_kwargs"].append(kwargs)
+                out = dict(self._row)
+                if kwargs.get("include_context") is False:
+                    out.pop("context_text", None)
+                    out.pop("context_token_ids", None)
+                    out.pop("context_parts", None)
+                return out
+
+        class _Repo:
+            def __init__(self, _session):
+                pass
+
+            async def create_many(self, rows):
+                if fail:
+                    raise RuntimeError("db down")
+                captured["rows"] = rows
+                return [_Saved(r) for r in rows]
+
+            async def prune(self, circuit_id, **kwargs):
+                captured["pruned"] = (circuit_id, kwargs)
+
+        @contextlib.asynccontextmanager
+        async def _factory():
+            class _S:
+                async def commit(self):
+                    pass
+
+            yield _S()
+
+        import millm.db.base as db_base
+        import millm.db.repositories.circuit_edge_sensing_repository as repo_mod
+
+        monkeypatch.setattr(db_base, "async_session_factory", _factory, raising=False)
+        monkeypatch.setattr(
+            repo_mod, "CircuitEdgeSensingRepository", _Repo, raising=False
+        )
+        import millm.sockets.progress as sp
+        monkeypatch.setattr(
+            sp.progress_emitter, "emit_circuit_sensing_event",
+            lambda p: None, raising=False,
+        )
+
+        import asyncio
+        payloads = asyncio.new_event_loop().run_until_complete(
+            svc.record("req-1", edges, truncated, None, None)
+        )
+        return payloads, captured
+
+    def test_the_broadcast_carries_NO_prompt_text(self, monkeypatch):
+        """The privacy guarantee, asserted on the actual call rather than by
+        grepping the source for a substring."""
+        svc = self._armed_svc()
+        _, cap = self._run(monkeypatch, svc, [self._edge()])
+        assert cap["broadcast_kwargs"], "to_dict was never called"
+        assert all(
+            k.get("include_context") is False for k in cap["broadcast_kwargs"]
+        ), f"broadcast built with {cap['broadcast_kwargs']} — prompt text leaks"
+
+    def test_the_rung_language_is_carried_VERBATIM_onto_the_row(self, monkeypatch):
+        """An observation must never restate the evidence claim. Re-deriving
+        the phrase here would let a row drift from the rung it was observed
+        under."""
+        svc = self._armed_svc()
+        _, cap = self._run(
+            monkeypatch, svc,
+            [self._edge(rung=0, rung_language="associated")],
+        )
+        row = cap["rows"][0]
+        assert row["edge_rung"] == 0
+        assert row["edge_rung_language"] == "associated"
+        assert "causal" not in row["edge_rung_language"].lower()
+
+    def test_truncated_reaches_every_row(self, monkeypatch):
+        """The honesty flag is per-row; a row that lost its flag reads as a
+        complete observation."""
+        svc = self._armed_svc()
+        _, cap = self._run(
+            monkeypatch, svc, [self._edge(), self._edge(down_pos=9)],
+            truncated=True,
+        )
+        assert [r["truncated"] for r in cap["rows"]] == [True, True]
+
+    def test_rows_are_attributed_to_the_BOUNDARY_circuit(self, monkeypatch):
+        """R2's defect: reading `self._circuit_id` at drain time attributed
+        observations to whatever is armed NOW, not what was armed when they
+        were observed."""
+        svc = self._armed_svc()
+        svc._circuit_id = "circ_SOMETHING_ELSE"
+        _, cap = self._run(monkeypatch, svc, [self._edge()])
+        assert cap["rows"][0]["circuit_id"] == "circ_1"
+
+    def test_a_persist_failure_records_nothing_and_never_raises(self, monkeypatch):
+        """An observation path must not break generation, and must not report
+        events it failed to store."""
+        svc = self._armed_svc()
+        payloads, _ = self._run(monkeypatch, svc, [self._edge()], fail=True)
+        assert payloads == []
+        assert svc.status({})["events_recorded"] == 0
+
+    def test_retention_pruning_runs_with_the_configured_bounds(self, monkeypatch):
+        svc = self._armed_svc()
+        _, cap = self._run(monkeypatch, svc, [self._edge()])
+        assert cap["pruned"] is not None, "retention pruning never ran"
+        pruned_circuit, kwargs = cap["pruned"]
+        assert pruned_circuit == "circ_1"
+        assert "cap" in kwargs and "max_age_days" in kwargs

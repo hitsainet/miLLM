@@ -1933,3 +1933,46 @@ class TestR2TruncationAccountingCannotDoubleCountOrCarryOver:
             svc.collect_edges(saes)
             svc.close_request()
         assert svc.status(saes)["requests_truncated"] == 2
+
+
+class TestR3ASwappedOutSAEIsStillReleased:
+    """F17 R3-02. The reclaim path (R2-01) and `close_request` unbound only
+    `_armed_saes`. An SAE swapped out of that map since begin — a re-arm, an
+    eviction — kept its reference to the now-dead context, and on its next
+    begin self-bound a PRIVATE solo context whose observations no sibling can
+    read (the R2-07 fallback, doing its job on a layer that should never have
+    reached it).
+
+    `disarm` already unioned the armed set with the caller's map for exactly
+    this reason; the request paths did not."""
+
+    def _armed(self):
+        svc = CircuitSensingService()
+        saes = two_saes()
+        svc.arm_for_circuit(circuit(), definition(), saes)
+        return svc, saes
+
+    def test_the_reclaim_releases_an_SAE_swapped_out_since_begin(self):
+        from tests.unit.services.test_circuit_sensing_service import make_sae
+
+        svc, saes = self._armed()
+        svc.begin_request("A", saes)
+        stranded = saes[13]
+        svc._armed_saes[13] = make_sae()        # swapped in the armed map only
+
+        svc.begin_request("B", saes)            # refused -> reclaim
+        assert stranded._edge_ctx is None, (
+            "a swapped-out SAE kept the dead context and will sense into a "
+            "private ring no sibling can read"
+        )
+
+    def test_close_request_releases_it_too(self):
+        from tests.unit.services.test_circuit_sensing_service import make_sae
+
+        svc, saes = self._armed()
+        svc.begin_request("A", saes)
+        stranded = saes[13]
+        svc._armed_saes[13] = make_sae()
+        svc.collect_edges(saes)
+        svc.close_request()
+        assert stranded._edge_ctx is None

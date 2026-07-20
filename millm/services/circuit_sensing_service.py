@@ -77,6 +77,10 @@ class CircuitSensingService:
         # owned by the context, so they cannot outlive the request.
         self._ctx: Optional[EdgeSensingRequestContext] = None
         self._armed_saes: dict[int, LoadedSAE] = {}
+        #: SAEs actually bound for the OPEN request. `_armed_saes` can be
+        #: swapped under us by a re-arm, so it is not a reliable release list
+        #: on its own (R3-02).
+        self._bound_saes: list[LoadedSAE] = []
         #: Identity of the circuit that owns the OPEN request boundary.
         self._request_circuit_id: Optional[str] = None
         self._request_context_tokens: int = 0
@@ -585,6 +589,7 @@ class CircuitSensingService:
             # and reclaiming would corrupt the live one. That setting is the
             # documented invariant this whole guard exists to enforce.
             stale, self._ctx = self._ctx, None
+            _stale_bound, self._bound_saes = self._bound_saes, []
             # R2-15: the stale request may have observed edges it never drained.
             # They are correctly DISCARDED rather than leaked — the next
             # request's `begin_edge_sensing_request` resets each buffer, so
@@ -614,7 +619,12 @@ class CircuitSensingService:
                 stale.close()
             except Exception:
                 logger.exception("circuit_sensing_stale_close_failed")
-            for sae in list(self._armed_saes.values()):
+            # R3-02: unbind the union of the ARMED set and the caller's map.
+            # An SAE swapped out of `_armed_saes` since begin kept a reference
+            # to the dead context and then self-bound a PRIVATE solo one on its
+            # next begin — sensing into a ring no sibling can read. `disarm`
+            # already unions for exactly this reason; the reclaim path did not.
+            for sae in self._unbind_targets(layer_saes, extra=_stale_bound):
                 try:
                     sae.bind_context(None)
                 except Exception:
@@ -703,6 +713,9 @@ class CircuitSensingService:
                 continue
             sae.bind_context(ctx)
             sae.begin_edge_sensing_request(request_id)
+            # Remember it: this is the authoritative record of who holds the
+            # context, and it survives a later swap of `_armed_saes` (R3-02).
+            self._bound_saes.append(sae)
             began = True
         self._request_dark_layers = sorted(dark)
         if dark:
@@ -822,6 +835,25 @@ class CircuitSensingService:
         """
         return list(self._last_request_truncated_layers)
 
+    def _unbind_targets(self, layer_saes, extra=None):
+        """Every SAE that might hold this service's context.
+
+        The union of the ARMED set, the caller's map, and any SAE bound during
+        the request. `_armed_saes` alone is not enough: an SAE swapped out by a
+        re-arm keeps its reference, and on its next begin self-binds a private
+        solo context whose observations no sibling can read (R3-02). `disarm`
+        already unioned for this reason; the request paths did not.
+        """
+        targets = dict(self._armed_saes)
+        targets.update(layer_saes or {})
+        # ...and every SAE this service actually BOUND for the open request.
+        # `close_request` takes no map, so without this record a swapped-out
+        # SAE is unreachable from either source and keeps a closed context.
+        seen = {id(s): s for s in targets.values()}
+        for sae in list(self._bound_saes) + list(extra or ()):
+            seen.setdefault(id(sae), sae)
+        return list(seen.values())
+
     def close_request(self) -> None:
         """Release the boundary snapshot. R3: _request_circuit_id survived both
         collect_edges and disarm, so a drain arriving after a disarm attributed
@@ -836,12 +868,18 @@ class CircuitSensingService:
         # either alone leaves a path where the next request inherits this one's
         # state — the failure mode this whole feature exists to remove.
         ctx, self._ctx = self._ctx, None
+        bound, self._bound_saes = self._bound_saes, []
         if ctx is not None:
             try:
                 ctx.close()
             except Exception:
                 logger.exception("circuit_sensing_context_close_failed")
-        for sae in list(self._armed_saes.values()):
+        # R3-02: same union as the reclaim path and `disarm` — an SAE swapped
+        # out since begin must still be released, or it keeps a closed context.
+        # `bound` is the authoritative list: it was captured above, before
+        # `_bound_saes` was cleared, and it is the only record that survives a
+        # re-arm swapping `_armed_saes` under us.
+        for sae in self._unbind_targets(None, extra=bound):
             try:
                 sae.bind_context(None)
             except Exception:

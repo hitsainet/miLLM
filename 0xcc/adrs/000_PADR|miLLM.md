@@ -2,11 +2,11 @@
 
 ## Mechanistic Interpretability LLM Server
 
-**Document Version:** 1.2
+**Document Version:** 1.3
 **Created:** January 30, 2026
-**Updated:** July 20, 2026 (Circuit Runtime increment — BRD-MILLM-CIRCUITS-001)
+**Updated:** July 20, 2026 (Circuit Consolidation increment — BRD-MILLM-CIRCUITS-002)
 **Status:** Approved
-**Reference:** Project PRD (000_PPRD|miLLM.md v1.2) · BRD-MILLM-CLUSTERS-001 · BRD-MILLM-CIRCUITS-001
+**Reference:** Project PRD (000_PPRD|miLLM.md v1.3) · BRD-MILLM-CLUSTERS-001 · BRD-MILLM-CIRCUITS-001 · BRD-MILLM-CIRCUITS-002
 
 ---
 
@@ -1157,6 +1157,38 @@ SAE_CACHE_DIR=./data/saes
 **Decision:** Dedicated `_sense` path in `LoadedSAE` (cached `W_enc[:, members]`, ≤20 columns), armed-only, serial-only v1, events flushed post-generation to a bounded `sensing_events` table with ±K token context
 **Trade-off:** A second (tiny) encode vs entanglement with monitoring
 **Rationale:** Monitoring compacts positionally and only the last forward pass survives to `on_activation` — reusing it would miss mid-generation co-activations and mis-index features. A ≤20-column matmul per pass is microseconds; decoupling means sensing cannot change monitoring behavior. CBM rows cannot be attributed to requests, so sensing-armed requests route serial (never approximated).
+
+#### Circuit Consolidation increment (v1.3, 2026-07-20)
+
+#### Request-scoped context vs N per-SAE counters
+**Decision:** Introduce a `SensingRequestContext` created per request that owns the absolute token position counter, the edge fire ring(s) and the per-request event budget; the per-SAE `_edge_token_offset` counters are retired
+**Trade-off:** One more object threaded through the hook path vs each SAE managing its own state locally
+**Rationale:** Three of Feature 15's eight criticals share exactly one root cause — N per-SAE counters must agree on an absolute coordinate that no component owns, and the shared ring's lifetime is managed by whoever remembers to call it. The code is correct today only because three separate comments keep being obeyed, and each review round found a new way to violate them: an early return that skipped the offset advance, a hook that pruned a sibling's fires, a prune declared request-level and never wired. A context makes those states unrepresentable rather than test-guarded. This is the same reasoning that moved cluster steering from ad-hoc dicts to `SensingRequestContext` in Feature 11, one scope up.
+
+#### One ring per (request, circuit) vs one ring per request
+**Decision:** The context holds a distinct `EdgeFireRing` for each active circuit, never a single shared ring
+**Trade-off:** N rings and slightly more bookkeeping vs one obvious shared structure
+**Rationale:** The ring is keyed by `edge_key`, which is synthesised as `{up_idx}@{up_layer}->{down_idx}@{down_layer}` and is therefore NOT unique across circuits — two circuits can legitimately contain the same edge. With one shared ring, circuit A's upstream fire could match circuit B's downstream fire and be recorded as an observation of an edge that fired in neither. That is a fabricated observation on an evidence surface, which is categorically worse than a missed one. Feature 19 makes this reachable in practice by allowing two circuits to serve at once.
+
+#### Layer-exclusive claims vs additive composition for concurrent circuits
+**Decision:** A layer is claimed by at most one active circuit; overlapping activation is refused with `CIRCUIT_LAYER_CONTENTION` naming the incumbent, with an explicit `allow_layer_overlap` override that omits the rung header
+**Trade-off:** Two circuits sharing a layer cannot both serve without an explicit acknowledgement, vs letting them compose freely
+**Rationale:** Steering composes additively (`modified = original + Σ strength_i·W_dec_i`) and the ±200 `clamp_steering` bounds each member INDIVIDUALLY while nothing bounds the sum. The GPU close-out measured the consequence directly: one layer at strength 5 is indistinguishable from baseline, **two layers at the same strength destroys generation**. Silent composition is therefore not a theoretical hazard but a reliable way to produce garbage the operator cannot distinguish from a bad circuit. Refusing by default preserves the property that every steered layer has exactly one explanation — which is what makes `X-miLLM-Circuit-Rung` and edge-sensing attribution honest. Priority/preemption was rejected because it yields a half-serving circuit whose rung (a MIN over edges) no longer describes what runs; budget-splitting was rejected because it silently serves an intervention nobody authored or validated.
+
+#### Steering epoch vs extending the request semaphore to admin mutations
+**Decision:** A monotonic `steering_epoch` on `AttachedSAEState`, bumped by every authoritative writer and compared under the lock at restore; last authoritative writer wins
+**Trade-off:** An in-flight request's steering persists past its own boundary when superseded, vs strict per-request isolation
+**Rationale:** The alternative — having `activate`/`deactivate`/`set_intensity` acquire the inference request queue — turns a management call into a 503 behind a long generation, inverts the layering (services reaching into `InferenceService`'s queue), and risks deadlock if any generation path ever calls back. The epoch costs one integer and one comparison, blocks nothing, and closes the window on BOTH the circuit and Feature 10 profile paths with the same field. The accepted cost is explicit: the current generation finishes under the old value because its hook is already installed, and the operator's newer value then survives instead of being silently reverted — which is strictly better than today, where `set_intensity` returns `"reapplied": true` for a change that was undone.
+
+#### Reachability as an acceptance gate vs relying on review
+**Decision:** No capability is accepted as shipped without a test that FAILS when its user- or agent-facing wiring is removed; documentation status marks distinguish "endpoint exists" from "reachable"
+**Trade-off:** An extra test per capability vs trusting the three-round review cycle
+**Rationale:** Three shipped capabilities were unreachable and none was caught by review: Feature 12's multi-SAE attach had a service, a route, a client and a hook but no UI control; eleven circuit MCP tools were documented as shipped while `MILLM_CATEGORY_MODULES` never registered them; and ring pruning was declared request-level in two consecutive rounds and wired in neither. All three were found by an operator trying to use the system. Reviews verified the mechanism and never asked whether anything called it. The rule is specifically that the test must fail when the wiring is cut — Feature 15 shipped a `TestRingPruningIsWired` that asserted an entry point existed while nothing called it, which is the precise anti-pattern being excluded.
+
+#### Runtime thresholds expressed per layer vs fixed constants
+**Decision:** Thresholds inherited from the single-SAE era (`CIRCUIT_SENSING_MAX_OVERHEAD_MS`, and the already-corrected `MULTISAE_VRAM_ENVELOPE_MB`) are expressed with a per-layer denominator or scaled by the armed layer count
+**Trade-off:** A slightly more complex threshold expression vs a single number an operator can read at a glance
+**Rationale:** Both constants were written when exactly one SAE could ever be armed, and both produce a guaranteed alarm in a multi-SAE world. The VRAM envelope's 200 MB was the two-SAE spike's close-out TARGET and flagged a healthy 5-SAE attach on a 24 GB card; the sensing threshold's 5 ms was measured against 5.4–7.3 ms across five armed layers (~1.1–1.5 ms/layer, entirely proportionate), so every single request warned. An alarm that always fires trains operators to ignore alarms, which is worse than no alarm.
 
 #### Circuit Runtime increment (v1.2, 2026-07-20)
 

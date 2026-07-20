@@ -2,10 +2,10 @@
 
 ## Mechanistic Interpretability LLM Server
 
-**Document Version:** 1.2
+**Document Version:** 1.3
 **Created:** January 30, 2026
 **Status:** Draft
-**Reference:** BRD v1.0 (January 29, 2026) · BRD-MILLM-CLUSTERS-001 (July 16, 2026) · BRD-MILLM-CIRCUITS-001 (July 20, 2026)
+**Reference:** BRD v1.0 (January 29, 2026) · BRD-MILLM-CLUSTERS-001 (July 16, 2026) · BRD-MILLM-CIRCUITS-001 (July 20, 2026) · BRD-MILLM-CIRCUITS-002 (July 20, 2026)
 
 ### Document Revision History
 
@@ -14,6 +14,7 @@
 | 1.0 | 2026-01-30 | Initial project PRD (Features 1–7, from BRD v1.0) |
 | 1.1 | 2026-07-16 | Cluster Runtime increment (BRD-MILLM-CLUSTERS-001): Features 8–11 (Cluster Import, Unified MCP, OWUI Cluster Dial, Co-Activation Sensing), FR-8.x–FR-11.x, NFR-1.4, matrix extension; former future stubs renumbered 12–14 |
 | 1.2 | 2026-07-20 | Circuit Runtime increment (BRD-MILLM-CIRCUITS-001): Features 12–15 (Multi-SAE Attach & Circuit Serving, Circuit Import + Slice-Fallback + Evidence Ladder, Circuit-Aware OWUI Dial, Circuit Edge Sensing), FR-12.x–FR-15.x, NFR-1.5, matrix extension; retired the former "Multi-SAE Support" future stub (now specified as Feature 12); remaining future stubs renumbered 16+ |
+| 1.3 | July 20, 2026 | Circuit Consolidation increment (BRD-MILLM-CIRCUITS-002): Features 16-20 (steering epoch, request-scoped sensing context, single serving derivation, concurrent circuit serving, MCP circuit surface + reachability assurance), FR-16.x-20.x, matrix columns; future stubs renumbered 21/22. |
 
 ---
 
@@ -359,6 +360,40 @@ Organized by logical workflow (matching UI structure):
 - FR-15.4: Edge events persist with bounded retention and are retrievable via API, UI, and WebSocket, carrying the edge's evidence rung
 - FR-15.5: New additive `/api/circuits/*` endpoints and a `millm_circuits` MCP tool category (import, activate/deactivate, status, list, edge-sensing readout), tracked in `docs/mcp-contract.md` (v1.1, additive-only)
 
+#### Steering Epoch (FR-16.x) — Increment: Circuit Consolidation
+- FR-16.1: `AttachedSAEState` SHALL carry a monotonic `steering_epoch`, bumped under the attachment lock by every authoritative writer of live steering state.
+- FR-16.2: A per-request steering override SHALL capture the epoch at save time and SHALL SKIP its restore when the epoch has advanced — last authoritative writer wins.
+- FR-16.3: A skipped restore SHALL be logged with both epochs, so supersession is observable rather than silent.
+- FR-16.4: `PUT /api/circuits/active/intensity` SHALL NOT report `"reapplied": true` for a change an in-flight request reverted; the same guarantee applies to the Feature 10 profile path.
+
+#### Request-Scoped Sensing Context (FR-17.x) — Increment: Circuit Consolidation
+- FR-17.1: Absolute token position SHALL be owned by ONE request-scoped counter, replacing the N per-SAE counters whose divergence caused three of Feature 15's eight criticals.
+- FR-17.2: Each `(request, circuit)` pair SHALL have its OWN fire ring; rings SHALL NOT be shared across circuits, since an `edge_key` present in two circuits would otherwise let one circuit's upstream fire match another's downstream and fabricate an observation of an edge that fired in neither.
+- FR-17.3: The per-request event budget SHALL be attributed per circuit so one busy circuit cannot exhaust another's observation budget.
+- FR-17.4: Ring lifetime (creation, pruning, release) SHALL be owned by the context, not by whichever hook happens to run last.
+- FR-17.5: The edge machinery SHALL live in its own module, exercisable without constructing a `LoadedSAE`.
+- FR-17.6: Characterization tests SHALL pin current matcher behaviour BEFORE any code moves, and mutation testing SHALL be applied to the result.
+
+#### Single Circuit-Serving Derivation (FR-18.x) — Increment: Circuit Consolidation
+- FR-18.1: Serving a circuit SHALL have exactly one implementation, consumed by activation, intensity changes and the per-request dial.
+- FR-18.2: No caller SHALL construct a service by bypassing its constructor in order to reach steering; a half-constructed service whose failure mode is a swallowed `AttributeError` and a silently unsteered response SHALL NOT be reachable.
+- FR-18.3: A circuit's claim set (the layers its serving members reach) SHALL be computed by that same derivation, so activation and contention agree by construction.
+
+#### Concurrent Circuit Serving (FR-19.x) — Increment: Circuit Consolidation
+- FR-19.1: A layer SHALL be claimed by at most one active circuit; circuits with disjoint claim sets SHALL serve concurrently.
+- FR-19.2: Activation whose claim set overlaps an incumbent's SHALL be refused with `CIRCUIT_LAYER_CONTENTION` (200 + `success:false`), naming the incumbent circuit and the contended layers.
+- FR-19.3: An explicit `allow_layer_overlap` acknowledgement SHALL permit additive composition; while any layer is composed, `X-miLLM-Circuit-Rung` SHALL be OMITTED, because no single circuit's evidence describes the response.
+- FR-19.4: Two active circuits naming the same `(layer, feature_idx)` SHALL be refused unconditionally, with no override, since the merge would serve a strength belonging to neither author.
+- FR-19.5: Deactivation SHALL release only that circuit's own claims and steering keys, never a co-tenant's.
+- FR-19.6: The capability SHALL ship behind `CIRCUIT_ALLOW_CONCURRENT` (default false for one release) with a tested downgrade, since the first concurrent activation is a one-way door in deployed data.
+
+#### MCP Circuit Surface & Reachability (FR-20.x) — Increment: Circuit Consolidation
+- FR-20.1: A `millm_circuits` MCP category SHALL expose every circuit capability reachable by REST — list, import, activate, deactivate, export, set intensity, status, and edge-sensing status/events/enable/disable.
+- FR-20.2: Every circuit- and edge-bearing MCP response SHALL carry `rung` and server-rendered `rung_language` verbatim; the build-failing copy audit SHALL extend to the MCP modules and their tool descriptions.
+- FR-20.3: No capability SHALL be accepted as shipped without a test that FAILS when its user- or agent-facing wiring is removed; a test asserting only that an entry point exists SHALL NOT satisfy this.
+- FR-20.4: Documentation status marks SHALL distinguish "endpoint exists" from "reachable by a user or agent".
+- FR-20.5: `docs/mcp-contract.md` SHALL move to v1.2, additive-only.
+
 ### Non-Functional Requirements
 
 #### Performance (NFR-1.x)
@@ -682,16 +717,107 @@ Features organized by UI workflow tabs, with requirements matrix:
 
 ---
 
+### Increment: Circuit Consolidation (BRD-MILLM-CIRCUITS-002)
+
+Structural consolidation of the shipped circuit runtime plus the agent surface it never got. Driven by an empirical result rather than an aesthetic one: across the 001 increment, **every review round found a critical regression in the previous round's fix — twelve rounds, twelve for twelve** — because correctness is maintained by convention (three code comments, three duplicate derivations) rather than enforced by construction. Also folds in three shipped-but-unreachable capabilities found by a post-close-out audit, and two hazards measured at the 2026-07-20 GPU close-out.
+
+#### Feature 16: Steering Epoch
+**User Value:** An operator's change to live steering is never silently undone by a request that was already in flight — and the API stops reporting success for a change that was reverted.
+
+**UI Tab:** Circuits / Clusters (no new surface; the lie disappears)
+
+**Requirements Covered:** FR-16.1 through FR-16.4
+
+**Key Capabilities:**
+- Monotonic `steering_epoch` on `AttachedSAEState`, bumped under the attachment lock by every authoritative writer
+- Per-request restore compares the epoch it captured and SKIPS when superseded — last authoritative writer wins
+- Covers BOTH the circuit path and the Feature 10 profile path in one change; fixing only one leaves the identical window open a file away
+- `set_intensity` stops returning `"reapplied": true` for a change an in-flight request reverted
+
+**Dependencies:** Feature 12 (attachment registry), Feature 14 (per-request dial)
+
+---
+
+#### Feature 17: Request-Scoped Sensing Context
+**User Value:** The edge-sensing invariants that took eight criticals across three review rounds to get right become impossible to violate rather than guarded by comments.
+
+**UI Tab:** none (internal)
+
+**Requirements Covered:** FR-17.1 through FR-17.6
+
+**Key Capabilities:**
+- One `SensingRequestContext` per request owning the absolute position counter, the fire rings, and the event budget — replacing N independently-advanced per-SAE counters
+- **One ring per (request, circuit)**: the ring is keyed by `edge_key` and two circuits can legitimately contain the same edge, so a shared ring would fabricate observations
+- Edge machinery extracted from `sae_wrapper.py` (91 `_edge` references in 1373 lines) into `millm/ml/edge_sensing.py`
+- Event budget attributed per circuit so one busy circuit cannot starve another's observations
+- Characterization tests green BEFORE the move; mutation practice applied after
+
+**Dependencies:** Feature 15 (edge sensing), Feature 19 (contention model shapes the N-circuit design)
+
+---
+
+#### Feature 18: Single Circuit-Serving Derivation
+**User Value:** Changing how a circuit is served means changing one thing, not finding three copies that must agree.
+
+**UI Tab:** none (internal)
+
+**Requirements Covered:** FR-18.1 through FR-18.3
+
+**Key Capabilities:**
+- `CircuitSteeringEngine` as the ONE derivation, consumed by activation, `set_intensity` and the per-request dial (today: `circuit_service.py:424`, `:799`, `inference_service.py:955`)
+- Retires the `SAEService.__new__` bypass at `inference_service.py:743`, whose failure mode is a swallowed `AttributeError` and a silently unsteered response
+- F14's two worst defects were both consequences of these derivations drifting
+
+**Dependencies:** Feature 17 (lands on the settled context)
+
+---
+
+#### Feature 19: Concurrent Circuit Serving
+**User Value:** Several circuits serve at once, and the one configuration that reliably destroys generation is refused by default rather than discovered in production.
+
+**UI Tab:** Circuits (contention state, incumbent naming)
+
+**Requirements Covered:** FR-19.1 through FR-19.6
+
+**Key Capabilities:**
+- **Layer-exclusive claims**: a layer is claimed by at most one active circuit; non-overlapping circuits serve freely
+- Overlap REFUSED with `CIRCUIT_LAYER_CONTENTION` (200 + `success:false`), naming the incumbent and the contended layers
+- Explicit `allow_layer_overlap` override, mirroring `acknowledge_unvalidated` — the rung header is **omitted** when used, because no single circuit's evidence describes a composed response
+- Same-`(layer, feature_idx)` collision refused unconditionally: the merge would serve a strength belonging to neither author
+- Drops `uq_circuits_active` for a `circuit_layer_claims` table; tested downgrade; `CIRCUIT_ALLOW_CONCURRENT` flag (default false for one release)
+- Design of record: `0xcc/docs/circuit-contention-model.md`
+
+**Dependencies:** Feature 13 (activation), Feature 18 (claim sets from the single derivation)
+
+---
+
+#### Feature 20: MCP Circuit Surface & Reachability Assurance
+**User Value:** An agent can do for circuits everything it can already do for clusters — and a capability can no longer ship with no way to invoke it.
+
+**UI Tab:** none (MCP + process)
+
+**Requirements Covered:** FR-20.1 through FR-20.5
+
+**Key Capabilities:**
+- A `millm_circuits` category on the existing unified miStudio-hosted MCP server: list, import, activate, deactivate, export, set intensity, status, plus edge-sensing status/events/enable/disable
+- Every circuit- and edge-bearing response carries `rung` + server-rendered `rung_language` verbatim; the copy audit extends to the MCP modules
+- Reachability rule: no capability is accepted without a test that FAILS when the wiring is removed
+- `docs/mcp-contract.md` → v1.2, with status marks distinguishing "endpoint exists" from "reachable"
+
+**Dependencies:** Features 13, 15 (the endpoints), Feature 18 (written against settled code)
+
+---
+
 ### Future Features (Post v1.0)
 
-#### Feature 16: Multi-User Authentication
+#### Feature 21: Multi-User Authentication
 **User Value:** Enable secure access for team environments and non-local deployments.
 
 **Priority:** v1.1+
 
 ---
 
-#### Feature 17: Neuronpedia Integration
+#### Feature 22: Neuronpedia Integration
 **User Value:** Browse and search features with human-readable labels from Neuronpedia.
 
 **Priority:** v1.1+ (partially delivered post-v1.0: probe feature links derive from attached SAE metadata)
@@ -700,23 +826,28 @@ Features organized by UI workflow tabs, with requirements matrix:
 
 ### Feature-Requirements Matrix
 
-| Feature | FR-1.x | FR-2.x | FR-3.x | FR-4.x | FR-5.x | FR-6.x | FR-7.x | FR-8.x | FR-9.x | FR-10.x | FR-11.x | FR-12.x | FR-13.x | FR-14.x | FR-15.x |
-|---------|--------|--------|--------|--------|--------|--------|--------|--------|--------|---------|---------|---------|---------|---------|---------|
-| 1. Model Management | ✓ | | | | | | ✓ | | | | | | | | |
-| 2. SAE Management | | ✓ | | | | | ✓ | | | | | ✓ | | | |
-| 3. Feature Steering | | | ✓ | | | | ✓ | | | | | ✓ | | | |
-| 4. OpenAI API | ✓ | | ✓ | | ✓ | | | | | | | | | ✓ | |
-| 5. Admin UI | | | | | | | ✓ | | | | | | ✓ | | |
-| 6. Profile Management | | | ✓ | | | ✓ | ✓ | | | | | | | | |
-| 7. Feature Monitoring | | ✓ | | ✓ | | | ✓ | | | | | | | | |
-| 8. Cluster Import | | | ✓ | | | ✓ | | ✓ | | | | | ✓ | | |
-| 9. Unified MCP | | | | | | | | ✓ | ✓ | ✓ | ✓ | | | | ✓ |
-| 10. OWUI Cluster Dial | | | ✓ | | ✓ | | | ✓ | | ✓ | | | | | |
-| 11. Co-Activation Sensing | | | | ✓ | | | | ✓ | | | ✓ | | | | |
-| 12. Multi-SAE Attach & Circuit Serving | | ✓ | ✓ | | | | | | | | | ✓ | | | |
-| 13. Circuit Import, Slice-Fallback & Evidence Ladder | | | ✓ | | | ✓ | | ✓ | | | | ✓ | ✓ | | |
-| 14. Circuit-Aware OWUI Dial | | | ✓ | | ✓ | | | | | ✓ | | ✓ | | ✓ | |
-| 15. Circuit Edge Sensing | | | | ✓ | | | | | ✓ | | ✓ | | ✓ | | ✓ |
+| Feature | FR-1.x | FR-2.x | FR-3.x | FR-4.x | FR-5.x | FR-6.x | FR-7.x | FR-8.x | FR-9.x | FR-10.x | FR-11.x | FR-12.x | FR-13.x | FR-14.x | FR-15.x | FR-16.x | FR-17.x | FR-18.x | FR-19.x | FR-20.x |
+|---------|---------|---------|---------|---------|---------|---------|---------|---------|---------|---------|---------|---------|---------|---------|---------|---------|---------|---------|---------|---------|
+| 1. Model Management | ✓ | | | | | | ✓ | | | | | | | | | | | | | |
+| 2. SAE Management | | ✓ | | | | | ✓ | | | | | ✓ | | | | | | | | |
+| 3. Feature Steering | | | ✓ | | | | ✓ | | | | | ✓ | | | | | | | | |
+| 4. OpenAI API | ✓ | | ✓ | | ✓ | | | | | | | | | ✓ | | | | | | |
+| 5. Admin UI | | | | | | | ✓ | | | | | | ✓ | | | | | | | |
+| 6. Profile Management | | | ✓ | | | ✓ | ✓ | | | | | | | | | | | | | |
+| 7. Feature Monitoring | | ✓ | | ✓ | | | ✓ | | | | | | | | | | | | | |
+| 8. Cluster Import | | | ✓ | | | ✓ | | ✓ | | | | | ✓ | | | | | | | |
+| 9. Unified MCP | | | | | | | | ✓ | ✓ | ✓ | ✓ | | | | ✓ | | | | | |
+| 10. OWUI Cluster Dial | | | ✓ | | ✓ | | | ✓ | | ✓ | | | | | | | | | | |
+| 11. Co-Activation Sensing | | | | ✓ | | | | ✓ | | | ✓ | | | | | | | | | |
+| 12. Multi-SAE Attach & Circuit Serving | | ✓ | ✓ | | | | | | | | | ✓ | | | | | | | | |
+| 13. Circuit Import, Slice-Fallback & Evidence Ladder | | | ✓ | | | ✓ | | ✓ | | | | ✓ | ✓ | | | | | | | |
+| 14. Circuit-Aware OWUI Dial | | | ✓ | | ✓ | | | | | ✓ | | ✓ | | ✓ | | | | | | |
+| 15. Circuit Edge Sensing | | | | ✓ | | | | | ✓ | | ✓ | | ✓ | | ✓ | | | | | |
+| 16. Steering Epoch | | | | | | | | | | | | | | | ✅ | | | | | |
+| 17. Request-Scoped Sensing Context | | | | | | | | | | | | | | | | ✅ | | | | |
+| 18. Single Serving Derivation | | | | | | | | | | | | | | | | | ✅ | | | |
+| 19. Concurrent Circuit Serving | | | | | | | | | | | | | | | | | | ✅ | | |
+| 20. MCP Circuit Surface | | | | | | | | | | | | | | | | | | | ✅ | |
 
 ---
 

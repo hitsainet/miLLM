@@ -86,6 +86,8 @@ class CircuitSensingService:
         #: Fires among the armed circuit's OWN members in the last request.
         #: Deliberately NOT ambient_fired_count — see _ambient_fired_count().
         self._last_request_member_fires: int = 0
+        #: Layers that dropped events in the last drained request (BR-006).
+        self._last_request_truncated_layers: list[int] = []
         self._unsensable: list[UnsensableEdge] = []
         self._max_token_lag: int = settings.CIRCUIT_SENSING_MAX_TOKEN_LAG
         self._last_request_overhead_ms: float = 0.0
@@ -509,6 +511,7 @@ class CircuitSensingService:
         request_id = ""
         merged: list[Any] = []
         truncated = False
+        truncated_layers: list[int] = []
         overhead = 0.0
         member_fires = 0
         for layer in self._armed_layers:
@@ -519,6 +522,14 @@ class CircuitSensingService:
             request_id = request_id or rid
             merged.extend(edges)
             truncated = truncated or trunc
+            # BR-006: WHICH layer truncated, not merely that something did. A
+            # request-wide boolean tells an operator their view is incomplete
+            # without telling them whether the gap is where they are looking —
+            # so a layer that observed everything is indistinguishable from one
+            # that dropped events, and the honest reading of any empty result
+            # becomes "maybe".
+            if trunc:
+                truncated_layers.append(layer)
             overhead += float(getattr(sae, "_edge_overhead_ms", 0.0) or 0.0)
             # R1: zeroed only at begin, so a layer that missed begin (the
             # `continue` in begin_request) re-contributed its stale overhead to
@@ -535,7 +546,24 @@ class CircuitSensingService:
                 layers=self._armed_layers,
             )
         merged.sort(key=lambda e: (e.down_pos, e.up_pos))
+        # The tuple stays THREE wide on purpose. Widening it would break every
+        # `a, b, c = collect_edges(...)` call site — silently by position at
+        # the two that ignore the flag — and task 5.4 requires the integration
+        # workflow to pass unchanged as the outside-boundary preservation
+        # proof. The per-layer detail rides alongside instead, read by the
+        # status route.
+        self._last_request_truncated_layers = sorted(truncated_layers)
         return request_id, merged, truncated
+
+    @property
+    def last_request_truncated_layers(self) -> list[int]:
+        """Layers that dropped events in the last drained request (BR-006).
+
+        Empty means every armed layer reported completely — which is a
+        different statement from "no events were observed", and the reason
+        this is a list of layers rather than a boolean.
+        """
+        return list(self._last_request_truncated_layers)
 
     def close_request(self) -> None:
         """Release the boundary snapshot. R3: _request_circuit_id survived both
@@ -822,6 +850,12 @@ class CircuitSensingService:
             "unsensable_edges": [u.to_dict() for u in self._unsensable],
             "max_token_lag": self._max_token_lag,
             "last_request_overhead_ms": round(self._last_request_overhead_ms, 3),
+            # BR-006. An empty list means every armed layer reported
+            # completely — a different claim from "no events were observed",
+            # which a bare `truncated: true/false` could not make. Named
+            # layers let an operator tell "the circuit was quiet" from "this
+            # layer's view is incomplete".
+            "truncated_layers": list(self._last_request_truncated_layers),
             "events_recorded": self._events_recorded,
             "ws_dropped": self._ws_dropped,
         }

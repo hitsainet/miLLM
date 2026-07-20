@@ -1,6 +1,6 @@
 # miLLM ↔ Unified MCP Server Contract
 
-**Status:** Normative for miLLM Feature 9 (Unified MCP) and Feature 15 (Circuit Edge Sensing / circuit MCP surface). **Version:** 1.1 (2026-07-20)
+**Status:** Normative for miLLM Feature 9 (Unified MCP) and Feature 15 (Circuit Edge Sensing / circuit MCP surface). **Version:** 1.2 (2026-07-20)
 **Consumer:** the unified MCP server that ships in the miStudio repo
 (`backend/src/mcp_server/`), exposing `millm_runtime` / `millm_clusters` /
 `millm_sensing` / `millm_circuits` tool categories against a miLLM deployment.
@@ -17,6 +17,14 @@ BRD-MILLM-CIRCUITS-001): it adds the `millm_circuits` tool category (§4), the
 `/api/circuits/*` endpoints and circuit edge-sensing routes, the circuit error
 codes (§5), and the rung-vocabulary rule (§4a). No v1.0 endpoint, field, or
 error code changed. A v1.0 client that ignores the circuit surface is unaffected.
+
+**v1.2 (2026-07-20)** is a strict additive superset of v1.1: it tightens the
+*meaning* of `reapplied`/`superseded` on the intensity route (§4a-ter, Feature
+16 — the values are now truthful rather than unconditional) and adds
+`truncated_layers` to the circuit-sensing status payload (§4a-quater, Feature
+17). No endpoint, field name, type, or error code was removed or changed. A
+v1.1 client keeps working; one that reads `reapplied` gets a more accurate
+answer than before.
 
 ## 2. Response envelope
 
@@ -126,7 +134,7 @@ sub-collection of a circuit, and the flat prefix matches `/api/sensing`.
 | `millm_deactivate_circuit` | `POST /api/circuits/{id}/deactivate` | REST ✅ · MCP not registered |
 | `millm_export_circuit` | `GET /api/circuits/{id}/export` (raw circuit document — no envelope) | REST ✅ · MCP not registered |
 | `millm_set_circuit_intensity` | `PUT /api/circuits/active/intensity` (`{intensity, reapply}`; one global λ scales all layers) | REST ✅ · MCP not registered |
-| `millm_circuit_sensing_status` | `GET /api/circuit-sensing/status` (armed state, layers, **`sensable_edges` + `unsensable_edges[{edge_key,reason,detail}]`**, `max_token_lag`, overhead, `enabled_circuits`) | REST ✅ · MCP not registered |
+| `millm_circuit_sensing_status` | `GET /api/circuit-sensing/status` (armed state, layers, **`sensable_edges` + `unsensable_edges[{edge_key,reason,detail}]`**, `max_token_lag`, overhead, **`truncated_layers[]` (v1.2)**, `enabled_circuits`) | REST ✅ · MCP not registered |
 | `millm_circuit_sensing_events` | `GET /api/circuit-sensing/events?circuit_id=&edge_key=&limit=&since=` (rows carry nested `up`/`down` `{layer,feature_idx,pos,act}`, `token_lag`, ±K `context_parts`, `edge_rung` + `edge_rung_language`) | REST ✅ · MCP not registered |
 | `millm_circuit_sensing_enable` / `_disable` | `POST /api/circuit-sensing/{circuit_id}/enable` / `/disable` (off by default, opt-in) | REST ✅ · MCP not registered |
 | `millm_circuit_sensing_event` | `GET /api/circuit-sensing/events/{event_id}` (one observation with its context window) | REST ✅ · MCP not registered |
@@ -190,6 +198,25 @@ A concurrent operator change WINS over an in-flight request: the request's
 restore is skipped rather than overwriting the newer authoritative write. So a
 per-request dial can no longer be the cause of `superseded` — only another
 authoritative writer can.
+
+### 4a-quater. `truncated_layers` names the incomplete layer (v1.2 — Feature 17)
+
+`GET /api/circuit-sensing/status` adds `truncated_layers: int[]` — the layers
+that dropped events in the last drained request. Additive; a client that
+ignores it is unaffected.
+
+**An empty list is a positive claim**, not an absence of information: every
+armed layer reported completely. That is a different statement from "no events
+were observed", and the distinction is why this names layers rather than being
+a boolean. Previously the runtime knew only that *something* had truncated, so
+a layer that observed everything was indistinguishable from one that dropped
+events, and the honest reading of any empty result was "maybe".
+
+An agent must therefore not report a circuit as quiet when the layer it cares
+about appears in `truncated_layers` — the correct statement is that the
+observation is incomplete for that layer. Truncation is a load-shedding
+outcome, never evidence about the circuit, and (per §4a) it must never move an
+edge's rung or soften the rung language.
 
 ### 4b. Circuit per-request dial (v1.1 — Feature 14)
 

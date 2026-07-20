@@ -56,6 +56,17 @@ class CircuitSensingStatusResponse(BaseModel):
     unsensable_edges: list[UnsensableEdgeInfo] = Field(default_factory=list)
     max_token_lag: int
     last_request_overhead_ms: float = 0.0
+    truncated_layers: list[int] = Field(
+        default_factory=list,
+        description=(
+            "Layers that dropped events in the last drained request (BR-006). "
+            "Empty means every armed layer reported completely — which is a "
+            "different statement from 'no events were observed', and the "
+            "reason this names layers instead of being a boolean. An operator "
+            "seeing an empty result needs to know whether the gap is where "
+            "they are looking."
+        ),
+    )
     events_recorded: int = 0
     ws_dropped: int = 0
     #: Persistent operator intent, distinct from runtime `armed`.

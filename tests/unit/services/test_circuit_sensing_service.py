@@ -653,3 +653,83 @@ class TestTheRequestBoundaryIsActuallyReleased:
         assert sae._edge_ring.match_down("carryover", 2) is None, (
             "the previous request's fires are visible to this one"
         )
+
+
+class TestTruncatedLayersNamesTheLayer:
+    """BR-006 / F17 task 4.3. A request-wide `truncated` boolean tells an
+    operator their view is incomplete without telling them WHERE, so a layer
+    that observed everything is indistinguishable from one that dropped
+    events — and the honest reading of any empty result becomes "maybe"."""
+
+    def _armed(self):
+        svc = CircuitSensingService()
+        saes = two_saes()
+        svc.arm_for_circuit(circuit(), definition(), saes)
+        svc.begin_request("r", saes)
+        return svc, saes
+
+    def test_the_truncating_layer_is_named(self):
+        svc, saes = self._armed()
+        saes[13]._edge_truncated = True
+        _, _, truncated = svc.collect_edges(saes)
+        assert truncated is True
+        assert svc.last_request_truncated_layers == [13], (
+            "named the wrong layer, or none — the operator cannot tell whether "
+            "the gap is where they are looking"
+        )
+
+    def test_a_complete_request_names_no_layers(self):
+        """Empty is a POSITIVE claim: every armed layer reported completely."""
+        svc, saes = self._armed()
+        _, _, truncated = svc.collect_edges(saes)
+        assert truncated is False
+        assert svc.last_request_truncated_layers == []
+
+    def test_every_truncating_layer_is_named_and_sorted(self):
+        svc, saes = self._armed()
+        for sae in saes.values():
+            sae._edge_truncated = True
+        svc.collect_edges(saes)
+        assert svc.last_request_truncated_layers == [10, 13]
+
+    def test_the_list_does_not_leak_across_requests(self):
+        """A stale layer list is worse than none: it accuses a layer that
+        reported completely this time."""
+        svc, saes = self._armed()
+        saes[13]._edge_truncated = True
+        svc.collect_edges(saes)
+        assert svc.last_request_truncated_layers == [13]
+
+        svc.close_request()
+        svc.begin_request("r2", saes)
+        svc.collect_edges(saes)
+        assert svc.last_request_truncated_layers == [], (
+            "the previous request's truncation is still being reported"
+        )
+
+    def test_the_property_returns_a_COPY(self):
+        """A caller mutating the returned list must not edit service state."""
+        svc, saes = self._armed()
+        saes[13]._edge_truncated = True
+        svc.collect_edges(saes)
+        got = svc.last_request_truncated_layers
+        got.append(999)
+        assert svc.last_request_truncated_layers == [13]
+
+    def test_truncated_layers_reaches_the_STATUS_PAYLOAD(self):
+        """The F16 R1 failure mode: a field the service computes, the response
+        model does not declare, and Pydantic silently drops. Asserting the
+        service alone would not have caught it."""
+        from millm.api.schemas.circuit_sensing import CircuitSensingStatusResponse
+
+        svc, saes = self._armed()
+        saes[13]._edge_truncated = True
+        svc.collect_edges(saes)
+
+        payload = svc.status(saes)
+        assert payload["truncated_layers"] == [13]
+        model = CircuitSensingStatusResponse(**payload)
+        assert model.truncated_layers == [13]
+        assert model.model_dump()["truncated_layers"] == [13], (
+            "declared on the model but dropped on serialization"
+        )

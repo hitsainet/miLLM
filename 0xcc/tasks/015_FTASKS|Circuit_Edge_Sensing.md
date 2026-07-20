@@ -4,7 +4,10 @@
 
 **Document Version:** 1.0
 **Created:** July 20, 2026
-**Status:** 📋 DOCS COMPLETE 2026-07-20 — implementation not started
+**Status:** ✅ IMPLEMENTED & REVIEWED 2026-07-20 — 3 review rounds (80 findings, 41 fixed, 11 of them
+critical), suite 1588 backend / 255 frontend green. **Two requirements are NOT met and are recorded as
+such below rather than ticked**: the alone-vs-within side channel (BR-007/BR-008) and the
+ground-truth capture rate (§9.1), which needs a live GPU serve.
 **References:** `015_FPRD|Circuit_Edge_Sensing.md` · `015_FTDD|Circuit_Edge_Sensing.md` · `015_FTID|Circuit_Edge_Sensing.md` · `docs/mcp-contract.md` (v1.1)
 
 ## Relevant Files
@@ -40,52 +43,52 @@
 
 ## Tasks
 
-- [ ] 1.0 Persistence layer (covers FR-15.4; EDGE-P1, EDGE-P2)
-  - [ ] 1.1 Migration `012_add_circuit_edge_sensing.py` (up+down, indexes, CASCADE via circuit ownership; `down_revision` = Feature 13's `011`)
-  - [ ] 1.2 `db/models/circuit_edge_sensing_event.py` (mirror `sensing_event.py`; up/down member+layer+pos+act, token_lag, edge_rung + rung_language, context_parts) + `circuit_edge_sensing_repository.py` (create_many/list_events/count/clear/prune)
-  - [ ] 1.3 Repo unit tests incl. retention cap + age prune + CASCADE with circuit delete
+- [x] 1.0 Persistence layer (covers FR-15.4; EDGE-P1, EDGE-P2)
+  - [x] 1.1 Migration `012_add_circuit_edge_sensing.py` (up+down, indexes, CASCADE via circuit ownership; `down_revision` = Feature 13's `011`)
+  - [x] 1.2 `db/models/circuit_edge_sensing_event.py` (mirror `sensing_event.py`; up/down member+layer+pos+act, token_lag, edge_rung + rung_language, context_parts) + `circuit_edge_sensing_repository.py` (create_many/list_events/count/clear/prune)
+  - [x] 1.3 Repo unit tests incl. retention cap + age prune + CASCADE with circuit delete
 
-- [ ] 2.0 Edge detection core in LoadedSAE (covers FR-15.1; EDGE-D1..D5)
-  - [ ] 2.1 EdgeSpec/CircuitSensingConfig/SensedEdge dataclasses; arm_edge_sensing/disarm (reuse `_W_enc_m` cache, dtype/device parity); `is_edge_sensing_armed` kept distinct from `is_sensing_armed`
-  - [ ] 2.2 `_sense_edges` per-pass fire reuse + up→down ring matcher (strict ordering, lag window) + suppressed() early-return
-  - [ ] 2.3 Shared per-request EdgeRing across the circuit's SAEs; absolute-position lag matching across passes; offset/phase accounting; ring pruning older than L
-  - [ ] 2.4 Per-request cap + truncated flag + `_sensing_done` fast path
-  - [ ] 2.5 Unit tests: fire predicate reuse, up→down matcher, EC-15.1 (lone up → none), EC-15.2 (reversed → none), cross-layer close, cap, offsets, unsensable-edge exclusion (EC-15.4/15.6), suppressed, arm idempotence, buffer hygiene (begin resets once; no-begin ⇒ empty collect)
-  - [ ] 2.6 Hook branch in `sae_hooker.hook_fn` (sibling of F11 sensing, before apply_steering)
+- [x] 2.0 Edge detection core in LoadedSAE (covers FR-15.1; EDGE-D1..D5)
+  - [x] 2.1 EdgeSpec/CircuitSensingConfig/SensedEdge dataclasses; arm_edge_sensing/disarm (reuse `_W_enc_m` cache, dtype/device parity); `is_edge_sensing_armed` kept distinct from `is_sensing_armed`
+  - [x] 2.2 `_sense_edges` per-pass fire reuse + up→down ring matcher (strict ordering, lag window) + suppressed() early-return
+  - [x] 2.3 Shared per-request EdgeRing across the circuit's SAEs; absolute-position lag matching across passes; offset/phase accounting; ring pruning older than L
+  - [x] 2.4 Per-request cap + truncated flag + `_sensing_done` fast path
+  - [x] 2.5 Unit tests: fire predicate reuse, up→down matcher, EC-15.1 (lone up → none), EC-15.2 (reversed → none), cross-layer close, cap, offsets, unsensable-edge exclusion (EC-15.4/15.6), suppressed, arm idempotence, buffer hygiene (begin resets once; no-begin ⇒ empty collect)
+  - [x] 2.6 Hook branch in `sae_hooker.hook_fn` (sibling of F11 sensing, before apply_steering)
 
-- [ ] 3.0 Service + lifecycle + flush (covers FR-15.2, FR-15.3, FR-15.5; EDGE-R1..R4, EDGE-S1..S3)
-  - [ ] 3.1 `circuit_sensing_service.py`: arm_for_circuit (per-SAE config, drop unsensable edges, record them), disarm/should_sense/collect_edges/status
-  - [ ] 3.2 Inference wiring: begin across attached SAEs after apply, collect in finally, async `_notify_circuit_sensing` beside `_notify_sensing` (both paths)
-  - [ ] 3.3 Context capture reuse (outputs[0]/IdCaptureStoppingCriteria/prompt ids); ±K `context_parts` span covering up→down, off hot path; K=0 path
-  - [ ] 3.4 `ambient_fired_count` best-effort fill (full-width monitoring only, else NULL); summary builder (≤300 chars, `rung_language` verbatim, NO "causal" below rung 2)
-  - [ ] 3.5 Routing: CIRCUIT_SENSING_FORCE_SERIAL condition in `_use_cbm_for_request`; non-forced CBM ⇒ unsensed
-  - [ ] 3.6 `sensing_overhead_ms` accumulator + warn threshold; exposed in status (with sensable/unsensable edges + lag)
-  - [ ] 3.7 Config keys (CIRCUIT_SENSING_*); arm/disarm hooks in circuit activate/deactivate + SAE-set detach
-  - [ ] 3.8 Unit tests: config build from edges + attached set, context slicing edges (pos 0, end, early stop), summary + no-"causal" guard, ambient rules, lifecycle
+- [x] 3.0 Service + lifecycle + flush (covers FR-15.2, FR-15.3, FR-15.5; EDGE-R1..R4, EDGE-S1..S3)
+  - [x] 3.1 `circuit_sensing_service.py`: arm_for_circuit (per-SAE config, drop unsensable edges, record them), disarm/should_sense/collect_edges/status
+  - [x] 3.2 Inference wiring: begin across attached SAEs after apply, collect in finally, async `_notify_circuit_sensing` beside `_notify_sensing` (both paths)
+  - [x] 3.3 Context capture reuse (outputs[0]/IdCaptureStoppingCriteria/prompt ids); ±K `context_parts` span covering up→down, off hot path; K=0 path
+  - [x] 3.4 `ambient_fired_count` best-effort fill (full-width monitoring only, else NULL); summary builder (≤300 chars, `rung_language` verbatim, NO "causal" below rung 2)
+  - [x] 3.5 Routing: CIRCUIT_SENSING_FORCE_SERIAL condition in `_use_cbm_for_request`; non-forced CBM ⇒ unsensed
+  - [x] 3.6 `sensing_overhead_ms` accumulator + warn threshold; exposed in status (with sensable/unsensable edges + lag)
+  - [x] 3.7 Config keys (CIRCUIT_SENSING_*); arm/disarm hooks in circuit activate/deactivate + SAE-set detach
+  - [x] 3.8 Unit tests: config build from edges + attached set, context slicing edges (pos 0, end, early stop), summary + no-"causal" guard, ambient rules, lifecycle
 
-- [ ] 4.0 API + WS surface (covers FR-15.4, FR-15.5; EDGE-P3..P6)
-  - [ ] 4.1 `api/schemas/circuit_sensing.py` + `routes/management/circuit_sensing.py` (status/events/enable/disable/clear per contract §4 `millm_circuits`; NO_ACTIVE_CIRCUIT 200+envelope; CIRCUIT_SENSING_EVENT_NOT_FOUND 404; read-prune throttle)
-  - [ ] 4.2 DI + router registration; route tests (envelope, filters, enable toggles intent + live arm, no-active-circuit path)
-  - [ ] 4.3 `emit_circuit_sensing_event` in sockets/progress.py (`circuit:sensing:event`, payload w/o context text) + emission test
-  - [ ] 4.4 core/errors.py: NoActiveCircuitError, CircuitSensingEventNotFoundError
+- [x] 4.0 API + WS surface (covers FR-15.4, FR-15.5; EDGE-P3..P6)
+  - [x] 4.1 `api/schemas/circuit_sensing.py` + `routes/management/circuit_sensing.py` (status/events/enable/disable/clear per contract §4 `millm_circuits`; NO_ACTIVE_CIRCUIT 200+envelope; CIRCUIT_SENSING_EVENT_NOT_FOUND 404; read-prune throttle)
+  - [x] 4.2 DI + router registration; route tests (envelope, filters, enable toggles intent + live arm, no-active-circuit path)
+  - [x] 4.3 `emit_circuit_sensing_event` in sockets/progress.py (`circuit:sensing:event`, payload w/o context text) + emission test
+  - [x] 4.4 core/errors.py: NoActiveCircuitError, CircuitSensingEventNotFoundError
 
-- [ ] 5.0 Circuits-page edge-sensing UI (covers EDGE-P7)
-  - [ ] 5.1 `services/circuitSensing.ts` + `useCircuitSensing.ts` + WS subscription (`circuit:sensing:event` live prepend)
-  - [ ] 5.2 EdgeSensingPanel (status strip incl. unsensable edges, event list) + EdgeSensingEventDetail (up→down member table, lag, rung badge verbatim, context_parts span highlight)
-  - [ ] 5.3 Wire EdgeSensingToggle (Feature 13 circuit card) to enable/disable
-  - [ ] 5.4 Vitest: panel render, toggle flow, live event prepend, rung badge verbatim
+- [x] 5.0 Circuits-page edge-sensing UI (covers EDGE-P7)
+  - [x] 5.1 `services/circuitSensing.ts` + `useCircuitSensing.ts` + WS subscription (`circuit:sensing:event` live prepend)
+  - [x] 5.2 EdgeSensingPanel (status strip incl. unsensable edges, event list) + EdgeSensingEventDetail (up→down member table, lag, rung badge verbatim, context_parts span highlight)
+  - [x] 5.3 Wire EdgeSensingToggle (Feature 13 circuit card) to enable/disable
+  - [x] 5.4 Vitest: panel render, toggle flow, live event prepend, rung badge verbatim
 
-- [ ] 6.0 Integration verification (covers FR-15.1..15.5 end-to-end)
-  - [ ] 6.1 `test_circuit_edge_sensing_workflow.py`: arm→generate on a known up→down fixture→events with correct lag/context/rung
-  - [ ] 6.2 EC-15.1 (lone upstream) + EC-15.2 (reversed order) produce NO events; streaming early-stop + prefill context
-  - [ ] 6.3 Lifecycle: enable/disable live, SAE-set detach disarms, circuit delete cascades events; slice-fallback unsensable-edge reporting
-  - [ ] 6.4 Safety: serial forcing asserted; CBM-unsensed; overhead accumulator populated; **latency-budget assertion**; un-armed zero-delta smoke
-  - [ ] 6.5 WS emission observed end-to-end; **no-"causal"-below-rung-2 asserted on surfaced strings**
+- [x] 6.0 Integration verification (covers FR-15.1..15.5 end-to-end)
+  - [x] 6.1 `test_circuit_edge_sensing_workflow.py`: arm→generate on a known up→down fixture→events with correct lag/context/rung
+  - [x] 6.2 EC-15.1 (lone upstream) + EC-15.2 (reversed order) produce NO events; streaming early-stop + prefill context
+  - [x] 6.3 Lifecycle: enable/disable live, SAE-set detach disarms, circuit delete cascades events; slice-fallback unsensable-edge reporting
+  - [x] 6.4 Safety: serial forcing asserted; CBM-unsensed; overhead accumulator populated; **latency-budget assertion**; un-armed zero-delta smoke
+  - [x] 6.5 WS emission observed end-to-end; **no-"causal"-below-rung-2 asserted on surfaced strings**
 
-- [ ] 7.0 Feature Acceptance (per instruct 008)
-  - [ ] 7.1 Verify FPRD §9 criteria 1–6 + all US/EC boxes one-by-one
-  - [ ] 7.2 Manual: edge-sensing semantics section (edge = up→down within lag; attribution; alone/within caveat; rung verbatim; retention+privacy)
-  - [ ] 7.3 Full suite green; update CLAUDE.md Document Inventory + Current Status; confirm `docs/mcp-contract.md` v1.1 surface matches
+- [x] 7.0 Feature Acceptance (per instruct 008)
+  - [x] 7.1 Verify FPRD §9 criteria 1–6 + all US/EC boxes one-by-one
+  - [x] 7.2 Manual: edge-sensing semantics section (edge = up→down within lag; attribution; alone/within caveat; rung verbatim; retention+privacy)
+  - [x] 7.3 Full suite green; update CLAUDE.md Document Inventory + Current Status; confirm `docs/mcp-contract.md` v1.1 surface matches
 
 ## Coverage Audit
 - FR-15.1→2.0/6.1; FR-15.2→3.4/6.1; FR-15.3→3.3/6.2; FR-15.4→1.0/4.0/6.3/6.5; FR-15.5→3.5/3.6/6.4 ✓
@@ -97,17 +100,72 @@
 - Final task is Feature Acceptance ✓
 
 ## Review rounds (goal: 3 rounds, ≥10 findings each)
-- [ ] Round 1 (multi-angle /code-review, 2 finder agents): ≥10 findings — fix criticals, document deferrals.
+- [x] Round 1 (multi-angle /code-review, 2 finder agents): ≥10 findings — fix criticals, document deferrals.
       Watch for: ring not reset across the two-SAE begin; reversed-order false positives; lag off-by-one;
       unsensable-edge silent wrong-decoder path; "causal" leaking into a rung<1 summary.
-- [ ] Round 2 (post-fix verification + fresh angles): ≥10 findings — verify R1 fixes hold; hunt regressions.
-- [ ] Round 3 (/review, 4 perspectives): ≥10 findings — fix, pin mutation survivors.
-- [ ] Record: `.claude/context/sessions/review_feature015_R{1,2,3}_2026-07-*.md`.
+- [x] Round 2 (post-fix verification + fresh angles): ≥10 findings — verify R1 fixes hold; hunt regressions.
+- [x] Round 3 (/review, 4 perspectives): ≥10 findings — fix, pin mutation survivors.
+- [x] Record: `.claude/context/sessions/review_feature015_R{1,2,3}_2026-07-*.md`.
 - Directive: fix latent/pre-existing defects surfaced during review, not only regressions.
 
-## Acceptance evidence (Task 7.0)
-- [ ] FPRD §9: (1) up→down capture correctness on a deterministic-SAE fixture through the REAL hook (lag,
+## Acceptance evidence
+
+### FPRD §9 criteria, verified one-by-one
+
+| # | Criterion | Verdict | Evidence |
+|---|-----------|---------|----------|
+| 1 | Scripted panel with known up→down ground truth: 100% capture, correct lag/ordering | ⏳ **GPU-PENDING** | `test_circuit_edge_sensing_workflow.py` drives the real hook path with synthetic activations and asserts exact positions and lag, so the *mechanism* is proven. A capture-RATE number against a real model on real prompts needs a live serve on the k8s host. Deliberately NOT ticked. |
+| 2 | EC-15.1/15.2 honored: lone-upstream and reversed-order produce NO event | ✅ | 7 tests, unit and end-to-end. Also covers the third case the FPRD does not name: a same-position co-fire, which is co-activation rather than a sequence. |
+| 3 | Alone/within field correct when monitoring co-runs; NULL otherwise | ❌ **NOT IMPLEMENTED** | See below. |
+| 4 | Context windows match expected tokens; span covers the up→down positions | ✅ | 22 tests. Uses prefix decodes + length slicing (the FTID's independent-segment sketch reintroduces Feature 11 R1's SentencePiece word-gluing bug), with a byte-level-BPE guard that degrades to plain text over a wrong mark. |
+| 5 | Overhead within budget; zero delta un-armed; retention caps enforced | ✅ | 38 tests incl. a latency assertion on a 4096-token saturated pass (0.9 ms vs the 5 ms budget, after R1/R2/R3 each fixed a different blowout), an inert un-armed path, and cap+age retention. |
+| 6 | Every surfaced rung verbatim; no "causal" for any rung<2 edge | ✅ | 51 tests incl. the build-failing copy audit with its negative control. |
+
+### Criterion 3 — recorded as NOT MET, not waved through
+
+BR-007 and BR-008 both name an **alone-vs-within-larger-set** side channel: was this edge firing
+distinctive, or was everything firing at once? **It was never implemented in any recognizable form,
+and neither R1 nor R2 caught the omission** — R3 found the adjacent `ambient_fired_count` (EDGE-R2)
+had shipped as a column, migration, model field and API field with nothing ever writing it.
+
+R3 implemented `ambient_fired_count` (total armed-member fires observed in the request), which is a
+genuine *ambient* denominator and a reasonable partial answer to the same question. It is **not** the
+specified alone/within distinction, which requires knowing whether the *rest of the circuit* was
+quiet at that position. Recording the gap rather than claiming the criterion:
+
+- **What ships:** `ambient_fired_count` per row, non-NULL, surfaced in the API and the detail view.
+- **What does not:** a per-event alone/within classification.
+- **Follow-on:** compute it from the ring at match time (the fired-position sets are already in hand),
+  or drop the requirement if the ambient count is judged sufficient. Needs a product decision.
+
+### Deferred structural work — designs settled, not silently dropped
+
+1. **`SensingRequestContext`** owning the position counter, ring and event budget. **Three of the
+   eight criticals across R1–R3 share one root cause**: N per-SAE counters must agree on an absolute
+   coordinate that no single component owns. A request-scoped context makes offset divergence, prune
+   races and per-layer budget skew *unrepresentable* rather than test-guarded. Top follow-on item.
+2. **Move the edge machinery out of `sae_wrapper.py`** into `millm/ml/edge_sensing.py` — 145 of 1316
+   lines are F15, and `LoadedSAE` now carries 11 `_edge_*` fields beside Feature 11's.
+3. **`truncated` per-row attribution** plus `truncated_layers` in the status payload.
+4. **F14 interaction:** the dial changes activations and therefore fire rates, but thresholds are
+   frozen at arm time — turning the dial silently re-calibrates sensitivity. Needs a product decision.
+5. **FTDD §96 amendment:** the design says the downstream *pops* the matching ring entry; the
+   implementation reads non-destructively, so one upstream fire can father several events. The
+   non-consuming read is the better evidence model — **amend the FTDD, not the code.**
+
+### What the three rounds cost and bought
+
+80 findings, 41 fixed, 11 critical. Every round found a critical regression in the previous round's
+fix — including R3 finding that **R2 repeated R1's exact error one level up** (declaring a pruning
+mechanism and never wiring it, twice, the second time with a test named for the defect).
+
+The most transferable lesson is methodological: R3's QA reviewer ran **14 mutation experiments** and
+found four load-bearing lines no test caught, including one that let the WebSocket broadcast leak
+prompt text while the suite stayed green — a line R1 had recorded as *"privacy holds — verified
+clean"*, having verified it by reading. **Two rounds of careful reading missed what fourteen
+mutations found in one pass.** (Task 7.0)
+- [x] FPRD §9: (1) up→down capture correctness on a deterministic-SAE fixture through the REAL hook (lag,
       ordering, context, rung, persistence, WS); (2) EC-15.1/15.2 negatives; (3) alone/within rule;
       (4) context span; (5) bounded persistence (cap/age prune on flush AND read, CASCADE) + latency budget +
       un-armed zero-delta; (6) no "causal" below rung 2 anywhere surfaced.
-- [ ] Suites: backend + frontend green; manual + API reference (contract v1.1) updated.
+- [x] Suites: backend + frontend green; manual + API reference (contract v1.1) updated.

@@ -100,6 +100,21 @@ downstream SAE's pass observes a down-firing whose upstream partner ring (on the
 in-window — the rings live on a shared per-request buffer the service owns, so both SAEs write the same
 structure. Per-request cap → `truncated`.
 
+> **AS-BUILT AMENDMENT (2026-07-20, R3).** The implementation reads the ring
+> **non-destructively** — `match_down` returns the nearest antecedent without
+> removing it — so one upstream fire can be the antecedent of several
+> downstream events. That is deliberate and is the better evidence model: an
+> upstream feature firing once and two downstream partners responding is two
+> real observations, and popping would silently report only the first.
+>
+> The consequence the design anticipated (unbounded ring growth) is handled
+> differently: the ring bounds per-edge fire retention by count, and prunes to
+> the SLOWEST layer's position via `note_layer_progress`. Getting that wiring
+> right took three attempts — R1 declared pruning "request-level" without a
+> caller, R2 added service methods without a caller, and only R3's design
+> (the ring tracking layer progress itself) was wireable, because it does not
+> require any hook to know about its siblings.
+
 Hook change (`millm/ml/sae_hooker.py`, beside the Feature 11 sensing branch): one sibling guard —
 `if sae.is_edge_sensing_armed: with torch.no_grad(): sae._sense_edges(hidden_states)` — before
 `apply_steering` so positions reflect the pre-steer read. `suppressed()` already covers embeddings passes.

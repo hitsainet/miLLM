@@ -20,6 +20,7 @@ import torch
 
 from millm.core.errors import (
     DownloadCancelledError,
+    InsufficientMemoryError,
     ModelNotLoadedError,
     SAEAlreadyAttachedError,
     SAEIncompatibleError,
@@ -180,9 +181,10 @@ class AttachedSAEState:
         return cls._instance
 
     def _first(self) -> Optional[AttachedEntry]:
-        """First attached entry (insertion order), or None. Not locked —
-        callers hold the lock or accept a point-in-time read."""
-        return next(iter(self._entries.values()), None)
+        """First attached entry (insertion order), or None. Locked so the
+        back-compat singular properties never race a concurrent set/clear."""
+        with self._lock:
+            return next(iter(self._entries.values()), None)
 
     @property
     def attached_sae(self) -> Optional[LoadedSAE]:
@@ -225,17 +227,20 @@ class AttachedSAEState:
 
     def get(self, sae_id: str, layer: int) -> Optional[AttachedEntry]:
         """Fetch the entry attached at ``(sae_id, layer)``, or None."""
-        return self._entries.get((sae_id, int(layer)))
+        with self._lock:
+            return self._entries.get((sae_id, int(layer)))
 
     def by_layer(self, layer: int) -> Optional[AttachedEntry]:
         """Fetch the unique entry attached at ``layer``.
 
         Returns None when no SAE — or *more than one* SAE — is attached to
         that layer, so a caller can never silently pick the wrong basis when
-        the layer is ambiguous.
+        the layer is ambiguous. The scan runs under the registry lock so a
+        concurrent attach/detach cannot raise "dict changed size" here.
         """
         layer = int(layer)
-        matches = [e for e in self._entries.values() if e.layer == layer]
+        with self._lock:
+            matches = [e for e in self._entries.values() if e.layer == layer]
         return matches[0] if len(matches) == 1 else None
 
     def set(
@@ -471,16 +476,52 @@ class SAEService:
             CircuitSteeringResult with per-layer applied strengths, hazards,
             and clamp warnings.
         """
-        # 1. Resolve every member's layer to a UNIQUE attached SAE; collect all
-        #    offenders first so the error reports the complete set (fail-closed).
+        from millm.core.config import settings
+
+        # 0. Clamp the global λ to the configured circuit-intensity envelope so a
+        #    rogue value can neither invert the circuit (negative) nor blow past
+        #    the dial ceiling. The apply-time ±200 clamp is a separate gate.
+        lo = float(settings.CIRCUIT_INTENSITY_MIN)
+        hi = float(settings.CIRCUIT_INTENSITY_MAX)
+        intensity = max(lo, min(hi, float(intensity)))
+
+        # 1. Resolve every member's layer to a UNIQUE attached SAE ONCE, under a
+        #    single consistent snapshot, and collect all offenders first so the
+        #    error reports the complete set (fail-closed) — never re-resolve
+        #    by_layer in the apply loop (that would be a TOCTOU wrong-basis risk).
+        resolved: dict[int, "AttachedEntry"] = {}
         offenders: list[dict[str, Any]] = []
+        seen_members: set[tuple[int, int]] = set()
         for m in members:
-            entry = self._sae_state.by_layer(m.layer)
+            # Duplicate (layer, feature_idx) members would silently last-write-
+            # win — reject them instead.
+            mkey = (m.layer, m.feature_idx)
+            if mkey in seen_members:
+                offenders.append(
+                    {
+                        "feature_idx": m.feature_idx,
+                        "layer": m.layer,
+                        "reason": "duplicate_member",
+                    }
+                )
+                continue
+            seen_members.add(mkey)
+
+            entry = resolved.get(m.layer)
+            if entry is None:
+                entry = self._sae_state.by_layer(m.layer)
             if entry is None:
                 offenders.append(
-                    {"feature_idx": m.feature_idx, "layer": m.layer, "sae_id": m.sae_id}
+                    {
+                        "feature_idx": m.feature_idx,
+                        "layer": m.layer,
+                        "sae_id": m.sae_id,
+                        "reason": "missing_or_ambiguous_sae",
+                    }
                 )
-            elif not (0 <= m.feature_idx < entry.sae.d_sae):
+                continue
+            resolved[m.layer] = entry
+            if not (0 <= m.feature_idx < entry.sae.d_sae):
                 offenders.append(
                     {
                         "feature_idx": m.feature_idx,
@@ -507,9 +548,13 @@ class SAEService:
                 )
             per_layer.setdefault(m.layer, {})[m.feature_idx] = eff
 
-        # 3. Apply each layer's members through THAT layer's SAE only.
+        # 3. Apply each layer's members through THAT layer's SAE only, using the
+        #    entry resolved in step 1 (never a second by_layer call). Clear the
+        #    layer's prior steering first so each serve is authoritative and no
+        #    stale features from a previous circuit/cluster/manual set leak in.
         for layer, steering in per_layer.items():
-            sae = self._sae_state.by_layer(layer).sae
+            sae = resolved[layer].sae
+            sae.clear_steering()
             sae.set_steering_batch(steering)  # bounds already gated in step 1
             sae.enable_steering(True)
 
@@ -1105,12 +1150,16 @@ class SAEService:
                 "No model loaded. Load a model before attaching SAE.",
             )
 
-        # Check no SAE already attached
-        if self._sae_state.is_attached:
+        # Reject only re-attaching THIS exact (sae_id, layer). Multi-SAE
+        # circuit serving (attach_set) legitimately populates the registry with
+        # SAEs on other layers; the single-attach path must not treat "some SAE
+        # is attached somewhere" as "already attached" (that wrongly blocked a
+        # standalone attach on a different layer once a circuit was served).
+        if self._sae_state.get(sae_id, layer) is not None:
             raise SAEAlreadyAttachedError(
-                f"SAE '{self._sae_state.attached_sae_id}' is already attached. "
-                "Detach it first before attaching another.",
-                details={"attached_sae_id": self._sae_state.attached_sae_id},
+                f"SAE '{sae_id}' is already attached at layer {layer}. "
+                "Detach it first before re-attaching.",
+                details={"sae_id": sae_id, "layer": layer},
             )
 
         # Check compatibility
@@ -1293,15 +1342,21 @@ class SAEService:
         attach_dtype = _resolve_attach_dtype(settings.MULTISAE_ATTACH_DTYPE)
         model = model_state.current.model
 
+        # Split into to-attach (new keys) and already-attached (idempotent skip).
+        to_attach: list[tuple[str, int]] = []
         results: list[dict[str, Any]] = []
         for sae_id, layer in requested:
-            # Idempotent: skip a key already attached.
             if self._sae_state.get(sae_id, layer) is not None:
                 results.append(
                     {"sae_id": sae_id, "layer": layer, "status": "already_attached"}
                 )
-                continue
+            else:
+                to_attach.append((sae_id, layer))
 
+        # PRE-VALIDATE every new key (existence + compatibility) BEFORE loading
+        # anything, so a bad key fails the whole call without a partial attach.
+        prepared: list[tuple[str, int, Any, "CompatibilityResult"]] = []
+        for sae_id, layer in to_attach:
             sae = await self.get_sae(sae_id)  # raises SAENotFoundError
             compat = await self.check_compatibility(sae_id, layer)
             if not compat.compatible:
@@ -1311,24 +1366,70 @@ class SAEService:
                 )
             for warning in compat.warnings:
                 logger.warning("sae_compatibility_warning", sae_id=sae_id, warning=warning)
+            prepared.append((sae_id, layer, sae, compat))
 
-            loaded_sae = self._loader.load(
-                cache_path=sae.cache_path,
-                device="cuda" if torch.cuda.is_available() else "cpu",
-                dtype=attach_dtype,
+        # Free-VRAM pre-check: refuse the whole set if the projected cumulative
+        # footprint would not fit, rather than OOM'ing mid-load. Best-effort
+        # estimate from on-disk sizes (fp16 attach ≈ 0.5× fp32 file, plus 20%).
+        if torch.cuda.is_available() and prepared:
+            free_mb = torch.cuda.mem_get_info()[0] / (1024 * 1024)
+            projected_mb = sum(
+                (sae.file_size_bytes or 0) / (1024 * 1024) * 0.6 for _, _, sae, _ in prepared
             )
-            handle = self._hooker.install(model, layer, loaded_sae)
-            self._reset_dynamo_for_hook_change()
-            self._sae_state.set(loaded_sae, sae_id, layer, handle)
-            results.append(
-                {
-                    "sae_id": sae_id,
-                    "layer": layer,
-                    "status": "attached",
-                    "memory_usage_mb": int(loaded_sae.estimate_memory_mb()),
-                    "warnings": compat.warnings,
-                }
-            )
+            if projected_mb > free_mb:
+                raise InsufficientMemoryError(
+                    f"Attaching {len(prepared)} SAE(s) needs ~{int(projected_mb)} MB "
+                    f"but only {int(free_mb)} MB is free.",
+                    details={"projected_mb": int(projected_mb), "free_mb": int(free_mb)},
+                )
+
+        # Attach, tracking keys added in THIS call so we can roll them all back
+        # if a later load/install throws — never leave a partial attach or a
+        # loaded-but-unregistered SAE leaking on the GPU.
+        attached_keys: list[tuple[str, int]] = []
+        try:
+            for sae_id, layer, sae, compat in prepared:
+                loaded_sae = self._loader.load(
+                    cache_path=sae.cache_path,
+                    device="cuda" if torch.cuda.is_available() else "cpu",
+                    dtype=attach_dtype,
+                )
+                try:
+                    handle = self._hooker.install(model, layer, loaded_sae)
+                except Exception:
+                    # The SAE loaded but the hook failed — free it before it leaks.
+                    try:
+                        loaded_sae.to_cpu()
+                    except Exception:
+                        pass
+                    raise
+                self._reset_dynamo_for_hook_change()
+                self._sae_state.set(loaded_sae, sae_id, layer, handle)
+                attached_keys.append((sae_id, layer))
+                results.append(
+                    {
+                        "sae_id": sae_id,
+                        "layer": layer,
+                        "status": "attached",
+                        "memory_usage_mb": int(loaded_sae.estimate_memory_mb()),
+                        "warnings": compat.warnings,
+                    }
+                )
+        except Exception:
+            # Roll back everything attached in THIS call (leave pre-existing
+            # attachments untouched).
+            for sae_id, layer in attached_keys:
+                entry = self._sae_state.get(sae_id, layer)
+                if entry is not None and entry.sae is not None:
+                    try:
+                        entry.sae.to_cpu()
+                    except Exception:
+                        pass
+                self._sae_state.clear(sae_id=sae_id, layer=layer)
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+            logger.warning("attach_set_rolled_back", rolled_back=len(attached_keys))
+            raise
 
         status_set = self.get_attachment_status_set()
         envelope = int(settings.MULTISAE_VRAM_ENVELOPE_MB)
@@ -1421,17 +1522,22 @@ class SAEService:
             pass  # Don't block detach if queue check fails
 
         # Resolve THIS sae_id's registry entries (multi-SAE aware — a sae_id
-        # may be attached on more than one layer). Fall back to the singular
-        # view for the single-SAE case where the registry has one entry.
+        # may be attached on more than one layer). ALL of them must be cleaned
+        # up, not just the first.
         own_entries = [e for e in self._sae_state.entries() if e.sae_id == sae_id]
-        attached_sae = own_entries[0].sae if own_entries else self._sae_state.attached_sae
 
-        # Get memory before cleanup (sum across this sae_id's layers)
-        memory_freed_mb = sum(
-            int(e.sae.estimate_memory_mb()) for e in own_entries if e.sae
-        ) or (int(attached_sae.estimate_memory_mb()) if attached_sae else 0)
+        # Get memory before cleanup (sum across this sae_id's layers). Use an
+        # explicit branch (not `or`) so a genuine 0-MB sum isn't overridden by
+        # the singular fallback.
+        if own_entries:
+            memory_freed_mb = sum(
+                int(e.sae.estimate_memory_mb()) for e in own_entries if e.sae
+            )
+        else:
+            fallback = self._sae_state.attached_sae
+            memory_freed_mb = int(fallback.estimate_memory_mb()) if fallback else 0
 
-        # Remove this sae_id's hook(s)
+        # Remove this sae_id's hook(s).
         for e in own_entries:
             if e.hook_handle:
                 self._hooker.remove(e.hook_handle)
@@ -1441,22 +1547,24 @@ class SAEService:
         # (now removed) steering after detach.
         self._reset_dynamo_for_hook_change()
 
-        # Clear steering values before moving to CPU.  If the same SAE is
-        # re-attached later (from the local cache), it must start with a clean
-        # steering state rather than silently applying values from the previous
-        # session.
-        if attached_sae:
-            attached_sae.clear_steering()
-            attached_sae.enable_monitoring(False)
+        # Clear steering + monitoring + sensing and move to CPU for EVERY SAE
+        # this sae_id owns (a multi-layer sae_id has one LoadedSAE per layer);
+        # cleaning only the first would leave the rest armed and resident.
+        detach_saes = [e.sae for e in own_entries if e.sae]
+        if not detach_saes and self._sae_state.attached_sae is not None:
+            detach_saes = [self._sae_state.attached_sae]
+        for detach_sae in detach_saes:
+            detach_sae.clear_steering()
+            detach_sae.enable_monitoring(False)
             # Sensing lifecycle (Feature 11): detaching the SAE disarms —
             # the cached encoder slice is about to move to CPU with the SAE.
             try:
                 import millm.api.dependencies as deps
 
-                deps.get_sensing_service().disarm(attached_sae)
+                deps.get_sensing_service().disarm(detach_sae)
             except Exception:
                 logger.warning("sensing_disarm_on_detach_failed", exc_info=False)
-            attached_sae.to_cpu()
+            detach_sae.to_cpu()
 
         # Clear CUDA cache
         if torch.cuda.is_available():
@@ -1474,8 +1582,11 @@ class SAEService:
         await self.repository.update_status(sae_id, SAEStatus.CACHED)
         await self.repository.deactivate_attachment(sae_id)
 
-        # Auto-unlock the model
-        if locked_model_id:
+        # Auto-unlock the model ONLY when no SAEs remain attached. In a
+        # multi-SAE circuit, detaching one SAE must not unlock the model while
+        # others are still hooked and steering (a concurrent unload would tear
+        # them out mid-generation).
+        if locked_model_id and not self._sae_state.is_attached:
             try:
                 from millm.db.base import async_session_factory
                 from millm.db.repositories.model_repository import ModelRepository

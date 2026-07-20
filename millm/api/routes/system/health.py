@@ -514,10 +514,17 @@ async def get_metrics(
 
     sae_state = AttachedSAEState()
     sae_attached = sae_state.is_attached
-    attached_sae = sae_state.attached_sae
-    steering_enabled = attached_sae.is_steering_enabled if attached_sae else False
-    monitoring_enabled = attached_sae.is_monitoring_enabled if attached_sae else False
-    active_features = len(attached_sae.get_steering_values()) if attached_sae and steering_enabled else 0
+    # Multi-SAE aware (Feature 12): aggregate steering/monitoring/active-feature
+    # counts across ALL attached SAEs so a cross-layer circuit is not
+    # under-reported to only its first entry.
+    _entries = sae_state.entries()
+    steering_enabled = any(e.sae.is_steering_enabled for e in _entries if e.sae)
+    monitoring_enabled = any(e.sae.is_monitoring_enabled for e in _entries if e.sae)
+    active_features = sum(
+        len(e.sae.get_steering_values())
+        for e in _entries
+        if e.sae and e.sae.is_steering_enabled
+    )
 
     return MetricsResponse(
         total_requests=metrics_counter.total_requests,

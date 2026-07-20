@@ -418,12 +418,14 @@ class TestSAEServiceAttachment:
     async def test_attach_sae_already_attached(
         self, service, mock_repository, sample_sae, mock_loaded_sae
     ):
-        """Test attach_sae raises when an SAE is already attached."""
+        """attach_sae raises when THIS exact (sae_id, layer) is already
+        attached (Feature 12: key-aware guard — a different layer or a
+        multi-SAE circuit on other layers must NOT block this)."""
         mock_repository.get.return_value = sample_sae
 
-        # Pre-attach an SAE in the singleton state
+        # Pre-attach the SAME key we will try to attach.
         state = AttachedSAEState()
-        state.set(mock_loaded_sae, "existing-sae-id", 6, MagicMock())
+        state.set(mock_loaded_sae, sample_sae.id, 12, MagicMock())
 
         with patch("millm.services.sae_service.LoadedModelState") as MockModelState:
             mock_state = MagicMock()
@@ -433,7 +435,30 @@ class TestSAEServiceAttachment:
             with pytest.raises(SAEAlreadyAttachedError) as exc_info:
                 await service.attach_sae(sample_sae.id, 12)
 
-        assert "existing-sae-id" in str(exc_info.value.message)
+        assert sample_sae.id in str(exc_info.value.message)
+        assert "layer 12" in str(exc_info.value.message)
+
+    @pytest.mark.asyncio
+    async def test_attach_sae_different_layer_not_blocked_by_registry(
+        self, service, mock_repository, sample_sae, mock_loaded_sae
+    ):
+        """A circuit attached on other layers (registry non-empty) must NOT
+        make a standalone single-attach on a DIFFERENT key raise 'already
+        attached' — it should proceed past the guard (R1 fix)."""
+        mock_repository.get.return_value = sample_sae
+
+        state = AttachedSAEState()
+        state.set(mock_loaded_sae, "circuit-sae-on-L6", 6, MagicMock())
+
+        with patch("millm.services.sae_service.LoadedModelState") as MockModelState:
+            mock_state = MagicMock()
+            mock_state.is_loaded = True
+            MockModelState.return_value = mock_state
+            # It must get PAST the already-attached guard; it may then fail
+            # later (compat/load) — but NOT with SAEAlreadyAttachedError.
+            with pytest.raises(Exception) as exc_info:
+                await service.attach_sae(sample_sae.id, 20)
+        assert not isinstance(exc_info.value, SAEAlreadyAttachedError)
 
     @pytest.mark.asyncio
     async def test_attach_sae_incompatible(self, service, mock_repository, sample_sae):

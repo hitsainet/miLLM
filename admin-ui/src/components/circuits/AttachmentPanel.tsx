@@ -22,7 +22,7 @@ export function AttachmentPanel() {
   if (error) {
     return (
       <div className="text-sm text-red-400 p-4">
-        Failed to load attachment status: {(error as Error).message}
+        Could not load attachment status. It will retry automatically.
       </div>
     );
   }
@@ -37,7 +37,7 @@ export function AttachmentPanel() {
     );
   }
 
-  const total = attachments.total_memory_usage_mb ?? 0;
+  const total = attachments.total_memory_usage_mb;
   const envelope = attachments.vram_envelope_mb;
 
   return (
@@ -52,7 +52,7 @@ export function AttachmentPanel() {
         </div>
         <div className="flex items-center gap-2">
           <span className="text-xs font-mono text-slate-400">
-            {total} MB
+            {total != null ? `${total} MB` : '—'}
             {envelope != null && (
               <span className="text-slate-500"> / {envelope} MB</span>
             )}

@@ -35,7 +35,14 @@ def _sae(d_sae: int = 8192):
                 raise ValueError(f"idx {idx} out of range")
         applied.update(steering)
 
+    def _clear(feature_idx=None):
+        if feature_idx is None:
+            applied.clear()
+        else:
+            applied.pop(feature_idx, None)
+
     sae.set_steering_batch.side_effect = _set_batch
+    sae.clear_steering.side_effect = _clear
     sae.get_steering_values.side_effect = lambda: dict(applied)
     sae._applied = applied
     return sae
@@ -227,6 +234,58 @@ class TestHazards:
         # Applied values are exactly the clamped budgets — hazards changed nothing.
         assert s10._applied == {1: 50.0}
         assert s13._applied == {2: 50.0}
+
+
+class TestR1Fixes:
+    def test_intensity_clamped_to_envelope(self):
+        """λ is clamped to [CIRCUIT_INTENSITY_MIN, MAX]=[0,2]; a rogue negative
+        never inverts the circuit and a huge value never over-drives."""
+        service = _service()
+        s10 = _sae()
+        _attach(service._sae_state, s10, "sae-10", 10)
+        members = [CircuitMember(feature_idx=1, layer=10, budget=50.0, sign=1)]
+        # Negative λ clamps to 0 → zero steering (not inverted).
+        service.set_circuit_steering(members, intensity=-3.0)
+        assert s10._applied == {1: 0.0}
+        # λ above 2 clamps to 2.
+        service.set_circuit_steering(members, intensity=9.0)
+        assert s10._applied == {1: 100.0}  # 50*1*2
+
+    def test_duplicate_member_rejected(self):
+        service = _service()
+        s10 = _sae()
+        _attach(service._sae_state, s10, "sae-10", 10)
+        members = [
+            CircuitMember(feature_idx=5, layer=10, budget=50.0, sign=1),
+            CircuitMember(feature_idx=5, layer=10, budget=30.0, sign=-1),  # dup key
+        ]
+        with pytest.raises(SAESetIncompleteError) as ei:
+            service.set_circuit_steering(members, intensity=1.0)
+        reasons = {o.get("reason") for o in ei.value.offenders}
+        assert "duplicate_member" in reasons
+        assert s10._applied == {}  # nothing applied
+
+    def test_stale_steering_cleared_before_new_serve(self):
+        """A prior serve's features must not leak into a new serve on the same
+        layer (R1: set_circuit_steering clears the layer first)."""
+        service = _service()
+        s10 = _sae()
+        _attach(service._sae_state, s10, "sae-10", 10)
+        # First serve: features 1 and 2.
+        service.set_circuit_steering(
+            [
+                CircuitMember(feature_idx=1, layer=10, budget=40.0, sign=1),
+                CircuitMember(feature_idx=2, layer=10, budget=40.0, sign=1),
+            ],
+            intensity=1.0,
+        )
+        assert set(s10.get_steering_values()) == {1, 2}
+        # Second serve touches only feature 5 — feature 1,2 must be gone.
+        service.set_circuit_steering(
+            [CircuitMember(feature_idx=5, layer=10, budget=30.0, sign=1)],
+            intensity=1.0,
+        )
+        assert s10.get_steering_values() == {5: 30.0}
 
 
 class TestClearCircuitSteering:

@@ -281,3 +281,68 @@ class TestStrictlyBeforeIsEnforcedByEachGuardIndEPENDENTLY:
             "with both guards disabled a same-position co-fire must match — "
             "if it does not, this control proves nothing"
         )
+
+
+class TestR2ASingleLayerCircuitPrunesToo:
+    """F17 R2-10. `note_layer_progress` returned early when fewer than 2 layers
+    had reported — "a single layer: nothing to be slower than". But with ONE
+    layer, that layer IS the slowest, so pruning is safe and correct. Measured
+    on a 600-fire edge: one reporting layer retained 512 (the per-edge hard
+    cap), two retained 4. That is 128x the intended memory, and a single-layer
+    circuit is a legitimate configuration.
+
+    Naively dropping the guard resurrects R1-01: with two layers the FIRST to
+    report prunes past fires the second still needs — six tests caught that
+    immediately. The ring cannot infer how many layers are coming, so it is
+    TOLD, and an untold ring keeps the old conservative rule."""
+
+    def test_a_ring_told_it_has_one_layer_prunes_on_that_layer(self):
+        from millm.ml.edge_sensing import EdgeFireRing
+
+        ring = EdgeFireRing(4)
+        ring.expect_layers(1)
+        for pos in range(600):
+            ring.record_up("e", pos, 1.0)
+        ring.note_layer_progress(10, 600)
+        assert len(ring._fires["e"]) < 50, (
+            f"{len(ring._fires['e'])} fires retained — a single-layer circuit "
+            "never pruned and fell back to the 512 hard cap"
+        )
+
+    def test_a_ring_told_it_has_TWO_layers_waits_for_both(self):
+        """The R1-01 guarantee: the fast layer must not prune ahead of the
+        slow one."""
+        from millm.ml.edge_sensing import EdgeFireRing
+
+        ring = EdgeFireRing(4)
+        ring.expect_layers(2)
+        ring.record_up("e", 38, 1.0)
+        ring.note_layer_progress(10, 5000)          # fast layer races ahead
+        assert ring.match_down("e", 41) == (38, 1.0), (
+            "pruned on one report while a second layer was still expected"
+        )
+
+    def test_an_UNTOLD_ring_stays_conservative(self):
+        """The default must not assume 1: a ring nobody told is a ring that may
+        still have siblings coming, and guessing wrong destroys their data."""
+        from millm.ml.edge_sensing import EdgeFireRing
+
+        ring = EdgeFireRing(4)
+        ring.record_up("e", 38, 1.0)
+        ring.note_layer_progress(10, 5000)
+        assert ring.match_down("e", 41) == (38, 1.0)
+
+    def test_the_service_tells_the_ring_its_layer_count(self):
+        """Declaring `expect_layers` without wiring it would be the exact
+        anti-pattern this arc keeps producing."""
+        from tests.unit.services.test_circuit_sensing_service import (
+            circuit, definition, two_saes,
+        )
+        from millm.services.circuit_sensing_service import CircuitSensingService
+
+        svc = CircuitSensingService()
+        saes = two_saes()
+        svc.arm_for_circuit(circuit(), definition(), saes)
+        svc.begin_request("r", saes)
+        ring = svc._ctx.ring("circ_1", svc._max_token_lag)
+        assert ring._expected_layers == len(svc._armed_layers) == 2

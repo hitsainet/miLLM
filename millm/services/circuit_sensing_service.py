@@ -601,6 +601,18 @@ class CircuitSensingService:
             cap=cap,
         )
         self._ctx = ctx
+        # R2-10: tell the ring how many layers will report, so it prunes to the
+        # slowest without guessing from a count. Without this a single-layer
+        # circuit never pruned (512 retained fires per edge instead of 4), and
+        # naively dropping the old `len < 2` guard let the FIRST layer to
+        # report prune past fires the second still needed — R1-01 again.
+        if self._request_circuit_id and self._armed_layers:
+            try:
+                ctx.ring(
+                    self._request_circuit_id, self._max_token_lag
+                ).expect_layers(len(self._armed_layers))
+            except Exception:
+                logger.exception("circuit_sensing_expect_layers_failed")
         # A new boundary: reasons from earlier requests are stale from here.
         self._pause_is_current = False
         # R2-06: and so is the previous request's truncation report. It was

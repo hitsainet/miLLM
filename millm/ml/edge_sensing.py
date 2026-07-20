@@ -149,6 +149,25 @@ class EdgeFireRing:
         #: SLOWEST layer without any hook knowing about its siblings.
         self._progress: dict[int, int] = {}
         self._last_pruned_at: int = 0
+        #: How many layers are expected to report progress for this circuit,
+        #: or None until told. None means "unknown", and pruning then waits for
+        #: a SECOND reporter — the old conservative behaviour — because a ring
+        #: that assumed 1 would prune on the first report and destroy fires a
+        #: sibling still needed (R1-01). The service calls `expect_layers` at
+        #: begin, which is what lets a genuinely single-layer circuit prune.
+        self._expected_layers: Optional[int] = None
+
+    def expect_layers(self, count: int) -> None:
+        """Tell the ring how many layers will report progress.
+
+        Pruning must wait for the SLOWEST layer, and the ring cannot infer how
+        many are coming. It previously approximated that with `len(_progress)
+        < 2`, which meant a single-layer circuit never pruned at all — 512
+        retained fires per edge instead of 4, measured. Dropping the guard
+        instead resurrects R1-01, where the first layer to report prunes past
+        fires the second still needs.
+        """
+        self._expected_layers = max(1, int(count))
 
     def record_up(self, edge_key: str, pos: int, act: float) -> None:
         fires = self._fires.setdefault(edge_key, [])
@@ -213,8 +232,32 @@ class EdgeFireRing:
         remembering.
         """
         self._progress[layer] = through
-        if len(self._progress) < 2:
-            return  # a single layer: nothing to be slower than
+        # R2-10: this used to `return` when only one layer had reported —
+        # "a single layer: nothing to be slower than". But with one layer THAT
+        # layer is the slowest, so pruning is both safe and correct, and
+        # skipping it meant a single-layer circuit never pruned at all.
+        # Measured on a 600-fire edge: one reporting layer retained 512 fires
+        # (the per-edge hard cap), two retained 4. That is 128x the intended
+        # memory on exactly the degraded path — and a single-layer circuit is a
+        # legitimate configuration, not an edge case.
+        #
+        # Bounded either way, so this was never a leak; it is the difference
+        # between the designed bound and the backstop.
+        #
+        # But simply dropping the guard resurrects R1-01: with two layers, the
+        # FIRST to report would prune past fires the second still needs. The
+        # ring cannot infer how many layers WILL report, so it is TOLD — see
+        # `expect_layers`. Until every expected layer has reported, pruning
+        # waits; a single-layer circuit therefore prunes immediately and a
+        # multi-layer one still waits for its slowest member.
+        expected = self._expected_layers
+        if expected is None:
+            # Unknown: fall back to the conservative rule. Never prune on a
+            # single report, because a sibling may still be coming.
+            if len(self._progress) < 2:
+                return
+        elif len(self._progress) < expected:
+            return
         slowest = min(self._progress.values())
         if slowest - self._last_pruned_at >= self._max_lag:
             self._last_pruned_at = slowest

@@ -143,10 +143,13 @@ refactor(services): extract HuggingFace logic
 ### Project Level Documents
 - ✅ 0xcc/docs/miLLM_BRD_v1.0.md (original v1.0 BRD)
 - ✅ 0xcc/prds/BRD-MILLM-CLUSTERS-001.md (Incremental BRD — Cluster Runtime: import / unified MCP / OWUI dial / sensing, drafted 2026-07-16)
+- ✅ 0xcc/prds/BRD-MILLM-CIRCUITS-001.md (Incremental BRD — Circuit Runtime: multi-SAE serving / live circuit steering / circuit-aware OWUI dial / edge sensing, drafted 2026-07-20; successor to BRD-MILLM-CLUSTERS-001, consumes miStudio's circuit-definition/v1 + EvidenceRung ladder)
 - ✅ 0xcc/prds/000_PPRD|miLLM.md (Project PRD v1.1 — Features 8–11 added 2026-07-16)
 - ✅ 0xcc/adrs/000_PADR|miLLM.md (Architecture Decision Record v1.1 — increment decisions 2026-07-16)
 
-**Increment: Cluster Runtime (BRD-MILLM-CLUSTERS-001) — docs complete 2026-07-16, implementation not started**
+**Increment: Cluster Runtime (BRD-MILLM-CLUSTERS-001) — docs complete 2026-07-16, IMPLEMENTED & SHIPPED** (cluster import/activate, unified miStudio-hosted MCP, OWUI dial filter, co-activation sensing all live; single-SAE runtime)
+
+**Next increment: Circuit Runtime (BRD-MILLM-CIRCUITS-001) — BRD drafted 2026-07-20, PPRD/feature chain not started.** Multi-SAE attach + live circuit serving (circuit-definition/v1), circuit-aware OWUI dial, edge-level sensing; surfaces the EvidenceRung verbatim ("causal" forbidden <rung 2). Next step: PPRD update via `0xcc/instruct/002_create-project-prd.md`.
 
 **Feature 8: Cluster Import**
 - ✅ 0xcc/prds/008_FPRD|Cluster_Import.md

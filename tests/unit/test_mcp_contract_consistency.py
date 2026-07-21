@@ -32,11 +32,35 @@ MISTUDIO = Path(
 )
 
 
+#: F20 R1-14. Set this in an environment where the guard MUST run, and a
+#: missing sibling repo becomes a FAILURE instead of a skip.
+#:
+#: The guard skipped in CI unconditionally — the workflow checks out only
+#: miLLM, so `mcp` was never importable and the three tests that constitute the
+#: entire cross-repo check could never execute. "Skips loudly" is true locally
+#: and irrelevant in a pipeline: a loud skip nobody reads IS the vacuous green
+#: it was built to prevent.
+#:
+#: An opt-in switch rather than always-fail, because a developer working in
+#: miLLM alone should not be blocked by a sibling checkout they do not need.
+REQUIRE_CROSS_REPO = os.environ.get("MILLM_REQUIRE_CROSS_REPO_CHECKS") == "1"
+
+
+def _unavailable(reason: str):
+    """Skip, or FAIL when this environment declared the guard mandatory."""
+    if REQUIRE_CROSS_REPO:
+        pytest.fail(
+            f"MILLM_REQUIRE_CROSS_REPO_CHECKS=1 but the cross-repo guard "
+            f"cannot run: {reason}"
+        )
+    pytest.skip(reason)
+
+
 def _registry() -> dict:
     """The miStudio MCP registry, or skip loudly."""
     backend = MISTUDIO / "backend"
     if not (backend / "src" / "mcp_server" / "tools" / "__init__.py").exists():
-        pytest.skip(
+        _unavailable(
             f"miStudio checkout not found at {MISTUDIO} — this guard checks the "
             "contract against the SIBLING repo's registry and cannot run "
             "without it. Set MISTUDIO_REPO to the checkout. (Skipping loudly "
@@ -52,7 +76,7 @@ def _registry() -> dict:
         # miStudio's MCP deps (`mcp`) are not in THIS repo's venv. Skipping
         # loudly and naming the cause: "unverified" is not "verified clean",
         # and a green tick here would mean the opposite of what it says.
-        pytest.skip(
+        _unavailable(
             f"miStudio's MCP package is not importable from miLLM's venv "
             f"({exc}). The registry guard is UNVERIFIED, not verified-clean — "
             "run it from a checkout with miStudio's dependencies installed."
@@ -90,12 +114,40 @@ class TestContractMatchesTheRegistry:
     def test_the_status_correction_is_RESOLVED_not_deleted(self):
         """It is the record of how a contract table read as shipped for an
         entire increment. Resolving it keeps the history; deleting it would
-        erase the only evidence the mistake happened."""
+        erase the only evidence the mistake happened.
+
+        F20 R1-15: this greped for "STATUS CORRECTION" and "RESOLVED", two
+        strings that appear in prose nobody will remove — so it could not fail.
+        It now asserts the two things that actually matter: the block still
+        DESCRIBES the original defect, and no row is left in the state the
+        correction says was fixed.
+        """
         text = CONTRACT.read_text()
         assert "STATUS CORRECTION" in text, (
             "the status-correction block was deleted rather than resolved"
         )
         assert "RESOLVED" in text, "the correction is still open"
+
+        # The record must still say what was WRONG, or "resolved" is a claim
+        # with nothing behind it.
+        assert "not registered" in text.split("RESOLVED", 1)[1][:2000], (
+            "the resolution no longer describes the defect it resolved — the "
+            "block has become a status line rather than a record"
+        )
+
+        # And no TABLE ROW may still carry the pre-fix mark. This is the check
+        # that would have failed before R1-02: 16 rows read
+        # "MCP not registered" while the block above said RESOLVED.
+        stale = [
+            line for line in text.splitlines()
+            if line.startswith("| `millm_") and "MCP not registered" in line
+        ]
+        assert not stale, (
+            f"{len(stale)} rows still read 'MCP not registered' while the "
+            "correction above declares it resolved — an agent reading "
+            "top-down is told the surface shipped, then told row by row that "
+            "it did not"
+        )
 
     def test_the_evidence_ladder_constants_agree(self):
         """Reciprocal parity: miLLM renders the rung phrases, miStudio's MCP

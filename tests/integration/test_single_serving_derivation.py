@@ -1292,3 +1292,88 @@ class TestR2TheResponseSHAPEIsUnchanged:
             "bound_layers changed source — if that is intended, it is an API "
             "change and needs a contract note, not a refactor comment"
         )
+
+
+class TestR2TheRestorePathDoesNotTrustStaleHandles:
+    """F18 R2-18. This is the property that makes R2-03's live references safe,
+    and no F18 test asserted it.
+
+    `claimed_entries` holds live registry entries, so a detach mid-request
+    leaves stale handles in the plan. The restore does NOT use them: it
+    re-resolves each saved layer through `state.get(sae_id, layer)` and skips
+    anything that has gone. Without that, a restore would write steering values
+    into a detached SAE — reviving an intervention on a layer the operator
+    deliberately released."""
+
+    def test_the_restore_re_resolves_rather_than_using_the_saved_handle(self):
+        import inspect
+
+        from millm.services.inference_service import InferenceService
+
+        src = inspect.getsource(InferenceService._restore_request_profile)
+        assert 'state.get(entry_state["sae_id"], entry_state["layer"])' in src, (
+            "the restore no longer re-resolves the entry — it would write to "
+            "whatever handle the request captured, including a detached one"
+        )
+        assert "if entry is None or entry.sae is None:" in src, (
+            "the restore no longer skips a detached entry"
+        )
+
+    def test_each_layer_restores_INDEPENDENTLY(self):
+        """A failing layer must not abort the loop: the remaining layers would
+        stay permanently dialled, which is the per-request override leaking
+        into global state that restore exists to prevent."""
+        import inspect
+
+        from millm.services.inference_service import InferenceService
+
+        src = inspect.getsource(InferenceService._restore_request_profile)
+        circuit_block = src[src.index('if saved.get("circuit")'):]
+        assert "except Exception as layer_error:" in circuit_block, (
+            "one layer's failure can now abort the restore of the others"
+        )
+
+
+class TestR2TheEchoVerdictTracksAttachment:
+    """F18 R2-19. `_steering_circuit_uncached` was rewritten to ask
+    `plan.is_serveable`. Its verdict must follow the CURRENT attachment state,
+    or a memoised header outlives the intervention it describes."""
+
+    @pytest.mark.asyncio
+    async def test_detaching_flips_the_verdict(self, monkeypatch):
+        from millm.services import sae_service as sae_mod
+        from millm.services.inference_service import InferenceService
+
+        d = defn([mem(10, feature=feat(1))])
+        circuit = SimpleNamespace(
+            id="c", intensity=1.0, layers=[10], serving_mode="full",
+            rung=2, circuit_meta={}, name="n",
+        )
+
+        class Registry:
+            layers = [10]
+
+            def entries(self):
+                return [
+                    SimpleNamespace(layer=n, sae_id=f"s{n}") for n in self.layers
+                ]
+
+        registry = Registry()
+        monkeypatch.setattr(sae_mod, "AttachedSAEState", lambda: registry)
+
+        svc = InferenceService.__new__(InferenceService)
+
+        async def _active():
+            return circuit
+
+        svc._active_full_circuit = _active
+        monkeypatch.setattr(
+            InferenceService, "_circuit_definition", lambda self, c: d
+        )
+
+        assert await svc._steering_circuit_uncached() is not None
+        registry.layers = []
+        assert await svc._steering_circuit_uncached() is None, (
+            "the echo verdict survived a detach — a response would carry a "
+            "rung header for an intervention that is no longer running"
+        )

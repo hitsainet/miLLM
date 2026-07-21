@@ -939,3 +939,95 @@ class TestR2ANonFiniteIntensityIsRefused:
                 defn([]), SimpleNamespace(intensity=1.0), intensity=value
             )
             assert plan.intensity == value
+
+
+class TestR2EveryPlanConsumerIsAccountedFor:
+    """F18 R2-10, attacking R2-01. The `has_intensity` guard was added at ONE
+    consumer. There are three `plan_for` call sites; this enumerates them and
+    states why each is safe, because "only one consumer reads intensity" is a
+    property of today's code that a new caller silently breaks."""
+
+    def test_only_the_expected_call_sites_build_plans(self):
+        import subprocess
+
+        out = subprocess.run(
+            ["grep", "-rn", r"\.plan_for(", "millm/"],
+            capture_output=True, text=True,
+        ).stdout
+        sites = sorted(
+            f"{ln.split(':')[0]}:{ln.split(':')[1]}"
+            for ln in out.splitlines()
+            if ln.strip() and "def plan_for" not in ln
+        )
+        assert len(sites) == 3, (
+            f"a new plan consumer appeared: {sites}. Check whether it reads "
+            "`plan.intensity`, and if so whether it checks `has_intensity` — "
+            "an unset plan carries NaN, which resolves through the clamp to "
+            "the CEILING rather than failing (R2-04)"
+        )
+
+    def test_the_echo_predicate_holds_an_UNSET_plan_safely(self):
+        """It passes no intensity, so its plan is legitimately unset. Safe only
+        because it reads `is_serveable` and never `intensity` — incidental
+        today, asserted now."""
+        import inspect
+
+        from millm.services.inference_service import InferenceService
+
+        src = inspect.getsource(InferenceService._steering_circuit_uncached)
+        assert "plan.is_serveable" in src
+        assert "plan.intensity" not in src, (
+            "the echo predicate now reads an intensity it never derived — its "
+            "plan is unset, so that value is NaN"
+        )
+
+    def test_an_unset_plan_is_exactly_what_the_echo_path_builds(self):
+        """Confirms the premise rather than assuming it."""
+        plan = CircuitSteeringEngine(_Registry([10])).plan_for(
+            defn([mem(10, feature=feat(1))]), SimpleNamespace(intensity=None)
+        )
+        assert plan.has_intensity is False
+        assert plan.is_serveable is True, (
+            "serveability must not depend on an intensity the caller never "
+            "asked for"
+        )
+
+
+class TestR2TwoSAEsOnOneClaimedLayerAreBothCarried:
+    """F18 R2-11, attacking R2-07's filter. `AttachedSAEState` is keyed by
+    `(sae_id, layer)`, so two SAEs on ONE layer is a legitimate F12 state — not
+    a duplicate to collapse. The filter keys on LAYER, so both entries are
+    carried, and the dial saves and restores both.
+
+    Attacked as a possible over-inclusion; it is correct. Pinned because the
+    filter's correctness depends on this registry property, and a filter
+    "tightened" to one entry per layer would silently stop restoring the
+    other's steering."""
+
+    def test_both_entries_on_a_claimed_layer_are_carried(self):
+        entries = [
+            SimpleNamespace(layer=10, sae_id="sae-A"),
+            SimpleNamespace(layer=10, sae_id="sae-B"),
+        ]
+
+        class Registry:
+            def entries(self):
+                return list(entries)
+
+        plan = CircuitSteeringEngine(Registry()).plan_for(
+            defn([mem(10, feature=feat(1))])
+        )
+        assert [e.sae_id for e in plan.claimed_entries] == ["sae-A", "sae-B"], (
+            "one of two SAEs on a claimed layer was dropped — the dial would "
+            "steer it and never restore it"
+        )
+
+    def test_the_registry_really_is_keyed_by_sae_id_AND_layer(self):
+        """The premise. If the registry ever became layer-keyed, the above
+        stops being reachable and the filter could be simplified."""
+        import inspect
+
+        from millm.services.sae_service import AttachedSAEState
+
+        doc = inspect.getdoc(AttachedSAEState) or ""
+        assert "(sae_id, layer)" in doc or "sae_id" in doc

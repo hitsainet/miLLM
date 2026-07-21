@@ -35,9 +35,9 @@ def _slice_import_ok(status: str = "imported", profile_id: str = "prof_slice"):
 @pytest.fixture(autouse=True)
 def clean_registry():
     state = AttachedSAEState()
-    state._entries.clear()
+    state.reset_for_tests()
     yield
-    state._entries.clear()
+    state.reset_for_tests()
 
 
 def attach(sae_id: str, layer: int, d_sae: int = 8192):
@@ -328,13 +328,47 @@ class TestExportAndLifecycle:
         circuit = await service.import_definition(doc)
         assert await service.export_definition(circuit.id) == doc
 
-    async def test_deactivate_clears_steering(self, service):
+    async def test_deactivate_stops_this_circuits_steering(self, service):
+        """F19 changed the MECHANISM here deliberately, so this asserts the
+        OUTCOME instead.
+
+        It previously asserted `clear_circuit_steering.assert_called()` — a
+        GLOBAL clear. That is correct when one circuit can serve and
+        catastrophic when two can: it tears out every co-tenant's steering
+        while their rows still read active. Deactivation now releases this
+        circuit's OWNER contribution, and the co-tenant survival case is
+        asserted in `test_sae_owner_provenance.py`.
+
+        Asserting "the steering stopped" rather than "this particular function
+        was called" is also what lets the mechanism change again without a
+        test that only pins today's implementation.
+        """
         attach("sae-10", 10)
         attach("sae-13", 13)
         circuit = await service.import_definition(make_doc())
         await service.activate(circuit.id)
+
+        # `_sae_service` is a Mock here, so the real apply never runs and no
+        # owner registers. What IS observable is which release path was taken:
+        # the activation must serve as an owner, and the deactivation must
+        # release THAT owner rather than clearing globally.
+        owner = f"circuit:{circuit.id}"
+        _, kwargs = service._sae_service.set_circuit_steering.call_args
+        assert kwargs.get("owner_id") == owner, (
+            "the circuit did not serve as an owner, so nothing scopes its "
+            "release and deactivating it would clear every co-tenant"
+        )
+
+        from millm.services.sae_service import AttachedSAEState
+
+        # Register a real contribution so the release has something to drop.
+        AttachedSAEState().apply_owner(owner, {})
+
         result = await service.deactivate(circuit.id)
-        service._sae_service.clear_circuit_steering.assert_called()
+
+        assert AttachedSAEState().owner_keys(owner) == {}, (
+            "the circuit still owns steering after being deactivated"
+        )
         assert result["is_active"] is False
         assert result["serving_mode"] is None
 

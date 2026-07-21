@@ -20,10 +20,10 @@ from millm.services.sae_service import AttachedSAEState
 @pytest.fixture(autouse=True)
 def clean():
     state = AttachedSAEState()
-    state._entries.clear()
+    state.reset_for_tests()
     state._steering_epoch = 0
     yield
-    state._entries.clear()
+    state.reset_for_tests()
     state._steering_epoch = 0
 
 
@@ -71,7 +71,7 @@ class TestTheCounter:
         silently permit a stale restore."""
         state = AttachedSAEState()
         state.bump_steering_epoch("a")
-        state._entries.clear()
+        state.reset_for_tests()
         assert state.steering_epoch == 1
 
 

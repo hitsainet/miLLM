@@ -18,10 +18,10 @@ from millm.services.sae_service import AttachedSAEState
 @pytest.fixture(autouse=True)
 def clean_registry():
     state = AttachedSAEState()
-    state._entries.clear()
+    state.reset_for_tests()
     reset_steering_memo()
     yield
-    state._entries.clear()
+    state.reset_for_tests()
     reset_steering_memo()
 
 

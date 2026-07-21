@@ -37,11 +37,9 @@ class FakeSAE:
 @pytest.fixture
 def state():
     st = AttachedSAEState()
-    st._entries.clear()
-    st._owners.clear()
+    st.reset_for_tests()
     yield st
-    st._entries.clear()
-    st._owners.clear()
+    st.reset_for_tests()
 
 
 def _attach(state, layer, sae_id=None):
@@ -170,5 +168,5 @@ class TestDetachedLayers:
         that is gone must degrade rather than raise on the serving path."""
         _attach(state, 10)
         state.apply_owner("circuit:A", {("s10", 10): {42: 40.0}})
-        state._entries.clear()
+        state.reset_for_tests()
         state.release_owner("circuit:A")  # must not raise

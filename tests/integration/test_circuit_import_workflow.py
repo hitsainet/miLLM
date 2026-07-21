@@ -59,9 +59,9 @@ def make_sae(d_in: int = 32, d_sae: int = 8192) -> LoadedSAE:
 @pytest.fixture(autouse=True)
 def clean_registry():
     state = AttachedSAEState()
-    state._entries.clear()
+    state.reset_for_tests()
     yield
-    state._entries.clear()
+    state.reset_for_tests()
 
 
 @pytest.fixture
@@ -272,3 +272,80 @@ class TestCoTenancy:
         circuit = await service.import_definition(load_fixture())
         await service.activate(circuit.id)
         cluster_service.deactivate.assert_not_awaited()
+
+
+class TestF19CoTenantSurvivesTheLIFECYCLE:
+    """Feature 19 task 3.4/6.4 — release is owner-scoped through the REAL
+    `CircuitService.deactivate`, not just through `SAEService`.
+
+    These exist because two mutations passed the entire suite:
+
+        deactivate clears GLOBALLY again  -> SURVIVED
+        rollback   clears GLOBALLY again  -> SURVIVED
+
+    The unit tests covered the owner map, and the concurrent-serving tests
+    covered `SAEService`, but nothing drove `CircuitService`'s own release
+    paths — so reverting either to a blanket `clear_circuit_steering()` was
+    invisible. That is the "declaring a mechanism is not wiring it" failure in
+    its exact form: the mechanism was right and the caller was unpinned.
+    """
+
+    async def test_deactivating_one_circuit_leaves_a_CO_TENANTS_steering(
+        self, service, sae_service
+    ):
+        attach("sae-10", 10, make_sae())
+        attach("sae-13", 13, make_sae())
+
+        circuit = await service.import_definition(load_fixture())
+        await service.activate(circuit.id)
+
+        state = AttachedSAEState()
+        assert state.owner_keys(f"circuit:{circuit.id}"), (
+            "the circuit did not serve as an owner"
+        )
+
+        # A co-tenant arrives on a layer the circuit does not touch.
+        other_sae = make_sae()
+        state.set(other_sae, "sae-20", 20, None)
+        state.apply_owner("circuit:OTHER", {("sae-20", 20): {77: 25.0}})
+        assert other_sae.get_steering_values() == {77: 25.0}
+
+        await service.deactivate(circuit.id)
+
+        assert other_sae.get_steering_values() == {77: 25.0}, (
+            "deactivating one circuit cleared a co-tenant's steering — that "
+            "circuit now serves nothing while its row still reads active"
+        )
+        assert state.owner_keys(f"circuit:{circuit.id}") == {}
+
+    async def test_a_FAILED_activation_rolls_back_only_its_own_steering(
+        self, service, sae_service, cluster_service
+    ):
+        """The ROLLBACK path, which the FTASKS names as the one most easily
+        missed. A failed activation must not take a co-tenant down with it."""
+        attach("sae-10", 10, make_sae())
+        attach("sae-13", 13, make_sae())
+
+        state = AttachedSAEState()
+        other_sae = make_sae()
+        state.set(other_sae, "sae-20", 20, None)
+        state.apply_owner("circuit:OTHER", {("sae-20", 20): {77: 25.0}})
+
+        circuit = await service.import_definition(load_fixture())
+
+        # Make the post-serve step fail so the rollback runs.
+        original = service.repository.update
+
+        async def boom(*args, **kwargs):
+            raise RuntimeError("activation exploded after the serve")
+
+        service.repository.update = boom
+        try:
+            with pytest.raises(RuntimeError, match="exploded"):
+                await service.activate(circuit.id)
+        finally:
+            service.repository.update = original
+
+        assert other_sae.get_steering_values() == {77: 25.0}, (
+            "the activation rollback cleared an unrelated circuit's steering"
+        )

@@ -98,10 +98,10 @@ def reset_sae_state():
     """Reset the AttachedSAEState singleton before each test."""
     state = AttachedSAEState()
     # Force clear without calling hook_handle.remove() on mock handles
-    state._entries.clear()
+    state.reset_for_tests()
     yield
     # Cleanup after test
-    state._entries.clear()
+    state.reset_for_tests()
 
 
 @pytest.fixture

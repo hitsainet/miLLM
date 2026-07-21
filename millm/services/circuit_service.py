@@ -340,7 +340,15 @@ class CircuitService:
                 if slice_profile_id and self._cluster_service is not None:
                     await self._cluster_service.deactivate(slice_profile_id)
                 if self._sae_service is not None:
-                    self._sae_service.clear_circuit_steering()
+                    # F19: the ROLLBACK path is the one most easily missed, and
+                    # a global clear here undoes co-tenants that had nothing to
+                    # do with the failed activation. Scope it to this circuit;
+                    # fall back only when it owned nothing.
+                    rolled_back = self._sae_service._sae_state.release_owner(
+                        f"circuit:{circuit.id}"
+                    )
+                    if not rolled_back:
+                        self._sae_service.clear_circuit_steering()
             except Exception:  # pragma: no cover - defensive
                 logger.error("circuit_activate_rollback_clear_failed", circuit_id=circuit.id)
             raise
@@ -468,8 +476,15 @@ class CircuitService:
         # mismatch, skipped its restore and stranded its transient λ in global
         # state permanently. Identical to the defect R1 fixed for
         # `set_intensity` and did not apply here.
+        # F19: serve as an OWNER. Without this, a second circuit activating
+        # clears the first's steering off every shared SAE — the co-tenant
+        # silently stops while its row still reads active.
         outcome = self._sae_service.set_circuit_steering(
-            members, intensity, edges=edges, authoritative=False
+            members,
+            intensity,
+            edges=edges,
+            authoritative=False,
+            owner_id=f"circuit:{circuit.id}",
         )
         return {
             "serving_mode": "full",
@@ -704,7 +719,19 @@ class CircuitService:
                 # R3 finding 3: `deactivate` bumps for the whole logical
                 # action; bumping here too advanced the epoch by 2 for one
                 # deactivation, stranding any restore snapshotted between them.
-                self._sae_service.clear_circuit_steering(authoritative=False)
+                # F19: release only THIS circuit's keys. The global clear
+                # this replaces tore out every co-tenant's steering — a
+                # circuit the operator never touched silently stopping while
+                # its row still reads active, with nothing reporting it.
+                #
+                # `release_owner` returns the keys it dropped; an empty result
+                # means this circuit owned nothing (a pre-F19 activation, or a
+                # slice serve), so the legacy clear is the correct fallback.
+                released = self._sae_service._sae_state.release_owner(
+                    f"circuit:{circuit.id}"
+                )
+                if not released:
+                    self._sae_service.clear_circuit_steering(authoritative=False)
                 cleared = True
             except Exception as e:  # pragma: no cover - defensive
                 logger.warning("circuit_clear_steering_failed", error=str(e))

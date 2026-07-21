@@ -241,6 +241,20 @@ class AttachedSAEState:
                     ] = {}
         return cls._instance
 
+    def reset_for_tests(self) -> None:
+        """Clear ALL singleton state. Tests only.
+
+        F19: fixtures previously cleared `_entries` by hand, so adding
+        `_owners` silently leaked owner state across tests — six unrelated
+        integration tests failed only in the full suite and passed in
+        isolation, which is the most expensive failure mode to diagnose.
+
+        Centralised here so a field added to the singleton is cleared in ONE
+        place rather than in every fixture that happens to remember.
+        """
+        self._entries.clear()
+        self._owners.clear()
+
     # ── Feature 19: owner-scoped steering ──────────────────────────────────
 
     def apply_owner(
@@ -685,6 +699,7 @@ class SAEService:
         *,
         edges: Optional[list[dict[str, Any]]] = None,
         authoritative: bool = True,
+        owner_id: Optional[str] = None,
     ) -> CircuitSteeringResult:
         """Serve a circuit: apply every member through ITS OWN layer's SAE at
         the member's frozen budget scaled by one global intensity (λ).
@@ -712,7 +727,7 @@ class SAEService:
         # just-detached SAE (or resolve a basis that no longer exists).
         with _ATTACHMENT_LOCK:
             outcome = self._set_circuit_steering_locked(
-                members, intensity, edges=edges
+                members, intensity, edges=edges, owner_id=owner_id
             )
             # Feature 16: bump ONLY for an authoritative write. The
             # per-request dial passes authoritative=False, because a
@@ -740,6 +755,7 @@ class SAEService:
         intensity: float,
         *,
         edges: Optional[list[dict[str, Any]]] = None,
+        owner_id: Optional[str] = None,
     ) -> CircuitSteeringResult:
         """Body of :meth:`set_circuit_steering`; call only with the lock held."""
         from millm.core.config import settings
@@ -892,6 +908,44 @@ class SAEService:
         disabled = intensity == 0 or all(
             v == 0 for s in per_entry.values() for v in s.values()
         )
+        # F19 task 3.2: when an OWNER is named, route through the owner map.
+        # The legacy path below clears each target SAE before writing, which is
+        # correct when one circuit can serve and CATASTROPHIC when two can — it
+        # tears out a co-tenant's steering while its row still reads active.
+        # `apply_owner` recomputes each layer from all surviving owners
+        # instead, so a co-tenant's keys survive by construction.
+        #
+        # `owner_id=None` keeps the pre-F19 behaviour verbatim for callers that
+        # have not been migrated (and for the per-request dial, which is
+        # request-scoped rather than an owner).
+        if owner_id is not None:
+            if disabled:
+                # An OFF circuit owns nothing — release rather than writing
+                # zeros, so its layers fall back to whatever other owners hold
+                # rather than being pinned at zero by a departed circuit.
+                self._sae_state.release_owner(owner_id)
+            else:
+                self._sae_state.apply_owner(owner_id, per_entry)
+
+            per_layer_owned: dict[int, dict[int, float]] = {}
+            for (_sid, layer), steering in per_entry.items():
+                per_layer_owned.setdefault(layer, {}).update(steering)
+            hazards = self._cross_layer_hazards(members, intensity, edges=edges)
+            logger.info(
+                "circuit_steering_applied_owned",
+                owner_id=owner_id,
+                layers=sorted(per_layer_owned),
+                member_count=len(members),
+                intensity=intensity,
+                disabled=disabled,
+            )
+            return CircuitSteeringResult(
+                applied_per_layer={} if disabled else per_layer_owned,
+                disabled=disabled,
+                hazards=hazards,
+                clamp_warnings=clamp_warnings,
+            )
+
         # F18 R3-09: ROLL BACK a partial apply. Steps 1-2 are fail-closed (all
         # offenders collected, SAESetIncompleteError raised before anything is
         # written), but this loop writes SAE-by-SAE. A raise on the third of

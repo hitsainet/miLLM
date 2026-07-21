@@ -22,9 +22,9 @@ from millm.services.sae_service import (
 @pytest.fixture(autouse=True)
 def reset_registry():
     state = AttachedSAEState()
-    state._entries.clear()
+    state.reset_for_tests()
     yield
-    state._entries.clear()
+    state.reset_for_tests()
 
 
 def _loaded_sae(mb: float = 64.0):

@@ -34,9 +34,9 @@ def make_sae(d_in: int = 32, d_sae: int = 128) -> LoadedSAE:
 @pytest.fixture(autouse=True)
 def clean_state():
     state = AttachedSAEState()
-    state._entries.clear()
+    state.reset_for_tests()
     yield
-    state._entries.clear()
+    state.reset_for_tests()
 
 
 @pytest.fixture

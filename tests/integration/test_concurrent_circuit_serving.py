@@ -519,3 +519,54 @@ class TestR2ClaimFaultsAreCOUNTED:
             metrics_counter, "increment_circuit_claim_faults", boom
         )
         cs_mod._note_claim_fault()  # must not raise
+
+
+class TestR2BothMetricSurfacesAGREE:
+    """F19 R2-20. The JSON and Prometheus surfaces each re-implemented the
+    owner scan, and already DIFFERED in how they derived `layers_served` — one
+    from a set of layers, the other from the length of a holder map.
+
+    Two surfaces computing the same three numbers independently is a place for
+    them to drift, and an operator whose dashboard reads one while their alert
+    reads the other has no way to tell which is right. They now share one
+    definition.
+    """
+
+    async def test_the_two_surfaces_report_identical_numbers(self):
+        from millm.api.routes.system.health import (
+            get_metrics,
+            get_prometheus_metrics,
+        )
+
+        attach(10)
+        attach(13)
+        svc = SAEService.for_registry()
+        svc.set_circuit_steering(
+            [CircuitMember(feature_idx=1, layer=10, budget=40.0, sign=1)],
+            1.0,
+            owner_id="circuit:A",
+        )
+        svc.set_circuit_steering(
+            [CircuitMember(feature_idx=2, layer=13, budget=30.0, sign=1)],
+            1.0,
+            owner_id="circuit:B",
+        )
+        # A composed layer, so all three numbers are non-trivial.
+        AttachedSAEState().apply_owner("cluster:p", {("sae-10", 10): {9: 5.0}})
+
+        json_metrics = await get_metrics()
+        loader = SimpleNamespace(is_loaded=False, model_name=None)
+        prom = (await get_prometheus_metrics(model_loader=loader)).body.decode()
+
+        for field, gauge in (
+            ("circuits_serving", "millm_circuits_serving"),
+            ("circuit_layers_served", "millm_circuit_layers_served"),
+            ("circuit_layers_composed", "millm_circuit_layers_composed"),
+        ):
+            value = getattr(json_metrics, field)
+            assert f"{gauge} {value}" in prom, (
+                f"{gauge} disagrees with JSON {field}={value} — a dashboard "
+                "and an alert built on these would contradict each other"
+            )
+
+        assert json_metrics.circuit_layers_composed == 1

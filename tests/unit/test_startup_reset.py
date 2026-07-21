@@ -192,3 +192,61 @@ class TestF19R2StartupReleasesClaimsPLAINLY:
             "the log does not say that stale claims cannot be cleared without "
             "another restart"
         )
+
+
+class TestF19R2ClaimsDegradationIsVISIBLE:
+    """F19 R2-19. A failed reconcile logged a line and the app served anyway.
+
+    That is the right call — refusing to start over a bookkeeping table would
+    be worse — but stale claims REFUSE every activation on their layers for the
+    life of the process, with no runtime remedy. The only clue was one WARNING
+    in startup logs that has already scrolled away, while `/health` reported a
+    fully healthy system and a readiness probe could not tell the difference.
+    """
+
+    def test_health_reports_DEGRADED_when_claims_are_unreconciled(self):
+        import asyncio
+        from unittest.mock import MagicMock
+
+        from millm.api.routes.system import health as health_mod
+
+        health_mod.CIRCUIT_CLAIMS_DEGRADED["degraded"] = False
+        health_mod.CIRCUIT_CLAIMS_DEGRADED["reason"] = None
+        try:
+            health_mod.note_claims_degraded("reconcile failed: boom")
+            result = asyncio.run(
+                health_mod.detailed_health_check(model_loader=MagicMock(is_loaded=False))
+            )
+            claims = next(
+                c for c in result.components if c.name == "circuit_claims"
+            )
+            assert claims.status == health_mod.HealthStatus.DEGRADED
+            assert "restarts" in claims.message
+            assert result.status == health_mod.HealthStatus.DEGRADED
+        finally:
+            health_mod.CIRCUIT_CLAIMS_DEGRADED["degraded"] = False
+            health_mod.CIRCUIT_CLAIMS_DEGRADED["reason"] = None
+
+    def test_health_reports_HEALTHY_when_they_reconciled(self):
+        import asyncio
+        from unittest.mock import MagicMock
+
+        from millm.api.routes.system import health as health_mod
+
+        health_mod.CIRCUIT_CLAIMS_DEGRADED["degraded"] = False
+        result = asyncio.run(
+            health_mod.detailed_health_check(model_loader=MagicMock(is_loaded=False))
+        )
+        claims = next(c for c in result.components if c.name == "circuit_claims")
+        assert claims.status == health_mod.HealthStatus.HEALTHY
+
+    def test_startup_flags_both_failure_paths(self):
+        text = MAIN.read_text()
+        release = text.index("circuit_claim_startup_release_failed")
+        reconcile = text.index("circuit_claim_reconcile_failed")
+        for name, idx in (("release", release), ("reconcile", reconcile)):
+            window = text[max(0, idx - 400) : idx]
+            assert "_note_claims_degraded" in window, (
+                f"the {name} failure path does not flag claims as degraded, so "
+                "/health stays green while activations are refused"
+            )

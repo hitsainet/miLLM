@@ -424,8 +424,23 @@ class CircuitClaimRegistry:
         )
         await self._session.flush()
 
-    async def reconcile(self, *, allow_concurrent: bool) -> dict[str, Any]:
-        """Startup reconciliation. Runs UNCONDITIONALLY.
+    async def reconcile(
+        self, *, allow_concurrent: bool, at_startup: bool = True
+    ) -> dict[str, Any]:
+        """Startup reconciliation.
+
+        F19 R2-18: `at_startup` is a REQUIRED acknowledgement, not a
+        convenience flag. This method demotes circuits in the DATABASE without
+        touching the in-memory owner map — safe at startup, where nothing is
+        attached and nothing is steering, and actively harmful at runtime,
+        where it would mark a circuit inactive while its SAEs keep steering it.
+        That is the "row inactive, model still steering" divergence F19 exists
+        to remove, produced by the very method meant to repair it.
+
+        The only guard was convention: the method is public and its docstring
+        said "runs UNCONDITIONALLY". A future caller reading that would have no
+        reason to hesitate. Calling it with `at_startup=False` now refuses
+        rather than silently doing the wrong thing.
 
         Two jobs:
 
@@ -441,6 +456,16 @@ class CircuitClaimRegistry:
         the single-active disarm this feature exists to replace.
         """
         from millm.db.models.circuit import Circuit
+
+        if not at_startup:
+            raise RuntimeError(
+                "reconcile() demotes circuits without clearing their live "
+                "steering, so it is safe only at startup where nothing is "
+                "attached. Calling it at runtime would leave a circuit "
+                "inactive in the database while its SAEs keep steering — the "
+                "exact divergence this feature exists to remove. Deactivate "
+                "the circuit through CircuitService instead."
+            )
 
         result: dict[str, Any] = {"orphans_released": [], "demoted": []}
 

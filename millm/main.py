@@ -109,6 +109,19 @@ async def _auto_load_model(model_identifier: str) -> None:
         )
 
 
+def _note_claims_degraded(reason: str) -> None:
+    """Flag layer claims as unreconciled for /health/detailed (F19 R2-19).
+
+    Guarded: a health-reporting helper must never be the reason startup fails.
+    """
+    try:
+        from millm.api.routes.system.health import note_claims_degraded
+
+        note_claims_degraded(reason)
+    except Exception:  # pragma: no cover - reporting must not break startup
+        pass
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     """
@@ -223,6 +236,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
                     ),
                 )
     except Exception as e:
+        _note_claims_degraded(f"claim release failed: {e}")
         logger.error(
             "circuit_claim_startup_release_failed",
             error=str(e),
@@ -262,6 +276,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         async with async_session_factory() as session:
             outcome = await CircuitClaimRegistry(session).reconcile(
                 allow_concurrent=settings.CIRCUIT_ALLOW_CONCURRENT,
+                at_startup=True,
             )
             await session.commit()
         if outcome["orphans_released"] or outcome["demoted"]:
@@ -271,7 +286,12 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
                 demoted=outcome["demoted"],
             )
     except Exception as e:
-        logger.warning(
+        # R2-19: surface it on /health/detailed. Serving continues — refusing
+        # to start over a bookkeeping table would be worse — but a readiness
+        # probe must be able to see that activations on the affected layers
+        # will be refused for the life of this process.
+        _note_claims_degraded(f"reconcile failed: {e}")
+        logger.error(
             "circuit_claim_reconcile_failed",
             error=str(e),
             error_type=type(e).__name__,

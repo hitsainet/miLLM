@@ -402,3 +402,45 @@ class TestR1ClaimsCarryTheirNAME:
             "the field that makes a claim intelligible to an operator is "
             "still empty"
         )
+
+
+class TestR2ReconcileRefusesAtRUNTIME:
+    """F19 R2-18. `reconcile()` demotes circuits in the DATABASE without
+    touching the in-memory owner map.
+
+    That is safe at startup, where nothing is attached and nothing is steering,
+    and actively harmful at runtime: it would mark a circuit inactive while its
+    SAEs keep steering it — the "row inactive, model still steering"
+    divergence F19 exists to remove, produced by the method meant to repair it.
+
+    The only guard was convention. The method is public and its docstring said
+    "runs UNCONDITIONALLY", so a future caller reading that had no reason to
+    hesitate.
+    """
+
+    async def test_calling_it_at_runtime_REFUSES(self, test_session):
+        await _circuit(test_session, "cA")
+        reg = CircuitClaimRegistry(test_session)
+        await reg.claim("cA", {10})
+
+        with pytest.raises(RuntimeError, match="safe only at startup"):
+            await reg.reconcile(allow_concurrent=False, at_startup=False)
+
+        # And it changed nothing on the way out.
+        assert len(await reg.live_claims()) == 1
+
+    async def test_the_refusal_names_the_alternative(self, test_session):
+        reg = CircuitClaimRegistry(test_session)
+        with pytest.raises(RuntimeError) as exc:
+            await reg.reconcile(allow_concurrent=True, at_startup=False)
+        assert "CircuitService" in str(exc.value), (
+            "the refusal does not tell the caller what to do instead"
+        )
+
+    async def test_startup_still_works(self, test_session):
+        await _circuit(test_session, "cA", active=False)
+        reg = CircuitClaimRegistry(test_session)
+        await reg.claim("cA", {10})
+
+        result = await reg.reconcile(allow_concurrent=True, at_startup=True)
+        assert result["orphans_released"]

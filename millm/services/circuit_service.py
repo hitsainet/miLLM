@@ -343,8 +343,18 @@ class CircuitService:
             result["composed_layers"] = composed_layers
             result["allowed_layer_overlap"] = True
             co_tenant_warnings = co_tenant_warnings + [
+                # F19 R2-17: the caveat travels WITH the number.
+                #
+                # This stated the close-out finding bare. `measured_hazard`
+                # carries "one model, one fixture — indicative, not
+                # exhaustive" everywhere else, and BR-011 §6.2 makes that
+                # binding precisely so an operator is not handed a
+                # single-fixture result as a general law. R1-15 fixed the same
+                # over-generalisation in the co-tenant warning; this string was
+                # missed.
                 f"Layers {composed_layers} now carry the SUMMED effect of more "
-                "than one circuit. In close-out testing two steered layers at "
+                "than one circuit. In close-out testing (one model, one "
+                "fixture — indicative, not exhaustive) two steered layers at "
                 "individually-harmless strength destroyed generation. The "
                 "circuit-rung header is omitted while any layer is composed, "
                 "because no single circuit's evidence describes the response."

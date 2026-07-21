@@ -967,3 +967,46 @@ class TestF19R2TwoCircuitsAreACTIVEInTheDATABASE:
             )
         active_ids = {c.id for c in await service.repository.list_active()}
         assert active_ids == {first.id, second.id}
+
+
+class TestF19R2TheCompositionWarningCARRIESTheCaveat:
+    """F19 R2-17. The composition warning stated the close-out finding BARE.
+
+    `measured_hazard` carries "one model, one fixture — indicative, not
+    exhaustive" everywhere else, and BR-011 §6.2 makes that binding precisely
+    so an operator is not handed a single-fixture result as a general law.
+    R1-15 fixed the same over-generalisation in the co-tenant warning; this
+    string was missed, and a mutation removing the caveat SURVIVED — no test
+    asserted the wording of the one warning an operator sees when they compose.
+    """
+
+    async def test_the_operator_sees_the_caveat_with_the_measurement(
+        self, service, monkeypatch
+    ):
+        monkeypatch.setattr(
+            "millm.core.config.settings.CIRCUIT_ALLOW_CONCURRENT", True
+        )
+        attach("sae-10", 10, make_sae())
+        attach("sae-13", 13, make_sae())
+
+        first = await service.import_definition(load_fixture())
+        await service.activate(first.id)
+
+        doc = load_fixture()
+        doc["name"] = "overlapping circuit"
+        for i, member in enumerate(doc["members"]):
+            member["feature"]["feature_idx"] = 900 + i
+        second = await service.import_definition(doc)
+
+        result = await service.activate(second.id, allow_layer_overlap=True)
+        warnings = " ".join(result.get("warnings") or [])
+
+        assert "destroyed generation" in warnings, (
+            "the composition warning no longer states what was measured"
+        )
+        assert "one model, one fixture" in warnings, (
+            "the measurement is presented as a general law. It is one model "
+            "and one fixture, and stating it as more is the same overclaim "
+            "the evidence ladder exists to prevent"
+        )
+        assert "indicative, not exhaustive" in warnings

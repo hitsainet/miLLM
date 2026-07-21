@@ -277,6 +277,29 @@ async def detailed_health_check(
     circuit_breakers: list[CircuitBreakerStatus] = []
     overall_status = HealthStatus.HEALTHY
 
+    # F19 R2-19: circuit claims. Reported as DEGRADED rather than unhealthy —
+    # the server serves fine, but activations on the affected layers will be
+    # refused until it restarts, and a readiness probe should be able to see
+    # that.
+    if CIRCUIT_CLAIMS_DEGRADED["degraded"]:
+        components.append(ComponentHealth(
+            name="circuit_claims",
+            status=HealthStatus.DEGRADED,
+            message=(
+                "Startup could not reconcile layer claims — activations on "
+                "affected layers will be refused until this process restarts: "
+                f"{CIRCUIT_CLAIMS_DEGRADED['reason']}"
+            ),
+        ))
+        if overall_status == HealthStatus.HEALTHY:
+            overall_status = HealthStatus.DEGRADED
+    else:
+        components.append(ComponentHealth(
+            name="circuit_claims",
+            status=HealthStatus.HEALTHY,
+            message="Layer claims reconciled at startup",
+        ))
+
     # Check model loader
     model_loaded = False
     model_name = None
@@ -467,6 +490,59 @@ class MetricsResponse(BaseModel):
 
 
 # Simple in-memory counters for metrics
+#: F19 R2-19. Set when startup could not release or reconcile layer claims.
+#:
+#: The app comes up and serves either way — refusing to start over a
+#: bookkeeping table would be worse — but stale claims REFUSE every activation
+#: on their layers for the life of the process, with no runtime remedy. Without
+#: this the only clue was one WARNING in startup logs that has already scrolled
+#: away, and /health reported a fully healthy system.
+CIRCUIT_CLAIMS_DEGRADED: dict[str, Any] = {"degraded": False, "reason": None}
+
+
+def circuit_serving_snapshot() -> tuple[int, int, int]:
+    """`(circuits_serving, layers_served, layers_composed)` — ONE definition.
+
+    F19 R2-20: the JSON and Prometheus surfaces each re-implemented this scan,
+    and already differed in how they derived `layers_served` (a set of layers
+    vs the length of a holder map). Two surfaces computing the same three
+    numbers independently is a place for them to drift, and an operator whose
+    dashboard reads one and whose alert reads the other would have no way to
+    tell which was right.
+
+    Read from the in-memory owner map, not the claims table: /metrics is
+    scraped continuously and must not add a DB round-trip per scrape, and the
+    owner map is what is ACTUALLY steering.
+    """
+    state = AttachedSAEState()
+    circuit_owners = [o for o in state._owners if o.startswith("circuit:")]
+
+    circuit_held: set[int] = set()
+    for owner in circuit_owners:
+        circuit_held.update(state.owner_keys(owner))
+
+    # EVERY owner on a circuit-held layer counts (R2-11): a slice-fallback
+    # co-tenant is a cluster profile, not a circuit owner, and composing with
+    # one still suppresses the rung header.
+    holders: dict[int, int] = {}
+    for owner in state._owners:
+        for layer in state.owner_keys(owner):
+            if layer in circuit_held:
+                holders[layer] = holders.get(layer, 0) + 1
+
+    return (
+        len(circuit_owners),
+        len(circuit_held),
+        sum(1 for n in holders.values() if n > 1),
+    )
+
+
+def note_claims_degraded(reason: str) -> None:
+    """Record that startup left layer claims in an unknown state."""
+    CIRCUIT_CLAIMS_DEGRADED["degraded"] = True
+    CIRCUIT_CLAIMS_DEGRADED["reason"] = reason
+
+
 class MetricsCounter:
     """Simple metrics counter for application observability."""
 
@@ -586,41 +662,13 @@ async def get_metrics(
     # Read from the in-memory owner map rather than the claims table: /metrics
     # is scraped continuously and must not add a DB round-trip per scrape, and
     # the owner map is the authority on what is ACTUALLY steering right now.
-    circuit_owners = sorted(
-        owner for owner in sae_state._owners if owner.startswith("circuit:")
-    )
-    circuit_layers: set[int] = set()
-    for owner in circuit_owners:
-        circuit_layers.update(sae_state.owner_keys(owner))
-    # F19 R2-11: count EVERY owner on a circuit-held layer, not just circuit
-    # owners.
-    #
-    # Counting `circuit:` owners alone made the metric blind to the case it
-    # most needed to catch: a layer whose co-tenant arrived through
-    # SLICE-FALLBACK materialises a CLUSTER PROFILE, not a circuit owner. That
-    # layer has one circuit owner, so `circuit_layers_composed` read 0 — the
-    # documented alertable condition never firing — while `GET /circuits/claims`
-    # badged the layer composed and the rung header WAS being suppressed.
-    #
-    # Two authorities disagreeing is worse than either being wrong: the metric
-    # said "nothing composed" while the response headers said otherwise. The
-    # metric now agrees with what actually suppresses the header — more than
-    # one contributor on a layer a circuit is steering.
-    layer_holders: dict[int, int] = {}
-    circuit_held: set[int] = set()
-    for owner in circuit_owners:
-        for layer in sae_state.owner_keys(owner):
-            circuit_held.add(layer)
-    for owner in sae_state._owners:
-        for layer in sae_state.owner_keys(owner):
-            if layer in circuit_held:
-                layer_holders[layer] = layer_holders.get(layer, 0) + 1
-    composed_layers = sorted(l for l, n in layer_holders.items() if n > 1)
+    # R2-20: ONE definition, shared with the Prometheus surface.
+    _serving, _served, _composed = circuit_serving_snapshot()
 
     return MetricsResponse(
-        circuits_serving=len(circuit_owners),
-        circuit_layers_served=len(circuit_layers),
-        circuit_layers_composed=len(composed_layers),
+        circuits_serving=_serving,
+        circuit_layers_served=_served,
+        circuit_layers_composed=_composed,
         circuit_claim_faults=metrics_counter.circuit_claim_faults,
         total_requests=metrics_counter.total_requests,
         active_requests=metrics_counter.active_requests,
@@ -668,25 +716,12 @@ async def get_prometheus_metrics(
     hf_status = get_circuit_breaker_status(huggingface_circuit)
     circuit_open = 1 if hf_status.is_open else 0
 
-    # F19: circuit serving, from the in-memory owner map (no DB round-trip on
-    # a continuously-scraped endpoint).
-    _sae_state = AttachedSAEState()
-    _circuit_owners = [
-        owner for owner in _sae_state._owners if owner.startswith("circuit:")
-    ]
-    # R2-11: same rule as the JSON surface — every owner on a circuit-held
-    # layer counts, so a slice-fallback co-tenant is not invisible.
-    _circuit_held: set[int] = set()
-    for _owner in _circuit_owners:
-        _circuit_held.update(_sae_state.owner_keys(_owner))
-    _holders: dict[int, int] = {}
-    for _owner in _sae_state._owners:
-        for _layer in _sae_state.owner_keys(_owner):
-            if _layer in _circuit_held:
-                _holders[_layer] = _holders.get(_layer, 0) + 1
-    circuits_serving = len(_circuit_owners)
-    circuit_layers_served = len(_circuit_held)
-    circuit_layers_composed = sum(1 for n in _holders.values() if n > 1)
+    # R2-20: the SAME definition the JSON surface uses.
+    (
+        circuits_serving,
+        circuit_layers_served,
+        circuit_layers_composed,
+    ) = circuit_serving_snapshot()
 
     # Build Prometheus format
     lines = [

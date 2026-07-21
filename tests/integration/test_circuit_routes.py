@@ -63,6 +63,8 @@ def mock_service():
     svc.repository = MagicMock()
     svc.repository.count = AsyncMock(return_value=1)
     svc.get_active = AsyncMock(return_value=None)
+    # F19: the active surface is a LIST.
+    svc.list_active = AsyncMock(return_value=[])
     svc.import_definition = AsyncMock(return_value=MagicMock())
     svc.summarize = MagicMock(return_value=make_summary())
     svc.activate = AsyncMock(
@@ -123,10 +125,41 @@ class TestList:
             r = await client.get("/api/circuits?min_rung=9")
         assert r.status_code == 422
 
-    async def test_active_null_when_none_serving(self, client):
+    async def test_active_is_an_EMPTY_LIST_when_none_serving(self, client):
+        """F19 R3-07: `/circuits/active` returns a LIST.
+
+        It previously returned the most recently updated row as a single
+        object, so with two circuits serving the second was invisible to every
+        operator surface that reads this — including the one endpoint whose job
+        is to answer "what is steering".
+        """
         async with client:
             r = await client.get("/api/circuits/active")
+        assert r.json()["data"] == []
+
+    async def test_single_true_keeps_the_pre_F19_shape(self, client):
+        """Compatibility for unmigrated callers. It under-reports when several
+        circuits serve, which is why it is opt-in rather than the default."""
+        async with client:
+            r = await client.get("/api/circuits/active?single=true")
         assert r.json()["data"] is None
+
+    async def test_active_lists_EVERY_serving_circuit(self, client, mock_service):
+        from unittest.mock import AsyncMock
+
+        mock_service.list_active = AsyncMock(
+            return_value=[
+                make_summary(id="circ_1", is_active=True, serving_mode="full"),
+                make_summary(id="circ_2", is_active=True, serving_mode="full"),
+            ]
+        )
+        async with client:
+            r = await client.get("/api/circuits/active")
+        ids = [row["id"] for row in r.json()["data"]]
+        assert ids == ["circ_1", "circ_2"], (
+            "a serving circuit is invisible to the endpoint that answers "
+            "'what is steering'"
+        )
 
 
 class TestImport:

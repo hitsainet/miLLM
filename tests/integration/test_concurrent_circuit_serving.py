@@ -570,3 +570,128 @@ class TestR2BothMetricSurfacesAGREE:
             )
 
         assert json_metrics.circuit_layers_composed == 1
+
+
+class TestR3TheDialRefusesToGuessWhichCircuit:
+    """F19 R3-06. `_active_full_circuit` read `get_active()`, which returns the
+    most recently updated row.
+
+    So with TWO circuits serving, the dial, the intensity resolution and the
+    rung header all described ONE of them while the response carried BOTH
+    circuits' summed steering. An operator dialling "the active circuit"
+    changed a different circuit than the header named.
+
+    Same rule as composition, for the same reason: no single circuit's evidence
+    describes the response, so return None rather than name one arbitrarily.
+    """
+
+    @pytest.mark.asyncio
+    async def test_two_serving_circuits_suppress_the_dial_and_rung(
+        self, monkeypatch
+    ):
+        from millm.services import inference_service as inf_mod
+        from millm.services.inference_service import InferenceService
+
+        rows = [
+            SimpleNamespace(id="cA", serving_mode="full", rung=2, name="A"),
+            SimpleNamespace(id="cB", serving_mode="full", rung=2, name="B"),
+        ]
+
+        class Repo:
+            def __init__(self, _session):
+                pass
+
+            async def list_active(self):
+                return rows
+
+        monkeypatch.setattr(
+            "millm.db.repositories.circuit_repository.CircuitRepository", Repo
+        )
+
+        class Session:
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *a):
+                return False
+
+        monkeypatch.setattr(
+            "millm.db.base.async_session_factory", lambda: Session()
+        )
+
+        svc = InferenceService.__new__(InferenceService)
+        assert await svc._active_full_circuit() is None, (
+            "the dial named ONE of two serving circuits — an operator dialling "
+            "'the active circuit' changes a different one than the rung header "
+            "describes"
+        )
+
+    @pytest.mark.asyncio
+    async def test_ONE_serving_circuit_still_resolves(self, monkeypatch):
+        """Specificity: refusing whenever anything is active would delete the
+        dial entirely."""
+        from millm.services.inference_service import InferenceService
+
+        row = SimpleNamespace(id="cA", serving_mode="full", rung=2, name="A")
+
+        class Repo:
+            def __init__(self, _session):
+                pass
+
+            async def list_active(self):
+                return [row]
+
+        monkeypatch.setattr(
+            "millm.db.repositories.circuit_repository.CircuitRepository", Repo
+        )
+
+        class Session:
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *a):
+                return False
+
+        monkeypatch.setattr(
+            "millm.db.base.async_session_factory", lambda: Session()
+        )
+
+        svc = InferenceService.__new__(InferenceService)
+        assert (await svc._active_full_circuit()) is row
+
+    @pytest.mark.asyncio
+    async def test_a_slice_fallback_circuit_does_not_count(self, monkeypatch):
+        """Only FULL serving reaches the multi-SAE dial; a slice serve is
+        steered by a cluster profile, not by this path."""
+        from millm.services.inference_service import InferenceService
+
+        rows = [
+            SimpleNamespace(id="cA", serving_mode="full", rung=2, name="A"),
+            SimpleNamespace(id="cB", serving_mode="slice_fallback", rung=2, name="B"),
+        ]
+
+        class Repo:
+            def __init__(self, _session):
+                pass
+
+            async def list_active(self):
+                return rows
+
+        monkeypatch.setattr(
+            "millm.db.repositories.circuit_repository.CircuitRepository", Repo
+        )
+
+        class Session:
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *a):
+                return False
+
+        monkeypatch.setattr(
+            "millm.db.base.async_session_factory", lambda: Session()
+        )
+
+        svc = InferenceService.__new__(InferenceService)
+        resolved = await svc._active_full_circuit()
+        assert resolved is not None and resolved.id == "cA"

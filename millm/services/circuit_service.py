@@ -245,6 +245,16 @@ class CircuitService:
         row = await self.repository.get_active()
         return self.summarize(row) if row else None
 
+    async def list_active(self) -> list[dict[str, Any]]:
+        """EVERY serving circuit (F19 R3-07).
+
+        `get_active()` returns the most recently updated row, so with two
+        circuits serving the second was invisible to every operator surface
+        that reads it — including `GET /circuits/active`, whose whole job is to
+        answer "what is steering".
+        """
+        return [self.summarize(row) for row in await self.repository.list_active()]
+
     def summarize(self, circuit: Circuit) -> dict[str, Any]:
         """List/detail row. Rung language is ALWAYS server-rendered from the
         ladder so no client can re-phrase an evidence claim."""

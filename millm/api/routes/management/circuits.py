@@ -252,14 +252,50 @@ async def list_claims(service: CircuitServiceDep) -> ApiResponse[list[dict]]:
     )
 
 
+async def _active_rows_with_steering(
+    service: Any, rows: list[dict[str, Any]]
+) -> list[dict[str, Any]]:
+    """Attach each row's own `steering` verdict (F19 R3-07).
+
+    `steering` is the SERVER's verdict on whether a circuit is genuinely
+    influencing generation — clients must not derive it from `is_active`,
+    which overclaims for a slice-fallback, unparseable or unattached circuit.
+    """
+    from millm.api.dependencies import get_inference_service
+    from millm.services.inference_service import reset_steering_memo
+
+    out: list[dict[str, Any]] = []
+    for row in rows:
+        summary = CircuitSummary(**row).model_dump()
+        try:
+            reset_steering_memo()
+            steering = await get_inference_service()._steering_circuit()
+            summary["steering"] = bool(
+                steering is not None and getattr(steering, "id", None) == row["id"]
+            )
+        except Exception:
+            # An observability nicety must never fail this read.
+            summary["steering"] = False
+        out.append(summary)
+    return out
+
+
 @router.get(
     "/active",
-    response_model=ApiResponse[CircuitSummary | None],
-    summary="The currently serving circuit",
+    response_model=ApiResponse[Any],
+    summary="The currently serving circuits",
 )
 async def get_active_circuit(
     service: CircuitServiceDep,
-) -> ApiResponse[CircuitSummary | None]:
+    single: bool = Query(
+        False,
+        description=(
+            "Pre-F19 shape: return the most recently activated circuit as a "
+            "single object instead of a list. Under-reports when several "
+            "circuits serve."
+        ),
+    ),
+) -> ApiResponse[Any]:
     """The active circuit (with serving_mode), or null when none is serving.
 
     Carries ``steering``: the server's own verdict on whether this circuit is
@@ -268,9 +304,30 @@ async def get_active_circuit(
     unparseable, or unattached circuit — the same rung overclaim the server
     already suppresses on its own headers. Clients read this field instead.
     """
-    row = await service.get_active()
-    if not row:
-        return ApiResponse.ok(None)
+    # F19 R3-07: several circuits can serve at once, so this returns a LIST.
+    # `?single=true` keeps the pre-F19 shape for callers that have not been
+    # migrated — but a client using it while two circuits serve is told about
+    # one of them, so the compatibility path says so in a header rather than
+    # quietly under-reporting.
+    rows = await service.list_active()
+    if single:
+        if not rows:
+            return ApiResponse.ok(None)
+        if len(rows) > 1:
+            logger.info(
+                "circuit_active_single_shape_under_reports",
+                count=len(rows),
+                detail=(
+                    "?single=true was used while several circuits are serving "
+                    "— only the most recently activated is reported"
+                ),
+            )
+        row = rows[0]
+    else:
+        # The list form is the truthful one. Wrapped per-row below so each
+        # carries its own `steering` verdict.
+        return ApiResponse.ok(await _active_rows_with_steering(service, rows))
+
     summary = CircuitSummary(**row)
     try:
         from millm.api.dependencies import get_inference_service

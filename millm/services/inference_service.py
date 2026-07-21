@@ -771,13 +771,41 @@ class InferenceService:
             from millm.db.repositories.circuit_repository import CircuitRepository
 
             async with async_session_factory() as session:
-                circuit = await CircuitRepository(session).get_active()
-            # The serving-mode read is inside the guard too: a stubbed or
-            # partially-initialised session can yield something that is not a
-            # Circuit, and no observability/dial nicety may fail a chat request.
-            if circuit is None or getattr(circuit, "serving_mode", None) != "full":
+                actives = await CircuitRepository(session).list_active()
+
+            # F19 R3-06: with SEVERAL circuits serving, no single one describes
+            # the response.
+            #
+            # This read `get_active()`, which returns the most recently updated
+            # row — so the dial, the intensity resolution and the rung header
+            # all described ONE of two serving circuits while the response
+            # carried both circuits' summed steering. An operator dialling
+            # "the active circuit" changed a different circuit than the one the
+            # header named.
+            #
+            # Same rule as composition, for the same reason: return None rather
+            # than name one arbitrarily. A per-circuit dial is future work
+            # (recorded in the FTASKS); until then, refusing to guess is the
+            # only honest answer.
+            full = [
+                c for c in actives
+                if getattr(c, "serving_mode", None) == "full"
+            ]
+            if not full:
                 return None
-            return circuit
+            if len(full) > 1:
+                logger.info(
+                    "circuit_dial_ambiguous_several_serving",
+                    circuit_ids=[getattr(c, "id", None) for c in full],
+                    detail=(
+                        "several circuits are serving, so no single circuit's "
+                        "dial or evidence describes the response — the "
+                        "per-request dial and the rung header are both "
+                        "suppressed"
+                    ),
+                )
+                return None
+            return full[0]
         except Exception as e:
             # F18 R3-14: returning None here is indistinguishable from "no
             # circuit is active", which is the NORMAL case and is logged

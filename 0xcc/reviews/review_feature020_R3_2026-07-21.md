@@ -2,7 +2,7 @@
 
 **Date:** 2026-07-21
 **Scope:** attack R2's fixes.
-**Status:** IN PROGRESS
+**Status:** IN PROGRESS — 19 findings
 
 ## The finding that matters most
 
@@ -116,6 +116,25 @@ it**, all four came back CAUGHT.
 That assertion is now the rule: *verify the mutation landed before recording a
 survivor.* Five instrument failures this increment, and four of them would have
 produced a change to correct code.
+
+
+## The client every tool passes through had no test file at all
+
+| # | Finding | Control |
+|---|---|---|
+| R3-17 | **A 200 whose body would not parse returned `{}` — indistinguishable from a genuine empty success.** A misrouted ingress or proxy splash page reaches the agent as an empty successful result: `millm_circuit_status` reports nothing steering, and the agent activates a circuit that contends with one already serving that layer. The `JSONDecodeError` was the only evidence the response had not come from miLLM at all, and it was discarded. `raw_get` ALREADY guarded this (009 R2) and the guard was never carried across — the same one-representative pattern as R3-10/11/12/13. | guard removed → **fail** |
+| R3-18 | `str(e)` on an httpx timeout is frequently EMPTY, so the message read *"miLLM request timed out: "* with no diagnostic. The PHASE is what matters: a connect timeout means miLLM was never reached; a **read** timeout on a POST means the request may ALREADY have committed, and an agent that retries double-imports or double-activates. | warning removed → **fail**; connect-vs-read specificity → **fail** |
+| R3-19 | Writing R3-18's shared helper reintroduced a defect in the other caller: `raw_get` has **no `method` variable in scope**, so the first version would have raised `NameError` on EVERY export timeout — masking the timeout with an unrelated crash. Caught by writing the test before trusting the edit. | `method` restored → **fail** |
+
+`test_millm_client_failure_paths.py` is new: **there was no test file for this
+client**, and it is the single component all 16 circuit tools pass through.
+
+Also disproven by executed probe, and recorded so they are not re-investigated:
+`raw_get` is the STRONGER path, not the weaker one (an HTML error page cannot be
+returned as a valid exported circuit); timeouts exist and fire (60s default, no
+hang-forever path); and there are **no retries anywhere**, so the POST/DELETE
+replay hazard I hypothesised does not exist.
+
 
 ## Instrument failures (continued from R2)
 

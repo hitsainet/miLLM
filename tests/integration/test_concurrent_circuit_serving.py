@@ -695,3 +695,93 @@ class TestR3TheDialRefusesToGuessWhichCircuit:
         svc = InferenceService.__new__(InferenceService)
         resolved = await svc._active_full_circuit()
         assert resolved is not None and resolved.id == "cA"
+
+
+class TestR3TheWORSTOutcomeIsCountedToo:
+    """F19 R3-11. Only the PARTIAL-loss branch counted a fault.
+
+    The TOTAL loss — circuit active and steering with ZERO claims, so anyone
+    can take its layers — was the uncounted one. R2-16's stated goal ("all four
+    handlers") held only because the partial and total conditions happen to
+    overlap today, not by construction: an operator alerting on the fault rate
+    would see nothing while a circuit steers with no claim at all.
+
+    The activation rollback — the path R1 named "most easily missed" — was
+    likewise uncounted.
+    """
+
+    @pytest.mark.asyncio
+    async def test_a_TOTAL_restore_loss_counts_a_fault(self, monkeypatch):
+        """The worst outcome, driven rather than greped.
+
+        A window-based source assertion could not catch this: moving the call
+        a few lines still passes. Verified by a mutation that SURVIVED the
+        grep version of this test.
+
+        Here the gate's re-claim fails AND every restore fails, so the circuit
+        ends active and steering with ZERO claims — anyone can take its layers.
+        """
+        from millm.api.routes.system.health import metrics_counter
+        from millm.services import circuit_claim_registry as reg_mod
+        from millm.services.circuit_service import CircuitService
+
+        before = metrics_counter.circuit_claim_faults
+
+        held = [
+            SimpleNamespace(
+                circuit_id="cA", layer=10, composed=False, steering_keys=(1,)
+            )
+        ]
+
+        class Registry:
+            def __init__(self, _session):
+                pass
+
+            async def live_claims(self):
+                return held
+
+            async def assess(self, *a, **k):
+                return SimpleNamespace(
+                    has_collision=False,
+                    has_contention=False,
+                    contended_layers=(),
+                    incumbents={},
+                    colliding_keys=(),
+                )
+
+            async def release(self, _cid):
+                return [10]
+
+            async def claim(self, *a, **k):
+                raise RuntimeError("every claim fails")
+
+        monkeypatch.setattr(reg_mod, "CircuitClaimRegistry", Registry)
+
+        svc = CircuitService.__new__(CircuitService)
+        svc.repository = SimpleNamespace(session=object())
+        definition = SimpleNamespace(
+            members=[], edges=[], budget=None,
+            sae_for_layer=lambda layer: None, layers=lambda: [10],
+        )
+
+        with pytest.raises(RuntimeError, match="every claim fails"):
+            await svc._claim_layers(
+                SimpleNamespace(id="cA", name="cA"), [10], definition, False
+            )
+
+        assert metrics_counter.circuit_claim_faults > before, (
+            "the circuit is active and steering with NO claims — the worst "
+            "outcome available here — and the dashboard counted nothing"
+        )
+
+    def test_the_rollback_path_also_counts(self):
+        """The activation rollback is the path R1 named 'most easily missed'.
+        Asserted structurally because driving it needs a failed DB write mid
+        activation; the behavioural half is covered above."""
+        import inspect
+
+        from millm.services.circuit_service import CircuitService
+
+        src = inspect.getsource(CircuitService.activate)
+        handler = src[src.index("circuit_activate_rollback_clear_failed") - 400 :]
+        assert "_note_claim_fault()" in handler[:400]

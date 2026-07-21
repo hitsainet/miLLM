@@ -146,12 +146,33 @@ Three metrics, on `/metrics` and `/metrics/prometheus`:
 | `millm_circuits_serving` | circuits currently steering |
 | `millm_circuit_layers_served` | distinct layers they steer |
 | `millm_circuit_layers_composed` | layers carrying **more than one** contributor |
+| `millm_circuit_claim_faults_total` | claim/steering divergences that could not be repaired |
 
 `millm_circuit_layers_composed > 0` is the one worth alerting on — it is
 exactly the condition in which the rung header is suppressed.
 
+`millm_circuit_claim_faults_total` counts the cases where the claims table and
+what is actually steering may disagree — a claim that could not be released, a
+rollback that could not complete, or the claim gate running without a database
+session. **Alert on the rate, not the value:** one fault during a database blip
+is recoverable; a rising count means layers are leaking.
+
+It is an in-memory counter and **resets to zero on restart**. That matters
+because restarting is also how you clear a stuck claim — so the count that
+would have shown a leak recurring disappears at the same moment you act on it.
+Record the value before restarting.
+
 Note that `millm_circuit_breaker_*` is the **HuggingFace HTTP** breaker and has
 nothing to do with circuit serving.
+
+### If `/health/detailed` reports `circuit_claims: degraded`
+
+Startup could not reconcile layer claims. The server still serves, but
+activations on the affected layers may be refused. Release the stuck claims
+with the endpoint above — that clears the degraded state without a restart.
+
+The liveness endpoint (`/api/health`) does **not** reflect this; only
+`/health/detailed` does.
 
 ## Edge Sensing
 

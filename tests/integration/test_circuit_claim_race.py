@@ -10,6 +10,8 @@ bypassed — `registry.claim()` is called directly, exactly as the losing side o
 a race reaches it.
 """
 
+from types import SimpleNamespace
+
 import pytest
 
 from millm.core.errors import CircuitLayerContentionError
@@ -281,24 +283,85 @@ class TestTheRestorePreservesEACHLayersState:
             "circuit can take it unopposed"
         )
 
-    async def test_the_gate_restores_PER_LAYER(self):
-        """One taken layer must cost ONE layer, not all of them."""
-        import inspect
+    async def test_the_gate_restores_PER_LAYER(self, test_session, monkeypatch):
+        """One taken layer must cost ONE layer, not all of them.
 
+        F19 R3-10: this was a `inspect.getsource` + substring assertion. It
+        proved the STRINGS `"for prior in held_before:"` and
+        `"composed=prior.composed"` appear in the function — so renaming the
+        loop variable failed it while the behaviour was correct, and wrapping
+        the loop body in `if False:` PASSED it. Three such tests survived
+        R2-04's frontend cleanup; this is the load-bearing one.
+
+        Now drives the real `_claim_layers` through a partial race: the circuit
+        re-activates wanting {10, 13}, another circuit takes 13 in between, and
+        the restore must give back 10 rather than losing both.
+        """
         from millm.services.circuit_service import CircuitService
 
-        src = inspect.getsource(CircuitService._claim_layers)
-        restore = src[src.index("if held_before:"):]
-        assert "for prior in held_before:" in restore, (
-            "the restore is still all-or-nothing: one layer taken by the race "
-            "winner loses every other layer too"
+        await _circuit(test_session, "cA", layers=(10, 13))
+        await _circuit(test_session, "cB", layers=(13,))
+        registry = CircuitClaimRegistry(test_session)
+        await registry.claim("cA", {10, 13}, steering_keys={10: {1}, 13: {2}})
+
+        svc = CircuitService.__new__(CircuitService)
+        svc.repository = SimpleNamespace(session=test_session)
+
+        # cB takes L13 the moment cA releases its own claims to re-claim.
+        real_release = registry.release
+        seized = {"done": False}
+
+        async def release_then_seize(circuit_id):
+            layers = await real_release(circuit_id)
+            if circuit_id == "cA" and not seized["done"]:
+                seized["done"] = True
+                await registry.claim("cB", {13})
+            return layers
+
+        monkeypatch.setattr(
+            "millm.services.circuit_claim_registry.CircuitClaimRegistry.release",
+            lambda self, cid: release_then_seize(cid),
         )
-        assert "composed=prior.composed" in restore, (
-            "the restore still collapses per-layer composure"
+
+        # The REAL definition type, not a namespace: three successive shape
+        # errors while hand-rolling one is the argument for using the type the
+        # code actually consumes.
+        from millm.api.schemas.circuit import CircuitDefinitionV1
+
+        definition = CircuitDefinitionV1.model_validate(
+            {
+                "kind": "mistudio.circuit-definition",
+                "schema_version": "1",
+                "name": "cA",
+                "saes": [
+                    {"layer": 10, "n_features": 8192, "mistudio_sae_id": "s10"},
+                    {"layer": 13, "n_features": 8192, "mistudio_sae_id": "s13"},
+                ],
+                "members": [
+                    {"layer": 10, "feature": {"feature_idx": 1, "strength": 40.0}},
+                    {"layer": 13, "feature": {"feature_idx": 2, "strength": 30.0}},
+                ],
+                "edges": [],
+                "budget": {"layers": {}, "intensity": 1.0},
+            }
         )
-        assert "circuit_claim_partially_restored" in restore, (
-            "a partial restore leaves the circuit steering layers it does not "
-            "claim — that must be loud"
+        circuit = SimpleNamespace(id="cA", name="cA")
+
+        # NARROW: a bare `pytest.raises(Exception)` here masked a fixture
+        # shape error (`expanded_members` missing) as if it were the race —
+        # the assertion below then passed for the wrong reason. Only the
+        # contention refusal proves the race happened.
+        with pytest.raises(CircuitLayerContentionError):
+            await svc._claim_layers(circuit, [10, 13], definition, False)
+        assert seized["done"], "the race never happened — nothing was seized"
+
+        held = {
+            c.layer for c in await registry.live_claims() if c.circuit_id == "cA"
+        }
+        assert held == {10}, (
+            f"cA holds {held or 'nothing'} — one layer was taken by the race "
+            "winner and the all-or-nothing restore lost the other one too, "
+            "leaving the circuit active and steering with no claim"
         )
 
 

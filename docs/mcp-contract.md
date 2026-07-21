@@ -1,6 +1,6 @@
 # miLLM ↔ Unified MCP Server Contract
 
-**Status:** Normative for miLLM Feature 9 (Unified MCP) and Feature 15 (Circuit Edge Sensing / circuit MCP surface) and Feature 19 (Concurrent Circuit Serving). **Version:** 1.4 (2026-07-21)
+**Status:** Normative for miLLM Feature 9 (Unified MCP) and Feature 15 (Circuit Edge Sensing / circuit MCP surface) and Feature 19 (Concurrent Circuit Serving). **Version:** 1.5 (2026-07-21)
 **Consumer:** the unified MCP server that ships in the miStudio repo
 (`backend/src/mcp_server/`), exposing `millm_runtime` / `millm_clusters` /
 `millm_sensing` / `millm_circuits` tool categories against a miLLM deployment.
@@ -246,7 +246,7 @@ ever lost data.
 As in §4a-quater, none of these move an edge's rung or soften rung language.
 Truncation and throttling are load-shedding outcomes, never evidence.
 
-### 4a-sexies. Layer contention and composition (v1.4 — Feature 19)
+### 4a-sexies. Layer contention and composition (v1.5 — Feature 19)
 
 Several circuits may serve AT ONCE, provided their claim sets are disjoint. The
 unit of contention is the **LAYER**, not the feature, because steering composes
@@ -266,6 +266,20 @@ contribute to the same residual-stream sum, and nothing bounds that sum (the
 |---|---|
 | `GET /api/circuits/claims` | `[{layer, circuit_id, circuit_name, composed, steering_keys}]` — who holds which layer. Not answerable from the circuit list: two circuits can both be active while contending for nothing. |
 | `POST /api/circuits/{id}/activate?allow_layer_overlap=true` | Compose onto a held layer. Refused by default. |
+| `POST /api/circuits/claims/release?circuit_id=…` | **Recovery.** Release one circuit's stuck claims. Scoped to a single circuit; there is deliberately no "release everything". |
+
+**When a refusal names a circuit that is not running.** Claims are released on
+deactivation and on restart, but a failure in either path can leave one live.
+The symptom is a `CIRCUIT_LAYER_CONTENTION` refusal whose `incumbent` is a
+circuit that `GET /api/circuits/active` does not list. An agent's correct move
+is `POST /api/circuits/claims/release` for that circuit id — NOT retrying the
+activation, and NOT `allow_layer_overlap=true`, which would compose against a
+circuit that is not there.
+
+The response carries `warnings[]`: an unknown `circuit_id` and a circuit that
+held no claims read differently, because the remedies differ. A circuit that is
+still ACTIVE warns that it is now steering layers it does not hold — releasing
+a live circuit's claims is a recovery action, not routine.
 
 **New refusal code — `CIRCUIT_LAYER_CONTENTION`** (200 + `success:false`, house
 style: the operation does not apply, nothing is missing).
@@ -302,6 +316,20 @@ slice-fallback.
 `GET /api/circuits/{id}/activate` responses carry `composed_layers` and
 `allowed_layer_overlap` when an override was used, so the acceptance is
 recorded in the response and not only in the server log.
+
+**Several circuits serving.** `GET /api/circuits/active` returns a LIST
+(`?single=true` keeps the pre-v1.4 single-object shape and UNDER-REPORTS when
+several serve). While more than one circuit serves in `full` mode, the
+per-request dial and the rung header are BOTH suppressed — no single circuit's
+dial or evidence describes the response. An agent must not substitute either
+circuit's rung, and must not report "the active circuit" as singular.
+
+**A slice-fallback serve is single-active.** A slice is steered by a cluster
+profile, and only one profile can be active, so activating a second
+slice-fallback circuit is refused with `reason:
+"slice_fallback_is_single_active"`. That refusal is NOT overridable by
+`allow_layer_overlap`; the remedy is to deactivate the named circuits or attach
+the missing SAEs so the circuit can serve in full.
 
 **`CIRCUIT_ALLOW_CONCURRENT`** gates the whole capability and defaults FALSE for
 one release. With it off, a contention refusal names configuration as the

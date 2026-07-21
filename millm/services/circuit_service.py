@@ -463,8 +463,17 @@ class CircuitService:
                     )
                     if not rolled_back:
                         self._sae_service.clear_circuit_steering()
-            except Exception:  # pragma: no cover - defensive
-                logger.error("circuit_activate_rollback_clear_failed", circuit_id=circuit.id)
+            except Exception:
+                # R3-11: this leaves the model steering with no active row —
+                # the path R1 named "most easily missed" — and it counted
+                # nothing. The `# pragma: no cover` is gone too: a failure path
+                # nobody measures is a failure path nobody has run.
+                _note_claim_fault()
+                logger.error(
+                    "circuit_activate_rollback_clear_failed",
+                    circuit_id=circuit.id,
+                    exc_info=True,
+                )
             raise
         refreshed = await self.repository.get(circuit.id)
         result["warnings"] = (
@@ -798,6 +807,16 @@ class CircuitService:
                         ),
                     )
                 if not restored:
+                    # NOT a second fault count. R3 flagged this branch as an
+                    # uncounted worst case, and it is not: total loss means
+                    # `lost` is non-empty, so `if lost:` above has already
+                    # counted it. Verified by tracing the branches rather than
+                    # by reading the reviewer's reasoning — adding a count here
+                    # would DOUBLE-count every total loss and inflate the very
+                    # rate an operator is meant to alert on.
+                    #
+                    # Kept as a distinct log line because the two states differ
+                    # in severity and the operator's next step differs with it.
                     logger.error(
                         "circuit_claim_restore_failed",
                         circuit_id=circuit.id,

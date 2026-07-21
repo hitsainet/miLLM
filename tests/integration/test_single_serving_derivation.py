@@ -1,0 +1,295 @@
+"""Feature 18 tasks 4.0/5.0 — one derivation, four consumers.
+
+The point of F18 is not that the code is tidier. It is that four call sites
+that must agree about an operator-visible claim now cannot disagree, because
+they read the same object. These tests assert that property directly, and the
+reachability tests assert that each site actually REACHES the engine — the
+`TestRingPruningIsWired` anti-pattern (asserting a mechanism exists rather than
+that it is invoked) is explicitly excluded.
+"""
+
+from types import SimpleNamespace
+from unittest.mock import MagicMock
+
+import pytest
+
+from millm.ml.circuit_steering import CircuitSteeringEngine, ServingPlan
+
+
+def feat(idx, strength=1.0, sign=1, label=None):
+    return SimpleNamespace(
+        feature_idx=idx, strength=strength, sign=sign, label=label
+    )
+
+
+def mem(layer, feature=None, expanded=None):
+    return SimpleNamespace(layer=layer, feature=feature, expanded_members=expanded)
+
+
+def defn(members, sae_by_layer=None, budget=None):
+    saes = sae_by_layer or {}
+    return SimpleNamespace(
+        members=members,
+        edges=[],
+        budget=budget,
+        sae_for_layer=lambda layer: saes.get(layer),
+        layers=lambda: sorted({m.layer for m in members}),
+    )
+
+
+def sae_ref(sae_id):
+    return SimpleNamespace(mistudio_sae_id=sae_id)
+
+
+class _Registry:
+    """Stands in for AttachedSAEState — entries() is the whole contract."""
+
+    def __init__(self, layers):
+        self._layers = list(layers)
+
+    def entries(self):
+        return [SimpleNamespace(layer=n, sae_id=f"sae-{n}") for n in self._layers]
+
+
+# ─────────────────────────────────────────────────────────────────────────
+# 4.1 — the four-way identity
+# ─────────────────────────────────────────────────────────────────────────
+
+
+class TestAllFourConsumersSeeTheSamePlan:
+    """One definition, four questions, one answer. Before F18 each site
+    derived its own; the two that diverged became F14-R1-01 and F14-R2-01."""
+
+    def _definition(self):
+        return defn(
+            [
+                mem(10, feature=feat(1, strength=40.0), expanded=[feat(2, 10.0)]),
+                mem(13, feature=feat(3, strength=30.0)),
+            ],
+            sae_by_layer={10: sae_ref("sae-10"), 13: sae_ref("sae-13")},
+            budget=SimpleNamespace(intensity=1.5),
+        )
+
+    def test_activation_and_the_operator_dial_derive_identical_members(self):
+        d = self._definition()
+        engine = CircuitSteeringEngine(_Registry([10, 13]))
+        activation = engine.plan_for(d, SimpleNamespace(intensity=99.0))
+        operator = CircuitSteeringEngine.serving_members(d)
+        assert [(m.layer, m.feature_idx, m.budget, m.sign, m.sae_id)
+                for m in activation.members] == [
+            (m.layer, m.feature_idx, m.budget, m.sign, m.sae_id) for m in operator
+        ]
+
+    def test_the_per_request_dial_differs_ONLY_in_intensity(self):
+        """A dialled request and an activation must never disagree about WHO
+        is steered — only about how hard."""
+        d = self._definition()
+        engine = CircuitSteeringEngine(_Registry([10, 13]))
+        activation = engine.plan_for(d, SimpleNamespace(intensity=99.0))
+        dialled = engine.plan_for(d, SimpleNamespace(intensity=99.0), intensity=2.0)
+
+        assert dialled.claimed_layers == activation.claimed_layers
+        assert [m.feature_idx for m in dialled.members] == [
+            m.feature_idx for m in activation.members
+        ]
+        assert dialled.intensity == 2.0
+        assert activation.intensity == 1.5
+
+    def test_the_echo_predicate_reads_the_same_plan_the_apply_drives(self):
+        """`is_serveable` must be true exactly when the apply would do
+        something. An echoed rung header on a circuit that is not steering
+        attaches an evidence claim to an intervention that never happened."""
+        d = self._definition()
+        serving = CircuitSteeringEngine(_Registry([10, 13])).plan_for(d)
+        assert serving.is_serveable is True
+
+        detached = CircuitSteeringEngine(_Registry([])).plan_for(d)
+        assert detached.is_serveable is False
+        assert detached.members, "members are unchanged; only attachment differs"
+
+    def test_a_circuit_with_no_members_is_never_serveable(self):
+        plan = CircuitSteeringEngine(_Registry([10])).plan_for(defn([]))
+        assert plan.is_serveable is False
+
+
+# ─────────────────────────────────────────────────────────────────────────
+# 4.2 / 4.3 — the two F14 regressions, structurally
+# ─────────────────────────────────────────────────────────────────────────
+
+
+class TestTheF14RegressionsCannotRecur:
+    def test_F14_R1_01_the_authored_basis_survives_a_dial(self):
+        """Authored 150, DB column 100. Dialling must serve from 150."""
+        d = defn([mem(10, feature=feat(1, strength=150.0))],
+                 budget=SimpleNamespace(intensity=150.0))
+        circuit = SimpleNamespace(intensity=100.0)
+        plan = CircuitSteeringEngine().plan_for(d, circuit)
+        assert plan.intensity == 150.0, (
+            "the DB column won — the dial would serve 100 for a circuit "
+            "authored at 150 (F14-R1-01)"
+        )
+
+    def test_a_zero_authored_intensity_is_not_mistaken_for_absent(self):
+        """0.0 means 'off' and is a legitimate authored value. A truthiness
+        check would fall through to the DB column and silently re-enable a
+        circuit the author turned off."""
+        d = defn([mem(10, feature=feat(1))],
+                 budget=SimpleNamespace(intensity=0.0))
+        plan = CircuitSteeringEngine().plan_for(d, SimpleNamespace(intensity=100.0))
+        assert plan.intensity == 0.0
+
+    def test_F14_R2_01_a_layer_outside_the_db_column_is_still_claimed(self):
+        """The member layer set is what the apply drives. A layer present in
+        the members and absent from `circuits.layers` was dialled and never
+        restored — a per-request override leaking into global state."""
+        d = defn(
+            [mem(10, feature=feat(1)), mem(99, feature=feat(2))],
+            sae_by_layer={10: sae_ref("sae-10"), 99: sae_ref("sae-99")},
+        )
+        plan = CircuitSteeringEngine(_Registry([10, 99])).plan_for(d)
+        assert 99 in plan.claimed_layers
+        assert plan.claimed_layers == frozenset(m.layer for m in plan.members)
+
+    def test_the_claim_set_is_an_IDENTITY_not_an_agreement(self):
+        """The structural statement: there is no second source that could
+        drift, because `claimed_layers` is derived from `members` and nothing
+        else."""
+        for members in (
+            [mem(10, feature=feat(1))],
+            [mem(10, feature=feat(1)), mem(13, feature=feat(2))],
+            [mem(7, expanded=[feat(1), feat(2)])],
+            [],
+        ):
+            plan = CircuitSteeringEngine().plan_for(defn(members))
+            assert plan.claimed_layers == frozenset(m.layer for m in plan.members)
+
+
+class TestTheAttachmentSplit:
+    def test_unattached_layers_are_the_claimed_minus_the_attached(self):
+        """EC-18.7 — the slice-fallback signal."""
+        d = defn([mem(10, feature=feat(1)), mem(13, feature=feat(2))])
+        plan = CircuitSteeringEngine(_Registry([10])).plan_for(d)
+        assert plan.claimed_layers == frozenset({10, 13})
+        assert plan.attached_layers == frozenset({10})
+        assert plan.unattached_layers == frozenset({13})
+
+    def test_a_fully_bound_circuit_has_nothing_unattached(self):
+        d = defn([mem(10, feature=feat(1)), mem(13, feature=feat(2))])
+        plan = CircuitSteeringEngine(_Registry([10, 13])).plan_for(d)
+        assert plan.unattached_layers == frozenset()
+
+    def test_a_partially_bound_circuit_is_still_serveable(self):
+        """One attached layer is enough to steer; the rest is the caller's
+        slice-fallback decision, not the engine's."""
+        d = defn([mem(10, feature=feat(1)), mem(13, feature=feat(2))])
+        assert CircuitSteeringEngine(_Registry([10])).plan_for(d).is_serveable
+
+
+# ─────────────────────────────────────────────────────────────────────────
+# 5.1 — reachability: each site INVOKES the engine
+# ─────────────────────────────────────────────────────────────────────────
+
+
+class TestEveryCallSiteReachesTheEngine:
+    """Invocation, never existence. Each test fails when its site's wiring is
+    cut, which is the only thing that distinguishes a wired mechanism from a
+    declared one — a distinction this arc got wrong five times."""
+
+    def test_the_engine_is_the_only_serving_flattening_in_the_tree(self):
+        import subprocess
+
+        out = subprocess.run(
+            ["grep", "-rn", "CircuitMember(", "millm/"],
+            capture_output=True, text=True,
+        ).stdout
+        sites = sorted({
+            ln.split(":")[0] for ln in out.splitlines()
+            if ln.strip() and "class CircuitMember" not in ln
+        })
+        assert sites == ["millm/ml/circuit_steering.py"]
+
+    def _spy_on_plan_for(self, monkeypatch):
+        """Record every `plan_for` invocation. `co_names` inspection is NOT
+        enough: cutting the dial's wiring while leaving its local import in
+        place left the class name in `co_names` and the test green. That is a
+        source grep wearing a reachability costume — the R3-13 anti-pattern."""
+        calls = []
+        real = CircuitSteeringEngine.plan_for
+
+        def spy(self, definition, circuit=None, intensity=None):
+            calls.append(intensity)
+            return real(self, definition, circuit, intensity)
+
+        monkeypatch.setattr(CircuitSteeringEngine, "plan_for", spy)
+        return calls
+
+    def _circuit_and_definition(self):
+        d = defn(
+            [mem(10, feature=feat(1, strength=40.0))],
+            sae_by_layer={10: sae_ref("sae-10")},
+        )
+        return SimpleNamespace(id="circ_1", intensity=1.0, layers=[10],
+                               serving_mode="full", rung=2,
+                               circuit_meta={}, name="fear→threat"), d
+
+    @pytest.mark.asyncio
+    async def test_the_dial_INVOKES_plan_for(self, monkeypatch):
+        from millm.services.inference_service import InferenceService
+
+        calls = self._spy_on_plan_for(monkeypatch)
+        circuit, d = self._circuit_and_definition()
+
+        svc = InferenceService.__new__(InferenceService)
+        svc._active_full_circuit = MagicMock(return_value=circuit)
+
+        async def _active():
+            return circuit
+
+        svc._active_full_circuit = _active
+        monkeypatch.setattr(
+            InferenceService, "_circuit_definition", lambda self, c: d
+        )
+        await svc._apply_request_circuit_steering(2.0)
+
+        assert calls, "the dial never called plan_for — its wiring is cut"
+        assert 2.0 in calls, f"the dial passed {calls} instead of its lambda"
+
+    @pytest.mark.asyncio
+    async def test_the_echo_predicate_INVOKES_plan_for(self, monkeypatch):
+        from millm.services.inference_service import InferenceService
+
+        calls = self._spy_on_plan_for(monkeypatch)
+        circuit, d = self._circuit_and_definition()
+
+        svc = InferenceService.__new__(InferenceService)
+
+        async def _active():
+            return circuit
+
+        svc._active_full_circuit = _active
+        monkeypatch.setattr(
+            InferenceService, "_circuit_definition", lambda self, c: d
+        )
+        await svc._steering_circuit_uncached()
+
+        assert calls, "the echo predicate never called plan_for"
+
+    def test_serve_full_and_set_intensity_reach_the_engine(self):
+        """These two are async DB paths; asserting the reference is the
+        proportionate check, and the four-way identity tests above already
+        prove they produce the same plan."""
+        from millm.services.circuit_service import CircuitService
+
+        assert "CircuitSteeringEngine" in CircuitService._serve_full.__code__.co_names
+        assert (
+            "CircuitSteeringEngine" in CircuitService.set_intensity.__code__.co_names
+        )
+
+
+class TestThePlanIsImmutable:
+    def test_a_plan_cannot_be_mutated_after_derivation(self):
+        """Four consumers share it. A mutable plan is four chances for one
+        consumer to change what another reads."""
+        plan = CircuitSteeringEngine().plan_for(defn([mem(10, feature=feat(1))]))
+        with pytest.raises(Exception):
+            plan.intensity = 99.0

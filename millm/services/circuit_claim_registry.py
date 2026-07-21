@@ -190,19 +190,33 @@ class CircuitClaimRegistry:
         identically to the sequential case.
         """
         keys = steering_keys or {}
-        for layer in sorted(layers):
-            self._session.add(
-                CircuitLayerClaim(
-                    circuit_id=circuit_id,
-                    layer=int(layer),
-                    composed=composed,
-                    steering_keys=sorted(keys.get(layer, set())) or None,
-                )
-            )
+
+        # SAVEPOINT, not a bare flush. A plain `session.rollback()` in the
+        # handler below discards the WHOLE transaction — including the
+        # INCUMBENT's claim, which was already written in this session. The
+        # loser of a race would take the winner down with it and leave the
+        # layer held by nobody.
+        #
+        # Found by the race test: after the losing claim raised, the winner's
+        # claim had vanished and the assertion read `set() == {'cA'}`.
+        #
+        # The nested transaction scopes the rollback to THIS attempt, so a
+        # partial multi-layer claim also unwinds cleanly (a circuit claiming
+        # {10, 13} where only 13 is free must not leave 13 held by a circuit
+        # that never activated).
         try:
-            await self._session.flush()
+            async with self._session.begin_nested():
+                for layer in sorted(layers):
+                    self._session.add(
+                        CircuitLayerClaim(
+                            circuit_id=circuit_id,
+                            layer=int(layer),
+                            composed=composed,
+                            steering_keys=sorted(keys.get(layer, set())) or None,
+                        )
+                    )
+                await self._session.flush()
         except IntegrityError as exc:
-            await self._session.rollback()
             logger.warning(
                 "circuit_claim_race_lost",
                 circuit_id=circuit_id,

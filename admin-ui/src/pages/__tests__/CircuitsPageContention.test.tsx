@@ -172,6 +172,41 @@ describe('CircuitsPage — layer contention', () => {
     await waitFor(() => expect(deactivateMock).toHaveBeenCalledWith('circ_abc'));
   });
 
+  it('"Deactivate incumbent" then RETRIES the activation', async () => {
+    // R2-15: this closed the dialog and stopped, leaving the operator with
+    // nothing steering and no indication the remedy was only half done — when
+    // getting this circuit serving is the reason they opened the dialog.
+    await activateAndGetRefused();
+    deactivateMock.mockResolvedValue({ id: 'circ_abc' });
+    activateMock.mockReset();
+    activateMock.mockResolvedValue({
+      name: 'hedging', serving_mode: 'full', rung_language: 'x',
+    });
+
+    await userEvent.click(screen.getByTestId('deactivate-incumbent'));
+
+    await waitFor(() => expect(activateMock).toHaveBeenCalled());
+    const [circuitId, , overlap] = activateMock.mock.calls[0];
+    expect(circuitId).toBe('circ_1');
+    expect(overlap).toBe(false); // the layer is free now — no override needed
+  });
+
+  it('does NOT retry when deactivating the incumbent FAILS', async () => {
+    // The layer is still held, so a retry would be refused again — and that
+    // second refusal reads as "the remedy did nothing" rather than as "the
+    // deactivation failed", which is the actual problem.
+    await activateAndGetRefused();
+    deactivateMock.mockImplementation(async () => {
+      throw new Error('deactivate exploded');
+    });
+    activateMock.mockReset();
+
+    await userEvent.click(screen.getByTestId('deactivate-incumbent'));
+
+    await waitFor(() => expect(deactivateMock).toHaveBeenCalled());
+    expect(activateMock).not.toHaveBeenCalled();
+  });
+
   it('cancelling closes the dialog and activates nothing', async () => {
     await activateAndGetRefused();
     activateMock.mockReset();

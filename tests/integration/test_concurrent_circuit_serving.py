@@ -441,3 +441,81 @@ class TestR2TheComposedMetricSeesSLICECoTenants:
         metrics = await get_metrics()
         assert metrics.circuit_layers_composed == 0
         assert metrics.circuits_serving == 1
+
+
+class TestR2ClaimFaultsAreCOUNTED:
+    """F19 R2-16. Every one of F19's failure handlers logged and continued, so
+    a claim leak, a failed rollback, or a bypassed gate was discoverable ONLY
+    by grepping structured logs for a specific event name. An operator watching
+    a dashboard saw a fully green system while layers leaked.
+
+    These are the states where the claims table and what is actually steering
+    can disagree — exactly the divergence F19 exists to remove — so they need a
+    number, not just a log line.
+    """
+
+    async def test_the_counter_is_EXPOSED_on_both_surfaces(self):
+        from millm.api.routes.system.health import (
+            get_metrics,
+            get_prometheus_metrics,
+        )
+
+        metrics = await get_metrics()
+        assert hasattr(metrics, "circuit_claim_faults")
+
+        loader = SimpleNamespace(is_loaded=False, model_name=None)
+        body = (await get_prometheus_metrics(model_loader=loader)).body.decode()
+        assert "millm_circuit_claim_faults_total" in body
+
+    async def test_a_real_failure_INCREMENTS_it(self):
+        """Wired, not merely declared.
+
+        Driven through the CLAIM GATE's bypass path, which is the reachable
+        divergence: a repository with no session means the activation was NOT
+        checked for contention or collisions and took no claims — pre-F19
+        silent-clobber behaviour behind a healthy-looking response.
+
+        (The owner-rollback handler needs a rebuild that SUCCEEDS and then
+        fails on restore. A collision raises during the merge, before any write,
+        so no layer ever enters the rollback's `done` list — verified by
+        instrumenting the path rather than assuming. That handler is covered by
+        its own rollback tests; this asserts the COUNTER is reached from a real
+        failure.)
+        """
+        from millm.api.routes.system.health import metrics_counter
+        from millm.services.circuit_service import CircuitService
+
+        before = metrics_counter.circuit_claim_faults
+
+        svc = CircuitService.__new__(CircuitService)
+        svc.repository = SimpleNamespace()  # no `.session`
+        circuit = SimpleNamespace(id="c", name="n")
+
+        composed = await svc._claim_layers(circuit, [10, 13], None, False)
+        assert composed == []
+
+        assert metrics_counter.circuit_claim_faults > before, (
+            "the claim gate was BYPASSED — no contention or collision check, "
+            "no claims taken — and nothing counted it, so an operator watching "
+            "the dashboard sees a green system"
+        )
+
+    async def test_counting_cannot_break_the_caller(self, monkeypatch):
+        """A metrics helper must never fail the serving path it reports on.
+
+        Breaks the COUNTER's method rather than replacing the module attribute:
+        an earlier version swapped `metrics_counter` for a raising property,
+        which leaked into the sibling test above and made it read 0. A test
+        that corrupts shared module state is a defect in the test, not a
+        finding about the code.
+        """
+        from millm.api.routes.system.health import metrics_counter
+        from millm.services import circuit_service as cs_mod
+
+        def boom() -> None:
+            raise RuntimeError("counter exploded")
+
+        monkeypatch.setattr(
+            metrics_counter, "increment_circuit_claim_faults", boom
+        )
+        cs_mod._note_claim_fault()  # must not raise

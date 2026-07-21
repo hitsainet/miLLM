@@ -447,6 +447,10 @@ class MetricsResponse(BaseModel):
     circuit_layers_composed: int = Field(
         0, description="Layers carrying more than one circuit (rung suppressed)"
     )
+    #: R2-16: unrepaired claim/steering divergences. Alert on the RATE.
+    circuit_claim_faults: int = Field(
+        0, description="Claim/steering divergences that could not be repaired"
+    )
     active_features: int = Field(0, description="Number of active steering features")
 
     # Monitoring metrics
@@ -473,6 +477,13 @@ class MetricsCounter:
         self.model_load_count: int = 0
         self.model_unload_count: int = 0
         self.circuit_breaker_trips: int = 0
+        #: F19 R2-16. Every one of F19's failure handlers logged and continued,
+        #: so a claim leak, a failed rollback, or a bypassed gate was
+        #: discoverable ONLY by grepping structured logs for a specific event
+        #: name. An operator watching a dashboard saw a fully green system.
+        #: These are the states where the DB and the runtime can disagree —
+        #: exactly the divergence F19 exists to remove — so they need a number.
+        self.circuit_claim_faults: int = 0
 
     def increment_requests(self) -> None:
         """Increment total and active request counts."""
@@ -498,6 +509,17 @@ class MetricsCounter:
     def increment_circuit_trips(self) -> None:
         """Increment circuit breaker trip count."""
         self.circuit_breaker_trips += 1
+
+    def increment_circuit_claim_faults(self) -> None:
+        """A claim/steering divergence was detected and could not be repaired.
+
+        Non-zero means the claims table and what is actually steering may
+        disagree: a claim that could not be released, a rollback that could not
+        complete, or the claim gate running without a session. Alert on the
+        RATE, not the value — one fault during a DB blip is recoverable; a
+        rising count means layers are leaking.
+        """
+        self.circuit_claim_faults += 1
 
 
 # Global metrics counter instance
@@ -599,6 +621,7 @@ async def get_metrics(
         circuits_serving=len(circuit_owners),
         circuit_layers_served=len(circuit_layers),
         circuit_layers_composed=len(composed_layers),
+        circuit_claim_faults=metrics_counter.circuit_claim_faults,
         total_requests=metrics_counter.total_requests,
         active_requests=metrics_counter.active_requests,
         request_errors=metrics_counter.request_errors,
@@ -691,6 +714,10 @@ async def get_prometheus_metrics(
         "# HELP millm_circuit_layers_composed Layers carrying more than one circuit (rung header suppressed)",
         "# TYPE millm_circuit_layers_composed gauge",
         f"millm_circuit_layers_composed {circuit_layers_composed}",
+        "",
+        "# HELP millm_circuit_claim_faults_total Claim/steering divergences that could not be repaired",
+        "# TYPE millm_circuit_claim_faults_total counter",
+        f"millm_circuit_claim_faults_total {metrics_counter.circuit_claim_faults}",
         "",
         "# HELP millm_request_errors_total Total number of request errors",
         "# TYPE millm_request_errors_total counter",

@@ -42,6 +42,22 @@ from millm.sockets.progress import ProgressEmitter
 
 logger = structlog.get_logger()
 
+def _note_claim_fault() -> None:
+    """Count an unrepaired claim/steering divergence (F19 R2-16).
+
+    Imported lazily and guarded: a metrics helper must never be able to break
+    the serving path it is reporting on. A lost count is preferable to a
+    request that fails because the counter was unavailable.
+    """
+    try:
+        from millm.api.routes.system.health import metrics_counter
+
+        metrics_counter.increment_circuit_claim_faults()
+    except Exception:  # pragma: no cover - counting must not fail the caller
+        pass
+
+
+
 #: How many heuristic (sign-only / weight-prior) hazards to list before
 #: collapsing the rest into a count. Validated hazards are never suppressed.
 HAZARD_HEURISTIC_CAP = 10
@@ -305,6 +321,7 @@ class AttachedSAEState:
                 except Exception:
                     # Restore what we can; a layer that cannot be rebuilt is
                     # named rather than silently abandoned.
+                    _note_claim_fault()
                     logger.error(
                         "circuit_owner_rollback_failed",
                         owner_id=owner_id,

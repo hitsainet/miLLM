@@ -48,6 +48,22 @@ from millm.services.sae_service import AttachedSAEState
 
 logger = structlog.get_logger()
 
+def _note_claim_fault() -> None:
+    """Count an unrepaired claim/steering divergence (F19 R2-16).
+
+    Imported lazily and guarded: a metrics helper must never be able to break
+    the serving path it is reporting on. A lost count is preferable to a
+    request that fails because the counter was unavailable.
+    """
+    try:
+        from millm.api.routes.system.health import metrics_counter
+
+        metrics_counter.increment_circuit_claim_faults()
+    except Exception:  # pragma: no cover - counting must not fail the caller
+        pass
+
+
+
 MAX_NAME_DEDUPE_ATTEMPTS = 50
 
 #: Per-referenced-SAE compatibility verdicts (mirrors the cluster matrix).
@@ -513,6 +529,7 @@ class CircuitService:
             # It still degrades rather than refusing — a persistence detail
             # must not make the server unable to serve — but it can no longer
             # do so quietly.
+            _note_claim_fault()
             logger.error(
                 "circuit_claim_gate_BYPASSED",
                 circuit_id=circuit.id,
@@ -666,6 +683,7 @@ class CircuitService:
                     except Exception:
                         lost.append(prior.layer)
                 if lost:
+                    _note_claim_fault()
                     logger.error(
                         "circuit_claim_partially_restored",
                         circuit_id=circuit.id,
@@ -1078,6 +1096,7 @@ class CircuitService:
         except Exception as e:
             # Loud: an unreleased claim locks those layers against every future
             # activation, so this must never pass unnoticed.
+            _note_claim_fault()
             logger.error(
                 "circuit_layer_claim_release_failed",
                 circuit_id=circuit.id,

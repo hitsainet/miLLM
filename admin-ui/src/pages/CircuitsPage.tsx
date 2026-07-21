@@ -209,10 +209,29 @@ export function CircuitsPage() {
           onDeactivateIncumbent={
             contention.details.incumbent?.id
               ? () => {
+                  // F19 R2-15: deactivate AND retry. This closed the dialog
+                  // and stopped, so the operator was left with nothing
+                  // steering and had to find and re-click Activate — the
+                  // two-step remedy the dialog offers had no completion step,
+                  // and the reason they opened it was to get this circuit
+                  // serving.
                   const incumbentId = contention.details.incumbent.id as string;
+                  const { circuitId, acknowledgeUnvalidated } = contention;
                   setContention(null);
                   setPending(null);
-                  void deactivateCircuit(incumbentId);
+                  void deactivateCircuit(incumbentId)
+                    .then(() => {
+                      activateCircuitQuiet({
+                        circuitId,
+                        acknowledgeUnvalidated,
+                      });
+                    })
+                    .catch(() => {
+                      // The deactivate mutation already toasts its failure.
+                      // Do NOT retry: the layer is still held, and a second
+                      // refusal here would read as the remedy having done
+                      // nothing rather than as the deactivation having failed.
+                    });
                 }
               : undefined
           }

@@ -29,18 +29,37 @@ export function CircuitsPage() {
     details: ContentionDetails;
     message: string;
     circuitId: string;
+    acknowledgeUnvalidated: boolean;
   } | null>(null);
-  const [pendingCircuitId, setPendingCircuitId] = useState<string | null>(null);
+  // F19 R2-02: remember the ACKNOWLEDGEMENT too, not just which circuit.
+  //
+  // "Compose anyway" retried with `{circuitId, allowLayerOverlap: true}` and
+  // dropped `acknowledgeUnvalidated`. So an operator who ticked the box on an
+  // unvalidated circuit, then hit a contention refusal, was refused AGAIN with
+  // UNVALIDATED_CIRCUIT — and the hook's handler toasts "tick the
+  // acknowledgement to steer with it anyway", which they already did. The
+  // dialog has closed, the checkbox lives in CircuitCard, and there is no path
+  // forward: the override was unreachable for exactly the circuits where
+  // composition is riskiest.
+  const [pending, setPending] = useState<{
+    circuitId: string;
+    acknowledgeUnvalidated: boolean;
+  } | null>(null);
 
   const handleContention = useCallback(
     (details: ContentionDetails, message: string) => {
       setContention((prev) => ({
         details,
         message,
-        circuitId: pendingCircuitId ?? prev?.circuitId ?? '',
+        // R2-03: an empty circuitId here would POST to `/circuits//activate`.
+        // Prefer the pending click, fall back to whatever the previous
+        // refusal named, and never invent one.
+        circuitId: pending?.circuitId ?? prev?.circuitId ?? '',
+        acknowledgeUnvalidated:
+          pending?.acknowledgeUnvalidated ?? prev?.acknowledgeUnvalidated ?? false,
       }));
     },
-    [pendingCircuitId],
+    [pending],
   );
 
   const {
@@ -48,7 +67,7 @@ export function CircuitsPage() {
     isLoading,
     importCircuit,
     isImporting,
-    activateCircuit,
+    activateCircuitQuiet,
     isActivating,
     deactivateCircuit,
     isDeactivating,
@@ -139,11 +158,19 @@ export function CircuitsPage() {
                 isActivating={isActivating}
                 isDeactivating={isDeactivating}
                 onActivate={(ack) => {
-                  // Remember WHICH circuit was being activated: a contention
-                  // refusal arrives asynchronously, and "Compose anyway" has to
-                  // retry the same one.
-                  setPendingCircuitId(circuit.id);
-                  void activateCircuit({
+                  // A contention refusal arrives asynchronously, so "Compose
+                  // anyway" needs BOTH which circuit and whether the operator
+                  // already acknowledged an unvalidated rung.
+                  setPending({
+                    circuitId: circuit.id,
+                    acknowledgeUnvalidated: ack,
+                  });
+                  // R2-05: the NON-throwing surface. `activateCircuit` is
+                  // `mutateAsync`, which rethrows after `onError` — so every
+                  // handled refusal (contention, unvalidated) also produced an
+                  // UNHANDLED PROMISE REJECTION. `void` suppresses the lint,
+                  // not the rejection.
+                  activateCircuitQuiet({
                     circuitId: circuit.id,
                     acknowledgeUnvalidated: ack,
                   });
@@ -166,12 +193,19 @@ export function CircuitsPage() {
           details={contention.details}
           message={contention.message}
           isBusy={isActivating || isDeactivating}
-          onCancel={() => setContention(null)}
+          onCancel={() => {
+            setContention(null);
+            // R2-03: clear the pending click too. It was set on every Activate
+            // and never reset, so a refusal arriving after an unrelated later
+            // click could compose the WRONG circuit.
+            setPending(null);
+          }}
           onDeactivateIncumbent={
             contention.details.incumbent?.id
               ? () => {
                   const incumbentId = contention.details.incumbent.id as string;
                   setContention(null);
+                  setPending(null);
                   void deactivateCircuit(incumbentId);
                 }
               : undefined
@@ -179,10 +213,14 @@ export function CircuitsPage() {
           onComposeAnyway={
             contention.details.overridable
               ? () => {
-                  const { circuitId } = contention;
+                  const { circuitId, acknowledgeUnvalidated } = contention;
                   setContention(null);
-                  void activateCircuit({
+                  setPending(null);
+                  activateCircuitQuiet({
                     circuitId,
+                    // R2-02: carry the acknowledgement through, or the retry
+                    // is refused for a reason the operator already resolved.
+                    acknowledgeUnvalidated,
                     allowLayerOverlap: true,
                   });
                 }

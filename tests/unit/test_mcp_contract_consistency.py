@@ -85,6 +85,23 @@ def _registry() -> dict:
         sys.path.remove(str(backend))
 
 
+#: The circuits table is located by this heading, not by scanning the whole
+#: document — see `_rows` for the three defects that came from not scoping.
+CIRCUIT_TABLE_HEADING = "### `millm_circuits`"
+
+#: R2-19: `"MCP ✅" in status` is an unanchored substring test, so text AFTER
+#: the mark is invisible. A row reading "REST ✅ · MCP ✅ REVOKED — do not call"
+#: passed as a clean registered claim: the contract told a human not to call
+#: the tool while the guard certified the row. Require the status to be ONLY
+#: the marks, so a qualifier has to be expressed by changing the mark.
+CLAIMS_MCP = re.compile(r"^REST\s*[✅❌]\s*·\s*MCP\s*✅$")
+
+
+def _claims_mcp(status: str) -> bool:
+    """True only when the status is exactly a clean MCP claim."""
+    return bool(CLAIMS_MCP.match(status.strip()))
+
+
 class TestContractMatchesTheRegistry:
     def test_the_contract_file_exists(self):
         assert CONTRACT.exists(), f"contract missing at {CONTRACT}"
@@ -219,17 +236,83 @@ class TestEveryRegisteredToolHasACorrectRow:
     """
 
     def _rows(self) -> dict:
-        """`{tool_name: status}` from the millm_circuits table."""
+        """`{tool_name: status}` from the millm_circuits table ONLY.
+
+        R2-16..18 rebuilt this. The original scanned every line in the document
+        for ``| `millm_`` with no notion of which TABLE it was in, then read
+        ``cells[-1]`` as the status. Three defects followed:
+
+        * It captured `millm_import_cluster` from the CLUSTERS table 50 lines
+          earlier, whose Endpoint cell contains an escaped pipe — so a 2-column
+          row split into 3 cells and passed the ``len(cells) < 3`` filter. Its
+          "status" was the prose fragment ``` `fail`) ```. The 14 other
+          non-circuit rows were excluded by ACCIDENT (they have exactly 2
+          cells), not by design: the arity filter was doing the table-scoping,
+          and doing it by coincidence.
+        * That phantom row inflated the count to 17, so the ``>= 14`` tripwire
+          on the row extraction passed with only 13 real circuit rows. Three
+          rows could vanish and the "this guard is checking nothing" alarm
+          stayed green.
+        * ``rows[name] = ...`` is last-write-wins across the WHOLE document, so
+          a stale duplicate row could overwrite a correct status — or, in the
+          other order, MASK a lie.
+
+        Now: find the circuits table by its section heading, stop at the next
+        heading, and locate the Status column BY NAME from the header row.
+        Duplicates inside the table are an error rather than a silent
+        overwrite.
+        """
         text = CONTRACT.read_text()
-        rows = {}
-        for line in text.splitlines():
+        lines = text.splitlines()
+
+        start = next(
+            (i for i, l in enumerate(lines) if CIRCUIT_TABLE_HEADING in l), None
+        )
+        assert start is not None, (
+            f"No {CIRCUIT_TABLE_HEADING!r} heading in {CONTRACT}. This guard "
+            "locates the circuits table by that heading; without it every "
+            "assertion below would run against an empty table and pass."
+        )
+        end = next(
+            (
+                i
+                for i, l in enumerate(lines[start + 1 :], start + 1)
+                if l.startswith("#")
+            ),
+            len(lines),
+        )
+        section = lines[start:end]
+
+        # Locate the Status column by NAME. Position is not a contract: adding
+        # a trailing Notes column would silently move `cells[-1]` onto it.
+        status_col = None
+        for line in section:
+            if line.startswith("|") and "Status" in line:
+                header = [c.strip() for c in line.strip("|").split("|")]
+                if "Status" in header:
+                    status_col = header.index("Status")
+                    break
+        assert status_col is not None, (
+            "The circuits table has no column literally named 'Status'. The "
+            "guard reads that column to decide whether a row claims MCP "
+            "support; it will not guess at a position."
+        )
+
+        rows: dict = {}
+        for line in section:
             if not line.startswith("| `millm_"):
                 continue
             cells = [c.strip() for c in line.strip("|").split("|")]
-            if len(cells) < 3:
+            if len(cells) <= status_col:
                 continue
             for name in re.findall(r"`(millm_[a-z_]+)`", cells[0]):
-                rows[name] = cells[-1]
+                assert name not in rows, (
+                    f"`{name}` appears in the circuits table twice. The guard "
+                    "refuses to pick one: a stale duplicate can overwrite a "
+                    "correct status, or mask a wrong one depending on order. "
+                    "Delete the obsolete row."
+                )
+                rows[name] = cells[status_col]
         return rows
 
     def _registered_tools(self) -> set:
@@ -261,7 +344,7 @@ class TestEveryRegisteredToolHasACorrectRow:
         registered = self._registered_tools()
         claimed = {
             name for name, status in self._rows().items()
-            if "MCP ✅" in status
+            if _claims_mcp(status)
         }
         phantom = sorted(claimed - registered)
         assert not phantom, (
@@ -282,7 +365,7 @@ class TestEveryRegisteredToolHasACorrectRow:
         )
 
         mismarked = sorted(
-            t for t in registered if "MCP ✅" not in rows[t]
+            t for t in registered if not _claims_mcp(rows[t])
         )
         assert not mismarked, (
             f"{mismarked} are registered and their rows say otherwise "

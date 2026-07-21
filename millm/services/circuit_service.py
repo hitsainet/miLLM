@@ -338,7 +338,9 @@ class CircuitService:
         # release — arming earlier would arm against SAEs that a co-tenant
         # release is about to detach. Best-effort: an observation surface must
         # never fail an activation.
-        self._arm_edge_sensing(circuit, definition, served_layers)
+        sensing_warnings = self._arm_edge_sensing(
+            circuit, definition, served_layers
+        )
 
         # Refresh `serveable` too: it was a snapshot of attachment state at
         # IMPORT time, so a circuit that became fully bindable since then kept
@@ -382,7 +384,9 @@ class CircuitService:
                 logger.error("circuit_activate_rollback_clear_failed", circuit_id=circuit.id)
             raise
         refreshed = await self.repository.get(circuit.id)
-        result["warnings"] = co_tenant_warnings + list(result.get("warnings") or [])
+        result["warnings"] = (
+            co_tenant_warnings + sensing_warnings + list(result.get("warnings") or [])
+        )
         # Feature 16: activation is an authoritative steering write
         AttachedSAEState().bump_steering_epoch('circuit_activate')
         return {
@@ -418,9 +422,19 @@ class CircuitService:
     async def _release_co_tenants(self, target_layers: list[int]) -> list[str]:
         """Deactivate an active cluster/profile that steers a target layer.
 
-        Circuit serving takes exclusive ownership of the layers it applies to
-        (it clears each SAE before writing). Rather than silently clobbering a
-        co-located cluster, deactivate it and return a user-visible warning.
+        F19 R1-15: this said "circuit serving takes EXCLUSIVE ownership of the
+        layers it applies to (it clears each SAE before writing)", and neither
+        half is true any more. Circuits no longer clear before writing — they
+        contribute through the owner map — and a layer may be legitimately
+        SHARED between circuits by explicit composition.
+
+        What remains true, and is the actual reason for this method: the claim
+        registry arbitrates circuit-vs-CIRCUIT contention only. A CLUSTER
+        steering one of these layers is outside that arbitration entirely, so
+        it would be summed into the residual stream with nothing having
+        adjudicated it and no record that both are contributing. Deactivating
+        it is the honest option; silently composing with it is not.
+
         Best-effort: a lookup failure must not block activation.
         """
         if self._cluster_service is None or not target_layers:
@@ -450,8 +464,9 @@ class CircuitService:
             ]
         logger.info("circuit_co_tenant_deactivated", profile_id=active.id)
         return [
-            f"Deactivated cluster '{getattr(active, 'name', active.id)}' — a circuit "
-            "takes exclusive ownership of the layers it steers"
+            f"Deactivated cluster '{getattr(active, 'name', active.id)}' — a "
+            "cluster steering the same layer would be summed into the circuit "
+            "with nothing adjudicating the combination"
         ]
 
     async def _claim_layers(
@@ -885,6 +900,8 @@ class CircuitService:
         """
         circuit = await self.get(circuit_id)
         cleared = False
+        #: R1-16: a failed clear must reach the CALLER, not only the logs.
+        warnings: list[str] = []
 
         if circuit.serving_mode == "slice_fallback":
             slice_profile_id = (circuit.provenance or {}).get("slice_profile_id")
@@ -917,8 +934,32 @@ class CircuitService:
                 if not released:
                     self._sae_service.clear_circuit_steering(authoritative=False)
                 cleared = True
-            except Exception as e:  # pragma: no cover - defensive
-                logger.warning("circuit_clear_steering_failed", error=str(e))
+            except Exception as e:
+                # F19 R1-16: `cleared_steering` is the operator's ONLY signal
+                # that the model stopped, and it was not derived from the
+                # outcome. A slice-branch success above sets `cleared = True`,
+                # so a failure HERE left the stale True in place and the
+                # response said `cleared_steering: true` while
+                # `circuit_clear_steering_failed` sat in the logs and the model
+                # kept steering.
+                #
+                # Force it false and say so in the warnings, so the claim
+                # matches reality rather than the last branch that happened to
+                # succeed. (The `# pragma: no cover` that excluded this path
+                # from coverage is also gone — a failure path nobody measures
+                # is a failure path nobody has run.)
+                cleared = False
+                warnings.append(
+                    "Steering could NOT be cleared for this circuit — the "
+                    f"model may still be steering: {e}"
+                )
+                logger.error(
+                    "circuit_clear_steering_failed",
+                    circuit_id=circuit.id,
+                    error=str(e),
+                    error_type=type(e).__name__,
+                    exc_info=True,
+                )
 
         self._disarm_edge_sensing()
 
@@ -968,7 +1009,10 @@ class CircuitService:
         refreshed = await self.repository.get(circuit.id)
         # Feature 16: deactivation is authoritative
         AttachedSAEState().bump_steering_epoch('circuit_deactivate')
-        return {**self.summarize(refreshed), "cleared_steering": cleared}
+        result = {**self.summarize(refreshed), "cleared_steering": cleared}
+        if warnings:
+            result["warnings"] = warnings
+        return result
 
     @staticmethod
     def _edge_sensing_layer_saes(layers: list[int]) -> dict:
@@ -988,16 +1032,18 @@ class CircuitService:
                 out[layer] = entry.sae
         return out
 
-    def _arm_edge_sensing(self, circuit, definition, served_layers: list[int]) -> None:
+    def _arm_edge_sensing(
+        self, circuit, definition, served_layers: list[int]
+    ) -> list[str]:
         """Arm edge sensing when the operator has enabled it for this circuit."""
         if not getattr(circuit, "sensing_enabled", False):
-            return
+            return []
         try:
             from millm.api.dependencies import get_circuit_sensing_service
 
             layer_saes = self._edge_sensing_layer_saes(served_layers)
             if not layer_saes:
-                return
+                return []
             unsensable = get_circuit_sensing_service().arm_for_circuit(
                 circuit, definition, layer_saes
             )
@@ -1007,12 +1053,27 @@ class CircuitService:
                     circuit_id=circuit.id,
                     unsensable=len(unsensable),
                 )
-        except Exception as e:  # pragma: no cover - defensive
+        except Exception as e:
+            # F19 R1-17: RETURN the failure, do not only log it.
+            #
+            # "Sensing is armed and nothing is co-firing" and "arming threw"
+            # were indistinguishable to an operator: they enable sensing,
+            # activate, get a clean success with no warning, and observe zero
+            # edge events forever. `_release_co_tenants` in this same file
+            # already returns a user-visible warning on its failure — the
+            # pattern existed and was not applied here.
             logger.warning(
                 "circuit_edge_sensing_arm_failed",
                 circuit_id=getattr(circuit, "id", None),
                 error=str(e),
+                error_type=type(e).__name__,
+                exc_info=True,
             )
+            return [
+                "Edge sensing could not be armed for this circuit — it is "
+                f"serving, but no edge events will be recorded: {e}"
+            ]
+        return []
 
     def _disarm_edge_sensing(self) -> None:
         try:

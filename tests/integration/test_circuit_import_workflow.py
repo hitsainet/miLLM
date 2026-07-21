@@ -779,3 +779,107 @@ class TestF19R1AProfileReleasesEVERYCircuit:
         svc = ProfileService.__new__(ProfileService)
         svc.repository = SimpleNamespace(session=test_session)
         assert await svc._release_active_circuit() == []
+
+
+class TestF19R1FailuresReachTheOPERATOR:
+    """F19 R1-16/17. Two paths where a real failure was logged and then
+    reported as success.
+    """
+
+    async def test_a_failed_clear_is_NOT_reported_as_cleared(
+        self, service, monkeypatch
+    ):
+        """R1-16. `cleared_steering` is the operator's ONLY signal that the
+        model stopped, and it was not derived from the outcome — a slice-branch
+        success set it True, so a later failure left the stale True in place
+        while `circuit_clear_steering_failed` sat in the logs and the model
+        kept steering."""
+        attach("sae-10", 10, make_sae())
+        attach("sae-13", 13, make_sae())
+        circuit = await service.import_definition(load_fixture())
+        await service.activate(circuit.id)
+
+        def boom(_owner):
+            raise RuntimeError("release exploded")
+
+        monkeypatch.setattr(
+            service._sae_service._sae_state, "release_owner", boom
+        )
+
+        result = await service.deactivate(circuit.id)
+
+        assert result["cleared_steering"] is False, (
+            "the clear FAILED and the response says it succeeded — the model "
+            "may still be steering and nothing tells the operator"
+        )
+        assert any("could NOT be cleared" in w for w in result.get("warnings", [])), (
+            "the failure never reached the caller, only the logs"
+        )
+
+    async def test_a_failed_sensing_arm_is_reported(self, service, monkeypatch):
+        """R1-17. 'Sensing is armed and nothing is co-firing' and 'arming
+        threw' were indistinguishable: a clean success, then zero edge events
+        forever."""
+        attach("sae-10", 10, make_sae())
+        attach("sae-13", 13, make_sae())
+
+        doc = load_fixture()
+        circuit = await service.import_definition(doc)
+        await service.repository.update(circuit.id, sensing_enabled=True)
+        circuit = await service.get(circuit.id)
+
+        def boom(*_a, **_k):
+            raise RuntimeError("arming exploded")
+
+        monkeypatch.setattr(service, "_edge_sensing_layer_saes", boom)
+
+        result = await service.activate(circuit.id)
+
+        assert any(
+            "Edge sensing could not be armed" in w
+            for w in result.get("warnings", [])
+        ), (
+            "the circuit serves but records no edge events, and the response "
+            "gave the operator no way to know"
+        )
+
+
+class TestF19R1TheCoTenantCopyIsTRUE:
+    """F19 R1-15. The warning said "a circuit takes EXCLUSIVE ownership of the
+    layers it steers", and F19 made both halves false: circuits no longer clear
+    before writing, and a layer may be legitimately SHARED by composition.
+
+    Copy that describes a guarantee the system no longer makes is the same
+    class of defect as an overclaimed rung — it tells an operator something
+    untrue about what the runtime is doing. This is pinned because a mutation
+    restoring the old text SURVIVED: no test asserted the wording of an
+    operator-facing string.
+    """
+
+    async def test_the_warning_does_not_promise_exclusivity(
+        self, service, monkeypatch, cluster_service
+    ):
+        attach("sae-10", 10, make_sae())
+        attach("sae-13", 13, make_sae())
+
+        cluster_service.get_active_cluster = AsyncMock(
+            return_value=SimpleNamespace(
+                id="prof_1", name="a cluster", layer=10
+            )
+        )
+
+        circuit = await service.import_definition(load_fixture())
+        result = await service.activate(circuit.id)
+
+        warnings = " ".join(result.get("warnings") or [])
+        if "Deactivated cluster" not in warnings:
+            pytest.skip("no co-tenant release happened in this fixture")
+
+        assert "exclusive ownership" not in warnings, (
+            "the warning still promises exclusivity, which F19 removed — a "
+            "layer may now be shared by explicit composition"
+        )
+        assert "summed into the circuit" in warnings, (
+            "the warning no longer says WHY the cluster had to go: it would "
+            "be summed with nothing adjudicating the combination"
+        )

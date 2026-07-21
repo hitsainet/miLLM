@@ -267,11 +267,20 @@ async def _active_rows_with_steering(
     out: list[dict[str, Any]] = []
     for row in rows:
         summary = CircuitSummary(**row).model_dump()
+        # F19 R3-19: ask the OWNER MAP, not `_steering_circuit()`.
+        #
+        # R3-06 made `_steering_circuit()` return None when SEVERAL circuits
+        # serve — correct for the dial and the rung header, since no single
+        # circuit describes the response. But this field answers a different
+        # question, per row: "is THIS circuit influencing generation?" Reusing
+        # the singular predicate made every row report `steering: false` in
+        # exactly the state the feature exists to support — two circuits both
+        # genuinely steering, and the endpoint saying neither is.
         try:
-            reset_steering_memo()
-            steering = await get_inference_service()._steering_circuit()
+            from millm.services.sae_service import AttachedSAEState
+
             summary["steering"] = bool(
-                steering is not None and getattr(steering, "id", None) == row["id"]
+                AttachedSAEState().owner_keys(f"circuit:{row['id']}")
             )
         except Exception:
             # An observability nicety must never fail this read.

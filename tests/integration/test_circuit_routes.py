@@ -627,3 +627,68 @@ class TestF19R2ClaimReleaseEndpoint:
         warnings = " ".join(r.json()["data"]["warnings"])
         assert "held no live claims" in warnings
         assert "different circuit" in warnings
+
+
+class TestF19R3PerRowSteeringVerdict:
+    """F19 R3-19. `steering` is a PER-ROW question — "is THIS circuit
+    influencing generation?" — and it was answered with the SINGULAR
+    `_steering_circuit()` predicate.
+
+    R3-06 made that predicate return None when several circuits serve (correct
+    for the dial and the rung header, since no single circuit describes the
+    response). Reusing it here made every row report `steering: false` in
+    exactly the state the feature exists to support: two circuits both
+    genuinely steering, and the endpoint saying neither is.
+    """
+
+    async def test_both_serving_circuits_report_steering_true(
+        self, client, mock_service
+    ):
+        from unittest.mock import AsyncMock
+
+        from millm.services.sae_service import AttachedSAEState
+
+        state = AttachedSAEState()
+        state.reset_for_tests()
+        state.apply_owner("circuit:circ_1", {})
+        state.apply_owner("circuit:circ_2", {})
+        # `owner_keys` is empty for a no-contribution owner, so give each a
+        # layer through the entries map the registry actually reads.
+        state._owners["circuit:circ_1"] = {("s10", 10): {1: 40.0}}
+        state._owners["circuit:circ_2"] = {("s13", 13): {2: 30.0}}
+
+        mock_service.list_active = AsyncMock(
+            return_value=[
+                make_summary(id="circ_1", is_active=True, serving_mode="full"),
+                make_summary(id="circ_2", is_active=True, serving_mode="full"),
+            ]
+        )
+        try:
+            async with client:
+                r = await client.get("/api/circuits/active")
+            rows = {row["id"]: row["steering"] for row in r.json()["data"]}
+            assert rows == {"circ_1": True, "circ_2": True}, (
+                "circuits that ARE steering report steering:false — the "
+                "endpoint denies the state the feature exists to support"
+            )
+        finally:
+            state.reset_for_tests()
+
+    async def test_a_circuit_that_owns_nothing_reports_false(
+        self, client, mock_service
+    ):
+        """Specificity: an active row is not the same as steering. A
+        slice-fallback or unattached circuit owns no keys."""
+        from unittest.mock import AsyncMock
+
+        from millm.services.sae_service import AttachedSAEState
+
+        AttachedSAEState().reset_for_tests()
+        mock_service.list_active = AsyncMock(
+            return_value=[
+                make_summary(id="circ_1", is_active=True, serving_mode="full")
+            ]
+        )
+        async with client:
+            r = await client.get("/api/circuits/active")
+        assert r.json()["data"][0]["steering"] is False

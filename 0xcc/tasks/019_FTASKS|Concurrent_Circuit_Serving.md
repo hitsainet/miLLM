@@ -4,7 +4,7 @@
 
 **Document Version:** 1.0
 **Created:** July 20, 2026
-**Status:** Draft
+**Status:** IMPLEMENTED + 3 review rounds (60 findings, all fixed) — 2026-07-21
 **References:** `019_FPRD|Concurrent_Circuit_Serving.md` · `019_FTDD|Concurrent_Circuit_Serving.md` · `019_FTID|Concurrent_Circuit_Serving.md` · `docs/circuit-contention-model.md` (design of record) · `BRD-MILLM-CIRCUITS-002.md` (BR-011, RSK-007, RSK-008)
 
 ## Relevant Files
@@ -145,3 +145,71 @@
 ## Acceptance evidence
 *[To be completed at acceptance — FPRD §9 criteria 1–7 verified one-by-one, with the downgrade run and
 the composed-response header omission observed on a real response, not only asserted in a unit test.]*
+
+
+---
+
+## Outcome (2026-07-21)
+
+**Implemented, reviewed in three rounds, 60 findings — all fixed and each pinned
+by a mutation control that fails when the fix is reverted.**
+
+Suites: backend 2044 → 2112, frontend 288 → 306. CI green.
+
+### What the rounds actually found
+
+The defects were NOT mostly in F19's new logic. The most severe were in
+PRE-EXISTING code that was correct until concurrency became possible:
+
+* **R2-01** — `set_active()` called `deactivate_all()`, so activating two
+  disjoint circuits left ONE active row. The feature did not work at the DB
+  layer, and twenty R1 findings were fixed above it. No test touched
+  `CircuitRepository`, and one test actively PINNED the defect.
+* **R1-04** — `get_active()` used `scalar_one_or_none()`, which RAISES on two
+  active rows. The caller swallowed it, so every chat request would have served
+  UNSTEERED while both circuits reported active.
+* **R1-03** — `deactivate()` never released the claim row, making routine
+  deactivation a permanent layer leak with no operator recovery.
+* **R3-08** — two slice-fallback circuits were mutually destructive through the
+  still-single-active PROFILE table. Unreachable until R2-01's fix.
+
+### Fixes that reintroduced defects other fixes removed
+
+Three times, in three consecutive rounds:
+
+* R1-18's restore recreated R1-19's exact defect class (composed collapsed
+  across layers).
+* R2-11's metric widening re-created the two-authorities disagreement it set
+  out to remove (R3-17).
+* R1-01 wired `reconcile()` at startup; R2-09 then made both its branches
+  unreachable, and the test guarding it MOCKED the registry so it would have
+  passed after the method body was deleted (R3-15).
+
+### Test-quality findings
+
+Five source-grep or unfalsifiable tests were replaced with behavioural ones,
+including three I wrote in earlier rounds of this same feature. Two tests of
+mine corrupted shared global state and failed only in the FULL suite, not in
+their own file.
+
+**One review finding was wrong** (R3-12): the total-restore-loss branch was
+reported as uncounted, and the surviving mutation is what prompted tracing the
+branches rather than trusting the reasoning. `if lost:` already covered it; the
+"fix" would have double-counted.
+
+### Not proven
+
+* **No GPU close-out for concurrent serving.** The two-layer degeneration
+  measurement this feature's refusal is built on comes from the F14 close-out;
+  concurrent serving itself has not been run on hardware. The contention model
+  is enforced, the hazard it protects against is measured, but "two circuits
+  serving at once produces coherent output" is UNTESTED on a real model.
+* **`CIRCUIT_ALLOW_CONCURRENT` ships FALSE**, so the capability is unreachable
+  by default. The dated flip commitment (BR-011a) is recorded but not yet made,
+  and an unflipped flag makes a shipped capability unreachable — the defect
+  class this increment exists to eliminate.
+* **Per-circuit dialling is absent.** While several circuits serve, the dial and
+  the rung header are both suppressed rather than scoped, which is honest but
+  not useful. Recorded as follow-on work.
+* **Profiles remain single-active**, so slice-fallback concurrency is refused
+  rather than supported.

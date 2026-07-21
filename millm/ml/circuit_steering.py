@@ -63,6 +63,12 @@ class ServingPlan:
     intensity: float
     claimed_layers: frozenset[int]
     attached_layers: frozenset[int]
+    #: The registry entries this plan was derived from, for the CLAIMED layers
+    #: only. Carried so a consumer never has to re-read the registry: a second
+    #: read is a drift window, because a detach between the two means the
+    #: snapshot the plan reports and the entries a request saves and restores
+    #: disagree (R1-08).
+    claimed_entries: tuple[Any, ...] = ()
 
     @property
     def unattached_layers(self) -> frozenset[int]:
@@ -187,6 +193,17 @@ class CircuitSteeringEngine:
     # The plan
     # ------------------------------------------------------------------
 
+    def _entries(self) -> list[Any]:
+        """The registry entries, read ONCE. See `ServingPlan.claimed_entries`."""
+        state = self._state
+        if state is None:
+            return []
+        try:
+            return list(state.entries())
+        except Exception:
+            logger.warning("circuit_attachment_registry_unreadable", exc_info=True)
+            return []
+
     def attached_layers(self) -> frozenset[int]:
         """Layers with an SAE attached right now, or empty with no registry.
 
@@ -203,17 +220,7 @@ class CircuitSteeringEngine:
         it is logged at WARNING. `state is None` stays quiet: that is a
         deliberate construction (no registry supplied), not a failure.
         """
-        state = self._state
-        if state is None:
-            return frozenset()
-        try:
-            return frozenset(e.layer for e in state.entries())
-        except Exception:
-            logger.warning(
-                "circuit_attachment_registry_unreadable",
-                exc_info=True,
-            )
-            return frozenset()
+        return frozenset(e.layer for e in self._entries())
 
     def plan_for(
         self,
@@ -235,9 +242,13 @@ class CircuitSteeringEngine:
             if intensity is not None
             else self.serving_intensity(definition, circuit)
         )
+        claimed = self.claim_set(members)
+        # ONE registry read for the whole plan (R1-08).
+        entries = self._entries()
         return ServingPlan(
             members=members,
             intensity=resolved,
-            claimed_layers=self.claim_set(members),
-            attached_layers=self.attached_layers(),
+            claimed_layers=claimed,
+            attached_layers=frozenset(e.layer for e in entries),
+            claimed_entries=tuple(e for e in entries if e.layer in claimed),
         )

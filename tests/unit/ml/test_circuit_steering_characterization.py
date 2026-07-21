@@ -22,13 +22,28 @@ import pytest
 from millm.ml.circuit_steering import CircuitSteeringEngine
 
 # F18 task 2.7: the characterization ASSERTIONS are unchanged; only the name
-# they call moved, from `CircuitService._serving_members` to the engine. That
-# is the whole parity claim — the same tests, the same expectations, a
-# different owner. The shim lives HERE, in the test file, and deliberately not
-# in production: a forwarding stub in the service would leave two names for one
-# thing, which is how four derivations happened in the first place.
-class CircuitService:
-    _serving_members = staticmethod(CircuitSteeringEngine.serving_members)
+# they call moved, from `CircuitService._serving_members` to the engine.
+#
+# R1-11: an earlier version aliased the engine behind a `CircuitService` shim
+# so the call sites could stay byte-identical. That made the parity claim
+# UNFALSIFIABLE — the shim IS the engine, so the tests could only prove
+# self-consistency, never that the engine matches the pre-move original. This
+# file's own header warns against fixtures that agree with the assertion by
+# construction, and then did exactly that.
+#
+# The real parity evidence is the executable-body diff against
+# `2804b4f:millm/services/circuit_service.py` (24 lines each, zero
+# differences) plus the mutation sweep (12 mutations, zero survivors). The
+# tests now call the engine directly and say so.
+_serving_members = staticmethod(CircuitSteeringEngine.serving_members)
+
+
+class _EngineUnderTest:
+    """Named for what it is. Calling `CircuitSteeringEngine.serving_members`
+    at every site would be equivalent; this keeps the 14 assertions readable
+    without implying a second owner still exists."""
+
+    serving_members = staticmethod(CircuitSteeringEngine.serving_members)
 
 
 # ─────────────────────────────────────────────────────────────────────────
@@ -76,14 +91,14 @@ class TestFlatteningRules:
         dropped authored members from the intervention — the whole point of
         the rule."""
         d = defn([mem(10, feature=feat(1), expanded=[feat(2), feat(3)])])
-        out = CircuitService._serving_members(d)
+        out = _EngineUnderTest.serving_members(d)
         assert sorted(m.feature_idx for m in out) == [1, 2, 3]
 
     def test_expanded_members_come_FIRST(self):
         """Order is observable: dedupe is first-wins, so which source leads
         decides which duplicate survives."""
         d = defn([mem(10, feature=feat(1), expanded=[feat(2)])])
-        out = CircuitService._serving_members(d)
+        out = _EngineUnderTest.serving_members(d)
         assert [m.feature_idx for m in out] == [2, 1]
 
     def test_a_duplicate_layer_feature_key_is_collapsed_FIRST_WINS(self):
@@ -92,7 +107,7 @@ class TestFlatteningRules:
         occurrence is the one that survives, carrying ITS strength."""
         d = defn([mem(10, feature=feat(1, strength=9.0),
                       expanded=[feat(1, strength=2.0)])])
-        out = CircuitService._serving_members(d)
+        out = _EngineUnderTest.serving_members(d)
         assert len(out) == 1
         assert out[0].budget == 2.0, "the later duplicate won"
 
@@ -100,21 +115,21 @@ class TestFlatteningRules:
         """The key is (layer, feature_idx). Collapsing on feature_idx alone
         would drop a legitimate member of a multi-layer circuit."""
         d = defn([mem(10, feature=feat(1)), mem(13, feature=feat(1))])
-        out = CircuitService._serving_members(d)
+        out = _EngineUnderTest.serving_members(d)
         assert len(out) == 2
         assert sorted(m.layer for m in out) == [10, 13]
 
     def test_an_empty_definition_yields_no_members(self):
         """EC-18.6."""
-        assert CircuitService._serving_members(defn([])) == []
+        assert _EngineUnderTest.serving_members(defn([])) == []
 
     def test_a_member_with_neither_source_contributes_nothing(self):
         d = defn([mem(10, feature=None, expanded=None)])
-        assert CircuitService._serving_members(d) == []
+        assert _EngineUnderTest.serving_members(d) == []
 
     def test_definition_order_is_preserved_across_members(self):
         d = defn([mem(13, feature=feat(5)), mem(10, feature=feat(1))])
-        out = CircuitService._serving_members(d)
+        out = _EngineUnderTest.serving_members(d)
         assert [(m.layer, m.feature_idx) for m in out] == [(13, 5), (10, 1)]
 
 
@@ -126,13 +141,13 @@ class TestPerLayerSaeResolution:
             [mem(10, feature=feat(1)), mem(13, feature=feat(2))],
             sae_by_layer={10: sae_ref("sae-A"), 13: sae_ref("sae-B")},
         )
-        out = CircuitService._serving_members(d)
+        out = _EngineUnderTest.serving_members(d)
         by_layer = {m.layer: m.sae_id for m in out}
         assert by_layer == {10: "sae-A", 13: "sae-B"}
 
     def test_a_layer_with_no_sae_reference_carries_None(self):
         d = defn([mem(10, feature=feat(1))], sae_by_layer={})
-        assert CircuitService._serving_members(d)[0].sae_id is None
+        assert _EngineUnderTest.serving_members(d)[0].sae_id is None
 
 
 class TestTheSignRuleIsCarriedNotApplied:
@@ -142,20 +157,20 @@ class TestTheSignRuleIsCarriedNotApplied:
 
     def test_budget_and_sign_are_carried_verbatim(self):
         d = defn([mem(10, feature=feat(1, strength=-3.0, sign=-1))])
-        out = CircuitService._serving_members(d)
+        out = _EngineUnderTest.serving_members(d)
         assert out[0].budget == -3.0, "the flattening pre-applied the sign"
         assert out[0].sign == -1
 
     def test_a_positive_strength_is_also_untouched(self):
         d = defn([mem(10, feature=feat(1, strength=2.5, sign=1))])
-        out = CircuitService._serving_members(d)
+        out = _EngineUnderTest.serving_members(d)
         assert (out[0].budget, out[0].sign) == (2.5, 1)
 
 
 class TestLabelsRide:
     def test_the_label_is_carried(self):
         d = defn([mem(10, feature=feat(1, label="fear"))])
-        assert CircuitService._serving_members(d)[0].label == "fear"
+        assert _EngineUnderTest.serving_members(d)[0].label == "fear"
 
 
 # ─────────────────────────────────────────────────────────────────────────

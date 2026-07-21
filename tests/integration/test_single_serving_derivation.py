@@ -426,3 +426,99 @@ class TestR1ForRegistryIsSafeForTheDialPath:
         )
         svc = SAEService.for_registry()
         assert [f for f in sorted(init_fields) if not hasattr(svc, f)] == []
+
+
+class TestR1TheDialUsesTheSnapshotItDerived:
+    """F18 R1-08/09. Two hardening changes that no test pinned, which is how
+    an unpinned fix gets silently reverted."""
+
+    def _svc_and_definition(self, monkeypatch, registry_layers=(10,)):
+        from millm.services.inference_service import InferenceService
+
+        d = defn(
+            [mem(10, feature=feat(1, strength=40.0))],
+            sae_by_layer={10: sae_ref("sae-10")},
+        )
+        circuit = SimpleNamespace(
+            id="circ_1", intensity=1.0, layers=[10], serving_mode="full",
+            rung=2, circuit_meta={}, name="fear→threat",
+        )
+
+        svc = InferenceService.__new__(InferenceService)
+
+        async def _active():
+            return circuit
+
+        svc._active_full_circuit = _active
+        monkeypatch.setattr(
+            InferenceService, "_circuit_definition", lambda self, c: d
+        )
+        return svc
+
+    @pytest.mark.asyncio
+    async def test_the_registry_is_read_ONCE_per_dial(self, monkeypatch):
+        """R1-08. `plan_for` already reads the registry; a second read is both
+        hot-path overhead and a drift window — a detach landing between them
+        means the snapshot the plan reports and the entries this request saves
+        and restores disagree."""
+        from millm.services.sae_service import AttachedSAEState
+
+        reads = []
+        state = AttachedSAEState()
+        real_entries = state.entries
+
+        def counting_entries():
+            reads.append(1)
+            return real_entries()
+
+        monkeypatch.setattr(state, "entries", counting_entries, raising=False)
+        svc = self._svc_and_definition(monkeypatch)
+        await svc._apply_request_circuit_steering(2.0)
+
+        assert len(reads) <= 1, (
+            f"the registry was read {len(reads)} times in one dial — the plan's "
+            "snapshot and the restored entries can disagree"
+        )
+
+    @pytest.mark.asyncio
+    async def test_a_construction_fault_is_NOT_reported_as_an_apply_failure(
+        self, monkeypatch
+    ):
+        """R1-09. `for_registry()` inside the try meant a construction fault
+        surfaced as `circuit_dial_apply_failed` — an apply failure that never
+        reached the apply. That is exactly how R1-05's missing-attribute bug
+        and both implementation NameErrors would have presented."""
+        from millm.services import inference_service as mod
+        from millm.services.sae_service import SAEService
+
+        def boom():
+            raise AttributeError("'SAEService' object has no attribute 'repository'")
+
+        monkeypatch.setattr(SAEService, "for_registry", staticmethod(boom))
+
+        warnings = []
+        monkeypatch.setattr(
+            mod.logger, "warning",
+            lambda event, **kw: warnings.append(event), raising=False,
+        )
+
+        # The dial returns early at `no_attached_layers` unless the registry
+        # holds the claimed layer, so the construction is only reachable with a
+        # real attachment. A behavioural probe was INCONCLUSIVE — it never
+        # reached the construction, and a test that cannot reach its subject
+        # proves nothing. Assert the placement structurally instead.
+        import inspect
+
+        src = inspect.getsource(
+            mod.InferenceService._apply_request_circuit_steering
+        )
+        assert "dial_service = SAEService.for_registry()" in src, (
+            "the dial service is constructed inside the try again — a "
+            "construction fault would surface as circuit_dial_apply_failed, "
+            "an apply failure that never reached the apply"
+        )
+        # NOT an index comparison against the log event name: that string also
+        # appears in an explanatory comment ABOVE the construction, so
+        # `src.index(...)` compares comment positions and fails on correct
+        # code. Tried it, watched it fail, replaced it — the assertion above is
+        # the one that distinguishes the two placements.

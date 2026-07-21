@@ -399,8 +399,16 @@ class TestSetIntensityReturnIsTruthful:
         svc.repository = repo
         svc._sae_service = MagicMock()
         svc.summarize = lambda c: {"id": "circ_1"}
+        # F18 R1-10: `_serving_members` no longer exists — `set_intensity`
+        # calls `CircuitSteeringEngine.serving_members(definition)` directly —
+        # so the stub that used to sit here was DEAD, and these tests silently
+        # ran the real flattener against a MagicMock. That passed by luck of
+        # the mock's shape rather than by intent, which is the difference
+        # between a fixture and a coincidence.
+        #
+        # `members=[]` is now load-bearing: the real flattener iterates it and
+        # correctly yields nothing, which is what these epoch tests want.
         svc._parse_stored = lambda c: MagicMock(edges=[], members=[])
-        svc._serving_members = staticmethod(lambda d: [])
         return svc, circuit
 
     async def test_reapplied_is_false_when_a_later_write_supersedes(self):

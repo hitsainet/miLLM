@@ -421,10 +421,22 @@ class CircuitService:
         self, circuit: Circuit, definition: CircuitDefinitionV1
     ) -> dict[str, Any]:
         """All referenced SAEs bound — delegate to Feature 12 serving."""
-        # F18: ONE derivation. `plan.claimed_layers` is defined AS the layers
-        # of `plan.members`, so `bound_layers` below cannot drift from what the
-        # apply drives (F14-R2-01), and the intensity resolution is the same
-        # expression the dial uses (F14-R1-01).
+        # F18: ONE derivation. The MEMBERS and the INTENSITY come from the
+        # plan, so this path and the dial cannot resolve either differently
+        # (F14-R1-01 was exactly that divergence).
+        #
+        # R1-07: an earlier version of this comment also claimed the response's
+        # `bound_layers` could no longer drift from the apply. It does not:
+        # that field still reports `definition.layers()`, deliberately. The
+        # FTASKS is explicit that any response-shape delta is a defect, not a
+        # feature, and `bound_layers` is a CONTRACT field describing the
+        # document's declared layers — not the claim set.
+        #
+        # The claim-set identity is real and is what the DIAL relies on for its
+        # snapshot (F14-R2-01); it simply is not what this response field
+        # reports. The comment asserted a guarantee the code below did not make,
+        # which would have convinced the next reader that a drift was
+        # impossible here.
         plan = CircuitSteeringEngine(self._sae_service._sae_state).plan_for(
             definition, circuit
         )

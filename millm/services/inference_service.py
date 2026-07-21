@@ -899,7 +899,17 @@ class InferenceService:
             return None
         member_layers = set(plan.claimed_layers)
 
-        entries = [e for e in state.entries() if e.layer in member_layers]
+        # R1-08: use the plan's OWN attachment snapshot rather than re-reading
+        # the registry. `plan_for` already read it; a second read is both pure
+        # overhead on the hot path and a drift window — a detach landing
+        # between them meant the snapshot the plan reports and the entries this
+        # request saves and restores disagree. A narrower version of exactly
+        # the drift F18 exists to close.
+        # R1-08: the entries the PLAN read, not a second registry read. A
+        # detach between the two reads meant the snapshot the plan reports and
+        # the entries this request saves and restores disagree — a narrower
+        # version of exactly the drift F18 exists to close.
+        entries = list(plan.claimed_entries)
         if not entries:
             logger.info("circuit_dial_noop_no_attached_layers",
                         circuit_id=circuit.id)
@@ -955,8 +965,14 @@ class InferenceService:
         # two unreachable failure branches whose log events could never fire —
         # so an operator grepping for `circuit_dial_definition_unparseable` to
         # debug a silent no-op would wrongly conclude the document parsed.
+        # R1-09: construct OUTSIDE the try. `for_registry` inside it meant a
+        # construction fault would surface as `circuit_dial_apply_failed` with
+        # an AttributeError string — an apply failure that never reached the
+        # apply. That is precisely how R1-05's missing-attribute bug would have
+        # presented, and how the two NameErrors during implementation did.
+        dial_service = SAEService.for_registry()
         try:
-            outcome = SAEService.for_registry().set_circuit_steering(
+            outcome = dial_service.set_circuit_steering(
                 members,
                 lam,
                 edges=[e.model_dump(mode="json") for e in definition.edges],

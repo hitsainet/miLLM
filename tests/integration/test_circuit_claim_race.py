@@ -228,3 +228,75 @@ class TestARE_ACTIVATINGCircuitKeepsItsClaims:
             "a restore that itself fails leaves the circuit active, steering, "
             "and holding nothing — that must be loud"
         )
+
+
+class TestTheRestorePreservesEACHLayersState:
+    """F19 R2-06/07. R1-18's restore reintroduced R1-19's defect and added a
+    new one, both in its own fix.
+
+    R2-06 — `composed=any(...)` marked EVERY restored layer composed if even
+    one was. Composed rows are EXCLUDED from the exclusive index, so an
+    exclusive layer restored that way sits outside its own protection: a third
+    circuit can claim it unopposed, and its rung header is suppressed forever
+    on a layer nothing ever composed onto.
+
+    R2-07 — `claim()` is all-or-nothing inside its savepoint, so if the race
+    winner took just ONE held layer, the whole restore raised and the circuit
+    was left holding NOTHING — precisely the state R1-18 exists to prevent.
+    """
+
+    async def test_an_exclusive_layer_is_not_restored_as_composed(
+        self, test_session
+    ):
+        await _circuit(test_session, "cA", layers=(10, 13))
+        await _circuit(test_session, "cB", layers=(13,))
+        registry = CircuitClaimRegistry(test_session)
+
+        # cA holds L10 exclusively and shares L13 with cB.
+        await registry.claim("cA", {10})
+        await registry.claim("cA", {13}, composed=True)
+        await registry.claim("cB", {13}, composed=True)
+
+        held = [c for c in await registry.live_claims() if c.circuit_id == "cA"]
+        assert {c.layer: c.composed for c in held} == {10: False, 13: True}
+
+        # Simulate the restore: per layer, preserving each layer's own flag.
+        await registry.release("cA")
+        for prior in held:
+            await registry.claim(
+                "cA",
+                {prior.layer},
+                composed=prior.composed,
+                steering_keys={prior.layer: set(prior.steering_keys)},
+            )
+
+        after = {
+            c.layer: c.composed
+            for c in await registry.live_claims()
+            if c.circuit_id == "cA"
+        }
+        assert after == {10: False, 13: True}, (
+            "the restore collapsed per-layer composure — L10 is exclusive and "
+            "was marked composed, putting it outside the index so a third "
+            "circuit can take it unopposed"
+        )
+
+    async def test_the_gate_restores_PER_LAYER(self):
+        """One taken layer must cost ONE layer, not all of them."""
+        import inspect
+
+        from millm.services.circuit_service import CircuitService
+
+        src = inspect.getsource(CircuitService._claim_layers)
+        restore = src[src.index("if held_before:"):]
+        assert "for prior in held_before:" in restore, (
+            "the restore is still all-or-nothing: one layer taken by the race "
+            "winner loses every other layer too"
+        )
+        assert "composed=prior.composed" in restore, (
+            "the restore still collapses per-layer composure"
+        )
+        assert "circuit_claim_partially_restored" in restore, (
+            "a partial restore leaves the circuit steering layers it does not "
+            "claim — that must be loud"
+        )

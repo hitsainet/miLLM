@@ -425,3 +425,76 @@ class TestF19ContentionRoutes:
             "and if it worked one author's strength would silently win"
         )
         assert details["colliding_keys"][0]["feature_idx"] == 42
+
+
+class TestF19R2ClaimReleaseEndpoint:
+    """F19 R2-10. Every claim-leak path in this feature had exactly ONE remedy:
+    a full process restart, which drops every loaded model and every attached
+    SAE — a multi-minute GPU outage to clear one stale row.
+
+    The endpoint is scoped to a single circuit ON PURPOSE. A "release
+    everything" button is a foot-gun in a feature whose whole point is that
+    several circuits serve at once: it would silently strip live circuits of
+    the protection they are relying on.
+    """
+
+    async def test_it_releases_only_the_named_circuits_claims(
+        self, client, mock_service
+    ):
+        from unittest.mock import AsyncMock, MagicMock
+
+        session = MagicMock()
+        session.commit = AsyncMock()
+        mock_service.repository.session = session
+        mock_service.repository.get = AsyncMock(
+            return_value=MagicMock(is_active=False)
+        )
+
+        with __import__("unittest.mock", fromlist=["patch"]).patch(
+            "millm.services.circuit_claim_registry.CircuitClaimRegistry"
+        ) as registry_cls:
+            registry_cls.return_value.release = AsyncMock(return_value=[10, 13])
+            async with client:
+                r = await client.post(
+                    "/api/circuits/claims/release?circuit_id=circ_1"
+                )
+
+        body = r.json()
+        assert body["success"] is True
+        assert body["data"]["released_layers"] == [10, 13]
+        registry_cls.return_value.release.assert_awaited_once_with("circ_1")
+
+    async def test_releasing_an_ACTIVE_circuits_claims_warns(
+        self, client, mock_service
+    ):
+        """Releasing a claim does not stop steering. If the circuit still reads
+        active it is now steering layers it does not hold, and another circuit
+        can take them — say so rather than refusing, because an operator doing
+        this is usually recovering from exactly that divergence."""
+        from unittest.mock import AsyncMock, MagicMock
+
+        session = MagicMock()
+        session.commit = AsyncMock()
+        mock_service.repository.session = session
+        mock_service.repository.get = AsyncMock(
+            return_value=MagicMock(is_active=True)
+        )
+
+        with __import__("unittest.mock", fromlist=["patch"]).patch(
+            "millm.services.circuit_claim_registry.CircuitClaimRegistry"
+        ) as registry_cls:
+            registry_cls.return_value.release = AsyncMock(return_value=[10])
+            async with client:
+                r = await client.post(
+                    "/api/circuits/claims/release?circuit_id=circ_1"
+                )
+
+        warnings = r.json()["data"]["warnings"]
+        assert any("still reads ACTIVE" in w for w in warnings)
+        assert any("Deactivate it" in w for w in warnings)
+
+    async def test_it_requires_a_circuit_id(self, client):
+        """No 'release everything' route: the parameter is required."""
+        async with client:
+            r = await client.post("/api/circuits/claims/release")
+        assert r.status_code == 422

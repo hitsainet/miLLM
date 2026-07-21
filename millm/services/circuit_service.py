@@ -624,16 +624,52 @@ class CircuitService:
             # Put back exactly what this circuit held, so a lost race leaves it
             # where it started rather than stripped of its own layers.
             if held_before:
-                try:
-                    await registry.claim(
-                        circuit.id,
-                        {c.layer for c in held_before},
-                        composed=any(c.composed for c in held_before),
-                        steering_keys={
-                            c.layer: set(c.steering_keys) for c in held_before
-                        },
+                # F19 R2-06/07: restore PER LAYER, preserving each layer's own
+                # `composed` flag.
+                #
+                # Two defects in the first version, both introduced by R1-18's
+                # own fix:
+                #
+                # R2-06 — `composed=any(...)` marked EVERY restored layer
+                #   composed if even one was. Composed rows are EXCLUDED from
+                #   the exclusive index, so an exclusive layer restored that way
+                #   would sit outside its own protection: a third circuit could
+                #   claim it unopposed, and its rung header would be suppressed
+                #   forever on a layer nothing ever composed onto. That is
+                #   R1-19's exact defect class, recreated.
+                #
+                # R2-07 — `claim()` is all-or-nothing inside its savepoint, so
+                #   if the race winner took just ONE of the held layers in the
+                #   interim, the whole restore raised and the circuit was left
+                #   holding NOTHING — precisely the state R1-18 exists to
+                #   prevent. Restoring per layer means one lost layer costs one
+                #   layer.
+                restored: list[int] = []
+                lost: list[int] = []
+                for prior in held_before:
+                    try:
+                        await registry.claim(
+                            circuit.id,
+                            {prior.layer},
+                            composed=prior.composed,
+                            steering_keys={prior.layer: set(prior.steering_keys)},
+                        )
+                        restored.append(prior.layer)
+                    except Exception:
+                        lost.append(prior.layer)
+                if lost:
+                    logger.error(
+                        "circuit_claim_partially_restored",
+                        circuit_id=circuit.id,
+                        restored=sorted(restored),
+                        lost=sorted(lost),
+                        detail=(
+                            "these layers were taken while this circuit was "
+                            "re-claiming; it is active and steering them with "
+                            "no claim, so another circuit can take them too"
+                        ),
                     )
-                except Exception:
+                if not restored:
                     logger.error(
                         "circuit_claim_restore_failed",
                         circuit_id=circuit.id,
@@ -642,7 +678,6 @@ class CircuitService:
                             "this circuit is active and steering but now holds "
                             "no claims — its layers can be taken by anyone"
                         ),
-                        exc_info=True,
                     )
             raise
         if composed:

@@ -357,17 +357,28 @@ class CircuitClaimRegistry:
         # the CALLER's discipline rather than by construction. Make it
         # structural: a layer with one holder is not composed, whatever the
         # caller asks.
-        shared: list[int] = []
-        for layer in sorted(layers):
-            holders = (
+        # F19 R2-08: ONE query, not one per layer. The first version issued a
+        # SELECT per layer inside a loop on the ACTIVATION HOT PATH — a circuit
+        # composing onto 8 layers made 8 round-trips where 1 suffices. Counted
+        # in SQL instead.
+        counts = dict(
+            (
                 await self._session.execute(
-                    sa.select(CircuitLayerClaim).where(
-                        CircuitLayerClaim.layer == layer,
+                    sa.select(
+                        CircuitLayerClaim.layer, sa.func.count()
+                    )
+                    .where(
+                        CircuitLayerClaim.layer.in_(sorted(layers)),
                         CircuitLayerClaim.released_at.is_(None),
                     )
+                    .group_by(CircuitLayerClaim.layer)
                 )
-            ).scalars().all()
-            if len(holders) > 1:
+            ).all()
+        )
+
+        shared: list[int] = []
+        for layer in sorted(layers):
+            if counts.get(layer, 0) > 1:
                 shared.append(layer)
             else:
                 logger.warning(

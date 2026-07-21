@@ -24,7 +24,7 @@ def _reset_block() -> str:
     # F19: stop at the claim-reconciliation block, which now sits between the
     # resets and the SAE-state clear. Without this the helper swallowed the new
     # block and the "one session per reset" count went from 1 to 2.
-    end = text.index("F19 R1-01/02: reconcile circuit LAYER CLAIMS")
+    end = text.index("F19 R2-09: RELEASE ALL CLAIMS at startup")
     return text[start:end]
 
 
@@ -143,3 +143,52 @@ class TestF19ClaimReconciliationIsWIRED:
         is a lie about what the server is doing."""
         text = MAIN.read_text()
         assert "allow_concurrent=settings.CIRCUIT_ALLOW_CONCURRENT" in text
+
+
+class TestF19R2StartupReleasesClaimsPLAINLY:
+    """F19 R2-09. Reconcile ran AFTER the bulk
+    `UPDATE circuits SET is_active=false`, which empties the active set — so
+    its orphan branch fired for EVERY claim on EVERY restart and logged
+    `circuit_claim_orphan_released` ("claims outlived their circuit's
+    activation") as an anomaly.
+
+    It is not an anomaly. It is the guaranteed steady state of a restart. A
+    permanently false-positive warning trains operators to ignore the one
+    signal that would matter when a genuine orphan appears, and reconcile's
+    demotion branch was unreachable for the same reason.
+
+    Nothing is steering after a restart — the in-memory owner map is empty — so
+    no claim can be valid. Startup now releases them plainly and says so as
+    routine.
+    """
+
+    def test_startup_releases_claims_as_a_restart_consequence(self):
+        text = MAIN.read_text()
+        assert "circuit_claims_released_on_startup" in text
+        assert "nothing is steering after a restart" in text, (
+            "the log does not say WHY the claims went, so it reads as an "
+            "anomaly rather than as the expected outcome"
+        )
+
+    def test_it_runs_BEFORE_reconcile(self):
+        """Ordering: the plain release is what actually frees the layers, so
+        reconcile's orphan branch is left for genuine orphans."""
+        text = MAIN.read_text()
+        release = text.index("circuit_claims_released_on_startup")
+        reconcile = text.index("CircuitClaimRegistry(session).reconcile")
+        assert release < reconcile
+
+    def test_a_failed_release_is_an_ERROR_not_a_warning(self):
+        """Stale claims refuse every activation on those layers for the life of
+        the process, and there is no runtime remedy — that is not a warning."""
+        text = MAIN.read_text()
+        start = text.index("circuit_claim_startup_release_failed")
+        # The handler is the logger.error call this event name sits inside.
+        block = text[start - 60 : start + 700]
+        assert "logger.error" in block, "a failed release is only a warning"
+        # NB: the source wraps the sentence across concatenated string
+        # literals, so match a fragment that cannot straddle a line break.
+        assert "runtime remedy short of another restart" in block, (
+            "the log does not say that stale claims cannot be cleared without "
+            "another restart"
+        )

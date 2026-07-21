@@ -97,6 +97,83 @@ async def list_circuits(
     )
 
 
+@router.post(
+    "/claims/release",
+    response_model=ApiResponse[dict],
+    summary="Release a stuck layer claim",
+)
+async def release_claims(
+    service: CircuitServiceDep,
+    circuit_id: str = Query(
+        ...,
+        description=(
+            "The circuit whose claims to release. Only claims belonging to "
+            "THIS circuit are touched."
+        ),
+    ),
+) -> ApiResponse[dict]:
+    """Manually release one circuit's layer claims (F19 R2-10).
+
+    Every claim-leak path in this feature previously had exactly one remedy: a
+    full process restart, which drops every loaded model and every attached SAE
+    — a multi-minute GPU outage to clear one stale row.
+
+    Scoped to a single circuit ON PURPOSE. A "release everything" button is a
+    foot-gun in a feature whose whole point is that several circuits serve at
+    once: it would silently strip live circuits of the protection they are
+    relying on.
+
+    This does NOT stop steering. It releases the CLAIM, so the layers can be
+    taken again. If the circuit is still active and steering, deactivate it
+    instead — releasing its claim while it serves leaves it steering layers it
+    does not hold, which is the state R2-07 exists to report.
+    """
+    from millm.services.circuit_claim_registry import CircuitClaimRegistry
+
+    session = getattr(service.repository, "session", None)
+    if session is None:
+        logger.error("circuit_claims_unavailable_for_release")
+        return ApiResponse.fail(
+            code="INTERNAL_ERROR",
+            message="Claims are not readable, so they cannot be released",
+        )
+
+    circuit = None
+    try:
+        circuit = await service.repository.get(circuit_id)
+    except Exception:  # pragma: no cover - the warning below is the point
+        pass
+
+    released = await CircuitClaimRegistry(session).release(circuit_id)
+    await session.commit()
+
+    warnings: list[str] = []
+    if circuit is not None and getattr(circuit, "is_active", False):
+        # Say it plainly rather than refusing: an operator clearing a claim on
+        # a circuit that still reads active is usually recovering from exactly
+        # the divergence this warns about.
+        warnings.append(
+            "This circuit still reads ACTIVE. Its claims are released, so it "
+            "is steering layers it no longer holds and another circuit can "
+            "take them. Deactivate it unless you are deliberately recovering "
+            "from a stuck claim."
+        )
+
+    logger.warning(
+        "circuit_claims_manually_released",
+        circuit_id=circuit_id,
+        layers=released,
+        still_active=bool(circuit is not None and getattr(circuit, "is_active", False)),
+    )
+    return ApiResponse.ok(
+        {
+            "circuit_id": circuit_id,
+            "released_layers": released,
+            "warnings": warnings,
+        }
+    )
+
+
 @router.get(
     "/claims",
     response_model=ApiResponse[list[dict]],

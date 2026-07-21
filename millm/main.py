@@ -178,6 +178,63 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     except Exception as e:
         logger.warning("failed_to_reset_stale_status", error=str(e))
 
+    # F19 R2-09: RELEASE ALL CLAIMS at startup, plainly.
+    #
+    # The previous version ran `reconcile()` AFTER the bulk
+    # `UPDATE circuits SET is_active=false` above, which empties the active set
+    # — so reconcile's orphan branch fired for EVERY claim on EVERY restart and
+    # logged `circuit_claim_orphan_released` ("claims outlived their circuit's
+    # activation") as an anomaly. It is not an anomaly; it is the guaranteed
+    # steady state of a restart. A permanently false-positive warning trains
+    # operators to ignore the one signal that would matter when a genuine
+    # orphan appears, and reconcile's demotion branch was likewise unreachable.
+    #
+    # Say what actually happens: nothing is steering after a restart (the
+    # in-memory owner map is empty), so no claim can be valid. Release them all
+    # as a restart consequence, and log it as routine.
+    try:
+        from millm.services.circuit_claim_registry import CircuitClaimRegistry
+        from millm.db.models.circuit_layer_claim import CircuitLayerClaim
+        from sqlalchemy import select, update as sa_update
+        from datetime import datetime, timezone
+
+        async with async_session_factory() as session:
+            live = (
+                await session.execute(
+                    select(CircuitLayerClaim.circuit_id).where(
+                        CircuitLayerClaim.released_at.is_(None)
+                    )
+                )
+            ).scalars().all()
+            if live:
+                await session.execute(
+                    sa_update(CircuitLayerClaim)
+                    .where(CircuitLayerClaim.released_at.is_(None))
+                    .values(released_at=datetime.now(timezone.utc), composed=False)
+                )
+                await session.commit()
+                logger.info(
+                    "circuit_claims_released_on_startup",
+                    count=len(live),
+                    circuits=sorted(set(live)),
+                    detail=(
+                        "nothing is steering after a restart, so no claim can "
+                        "be valid — these layers are free again"
+                    ),
+                )
+    except Exception as e:
+        logger.error(
+            "circuit_claim_startup_release_failed",
+            error=str(e),
+            error_type=type(e).__name__,
+            detail=(
+                "stale layer claims remain and will REFUSE every activation "
+                "on those layers for the life of this process; there is no "
+                "runtime remedy short of another restart"
+            ),
+            exc_info=True,
+        )
+
     # F19 R1-01/02: reconcile circuit LAYER CLAIMS.
     #
     # Two defects, one fix:

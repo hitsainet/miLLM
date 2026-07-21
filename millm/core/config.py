@@ -91,6 +91,16 @@ class Settings(BaseSettings):
     # Global circuit intensity (λ) bounds — shared with the Feature 14 dial.
     CIRCUIT_INTENSITY_MIN: float = 0.0
     CIRCUIT_INTENSITY_MAX: float = 2.0
+    #: Feature 19. Several circuits may serve at once when their claim sets are
+    #: disjoint. Defaults FALSE for one release (BR-011a) so the split is
+    #: reversible in the field, with a dated flip commitment recorded in the
+    #: BRD — an unflipped flag makes a shipped capability unreachable, which is
+    #: the defect class this increment exists to eliminate.
+    #:
+    #: Flag OFF REFUSES LOUDLY, naming configuration as the reason. It must NOT
+    #: fall back to the silent single-active disarm this feature replaces: that
+    #: silent fallback IS the bug (CLAIM-M4).
+    CIRCUIT_ALLOW_CONCURRENT: bool = False
 
     # Co-activation sensing (Feature 11)
     SENSING_EPSILON: float = 0.1              # theta_i = max(floor, eps*max_act_i)

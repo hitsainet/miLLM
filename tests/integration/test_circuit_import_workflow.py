@@ -349,3 +349,260 @@ class TestF19CoTenantSurvivesTheLIFECYCLE:
         assert other_sae.get_steering_values() == {77: 25.0}, (
             "the activation rollback cleared an unrelated circuit's steering"
         )
+
+
+class TestF19TheClaimGate:
+    """Feature 19 tasks 3.3/3.7/6.2 — contention refusal, atomicity, and the
+    flag-off path.
+
+    The gate's ORDERING is the feature: collision first and unconditionally,
+    then contention, then the claim insert. A collision reachable through the
+    override would let one author's strength silently overwrite another's.
+    """
+
+    async def _activate_first(self, service, monkeypatch):
+        attach("sae-10", 10, make_sae())
+        attach("sae-13", 13, make_sae())
+        first = await service.import_definition(load_fixture())
+        await service.activate(first.id)
+        return first
+
+    async def test_a_second_circuit_on_the_same_layers_is_REFUSED(
+        self, service, monkeypatch
+    ):
+        from millm.core.errors import CircuitLayerContentionError
+
+        monkeypatch.setattr(
+            "millm.core.config.settings.CIRCUIT_ALLOW_CONCURRENT", True
+        )
+        first = await self._activate_first(service, monkeypatch)
+
+        doc = load_fixture()
+        doc["name"] = "second circuit"
+        second = await service.import_definition(doc)
+
+        with pytest.raises(CircuitLayerContentionError) as exc:
+            await service.activate(second.id)
+
+        err = exc.value
+        assert err.code == "CIRCUIT_LAYER_CONTENTION"
+        assert err.status_code == 200, "house style: refusal in the envelope"
+        # Same features on the same layers — this is a COLLISION, and it must
+        # be reported as one rather than as plain contention.
+        assert err.details["overridable"] is False
+        assert "cannot be overridden" in err.message
+
+    async def test_the_refusal_is_ATOMIC(self, service, monkeypatch):
+        """Nothing applied, incumbent untouched, no claim row left behind."""
+        from millm.core.errors import CircuitLayerContentionError
+        from millm.services.circuit_claim_registry import CircuitClaimRegistry
+
+        monkeypatch.setattr(
+            "millm.core.config.settings.CIRCUIT_ALLOW_CONCURRENT", True
+        )
+        first = await self._activate_first(service, monkeypatch)
+        state = AttachedSAEState()
+        incumbent_before = state.owner_keys(f"circuit:{first.id}")
+        assert incumbent_before
+
+        doc = load_fixture()
+        doc["name"] = "second circuit"
+        second = await service.import_definition(doc)
+
+        with pytest.raises(CircuitLayerContentionError):
+            await service.activate(second.id)
+
+        assert state.owner_keys(f"circuit:{first.id}") == incumbent_before, (
+            "the refused activation disturbed the incumbent's steering"
+        )
+        assert state.owner_keys(f"circuit:{second.id}") == {}, (
+            "the refused circuit applied steering anyway"
+        )
+
+        registry = CircuitClaimRegistry(service.repository.session)
+        owners = {c.circuit_id for c in await registry.live_claims()}
+        assert second.id not in owners, "a refused activation left a claim row"
+
+    async def test_the_incumbent_is_NAMED_in_the_refusal(
+        self, service, monkeypatch
+    ):
+        """So the operator's next action is obvious: deactivate it, or edit
+        one circuit's layers."""
+        from millm.core.errors import CircuitLayerContentionError
+
+        monkeypatch.setattr(
+            "millm.core.config.settings.CIRCUIT_ALLOW_CONCURRENT", True
+        )
+        first = await self._activate_first(service, monkeypatch)
+
+        doc = load_fixture()
+        doc["name"] = "second circuit"
+        second = await service.import_definition(doc)
+
+        with pytest.raises(CircuitLayerContentionError) as exc:
+            await service.activate(second.id)
+        assert exc.value.details["incumbent"]["id"] == first.id
+
+    async def test_disjoint_layers_activate_CLEANLY(self, service, monkeypatch):
+        """The feature's whole point: no contention, no refusal, both serve."""
+        from millm.services.circuit_claim_registry import CircuitClaimRegistry
+
+        monkeypatch.setattr(
+            "millm.core.config.settings.CIRCUIT_ALLOW_CONCURRENT", True
+        )
+        first = await self._activate_first(service, monkeypatch)
+
+        # The fixture uses layers 10 and 13, so +10 shifts them to 20 and 23.
+        attach("sae-20", 20, make_sae())
+        attach("sae-23", 23, make_sae())
+        doc = load_fixture()
+        doc["name"] = "disjoint circuit"
+        for sae in doc["saes"]:
+            sae["layer"] += 10
+        for member in doc["members"]:
+            member["layer"] += 10
+        for edge in doc.get("edges", []):
+            for endpoint in ("up", "down"):
+                if endpoint in edge:
+                    edge[endpoint]["layer"] += 10
+        second = await service.import_definition(doc)
+
+        await service.activate(second.id)  # must not raise
+
+        state = AttachedSAEState()
+        assert state.owner_keys(f"circuit:{first.id}"), "the incumbent stopped"
+        assert state.owner_keys(f"circuit:{second.id}"), "the newcomer did not serve"
+
+        registry = CircuitClaimRegistry(service.repository.session)
+        owners = {c.circuit_id for c in await registry.live_claims()}
+        assert {first.id, second.id} <= owners
+
+    async def test_the_FLAG_OFF_path_refuses_LOUDLY_naming_configuration(
+        self, service, monkeypatch
+    ):
+        """CLAIM-M4. Flag-off must NOT fall back to the silent single-active
+        disarm this feature replaces — that silent fallback IS the bug."""
+        from millm.core.errors import CircuitLayerContentionError
+
+        monkeypatch.setattr(
+            "millm.core.config.settings.CIRCUIT_ALLOW_CONCURRENT", False
+        )
+        first = await self._activate_first(service, monkeypatch)
+        state = AttachedSAEState()
+        before = state.owner_keys(f"circuit:{first.id}")
+
+        doc = load_fixture()
+        doc["name"] = "second circuit"
+        # Distinct features so this is CONTENTION, not a collision — the
+        # flag-off branch is what must refuse it.
+        for i, member in enumerate(doc["members"]):
+            member["feature"]["feature_idx"] = 900 + i
+        second = await service.import_definition(doc)
+
+        with pytest.raises(CircuitLayerContentionError) as exc:
+            await service.activate(second.id)
+
+        assert "CIRCUIT_ALLOW_CONCURRENT" in exc.value.message, (
+            "the refusal did not name configuration as the reason, so an "
+            "operator cannot tell a policy refusal from a real conflict"
+        )
+        assert state.owner_keys(f"circuit:{first.id}") == before, (
+            "the incumbent was silently disarmed — the exact bug F19 removes"
+        )
+
+    async def test_re_activating_the_SAME_circuit_is_idempotent(
+        self, service, monkeypatch
+    ):
+        """EC-19.3. A circuit must not contend with its own incumbent claim."""
+        monkeypatch.setattr(
+            "millm.core.config.settings.CIRCUIT_ALLOW_CONCURRENT", True
+        )
+        first = await self._activate_first(service, monkeypatch)
+        await service.activate(first.id)  # must not raise
+
+        from millm.services.circuit_claim_registry import CircuitClaimRegistry
+
+        registry = CircuitClaimRegistry(service.repository.session)
+        live = [c for c in await registry.live_claims() if c.circuit_id == first.id]
+        assert sorted(c.layer for c in live) == [10, 13], (
+            "re-activation duplicated or dropped the circuit's claims"
+        )
+
+    async def test_contention_WITHOUT_the_override_is_refused(
+        self, service, monkeypatch
+    ):
+        """The override branch itself, which was UNPINNED.
+
+        A mutation removing `if not allow_layer_overlap:` SURVIVED the whole
+        suite: contention was silently composed with nobody asking for it.
+        That is the failure mode the entire feature exists to prevent — the
+        close-out measured two steered layers at strength 5 destroying
+        generation, and composition without an explicit act is how an operator
+        gets there without being told.
+
+        Distinct features, so this is CONTENTION (composable) rather than a
+        collision (never composable) — the branch under test is the one the
+        override can pass.
+        """
+        from millm.core.errors import CircuitLayerContentionError
+
+        monkeypatch.setattr(
+            "millm.core.config.settings.CIRCUIT_ALLOW_CONCURRENT", True
+        )
+        first = await self._activate_first(service, monkeypatch)
+
+        doc = load_fixture()
+        doc["name"] = "overlapping circuit"
+        for i, member in enumerate(doc["members"]):
+            member["feature"]["feature_idx"] = 900 + i
+        second = await service.import_definition(doc)
+
+        with pytest.raises(CircuitLayerContentionError) as exc:
+            await service.activate(second.id)
+
+        err = exc.value
+        assert err.details["overridable"] is True
+        assert err.details["override_param"] == "allow_layer_overlap"
+        assert err.details["rung_header_suppressed_if_overridden"] is True
+
+        from millm.services.sae_service import AttachedSAEState
+
+        assert AttachedSAEState().owner_keys(f"circuit:{second.id}") == {}, (
+            "contention was COMPOSED without anyone asking for it"
+        )
+
+    async def test_the_override_COMPOSES_and_says_so(self, service, monkeypatch):
+        """The other side: with the explicit act, composition proceeds — and
+        is reported, so the operator's response carries what they accepted."""
+        monkeypatch.setattr(
+            "millm.core.config.settings.CIRCUIT_ALLOW_CONCURRENT", True
+        )
+        first = await self._activate_first(service, monkeypatch)
+
+        doc = load_fixture()
+        doc["name"] = "overlapping circuit"
+        for i, member in enumerate(doc["members"]):
+            member["feature"]["feature_idx"] = 900 + i
+        second = await service.import_definition(doc)
+
+        result = await service.activate(second.id, allow_layer_overlap=True)
+
+        assert sorted(result.get("composed_layers") or []) == [10, 13], (
+            "the response did not report which layers are composed, so the "
+            "operator cannot see what they accepted"
+        )
+
+        from millm.services.sae_service import AttachedSAEState
+
+        state = AttachedSAEState()
+        assert state.owner_keys(f"circuit:{first.id}"), "the incumbent stopped"
+        assert state.owner_keys(f"circuit:{second.id}"), "the override did not serve"
+
+        from millm.services.circuit_claim_registry import CircuitClaimRegistry
+
+        registry = CircuitClaimRegistry(service.repository.session)
+        composed = {c.circuit_id for c in await registry.live_claims() if c.composed}
+        assert {first.id, second.id} <= composed, (
+            "both sides of a composition must be marked, or the rung header "
+            "cannot be suppressed for the incumbent"
+        )

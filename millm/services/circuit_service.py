@@ -254,7 +254,11 @@ class CircuitService:
     # ── Activation ─────────────────────────────────────────────────────────
 
     async def activate(
-        self, circuit_id: str, *, acknowledge_unvalidated: bool = False
+        self,
+        circuit_id: str,
+        *,
+        acknowledge_unvalidated: bool = False,
+        allow_layer_overlap: bool = False
     ) -> dict[str, Any]:
         """Serve a circuit.
 
@@ -298,12 +302,37 @@ class CircuitService:
         # activation never leaves the user with nothing steering.
         served_layers = bound_layers if all_bound else bound_layers[:1]
 
+        # ── Feature 19: the CLAIM GATE ────────────────────────────────────
+        # After the serving derivation (so the claim set is the real one) and
+        # BEFORE the serve (so a refusal is atomic — nothing applied, incumbent
+        # untouched).
+        composed_layers = await self._claim_layers(
+            circuit, served_layers, definition, allow_layer_overlap
+        )
+
         if all_bound:
             result = await self._serve_full(circuit, definition)
         else:
             result = await self._serve_slices(circuit, definition, bound_layers, verdicts)
 
         co_tenant_warnings = await self._release_co_tenants(served_layers)
+
+        # F19: SURFACE the composition. `_claim_layers` computed this and
+        # nothing reported it, so an operator who passed
+        # `allow_layer_overlap=true` got a normal-looking success with no
+        # record of what they had accepted — and the warning that those layers
+        # now carry a SUMMED effect existed only in the server log.
+        # Mirrors how `acknowledged_unvalidated` is echoed.
+        if composed_layers:
+            result["composed_layers"] = composed_layers
+            result["allowed_layer_overlap"] = True
+            co_tenant_warnings = co_tenant_warnings + [
+                f"Layers {composed_layers} now carry the SUMMED effect of more "
+                "than one circuit. In close-out testing two steered layers at "
+                "individually-harmless strength destroyed generation. The "
+                "circuit-rung header is omitted while any layer is composed, "
+                "because no single circuit's evidence describes the response."
+            ]
 
         # Feature 15: arm edge sensing AFTER the serve and after co-tenant
         # release — arming earlier would arm against SAEs that a co-tenant
@@ -424,6 +453,139 @@ class CircuitService:
             f"Deactivated cluster '{getattr(active, 'name', active.id)}' — a circuit "
             "takes exclusive ownership of the layers it steers"
         ]
+
+    async def _claim_layers(
+        self,
+        circuit: Circuit,
+        served_layers: list[int],
+        definition: Any,
+        allow_layer_overlap: bool,
+    ) -> list[int]:
+        """Claim `served_layers` for this circuit, or refuse. Returns the
+        layers this activation COMPOSES onto (empty in the normal case).
+
+        Ordering here is the whole gate, and it is deliberate:
+
+        1. COLLISION first and UNCONDITIONALLY. Two circuits naming the same
+           (layer, feature_idx) have no honest composition — one strength
+           silently wins and the served value belongs to neither author. Put
+           this after the override branch and `allow_layer_overlap=true`
+           becomes a route to reach it.
+        2. Then CONTENTION, which the override may pass.
+        3. Then the claim INSERT, whose `IntegrityError` is the real race
+           arbiter (see `CircuitClaimRegistry.claim`).
+
+        The flag-off path REFUSES LOUDLY naming configuration. It must never
+        fall back to the silent single-active disarm this feature replaces —
+        that silent fallback IS the bug this feature exists to remove.
+        """
+        from millm.core.config import settings
+        from millm.core.errors import CircuitLayerContentionError
+        from millm.services.circuit_claim_registry import CircuitClaimRegistry
+
+        session = getattr(self.repository, "session", None)
+        if session is None:
+            # No session to claim through (unit fixtures with a stubbed repo).
+            # Claiming is a persistence concern; serving must still work.
+            return []
+
+        registry = CircuitClaimRegistry(session)
+        wanted = {int(layer) for layer in served_layers}
+
+        # Per-layer feature indices, so a COLLISION is detectable before the
+        # apply rather than raising out of `_rebuild_layer`.
+        keys: dict[int, set[int]] = {}
+        for member in CircuitSteeringEngine.serving_members(definition):
+            # `serving_members` yields the FLAT serving shape (m.feature_idx),
+            # not the nested definition shape (m.feature.feature_idx). Reading
+            # the nested one here silently collected NO keys, so every
+            # collision was misreported as ordinary contention — and therefore
+            # as OVERRIDABLE, which is the one thing a collision must never be.
+            # Caught by a gate test asserting `overridable is False`.
+            idx = getattr(member, "feature_idx", None)
+            if idx is not None and int(member.layer) in wanted:
+                keys.setdefault(int(member.layer), set()).add(int(idx))
+
+        verdict = await registry.assess(circuit.id, wanted, steering_keys=keys)
+
+        # 1. COLLISION — never overridable, checked before any override branch.
+        if verdict.has_collision:
+            incumbent_id = verdict.colliding_keys[0][2]
+            name, _layers = verdict.incumbents.get(incumbent_id, (None, ()))
+            logger.warning(
+                "circuit_activation_refused_collision",
+                circuit_id=circuit.id,
+                incumbent_id=incumbent_id,
+                colliding_keys=[list(k) for k in verdict.colliding_keys],
+            )
+            raise CircuitLayerContentionError(
+                contended_layers=verdict.contended_layers,
+                incumbent_id=incumbent_id,
+                incumbent_name=name,
+                requested_id=circuit.id,
+                requested_name=circuit.name,
+                colliding_keys=verdict.colliding_keys,
+            )
+
+        # 2. CONTENTION — overridable, and gated by the config flag.
+        if verdict.has_contention:
+            incumbent_id = next(iter(verdict.incumbents), None)
+            name, _l = verdict.incumbents.get(incumbent_id, (None, ()))
+            if not settings.CIRCUIT_ALLOW_CONCURRENT:
+                logger.warning(
+                    "circuit_activation_refused_flag_off",
+                    circuit_id=circuit.id,
+                    contended_layers=list(verdict.contended_layers),
+                )
+                raise CircuitLayerContentionError(
+                    contended_layers=verdict.contended_layers,
+                    incumbent_id=incumbent_id,
+                    incumbent_name=name,
+                    requested_id=circuit.id,
+                    requested_name=circuit.name,
+                    detail=(
+                        "concurrent circuit serving is disabled by "
+                        "configuration (CIRCUIT_ALLOW_CONCURRENT=false), so "
+                        "this cannot be overridden until it is enabled"
+                    ),
+                )
+            if not allow_layer_overlap:
+                raise CircuitLayerContentionError(
+                    contended_layers=verdict.contended_layers,
+                    incumbent_id=incumbent_id,
+                    incumbent_name=name,
+                    requested_id=circuit.id,
+                    requested_name=circuit.name,
+                )
+
+        # 3. Claim. Composition marks BOTH sides — the rung header is
+        # suppressed for any circuit on a composed layer, which cannot be
+        # determined from the requester's rows alone.
+        composed = sorted(verdict.contended_layers) if verdict.has_contention else []
+        await registry.release(circuit.id)  # idempotent re-activation
+        await registry.claim(
+            circuit.id, wanted, composed=bool(composed), steering_keys=keys
+        )
+        if composed:
+            await registry.mark_composed(circuit.id, set(composed))
+            # LOUD: every override is logged naming both circuits and layers.
+            logger.warning(
+                "circuit_layer_overlap_ACCEPTED",
+                circuit_id=circuit.id,
+                circuit_name=circuit.name,
+                composed_layers=composed,
+                incumbents=[
+                    {"id": cid, "name": n}
+                    for cid, (n, _l) in verdict.incumbents.items()
+                ],
+                detail=(
+                    "these layers now carry the SUMMED effect of more than "
+                    "one circuit; the circuit-rung header is suppressed while "
+                    "any layer is composed"
+                ),
+            )
+        return composed
+
 
     async def _serve_full(
         self, circuit: Circuit, definition: CircuitDefinitionV1

@@ -1071,3 +1071,48 @@ class TestR2TheFrozenPlanIsFrozenAllTheWayDown:
         assert len(plan.members) == 2
         assert plan.members[0].layer == 10
         assert [m.layer for m in plan.members] == [10, 13]
+
+
+class TestR2DegenerateDefinitionsFailLOUDLY:
+    """F18 R2-13. The engine flattens whatever the document hands it. Probed
+    four degenerate shapes to confirm none produces a plausible-looking plan
+    from bad data — a silently wrong member list would steer the wrong feature.
+
+    All four fail loudly, three of them through `CircuitMember`'s own
+    validation. Pinned because that validation is the guard, and constructing
+    members via a looser path (a dict, a namespace, `model_construct`) would
+    remove it without any test noticing."""
+
+    def test_a_null_layer_is_refused_by_member_validation(self):
+        d = defn([mem(None, feature=feat(1))])
+        with pytest.raises(Exception) as exc:
+            CircuitSteeringEngine.serving_members(d)
+        assert "layer" in str(exc.value)
+
+    def test_a_null_feature_idx_is_refused(self):
+        d = defn([mem(10, feature=feat(None))])
+        with pytest.raises(Exception) as exc:
+            CircuitSteeringEngine.serving_members(d)
+        assert "feature_idx" in str(exc.value)
+
+    def test_the_schema_makes_a_null_member_list_unreachable(self):
+        """`members=None` raises a bare TypeError, which is the right answer
+        for a programming error — and the schema declares
+        `list[CircuitMemberV1] = Field(..., min_length=1)`, so a parsed
+        document can never present it."""
+        import inspect
+
+        from millm.api.schemas import circuit as schema_mod
+
+        src = inspect.getsource(schema_mod)
+        assert "members: list[CircuitMemberV1] = Field(..., min_length=1)" in src, (
+            "the member list became optional or empty-able; the engine's "
+            "TypeError on None is now reachable from a document"
+        )
+
+    def test_a_definition_with_no_sae_references_still_derives(self):
+        """Missing SAE references are a legitimate unbound state, not an
+        error: every member simply carries `sae_id=None`."""
+        d = defn([mem(10, feature=feat(1))], sae_by_layer={})
+        members = CircuitSteeringEngine.serving_members(d)
+        assert len(members) == 1 and members[0].sae_id is None

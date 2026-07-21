@@ -58,6 +58,19 @@ _STEERING_CIRCUIT_MEMO: "contextvars.ContextVar[Any]" = contextvars.ContextVar(
 )
 
 
+#: Set when a per-request circuit dial FAILED to apply, so the rung echo can be
+#: retracted. F18 R3-01: the header is computed at request entry and the apply
+#: happens later inside generation, so an apply failure left the response
+#: advertising `X-miLLM-Circuit-Rung: 2; language="causally validated (edge)"`
+#: for an intervention that provably did not run. `_steering_circuit`'s own
+#: docstring names that hazard — the R1 fix closed it for the LOOKUP path and
+#: left the apply-failure path open. Same ContextVar discipline as the memo:
+#: the service is a process singleton, so per-request state cannot live on it.
+_CIRCUIT_APPLY_FAILED: "contextvars.ContextVar[bool]" = contextvars.ContextVar(
+    "millm_circuit_apply_failed", default=False
+)
+
+
 def reset_steering_memo() -> None:
     """Drop any memoised steering-circuit verdict for this context.
 
@@ -65,8 +78,27 @@ def reset_steering_memo() -> None:
     across requests, so the reset is explicit — assuming a fresh context per
     request would repeat the very "it's request-scoped" mistake that made the
     previous memo process-wide.
+
+    Also clears the apply-failure flag, for the identical reason: a stale True
+    would suppress the rung header on an unrelated later request that steered
+    perfectly well.
     """
     _STEERING_CIRCUIT_MEMO.set(_MEMO_UNSET)
+    _CIRCUIT_APPLY_FAILED.set(False)
+
+
+def note_circuit_apply_failed() -> None:
+    """Record that this request's circuit dial did not apply."""
+    _CIRCUIT_APPLY_FAILED.set(True)
+
+
+def circuit_apply_failed() -> bool:
+    """True if this request's circuit dial failed to apply.
+
+    The rung echo MUST consult this before emitting a header: a rung phrase
+    describes evidence for an intervention, and no intervention ran.
+    """
+    return _CIRCUIT_APPLY_FAILED.get()
 
 
 class LoadedModelInfo:
@@ -985,8 +1017,25 @@ class InferenceService:
         except Exception as e:
             # The dial must never fail a chat request: restore what we saved
             # and fall through unsteered-by-this-dial.
+            # F18 R3-01: retract the rung echo. The header was computed at
+            # request entry, before this apply ran, so without this the
+            # response advertises `X-miLLM-Circuit-Rung: 2; language="causally
+            # validated (edge)"` for an intervention that provably did not
+            # happen — an evidence claim about nothing, on the one surface a
+            # dial client actually reads. `_steering_circuit`'s docstring names
+            # this hazard; R1 closed it for the LOOKUP path and left the
+            # apply-failure path open.
+            note_circuit_apply_failed()
+            # R3-05: `error=str(e)` alone cannot distinguish a real
+            # misconfiguration (SAESetIncompleteError — a member's SAE is gone)
+            # from a transient GPU hiccup, so an operator sees one undifferentiated
+            # WARN either way. Name the type and keep the traceback.
             logger.warning(
-                "circuit_dial_apply_failed", circuit_id=circuit.id, error=str(e)
+                "circuit_dial_apply_failed",
+                circuit_id=circuit.id,
+                error=str(e),
+                error_type=type(e).__name__,
+                exc_info=True,
             )
             self._restore_request_profile(
                 {"circuit": True, "epoch": saved_epoch,

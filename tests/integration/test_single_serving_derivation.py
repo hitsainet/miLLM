@@ -1377,3 +1377,257 @@ class TestR2TheEchoVerdictTracksAttachment:
             "the echo verdict survived a detach — a response would carry a "
             "rung header for an intervention that is no longer running"
         )
+
+
+class TestR3TheRungHeaderIsRetractedWhenTheApplyFails:
+    """F18 R3-01. THE HIGHEST-SEVERITY FINDING OF THIS INCREMENT.
+
+    `X-miLLM-Circuit-Rung` is computed at request ENTRY. The dial applies
+    LATER, inside generation, and its `except Exception` deliberately never
+    fails a chat request. So an apply failure left the response advertising
+
+        X-miLLM-Circuit-Rung: 2; language="causally validated (edge)"
+
+    for an intervention that provably did not run — an evidence claim about
+    nothing, on the one surface a dial client actually reads. The whole point of
+    the ladder is that "causally validated" is never said loosely.
+
+    `_steering_circuit`'s own docstring names this hazard and says R1 fixed it;
+    R1 fixed it for the LOOKUP path (nothing attached) and left the
+    APPLY-FAILURE path open. Two rounds of review read past it."""
+
+    def test_a_failed_apply_records_itself_for_the_request(self):
+        from millm.services.inference_service import (
+            circuit_apply_failed,
+            note_circuit_apply_failed,
+            reset_steering_memo,
+        )
+
+        reset_steering_memo()
+        assert circuit_apply_failed() is False
+        note_circuit_apply_failed()
+        assert circuit_apply_failed() is True
+
+    def test_the_flag_does_not_leak_into_the_next_request(self):
+        """Same ContextVar discipline as the memo. An ASGI server may reuse a
+        context, so a stale True would suppress the rung header on a later
+        request that steered perfectly well — turning an honesty fix into a
+        silent loss of disclosure."""
+        from millm.services.inference_service import (
+            circuit_apply_failed,
+            note_circuit_apply_failed,
+            reset_steering_memo,
+        )
+
+        note_circuit_apply_failed()
+        reset_steering_memo()
+        assert circuit_apply_failed() is False
+
+    @pytest.mark.asyncio
+    async def test_a_REAL_failing_apply_sets_the_flag(self, monkeypatch):
+        """R3-06 — this test replaced a source-grep, and the grep could not
+        fail. A mutation that emptied `note_circuit_apply_failed`'s BODY left
+        the call text at the dial site intact, so the grep passed while the
+        flag was never set and the header was never retracted. The defect the
+        fix exists to prevent was fully reintroduced under a green suite.
+
+        This drives the real dial with an apply that raises, and asserts the
+        observable outcome rather than the presence of a line of code."""
+        from millm.services import inference_service as inf_mod
+        from millm.services.inference_service import (
+            InferenceService,
+            circuit_apply_failed,
+            reset_steering_memo,
+        )
+
+        reset_steering_memo()
+
+        class Boom:
+            def set_circuit_steering(self, *a, **k):
+                raise RuntimeError("apply exploded")
+
+        from millm.services import sae_service as sae_mod
+
+        monkeypatch.setattr(
+            sae_mod.SAEService, "for_registry", staticmethod(lambda: Boom())
+        )
+
+        d = defn([mem(10, feature=feat(1))])
+        circuit = SimpleNamespace(
+            id="c", intensity=1.0, layers=[10], serving_mode="full",
+            rung=2, circuit_meta={}, name="n",
+        )
+
+        class Registry:
+            def entries(self):
+                return [
+                    SimpleNamespace(
+                        layer=10,
+                        sae_id="s10",
+                        sae=SimpleNamespace(
+                            get_steering_values=lambda: {},
+                            is_steering_enabled=lambda: False,
+                            clear_steering=lambda: None,
+                            set_steering_batch=lambda v: None,
+                            enable_steering=lambda e: None,
+                        ),
+                    )
+                ]
+
+            steering_epoch = 0
+
+            def by_layer(self, layer):
+                return None
+
+        monkeypatch.setattr(sae_mod, "AttachedSAEState", lambda: Registry())
+
+        svc = InferenceService.__new__(InferenceService)
+        monkeypatch.setattr(
+            InferenceService, "_circuit_definition", lambda self, c: d
+        )
+        monkeypatch.setattr(
+            InferenceService, "_restore_request_profile", lambda self, s: None
+        )
+
+        async def _active():
+            return circuit
+
+        svc._active_full_circuit = _active
+
+        assert circuit_apply_failed() is False
+        result = await svc._apply_request_circuit_steering(1.0, "req-1")
+        assert result is None, "a failed apply must not report a saved profile"
+        assert circuit_apply_failed() is True, (
+            "the apply raised and the request did not record it — the response "
+            "will still advertise a rung header for an intervention that never "
+            "ran"
+        )
+
+    def test_the_route_generates_BEFORE_deciding_on_the_header(self):
+        """Ordering is the whole fix: the header must be set after the apply
+        has had its chance to fail, not before."""
+        import inspect
+
+        from millm.api.routes.openai import chat
+
+        src = inspect.getsource(chat.create_chat_completion)
+        gen = src.index("result = await inference.create_chat_completion")
+        hdr = src.index('response.headers["X-miLLM-Circuit-Rung"]')
+        assert gen < hdr, (
+            "the rung header is still set before generation, so an apply "
+            "failure inside generation cannot retract it"
+        )
+        assert "not circuit_apply_failed()" in src, (
+            "the header is emitted without consulting the apply outcome"
+        )
+
+
+class TestR3NonFiniteIsRefusedAtTheSINK:
+    """F18 R3-02/04. `max(lo, min(hi, nan))` returns `hi` — a non-finite
+    intensity resolves to the CEILING, maximum-aggression steering, silently.
+
+    R2-04 guarded ONE of the four paths into that clamp (`plan_for`'s override).
+    The other three — `plan_for`'s DERIVED branch, `_serve_full`, and
+    `set_intensity`, which never builds a plan at all — were unguarded. An
+    authored `intensity_range` of "NaN" reaches the clamp from any imported
+    document, because `float("NaN")` does not raise.
+
+    The guard now lives at the single point of convergence. Fail CLOSED:
+    refusing to steer is correct where the alternative is steering at the
+    maximum the envelope allows."""
+
+    def test_the_clamp_still_resolves_nan_to_the_ceiling(self):
+        """The arithmetic fact the guard exists for. If this ever stops being
+        true the guard's rationale needs rereading, not silently keeping."""
+        assert max(0.0, min(2.0, float("nan"))) == 2.0
+
+    def test_set_circuit_steering_refuses_a_non_finite_intensity(self):
+        from millm.services.sae_service import SAEService
+
+        svc = SAEService.for_registry()
+        for bad in (float("nan"), float("inf"), float("-inf")):
+            with pytest.raises(ValueError, match="finite"):
+                svc.set_circuit_steering(
+                    members=[mem(10, feature=feat(1))], intensity=bad
+                )
+
+    def test_a_stored_non_finite_intensity_is_refused_on_the_DERIVED_path(self):
+        """R2-04's guard tests the override; this is the sibling door one line
+        below it. A circuit row holding NaN — a migration backfill, a direct
+        SQL UPDATE, an authored range of "NaN" — produced a plan carrying NaN
+        with no error at all."""
+        from millm.ml.circuit_steering import CircuitSteeringEngine
+
+        d = defn([mem(10, feature=feat(1))])
+        circuit = SimpleNamespace(
+            id="c", intensity=float("nan"), layers=[10],
+            serving_mode="full", rung=2, circuit_meta={}, name="n",
+        )
+        with pytest.raises(ValueError, match="finite"):
+            CircuitSteeringEngine().plan_for(d, circuit)
+
+    def test_UNSET_INTENSITY_still_passes_the_derived_guard(self):
+        """Absence and corruption are BOTH NaN, so they are told apart by
+        identity, not by value. A guard that rejected all NaN would break the
+        legitimate members-only derivation R1-12 introduced the sentinel for."""
+        from millm.ml.circuit_steering import (
+            UNSET_INTENSITY,
+            CircuitSteeringEngine,
+        )
+
+        d = defn([mem(10, feature=feat(1))])
+        circuit = SimpleNamespace(
+            id="c", intensity=None, layers=[10], serving_mode="full",
+            rung=2, circuit_meta={}, name="n",
+        )
+        plan = CircuitSteeringEngine().plan_for(d, circuit)
+        assert plan.intensity is UNSET_INTENSITY
+        assert plan.has_intensity is False
+
+
+class TestR3TheFreezeIsAnInvariantOfTheClass:
+    """F18 R3-03. R2-12 changed `plan_for` to pass tuples and annotated the
+    field `tuple[Any, ...]`. Dataclasses DO NOT ENFORCE ANNOTATIONS, so this
+    was accepted and the append succeeded:
+
+        ServingPlan(members=[1, 2], ...).members.append(3)   -> [1, 2, 3]
+
+    reproducing the exact half-frozen object R2-12 was written to eliminate,
+    for any consumer or test that builds a plan directly. R2's own test
+    (`test_members_cannot_be_appended_to`) asserted a property of `tuple` and
+    so could never have caught it."""
+
+    def test_a_list_passed_to_the_constructor_is_frozen(self):
+        from millm.ml.circuit_steering import ServingPlan
+
+        plan = ServingPlan(
+            members=[mem(10, feature=feat(1))],
+            intensity=1.0,
+            claimed_layers={10},
+            attached_layers={10},
+            claimed_entries=[SimpleNamespace(layer=10, sae_id="s")],
+        )
+        assert isinstance(plan.members, tuple)
+        assert isinstance(plan.claimed_entries, tuple)
+        assert isinstance(plan.claimed_layers, frozenset)
+        assert isinstance(plan.attached_layers, frozenset)
+        with pytest.raises(AttributeError):
+            plan.members.append(mem(11, feature=feat(2)))
+
+    def test_the_claim_identity_cannot_be_broken_by_a_direct_construction(self):
+        """The invariant F18 exists to make structural, asserted against the
+        construction path R2-12 left open rather than only the factory."""
+        from millm.ml.circuit_steering import ServingPlan
+
+        members = [mem(10, feature=feat(1))]
+        plan = ServingPlan(
+            members=members,
+            intensity=1.0,
+            claimed_layers=frozenset({10}),
+            attached_layers=frozenset({10}),
+        )
+        members.append(mem(99, feature=feat(2)))  # mutate the ORIGINAL list
+        assert plan.claimed_layers == frozenset(m.layer for m in plan.members), (
+            "the plan aliased the caller's list, so mutating it after "
+            "construction broke the claim-set identity"
+        )

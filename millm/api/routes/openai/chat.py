@@ -23,7 +23,11 @@ from millm.api.schemas.openai import (
     OpenAIErrorResponse,
 )
 from millm.core.logging import get_logger
-from millm.services.inference_service import InferenceService, reset_steering_memo
+from millm.services.inference_service import (
+    InferenceService,
+    circuit_apply_failed,
+    reset_steering_memo,
+)
 
 router = APIRouter()
 logger = get_logger(__name__)
@@ -150,6 +154,17 @@ async def create_chat_completion(
         response.headers["X-miLLM-Backend"] = backend
         if echo_intensity is not None:
             response.headers["X-miLLM-Steering-Intensity"] = echo_intensity
-        if echo_circuit_rung is not None:
+        # F18 R3-01: generate FIRST, then decide whether the rung header is
+        # still true. The dial applies inside generation and can fail; setting
+        # the header beforehand made the response advertise causal-validated
+        # evidence for an intervention that did not run. `circuit_apply_failed`
+        # is the request-scoped record of that outcome.
+        #
+        # Only the non-streaming branch can do this. The streaming branch must
+        # commit its headers before the first byte, so its header is a
+        # best-effort statement of intent — recorded as known debt in the F18
+        # review notes rather than papered over.
+        result = await inference.create_chat_completion(request)
+        if echo_circuit_rung is not None and not circuit_apply_failed():
             response.headers["X-miLLM-Circuit-Rung"] = echo_circuit_rung
-        return await inference.create_chat_completion(request)
+        return result

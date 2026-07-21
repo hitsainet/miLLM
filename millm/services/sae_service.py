@@ -6,6 +6,7 @@ components to manage SAE lifecycle operations including download, attach, and de
 """
 
 import asyncio
+import math
 import os
 import re
 import threading
@@ -649,7 +650,25 @@ class SAEService:
             # rather than silently pinning every serve to `lo`.
             logger.warning("circuit_intensity_bounds_inverted", min=lo, max=hi)
             lo, hi = 0.0, 2.0
-        intensity = max(lo, min(hi, float(intensity)))
+        # F18 R3-02: THE SINK. `max(lo, min(hi, nan))` returns `hi` — a
+        # non-finite intensity resolves to the CEILING, i.e. maximum-aggression
+        # steering, silently. R2-04 guarded `plan_for`'s override path; that is
+        # one of FOUR paths into this line. The other three — plan_for's DERIVED
+        # branch, `_serve_full`, and `set_intensity` (which never builds a plan
+        # at all) — were unguarded, and an authored `intensity_range` of "NaN"
+        # reaches here from any imported document with no privileged access.
+        #
+        # So the guard lives at the single point of convergence, not at a
+        # subset of the sources. Fail CLOSED: refuse to steer rather than steer
+        # at the ceiling, because the failure mode of guessing here is the most
+        # aggressive intervention the envelope permits.
+        intensity = float(intensity)
+        if not math.isfinite(intensity):
+            raise ValueError(
+                f"circuit intensity must be finite, got {intensity!r} — "
+                "refusing to steer (a non-finite value clamps to the maximum)"
+            )
+        intensity = max(lo, min(hi, intensity))
 
         # 1. Resolve every member's layer to a UNIQUE attached SAE ONCE, under a
         #    single consistent snapshot, and collect all offenders first so the

@@ -98,6 +98,29 @@ class ServingPlan:
     #: still attached.
     claimed_entries: tuple[Any, ...] = ()
 
+    def __post_init__(self) -> None:
+        """Make the freeze an invariant of the CLASS, not of one factory.
+
+        F18 R3-03: R2-12 changed `plan_for` to pass tuples and the annotation
+        to `tuple[Any, ...]`, but dataclasses do not enforce annotations —
+        `ServingPlan(members=[1, 2], ...)` was accepted and `.members.append(3)`
+        succeeded, reproducing the exact half-frozen object R2-12 was written to
+        eliminate. Any consumer or test constructing a plan directly (rather
+        than through `plan_for`) reintroduced it.
+
+        Coerce rather than reject: the sequence fields are all "whatever the
+        caller had", and a tuple() of an already-tuple is free. `object.__setattr__`
+        because the dataclass is frozen.
+        """
+        for field in ("members", "claimed_entries"):
+            value = getattr(self, field)
+            if not isinstance(value, tuple):
+                object.__setattr__(self, field, tuple(value))
+        for field in ("claimed_layers", "attached_layers"):
+            value = getattr(self, field)
+            if not isinstance(value, frozenset):
+                object.__setattr__(self, field, frozenset(value))
+
     @property
     def has_intensity(self) -> bool:
         """False when no serving intensity could be derived.
@@ -320,6 +343,26 @@ class CircuitSteeringEngine:
             if intensity is not None
             else self.serving_intensity(definition, circuit)
         )
+        # F18 R3-04: the R2-04 guard above tests `intensity` — the OVERRIDE.
+        # The DERIVED branch reaches this line unchecked, so a circuit row
+        # holding NaN (a migration backfill, a direct SQL UPDATE, an authored
+        # `intensity_range` of "NaN" — `float("NaN")` does not raise) produced
+        # a plan carrying NaN with no error, which clamps to the CEILING at the
+        # apply. The commit message for R2-04 said "refuses any non-finite
+        # OVERRIDE", and that narrower claim was exactly accurate: the sibling
+        # door one line below was open.
+        #
+        # `UNSET_INTENSITY` is itself NaN and must still pass — it is a
+        # deliberate absence-marker, and `has_intensity` is how a consumer
+        # tests for it. Absence and corruption are both NaN, so they are told
+        # apart by IDENTITY, not by value. `is` is exact here: UNSET_INTENSITY
+        # is a single module-level float object, and a NaN arriving from the
+        # database is never that object.
+        if resolved is not UNSET_INTENSITY and not math.isfinite(resolved):
+            raise ValueError(
+                f"serving intensity must be finite: {resolved} "
+                "(derived from the circuit document, not a request override)"
+            )
         claimed = self.claim_set(members)
         # ONE registry read for the whole plan (R1-08).
         entries = self._entries()

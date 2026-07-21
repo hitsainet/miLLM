@@ -46,6 +46,16 @@ export function CircuitsPage() {
     acknowledgeUnvalidated: boolean;
   } | null>(null);
 
+  // F19 R3-18: circuits already sacrificed to this activation attempt.
+  //
+  // "Deactivate incumbent" now retries, and the retry can be refused by a
+  // DIFFERENT incumbent — so the dialog reopens, looking identical to the
+  // first time. The loop is bounded only by the number of distinct incumbents,
+  // and every pass destroys a live circuit. Without a record, the operator
+  // cannot tell iteration three from iteration one, or notice they have now
+  // stopped three circuits to start one.
+  const [sacrificed, setSacrificed] = useState<string[]>([]);
+
   const handleContention = useCallback(
     (details: ContentionDetails, message: string) => {
       setContention((prev) => ({
@@ -199,8 +209,10 @@ export function CircuitsPage() {
           details={contention.details}
           message={contention.message}
           isBusy={isActivating || isDeactivating}
+          previouslyDeactivated={sacrificed}
           onCancel={() => {
             setContention(null);
+            setSacrificed([]);
             // R2-03: clear the pending click too. It was set on every Activate
             // and never reset, so a refusal arriving after an unrelated later
             // click could compose the WRONG circuit.
@@ -216,9 +228,13 @@ export function CircuitsPage() {
                   // and the reason they opened it was to get this circuit
                   // serving.
                   const incumbentId = contention.details.incumbent.id as string;
+                  const label = contention.details.incumbent.name ?? incumbentId;
                   const { circuitId, acknowledgeUnvalidated } = contention;
                   setContention(null);
                   setPending(null);
+                  setSacrificed((prev) =>
+                    prev.includes(label) ? prev : [...prev, label],
+                  );
                   void deactivateCircuit(incumbentId)
                     .then(() => {
                       activateCircuitQuiet({
@@ -241,6 +257,7 @@ export function CircuitsPage() {
                   const { circuitId, acknowledgeUnvalidated } = contention;
                   setContention(null);
                   setPending(null);
+                  setSacrificed([]);
                   activateCircuitQuiet({
                     circuitId,
                     // R2-02: carry the acknowledgement through, or the retry

@@ -51,6 +51,8 @@ interface ContentionDialogProps {
   onComposeAnyway?: () => void;
   onCancel: () => void;
   isBusy?: boolean;
+  /** F19 R3-18: circuits already deactivated for THIS activation attempt. */
+  previouslyDeactivated?: string[];
 }
 
 export function ContentionDialog({
@@ -60,6 +62,7 @@ export function ContentionDialog({
   onComposeAnyway,
   onCancel,
   isBusy = false,
+  previouslyDeactivated = [],
 }: ContentionDialogProps) {
   const incumbentName = details.incumbent?.name ?? 'another active circuit';
   const otherIncumbents = (details.all_incumbents ?? []).filter(
@@ -172,6 +175,27 @@ export function ContentionDialog({
               </ul>
               <p className="mt-2 text-amber-200/70">
                 {hazard.source} — {hazard.note}
+              </p>
+            </div>
+          )}
+
+          {/* R3-18: the retry can be refused by a DIFFERENT incumbent, so this
+              dialog reopens looking identical to the first time. Say what has
+              already been stopped, or the operator cannot tell iteration three
+              from iteration one — and may not notice they have stopped three
+              circuits to start one. */}
+          {previouslyDeactivated.length > 0 && (
+            <div
+              className="rounded border border-amber-900/60 bg-amber-950/20 p-2 text-xs"
+              data-testid="already-deactivated"
+            >
+              <p className="text-amber-200">
+                Already deactivated for this attempt:{' '}
+                <strong>{previouslyDeactivated.join(', ')}</strong>
+              </p>
+              <p className="mt-1 text-amber-200/80">
+                Each retry stops another live circuit. Consider composing, or
+                editing this circuit&apos;s layers instead.
               </p>
             </div>
           )}

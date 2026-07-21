@@ -300,6 +300,42 @@ describe('CircuitsPage — layer contention', () => {
     expect(DETAILS.all_incumbents).toBeUndefined();
   });
 
+  it('shows what has ALREADY been deactivated on a repeat refusal', async () => {
+    // R3-18. "Deactivate incumbent" retries, and the retry can be refused by a
+    // DIFFERENT incumbent — so the dialog reopens looking identical to the
+    // first time. Every pass destroys a live circuit, and without a record the
+    // operator cannot tell iteration three from iteration one, or notice they
+    // have stopped three circuits to start one.
+    await activateAndGetRefused();
+    deactivateMock.mockResolvedValue({ id: 'circ_abc' });
+
+    // The retry is refused by a SECOND incumbent.
+    activateMock.mockImplementation(async () => {
+      throw new ApiError('CIRCUIT_LAYER_CONTENTION', 'still contended', {
+        ...DETAILS,
+        incumbent: { id: 'circ_def', name: 'hedging-2' },
+      });
+    });
+
+    await userEvent.click(screen.getByTestId('deactivate-incumbent'));
+
+    await waitFor(() =>
+      expect(screen.getByTestId('already-deactivated')).toBeInTheDocument(),
+    );
+    const note = screen.getByTestId('already-deactivated');
+    expect(note).toHaveTextContent('fear→threat');
+    expect(note).toHaveTextContent('Each retry stops another live circuit');
+  });
+
+  it('does not show that note on a FIRST refusal', async () => {
+    // Specificity: an always-present warning would make every ordinary refusal
+    // read as an escalating loop. (Written as a real assertion after the first
+    // draft used `expect(true).toBe(true)` — a placeholder that cannot fail is
+    // the anti-pattern this round has been removing.)
+    await activateAndGetRefused();
+    expect(screen.queryByTestId('already-deactivated')).not.toBeInTheDocument();
+  });
+
   it('a COLLISION refusal offers no compose action', async () => {
     activateMock.mockImplementation(async () => {
       throw new ApiError('CIRCUIT_LAYER_CONTENTION', 'same feature', {

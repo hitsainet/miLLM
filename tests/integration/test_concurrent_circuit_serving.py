@@ -815,3 +815,86 @@ class TestR3TheWORSTOutcomeIsCountedToo:
         src = inspect.getsource(CircuitService.activate)
         handler = src[src.index("circuit_activate_rollback_clear_failed") - 400 :]
         assert "_note_claim_fault()" in handler[:400]
+
+
+class TestR3TheTwoCompositionAUTHORITIESAreBothReported:
+    """F19 R3-17. There are THREE authorities on "is a layer composed", and
+    they can disagree:
+
+      1. the OWNER MAP — what is contributing to each layer right now;
+      2. the CLAIMS TABLE — what the gate recorded, and what
+         `_any_layer_composed` reads to SUPPRESS the rung header;
+      3. the gate's verdict at activation time.
+
+    R2-11 widened `circuit_layers_composed` to count non-circuit co-tenants so
+    it would "agree with header suppression". It does not — suppression reads
+    the CLAIMS TABLE — so a cluster co-tenant makes the metric report composed
+    while the header is still emitted. That is the same two-authorities
+    defect R2-11 set out to remove, inverted.
+
+    Reporting both is the honest fix: equal is healthy, a gap is the signal.
+    """
+
+    async def test_a_runtime_composition_with_no_CLAIM_shows_a_gap(self):
+        from millm.api.routes.system.health import get_metrics
+
+        attach(10)
+        SAEService.for_registry().set_circuit_steering(
+            [CircuitMember(feature_idx=1, layer=10, budget=40.0, sign=1)],
+            1.0,
+            owner_id="circuit:A",
+        )
+        # A cluster co-tenant: RUNTIME composition, no claim row.
+        AttachedSAEState().apply_owner("cluster:p", {("sae-10", 10): {9: 5.0}})
+
+        metrics = await get_metrics()
+        assert metrics.circuit_layers_composed == 1, "runtime composition missed"
+        assert metrics.circuit_layers_composed_claimed == 0, (
+            "the claims table records no composition here, and that is the "
+            "point: the rung header is NOT suppressed for this layer, so a "
+            "metric reporting only the runtime view contradicts the headers"
+        )
+
+    async def test_a_CLAIMED_composition_is_reported(self, monkeypatch):
+        """The half the previous assertion could not see.
+
+        `assert claimed == 0` passes whether the gauge is computed or
+        hard-wired to zero — verified by a mutation that SURVIVED it. Only a
+        NON-zero case proves the claims table is actually read.
+        """
+        from millm.api.routes.system import health as health_mod
+
+        async def two_composed_layers():
+            return [
+                SimpleNamespace(layer=10, composed=True),
+                SimpleNamespace(layer=13, composed=True),
+                SimpleNamespace(layer=20, composed=False),
+            ]
+
+        class Registry:
+            def __init__(self, _session):
+                pass
+
+            live_claims = staticmethod(two_composed_layers)
+
+        monkeypatch.setattr(
+            "millm.services.circuit_claim_registry.CircuitClaimRegistry", Registry
+        )
+
+        class Session:
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *a):
+                return False
+
+        monkeypatch.setattr(
+            "millm.db.base.async_session_factory", lambda: Session()
+        )
+
+        metrics = await health_mod.get_metrics()
+        assert metrics.circuit_layers_composed_claimed == 2, (
+            "the claims table is not being read, so a drift between the gate "
+            "and the runtime is invisible — and the gauge that would show it "
+            "reports a constant"
+        )

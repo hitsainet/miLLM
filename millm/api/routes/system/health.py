@@ -474,6 +474,12 @@ class MetricsResponse(BaseModel):
     circuit_claim_faults: int = Field(
         0, description="Claim/steering divergences that could not be repaired"
     )
+    #: R3-17: what the CLAIMS TABLE says is composed — which is what actually
+    #: suppresses the rung header. `circuit_layers_composed` is the RUNTIME
+    #: view. Equal is healthy; a gap means the gate and the runtime disagree.
+    circuit_layers_composed_claimed: int = Field(
+        0, description="Layers the claims table records as composed"
+    )
     active_features: int = Field(0, description="Number of active steering features")
 
     # Monitoring metrics
@@ -513,6 +519,27 @@ def circuit_serving_snapshot() -> tuple[int, int, int]:
     Read from the in-memory owner map, not the claims table: /metrics is
     scraped continuously and must not add a DB round-trip per scrape, and the
     owner map is what is ACTUALLY steering.
+
+    F19 R3-17 — WHICH AUTHORITY THIS IS, stated precisely, because there are
+    three and they can disagree:
+
+      1. the OWNER MAP — what is contributing to each layer right now;
+      2. the CLAIMS TABLE — what the gate recorded and, via
+         `_any_layer_composed`, what actually SUPPRESSES the rung header;
+      3. the claim gate's own verdict at activation time.
+
+    R2-11 widened this metric to count non-circuit co-tenants so it would
+    "agree with header suppression". It does not: suppression reads the CLAIMS
+    TABLE, so a cluster co-tenant makes this metric report composed while the
+    header is still emitted.
+
+    That is the same two-authorities-disagreeing defect R2-11 set out to
+    remove, inverted. The honest fix is not to pick one — the runtime truth and
+    the recorded truth are both worth knowing, and a divergence between them is
+    itself the interesting signal. `circuit_layers_composed` reports the
+    RUNTIME (this map); `circuit_layers_composed_claimed` reports what the
+    claims table says. Equal is healthy; a gap means the gate and the runtime
+    have drifted.
     """
     state = AttachedSAEState()
     circuit_owners = [o for o in state._owners if o.startswith("circuit:")]
@@ -535,6 +562,28 @@ def circuit_serving_snapshot() -> tuple[int, int, int]:
         len(circuit_held),
         sum(1 for n in holders.values() if n > 1),
     )
+
+
+async def _claimed_composed_count() -> int:
+    """Layers the CLAIMS TABLE records as composed (F19 R3-17).
+
+    This is the authority that drives rung-header suppression, so reporting it
+    beside the runtime count is what makes a drift between them visible.
+
+    Costs one indexed read on the JSON metrics surface only — the Prometheus
+    surface is scraped far more often and stays DB-free. Degrades to 0 rather
+    than failing the endpoint: a metrics read must never be the reason /metrics
+    is down.
+    """
+    try:
+        from millm.db.base import async_session_factory
+        from millm.services.circuit_claim_registry import CircuitClaimRegistry
+
+        async with async_session_factory() as session:
+            claims = await CircuitClaimRegistry(session).live_claims()
+        return len({c.layer for c in claims if c.composed})
+    except Exception:
+        return 0
 
 
 def note_claims_degraded(reason: str) -> None:
@@ -687,6 +736,7 @@ async def get_metrics(
         circuit_layers_served=_served,
         circuit_layers_composed=_composed,
         circuit_claim_faults=metrics_counter.circuit_claim_faults,
+        circuit_layers_composed_claimed=await _claimed_composed_count(),
         total_requests=metrics_counter.total_requests,
         active_requests=metrics_counter.active_requests,
         request_errors=metrics_counter.request_errors,

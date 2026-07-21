@@ -572,3 +572,119 @@ class TestR1AMissingIntensityIsNotZero:
             defn([]), SimpleNamespace(intensity=1.0), intensity=0.0
         )
         assert plan.intensity == 0.0 and plan.has_intensity is True
+
+
+class TestR1TheEchoPredicateMatchesTheOldLogic:
+    """F18 R1-17. The predicate was rewritten from two hand-written checks
+    (members, then attachment) to one `plan.is_serveable`. Verified against the
+    old logic across every member/attachment shape — they agree — because a
+    silent change HERE would attach or withhold an evidence claim, which is the
+    one thing this predicate exists to get right."""
+
+    def _old(self, members, attached):
+        if not members:
+            return None
+        member_layers = {m.layer for m in members}
+        if not any(layer in member_layers for layer in attached):
+            return None
+        return "circuit"
+
+    @pytest.mark.parametrize(
+        "layers,attached",
+        [
+            ([10], [10]),          # match
+            ([10], []),            # nothing attached
+            ([], [10]),            # no members
+            ([10, 13], [10]),      # partially attached
+            ([10, 13], [99]),      # attached, but not to a claimed layer
+        ],
+    )
+    def test_old_and_new_agree(self, layers, attached):
+        d = defn([mem(n, feature=feat(1)) for n in layers])
+        plan = CircuitSteeringEngine(_Registry(attached)).plan_for(d)
+        new = "circuit" if plan.is_serveable else None
+        assert new == self._old(plan.members, attached)
+
+    def test_an_unreadable_registry_withholds_rather_than_propagates(self):
+        """R1-18, a recorded delta: the old code called `entries()` directly
+        and let a registry error propagate; the new path swallows it (logged)
+        and returns None. Under-claiming — the response loses its rung header
+        rather than carrying one the system cannot confirm. That is the right
+        direction for an evidence surface, and it is a real behaviour change,
+        so it is pinned rather than left implicit."""
+
+        class Broken:
+            def entries(self):
+                raise RuntimeError("registry unavailable")
+
+        plan = CircuitSteeringEngine(Broken()).plan_for(
+            defn([mem(10, feature=feat(1))])
+        )
+        assert plan.is_serveable is False
+
+
+class TestR1TheSignRuleEndToEnd:
+    """F18 R1-19, FPRD §9 criterion 5: the canonical sign rule asserted
+    DIRECTLY rather than inferred from an applied value.
+
+    A NEGATIVE authored strength is already directional. If the plan pre-applied
+    `sign`, a suppression (-3, sign -1) would become an amplification (+3) — a
+    steering change that looks plausible and is backwards. The rule lives in
+    `_directional_budget`; the engine's job is to carry both fields untouched
+    so that function can be the only place it is applied."""
+
+    @pytest.mark.parametrize(
+        "strength,sign,expected",
+        [
+            (-3.0, -1, -3.0),   # the double-application case
+            (-3.0, 1, -3.0),
+            (3.0, -1, -3.0),
+            (3.0, 1, 3.0),
+        ],
+    )
+    def test_the_plan_carries_and_directional_budget_applies(
+        self, strength, sign, expected
+    ):
+        from millm.services.sae_service import _directional_budget
+
+        d = defn([mem(10, feature=feat(1, strength=strength, sign=sign))])
+        member = CircuitSteeringEngine.serving_members(d)[0]
+
+        # Carried, not applied.
+        assert (member.budget, member.sign) == (strength, sign)
+        # And the one place that applies it gets the right answer.
+        assert _directional_budget(member.budget, member.sign) == expected
+
+    def test_the_plan_never_pre_applies_the_sign(self):
+        """The direct assertion criterion 5 asks for: a negative budget must
+        arrive at `_directional_budget` still negative."""
+        d = defn([mem(10, feature=feat(1, strength=-3.0, sign=-1))])
+        plan = CircuitSteeringEngine().plan_for(d, SimpleNamespace(intensity=1.0))
+        assert plan.members[0].budget == -3.0, (
+            "the flattening pre-applied the sign — a suppression would serve "
+            "as an amplification"
+        )
+
+
+class TestR1ClaimSetOnEveryCharacterizationFixture:
+    """F18 R1-20, FPRD §9 criterion 3: `claim_set` equals the distinct layers
+    of `serving_members` on every characterization shape, including the
+    both-sources (EC-18.1) and dedupe (EC-18.2) cases."""
+
+    @pytest.mark.parametrize(
+        "members",
+        [
+            [mem(10, feature=feat(1), expanded=[feat(2), feat(3)])],   # EC-18.1
+            [mem(10, feature=feat(1, 9.0), expanded=[feat(1, 2.0)])],  # EC-18.2
+            [mem(10, feature=feat(1)), mem(13, feature=feat(1))],
+            [mem(13, feature=feat(5)), mem(10, feature=feat(1))],
+            [mem(10, feature=None, expanded=None)],
+            [],
+        ],
+    )
+    def test_the_claim_set_is_exactly_the_member_layers(self, members):
+        d = defn(members)
+        derived = CircuitSteeringEngine.serving_members(d)
+        assert CircuitSteeringEngine.claim_set(derived) == frozenset(
+            m.layer for m in derived
+        )

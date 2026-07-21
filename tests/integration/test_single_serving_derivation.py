@@ -1177,3 +1177,118 @@ class TestR2TheServeabilityBoundary:
         plan = CircuitSteeringEngine(_Registry([10])).plan_for(d)
         assert plan.is_serveable is True
         assert plan.unattached_layers == frozenset({13})
+
+
+class TestR2TheFourSitesAgreeOnAREALISTICDefinition:
+    """F18 R2-16. The four-way identity tests above use simple fixtures. This
+    one uses the shape a real circuit presents: multi-layer, a cluster_ref with
+    BOTH an expansion and its own feature, mixed signs, per-layer SAE
+    references and a document budget that differs from the DB column — every
+    axis on which the four sites historically diverged, in one definition."""
+
+    def _realistic(self):
+        return defn(
+            [
+                mem(10, feature=feat(1, strength=40.0, sign=1, label="a"),
+                    expanded=[feat(2, strength=10.0, sign=-1, label="b")]),
+                mem(13, feature=feat(3, strength=30.0, sign=1, label="c")),
+            ],
+            sae_by_layer={10: sae_ref("sae-10"), 13: sae_ref("sae-13")},
+            budget=SimpleNamespace(intensity=1.5),
+        )
+
+    def _key(self, members):
+        return [
+            (m.layer, m.feature_idx, m.budget, m.sign, m.sae_id, m.label)
+            for m in members
+        ]
+
+    def test_set_intensity_and_activation_derive_byte_identical_members(self):
+        d = self._realistic()
+        via_set_intensity = CircuitSteeringEngine.serving_members(d)
+        via_activation = CircuitSteeringEngine(None).plan_for(
+            d, SimpleNamespace(intensity=99.0)
+        ).members
+        assert self._key(via_set_intensity) == self._key(via_activation)
+
+    def test_the_dial_derives_the_same_members_at_a_different_lambda(self):
+        d = self._realistic()
+        activation = CircuitSteeringEngine(None).plan_for(
+            d, SimpleNamespace(intensity=99.0)
+        )
+        dialled = CircuitSteeringEngine(None).plan_for(
+            d, SimpleNamespace(intensity=99.0), intensity=0.5
+        )
+        assert self._key(dialled.members) == self._key(activation.members)
+        assert (activation.intensity, dialled.intensity) == (1.5, 0.5)
+
+    def test_the_document_budget_beats_the_db_column_on_this_shape(self):
+        """F14-R1-01 on a realistic definition rather than a minimal one."""
+        plan = CircuitSteeringEngine(None).plan_for(
+            self._realistic(), SimpleNamespace(intensity=99.0)
+        )
+        assert plan.intensity == 1.5
+
+    def test_the_mixed_sign_expansion_survives_intact(self):
+        """A -1 sign inside an expansion, carried untouched all the way — the
+        combination that would flip if any site pre-applied it."""
+        members = CircuitSteeringEngine.serving_members(self._realistic())
+        by_idx = {m.feature_idx: (m.budget, m.sign) for m in members}
+        assert by_idx[2] == (10.0, -1)
+        assert by_idx[1] == (40.0, 1)
+
+
+class TestR2TheResponseSHAPEIsUnchanged:
+    """F18 R2-17. The FTASKS is explicit: any API response-shape delta from
+    this refactor is a defect, not a feature. Diffed `_serve_full`'s returned
+    keys against the pre-refactor commit — identical.
+
+    (The diff initially showed `circuit_id` as added; it comes from R2-01's
+    error `details`, not the response dict. Checked before reporting, because a
+    naive key-grep over the whole method body cannot tell a response from an
+    exception payload.)"""
+
+    def _returned_keys(self, source: str, fn: str) -> set:
+        """Keys of the dict literal the function RETURNS, not every string in
+        its body."""
+        import re
+
+        start = source.index(f"    async def {fn}(")
+        end = source.index("\n    async def ", start + 10)
+        body = source[start:end]
+        ret = body.index("return {")
+        return set(re.findall(r'"([a-z_]+)":', body[ret:]))
+
+    def test_serve_full_returns_exactly_the_pre_refactor_keys(self):
+        import subprocess
+
+        from millm.services import circuit_service
+
+        pre = subprocess.run(
+            ["git", "show", "2804b4f:millm/services/circuit_service.py"],
+            capture_output=True, text=True, cwd="/home/x-sean/app/miLLM",
+        ).stdout
+        if not pre:
+            pytest.skip("pre-refactor revision unavailable")
+
+        import inspect
+
+        post = inspect.getsource(circuit_service)
+        assert self._returned_keys(post, "_serve_full") == self._returned_keys(
+            pre, "_serve_full"
+        ), "the activation response shape changed — a defect per the FTASKS"
+
+    def test_bound_layers_still_reports_the_documents_layers(self):
+        """R1-07: the claim-set identity is what the DIAL relies on;
+        `bound_layers` is a contract field reporting the document's declared
+        layers, and moving it to `claimed_layers` would be the response-shape
+        delta the FTASKS forbids."""
+        import inspect
+
+        from millm.services.circuit_service import CircuitService
+
+        src = inspect.getsource(CircuitService._serve_full)
+        assert '"bound_layers": definition.layers()' in src, (
+            "bound_layers changed source — if that is intended, it is an API "
+            "change and needs a contract note, not a refactor comment"
+        )

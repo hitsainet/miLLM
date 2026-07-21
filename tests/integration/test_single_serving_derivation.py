@@ -1631,3 +1631,85 @@ class TestR3TheFreezeIsAnInvariantOfTheClass:
             "the plan aliased the caller's list, so mutating it after "
             "construction broke the claim-set identity"
         )
+
+
+class TestR3AFailedOperatorDialDoesNotStrandInFlightRequests:
+    """F18 R3-07/08. `set_intensity` bumps the steering epoch under
+    `if not reapplied` — and a FAILED apply also leaves `reapplied` False.
+
+    R3-07: an operator dial that raised advanced the epoch as though it were
+    the authoritative write. Every in-flight request whose snapshot straddles
+    that bump then sees a mismatch, SKIPS ITS RESTORE (by design — the epoch
+    guard means "someone wrote after me, don't clobber them"), and strands its
+    transient per-request lambda in global state PERMANENTLY. A failed operator
+    action should change nothing; instead it silently made other requests'
+    temporary overrides permanent, and the operator was told only that the
+    apply failed.
+
+    R3-08, found BY the R3-07 fix: `applied_epoch` is bound on exactly two
+    paths (a successful apply, and the bump) and read unconditionally at
+    `still_current`. The failed-apply path reached that read with it UNBOUND —
+    `UnboundLocalError` out of a method whose contract on this path is "report
+    the divergence rather than letting an exception imply nothing landed",
+    after the DB write had already committed. It was latent only because the
+    unconditional bump happened to bind it as a side effect."""
+
+    @pytest.mark.asyncio
+    async def test_a_raising_apply_neither_bumps_the_epoch_nor_explodes(self):
+        from millm.services import circuit_service as cs_mod
+        from millm.services.sae_service import AttachedSAEState
+
+        meta = {
+            "kind": "mistudio.circuit-definition",
+            "schema_version": "1",
+            "name": "n",
+            "saes": [
+                {"layer": 10, "n_features": 8192, "mistudio_sae_id": "sae-10"}
+            ],
+            "members": [
+                {"layer": 10, "feature": {"feature_idx": 1, "strength": 40.0}}
+            ],
+            "edges": [],
+            "budget": {
+                "layers": {}, "intensity": 1.0, "intensity_range": [0.0, 2.0],
+            },
+        }
+        circuit = SimpleNamespace(
+            id="c", name="n", layers=[10], serving_mode="full",
+            intensity=1.0, rung=2, circuit_meta=meta, is_active=True,
+            description=None, serveable=True, per_sae_warnings=[],
+            edge_count=0, provenance={}, created_at=None, updated_at=None,
+        )
+
+        class Boom:
+            def set_circuit_steering(self, *a, **k):
+                raise RuntimeError("apply exploded")
+
+        class Repo:
+            async def get(self, _id):
+                return circuit
+
+            async def update(self, _id, **fields):
+                for k, v in fields.items():
+                    setattr(circuit, k, v)
+                return circuit
+
+        svc = cs_mod.CircuitService.__new__(cs_mod.CircuitService)
+        svc._sae_service = Boom()
+        svc.repository = Repo()
+
+        before = AttachedSAEState().steering_epoch
+
+        # R3-08: this must NOT raise. The DB write has already committed by the
+        # time the apply runs, so the contract is to report the divergence.
+        result = await svc.set_intensity(circuit, 1.5)
+
+        assert AttachedSAEState().steering_epoch == before, (
+            "a FAILED apply advanced the steering epoch — every in-flight "
+            "request now skips its restore and strands its transient lambda"
+        )
+        # And the operator is told the truth about what happened.
+        text = " ".join(result.get("warnings", []))
+        assert "could not be applied" in text and "differ" in text, (
+            f"the apply failure was not reported to the operator: {result!r}"
+        )

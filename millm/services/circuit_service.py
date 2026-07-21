@@ -815,6 +815,35 @@ class CircuitService:
         refreshed = await self.repository.get(circuit.id)
 
         reapplied = False
+        #: F18 R3-07: distinct from `reapplied`. A FAILED apply also leaves
+        #: `reapplied` False, and the `if not reapplied` bump below then treats
+        #: it as the authoritative write — advancing the steering epoch for an
+        #: action that did not land. Every in-flight request whose snapshot
+        #: straddles that bump sees a mismatch, SKIPS ITS RESTORE, and strands
+        #: its transient per-request λ in global state permanently. A failed
+        #: operator dial should change nothing; instead it silently made other
+        #: requests' overrides permanent.
+        #:
+        #: So the bump is owned by the branches that legitimately have nothing
+        #: else to bump (slice-fallback, no-op) — not by "anything that didn't
+        #: set reapplied".
+        apply_failed = False
+        #: F18 R3-08. Bound on exactly two paths — a successful apply (from the
+        #: outcome) and the authoritative bump — and read unconditionally at
+        #: `still_current` below. The FAILED-apply path reached that read with
+        #: it unbound: `UnboundLocalError`, raised out of a method whose entire
+        #: contract on this path is "report the divergence rather than letting
+        #: an exception imply nothing landed" — AFTER the DB write committed.
+        #:
+        #: It was latent before R3-07 only because the unconditional
+        #: `if not reapplied` bump happened to bind it as a side effect. Fixing
+        #: the epoch bug exposed it, which is the argument for fixing the
+        #: pre-existing defect rather than only the regression.
+        #:
+        #: Seeded from the LIVE epoch: nothing of ours landed, so "is the live
+        #: epoch still what our action produced" is truthfully answered by
+        #: whatever is live right now.
+        applied_epoch = AttachedSAEState().steering_epoch
         warnings: list[str] = []
         if serving_full and definition is not None:
             # R2: the DB write above already committed the new intensity, so a
@@ -844,9 +873,11 @@ class CircuitService:
                     else AttachedSAEState().steering_epoch
                 )
             except Exception as exc:
+                apply_failed = True
                 logger.warning(
                     "circuit_set_intensity_apply_failed",
                     circuit_id=circuit.id, error=str(exc),
+                    error_type=type(exc).__name__, exc_info=True,
                 )
                 warnings.append(
                     f"The intensity was recorded but could not be applied to "
@@ -868,9 +899,11 @@ class CircuitService:
         # did (the slice-fallback and no-op branches), and either way capture
         # the epoch OUR action produced so the check below tests whether
         # something landed AFTER us rather than reporting our own bump.
-        if not reapplied:
+        if not reapplied and not apply_failed:
             # Nothing above bumped (slice-fallback / no-op), so this action is
-            # the authoritative write and owns the bump.
+            # the authoritative write and owns the bump. R3-07: a FAILED apply
+            # is excluded — it landed nothing, so bumping would strand every
+            # in-flight request's transient λ (see `apply_failed` above).
             applied_epoch = AttachedSAEState().bump_steering_epoch(
                 "circuit_set_intensity"
             )

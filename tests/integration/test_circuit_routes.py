@@ -272,12 +272,41 @@ class TestActivation:
 
 class TestIntensityAndLifecycle:
     async def test_set_active_intensity(self, client, mock_service):
-        mock_service.get_active.return_value = make_summary(is_active=True)
+        # F20 R2-03: the route reads `list_active()` so it can REFUSE when
+        # several circuits serve — a single-element list is the dialable case.
+        mock_service.list_active.return_value = [make_summary(is_active=True)]
         async with client:
             r = await client.put(
                 "/api/circuits/active/intensity", json={"intensity": 1.5}
             )
         assert r.json()["data"]["intensity"] == 1.5
+
+    async def test_dialling_is_REFUSED_while_several_circuits_serve(
+        self, client, mock_service
+    ):
+        """F20 R2-03. This read `get_active()` — the most recently updated row —
+        so with two circuits serving it silently dialled whichever was touched
+        LAST and reported a λ change for a circuit the caller never named.
+
+        F19 R3-06 applied this rule to the per-request dial and the rung
+        header; the management dial was left behind, and the MCP tool
+        description then PROMISED a refusal that did not exist."""
+        mock_service.list_active.return_value = [
+            make_summary(id="circ_1", name="one", is_active=True),
+            make_summary(id="circ_2", name="two", is_active=True),
+        ]
+        async with client:
+            r = await client.put(
+                "/api/circuits/active/intensity", json={"intensity": 1.5}
+            )
+        body = r.json()
+        assert body["success"] is False
+        assert body["error"]["code"] == "AMBIGUOUS_ACTIVE_CIRCUIT"
+        named = {c["id"] for c in body["error"]["details"]["active_circuits"]}
+        assert named == {"circ_1", "circ_2"}, (
+            "the refusal must name WHICH circuits are serving, or the operator "
+            "cannot act on it"
+        )
 
     async def test_no_active_circuit_refused_in_envelope(self, client):
         async with client:
@@ -353,7 +382,7 @@ class TestR1Fixes:
     async def test_intensity_response_carries_reapplied(self, client, mock_service):
         """`reapplied` was silently dropped by the route filter — a slice
         circuit reported a new intensity the steering never received."""
-        mock_service.get_active.return_value = make_summary(is_active=True)
+        mock_service.list_active.return_value = [make_summary(is_active=True)]
         mock_service.set_intensity.return_value = {
             **make_summary(is_active=True, serving_mode="slice_fallback", intensity=0.4),
             "reapplied": False,

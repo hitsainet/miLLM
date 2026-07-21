@@ -512,12 +512,38 @@ async def set_active_circuit_intensity(
     body: SetCircuitIntensityRequest,
 ) -> ApiResponse[CircuitIntensityResponse]:
     """One global λ scales every layer of the active circuit together."""
-    active = await service.get_active()
-    if active is None:
+    # F20 R2-03: REFUSE while several circuits serve.
+    #
+    # This read `get_active()`, which returns the MOST RECENTLY UPDATED row —
+    # so with two circuits serving it silently dialled whichever was touched
+    # last, and reported a λ change for a circuit the caller never named.
+    #
+    # F19 R3-06 already applied this rule to the per-request dial and the rung
+    # header: when several circuits serve, no single one describes the
+    # response. The management dial was left behind, and the MCP tool
+    # description then PROMISED the refusal that did not exist.
+    actives = await service.list_active()
+    if not actives:
         return ApiResponse.fail(
             code="NO_ACTIVE_CIRCUIT",
             message="No circuit is currently serving",
         )
+    if len(actives) > 1:
+        names = ", ".join(f"'{c['name']}'" for c in actives)
+        return ApiResponse.fail(
+            code="AMBIGUOUS_ACTIVE_CIRCUIT",
+            message=(
+                f"{len(actives)} circuits are serving ({names}), so there is "
+                "no single 'active circuit' to dial. Deactivate all but one, "
+                "or dial the layers through the cluster that owns them."
+            ),
+            details={
+                "active_circuits": [
+                    {"id": c["id"], "name": c["name"]} for c in actives
+                ]
+            },
+        )
+    active = actives[0]
     try:
         result = await service.set_intensity(
             active["id"],

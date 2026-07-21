@@ -68,3 +68,63 @@ jobs:
             --ignore=tests/unit/api/test_exception_handlers.py \
             -m "not slow" \
             -v --no-cov --tb=short
+
+  cross-repo-contract:
+    # F20 R2-02: the cross-repo guard existed and NOTHING RAN IT.
+    #
+    # R1-14 added `MILLM_REQUIRE_CROSS_REPO_CHECKS=1` to turn the skip into a
+    # failure, and then nothing set it — the mechanism was built and left
+    # unwired, which is this increment's signature defect. A switch nobody
+    # flips is a skip with extra steps.
+    #
+    # This job checks out BOTH repos and runs the guard with the switch ON, so
+    # a contract row that claims a tool miStudio does not register FAILS here
+    # rather than skipping in silence.
+    name: Contract ↔ MCP registry
+    runs-on: ubuntu-latest
+    env:
+      SECRET_KEY: ci-test-secret-key-minimum-32-characters-long
+      DATA_DIR: /tmp/millm-ci
+      MILLM_REQUIRE_CROSS_REPO_CHECKS: '1'
+      MISTUDIO_REPO: ${{ github.workspace }}/miStudio
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: miLLM
+
+      - name: Check out miStudio (the MCP server lives there)
+        uses: actions/checkout@v4
+        continue-on-error: true
+        id: sibling
+        with:
+          repository: Onegaishimas/miStudio
+          path: miStudio
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install the contract-guard dependencies
+        # Only what the guard needs: pytest to run it, mcp to import the
+        # sibling registry. Not the full ML stack.
+        run: pip install pytest mcp pydantic pydantic-settings
+
+      - name: Run the cross-repo guard
+        # If the sibling checkout failed (a fork PR without access), the guard
+        # cannot run — say so LOUDLY rather than passing. A green tick here
+        # would mean the opposite of what it says.
+        run: |
+          if [ "${{ steps.sibling.outcome }}" != "success" ]; then
+            echo "::error::miStudio checkout failed — the contract guard could"
+            echo "::error::not run. This is UNVERIFIED, not verified-clean."
+            exit 1
+          fi
+          cd miLLM
+          # `-p no:cacheprovider --noconftest`: these two files check DOCS and
+          # a SIBLING REGISTRY. They need no database, no Redis and no app
+          # settings, and loading miLLM's conftest would demand all three —
+          # turning a documentation guard into an integration test.
+          python -m pytest --noconftest -p no:cacheprovider -v \
+                 tests/unit/test_mcp_contract_consistency.py \
+                 tests/unit/test_mcp_tool_paths_are_real.py

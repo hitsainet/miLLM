@@ -1819,3 +1819,147 @@ class TestR3APartialApplyRollsBack:
         assert saes[12].get_steering_values() == {}, (
             "the failing layer's state is expected to be unrecoverable here"
         )
+
+
+class TestR3TheAuthoredBudgetWinsThroughEITHERSHAPE:
+    """F18 R3-11. THE MODULE'S OWN REASON FOR EXISTING, VIOLATED INSIDE IT.
+
+    `serving_intensity` read the authored budget with attribute access only.
+    A DICT-shaped budget — reachable, because `CircuitDefinitionV1` sets
+    `extra="allow"` and `_parse_stored` on a partially-shaped `circuit_meta`
+    yields one — found no `.intensity`, fell through, and silently served the
+    STALE DB COLUMN instead of the authored value.
+
+    Verified by execution before the fix: authored 1.7 was served as 0.3.
+
+    That is F14-R1-01 reappearing inside the module whose docstring says it
+    exists to make F14-R1-01 structurally impossible. `_resolve_circuit_intensity`
+    reads this same field as a dict, which is the proof both shapes are live in
+    this codebase rather than a hypothetical."""
+
+    def test_a_dict_budget_still_beats_the_db_column(self):
+        from millm.ml.circuit_steering import CircuitSteeringEngine
+
+        d = SimpleNamespace(
+            members=[], edges=[], budget={"intensity": 1.7},
+            sae_for_layer=lambda layer: None, layers=lambda: [],
+        )
+        assert CircuitSteeringEngine().serving_intensity(
+            d, SimpleNamespace(intensity=0.3)
+        ) == 1.7, (
+            "the authored budget lost to the stale DB column because it was a "
+            "dict — F14-R1-01, resurrected"
+        )
+
+    def test_an_object_budget_still_beats_the_db_column(self):
+        from millm.ml.circuit_steering import CircuitSteeringEngine
+
+        d = SimpleNamespace(
+            members=[], edges=[], budget=SimpleNamespace(intensity=1.7),
+            sae_for_layer=lambda layer: None, layers=lambda: [],
+        )
+        assert CircuitSteeringEngine().serving_intensity(
+            d, SimpleNamespace(intensity=0.3)
+        ) == 1.7
+
+    def test_an_authored_ZERO_still_wins_through_a_dict(self):
+        """The `is not None` distinction, through the shape that lost it. A
+        budget of 0.0 is a legitimate authored 'off' and must not fall through
+        to the column — the original reason this read is explicit."""
+        from millm.ml.circuit_steering import CircuitSteeringEngine
+
+        d = SimpleNamespace(
+            members=[], edges=[], budget={"intensity": 0.0},
+            sae_for_layer=lambda layer: None, layers=lambda: [],
+        )
+        assert CircuitSteeringEngine().serving_intensity(
+            d, SimpleNamespace(intensity=0.3)
+        ) == 0.0
+
+
+class TestR3AMalformedRegistryCannotKillAChatRequest:
+    """F18 R3-12. The `_entries()` guard covered `state.entries()` but NOT the
+    reads that touch each entry: `frozenset(e.layer for e in entries)` and the
+    claimed-entries filter both ran outside it.
+
+    So a malformed entry raised AttributeError straight out of `plan_for`. On
+    the echo path that reaches `_steering_circuit_uncached`, which has no
+    handler of its own — an unhandled exception on the CHAT HOT PATH, defeating
+    the "no observability nicety may ever fail a chat request" contract the
+    degradation exists to keep. Verified by execution."""
+
+    def test_an_entry_missing_its_layer_degrades_instead_of_raising(self):
+        from millm.ml.circuit_steering import CircuitSteeringEngine
+
+        class Malformed:
+            def entries(self):
+                return [SimpleNamespace(sae_id="s")]  # no .layer
+
+        engine = CircuitSteeringEngine()
+        engine._state = Malformed()
+        d = SimpleNamespace(
+            members=[], edges=[], budget=None,
+            sae_for_layer=lambda layer: None, layers=lambda: [],
+        )
+        plan = engine.plan_for(d, SimpleNamespace(intensity=1.0))
+        assert plan.attached_layers == frozenset()
+        assert plan.is_serveable is False
+
+    def test_a_raising_registry_still_degrades(self):
+        """The half that was already guarded — kept so a refactor cannot trade
+        one for the other."""
+        from millm.ml.circuit_steering import CircuitSteeringEngine
+
+        class Broken:
+            def entries(self):
+                raise RuntimeError("registry is gone")
+
+        engine = CircuitSteeringEngine()
+        engine._state = Broken()
+        d = SimpleNamespace(
+            members=[], edges=[], budget=None,
+            sae_for_layer=lambda layer: None, layers=lambda: [],
+        )
+        assert engine.plan_for(
+            d, SimpleNamespace(intensity=1.0)
+        ).attached_layers == frozenset()
+
+
+class TestR3GoingDarkIsNeverSILENT:
+    """F18 R3-13/14. Two degradation paths returned None with no operator
+    signal at all.
+
+    `_circuit_definition` swallowed ANY parse failure bare: a corrupt
+    `circuit_meta` made both the dial and the rung echo degrade to "nothing is
+    steering" with NO warning, NO counter and NO header. The circuit still
+    reads ACTIVE in the management API and steers nothing, forever — the only
+    way to find out is to notice the model stopped behaving differently.
+
+    `_active_full_circuit` returned None on any DB exception, making "no
+    circuit is active" (the normal case, logged nowhere) indistinguishable from
+    "we could not find out".
+
+    Going quietly dark is the failure mode this codebase treats as worse than
+    raising."""
+
+    def test_an_unparseable_definition_is_logged(self):
+        import inspect
+
+        from millm.services.inference_service import InferenceService
+
+        src = inspect.getsource(InferenceService._circuit_definition)
+        assert "circuit_definition_unparseable" in src, (
+            "a corrupt circuit document still degrades silently"
+        )
+        assert "exc_info=True" in src, "the reason is lost"
+
+    def test_the_lookup_failure_says_it_is_not_the_normal_case(self):
+        import inspect
+
+        from millm.services.inference_service import InferenceService
+
+        src = inspect.getsource(InferenceService._active_full_circuit)
+        handler = src[src.index("except Exception as e:"):]
+        assert "error_type" in handler and "exc_info=True" in handler, (
+            "a DB blip is still indistinguishable from a clean 'nothing active'"
+        )

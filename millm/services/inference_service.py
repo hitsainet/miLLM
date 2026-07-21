@@ -779,7 +779,24 @@ class InferenceService:
                 return None
             return circuit
         except Exception as e:
-            logger.warning("active_circuit_lookup_failed", error=str(e))
+            # F18 R3-14: returning None here is indistinguishable from "no
+            # circuit is active", which is the NORMAL case and is logged
+            # nowhere. So during a Postgres blip every dialled request silently
+            # degrades to unsteered AND drops the rung header, and an operator
+            # watching the logs cannot tell "nothing is active" from "we could
+            # not find out". `error=str(e)` alone loses the type and the
+            # traceback that would say which it was.
+            logger.warning(
+                "active_circuit_lookup_failed",
+                error=str(e),
+                error_type=type(e).__name__,
+                detail=(
+                    "could not determine whether a circuit is active — this "
+                    "request served UNSTEERED and dropped its rung header; "
+                    "this is NOT the same as no circuit being active"
+                ),
+                exc_info=True,
+            )
             return None
 
     @staticmethod
@@ -790,6 +807,26 @@ class InferenceService:
         try:
             return CircuitDefinitionV1.model_validate(circuit.circuit_meta)
         except Exception:
+            # F18 R3-13: this returned None with NO LOG ANYWHERE. A corrupt
+            # `circuit_meta` therefore made both the dial and the rung echo
+            # degrade to "nothing is steering" with zero operator-visible
+            # signal — no warning, no counter, no header. The circuit still
+            # reads ACTIVE in the management API and steers nothing, forever,
+            # and the only way to discover it is to notice the model stopped
+            # behaving differently.
+            #
+            # Going quietly dark is the failure mode this codebase treats as
+            # worse than raising. Say it, once per call, with the reason.
+            logger.warning(
+                "circuit_definition_unparseable",
+                circuit_id=getattr(circuit, "id", None),
+                detail=(
+                    "the stored circuit document no longer validates against "
+                    "the v1 contract — this circuit reads active but cannot "
+                    "steer; re-import it from miStudio"
+                ),
+                exc_info=True,
+            )
             return None
 
     async def _steering_circuit(self) -> Optional[Any]:

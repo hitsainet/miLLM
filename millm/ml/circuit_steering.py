@@ -250,8 +250,25 @@ class CircuitSteeringEngine:
         known-good value instead.
         """
         budget = getattr(definition, "budget", None)
-        if budget is not None and getattr(budget, "intensity", None) is not None:
-            return budget.intensity
+        # F18 R3-11: read the budget through BOTH shapes. This read was
+        # attribute-only, so a dict-shaped budget — reachable, because
+        # `CircuitDefinitionV1` sets `extra="allow"` and `_parse_stored` on a
+        # partially-shaped `circuit_meta` yields one — found no `.intensity`,
+        # fell through, and silently served the STALE DB COLUMN instead of the
+        # authored value. Verified by execution: authored 1.7 served as 0.3.
+        #
+        # That is F14-R1-01 reappearing INSIDE the module whose docstring says
+        # it exists to make F14-R1-01 structurally impossible.
+        # `_resolve_circuit_intensity` reads this same field as a dict, which
+        # is the proof both shapes are live in this codebase rather than a
+        # hypothetical.
+        authored = (
+            budget.get("intensity")
+            if isinstance(budget, dict)
+            else getattr(budget, "intensity", None)
+        )
+        if budget is not None and authored is not None:
+            return authored
         # R1-12: with no document budget AND no circuit row there is no basis
         # at all. The pre-move expression raised AttributeError here; returning
         # a bare 0.0 would mean "serve nothing", turning a loud failure into a
@@ -291,7 +308,22 @@ class CircuitSteeringEngine:
         if state is None:
             return []
         try:
-            return list(state.entries())
+            entries = list(state.entries())
+            # F18 R3-12: the guard covered `entries()` but NOT the reads that
+            # touch each entry. `frozenset(e.layer for e in entries)` and the
+            # claimed-entries filter ran outside it, so a malformed entry
+            # (missing `.layer`) raised AttributeError straight out of
+            # `plan_for`. On the echo path that reaches
+            # `_steering_circuit_uncached`, which has no handler of its own —
+            # an unhandled exception on the CHAT HOT PATH, defeating the "no
+            # observability nicety may ever fail a chat request" contract this
+            # degradation exists to keep. Verified by execution.
+            #
+            # So the guard now spans the read AND the field access, by forcing
+            # the layer read here where it is already protected.
+            for entry in entries:
+                entry.layer  # noqa: B018 — the access IS the validation
+            return entries
         except Exception:
             logger.warning("circuit_attachment_registry_unreadable", exc_info=True)
             return []

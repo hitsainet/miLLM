@@ -23,6 +23,9 @@ interface CircuitCardProps {
   onExport: () => void;
   isActivating?: boolean;
   isDeactivating?: boolean;
+  /** F19: layers of THIS circuit that another circuit also holds. Non-empty
+   *  means the rung header is suppressed for responses it steers. */
+  composedLayers?: number[];
 }
 
 /** Rung → badge colour. Deliberately NOT a language map: the phrase itself
@@ -49,6 +52,7 @@ export function CircuitCard({
   onExport,
   isActivating = false,
   isDeactivating = false,
+  composedLayers = [],
 }: CircuitCardProps) {
   const [showDetail, setShowDetail] = useState(false);
 
@@ -63,12 +67,32 @@ export function CircuitCard({
             <Share2 className="w-4 h-4 text-cyan-400 shrink-0" />
             <span className="font-medium text-slate-100 truncate">{circuit.name}</span>
 
-            {/* Evidence rung — server-rendered phrase, verbatim. */}
-            <span data-testid="rung-badge">
-              <Badge variant={RUNG_VARIANT[circuit.rung] ?? 'default'} size="sm">
-                {circuit.rung_language}
-              </Badge>
-            </span>
+            {/* Evidence rung — server-rendered phrase, verbatim.
+                F19 R2-14: HIDDEN while this circuit sits on a composed layer.
+                The runtime suppresses `X-miLLM-Circuit-Rung` in exactly that
+                case, because no single circuit's evidence describes a summed
+                response — so a card still showing the rung would contradict
+                the header and tell the operator the evidence still applies. */}
+            {composedLayers.length === 0 ? (
+              <span data-testid="rung-badge">
+                <Badge variant={RUNG_VARIANT[circuit.rung] ?? 'default'} size="sm">
+                  {circuit.rung_language}
+                </Badge>
+              </span>
+            ) : (
+              <span
+                data-testid="composed-badge"
+                title={
+                  `Layers ${composedLayers.join(', ')} carry more than one ` +
+                  `circuit. The rung header is omitted while composed, because ` +
+                  `no single circuit's evidence describes the response.`
+                }
+              >
+                <Badge variant="warning" size="sm">
+                  composed · rung suppressed
+                </Badge>
+              </span>
+            )}
 
             {!circuit.validated && (
               <span data-testid="unvalidated-badge">

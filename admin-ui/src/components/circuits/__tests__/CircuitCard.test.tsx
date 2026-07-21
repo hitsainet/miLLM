@@ -57,7 +57,11 @@ function makeCircuit(overrides: Partial<CircuitSummary> = {}): CircuitSummary {
 
 const noop = () => {};
 
-function renderCard(circuit: CircuitSummary, onActivate = vi.fn()) {
+function renderCard(
+  circuit: CircuitSummary,
+  onActivate = vi.fn(),
+  composedLayers: number[] = [],
+) {
   const queryClient = new QueryClient({
     defaultOptions: { queries: { retry: false } },
   });
@@ -65,6 +69,7 @@ function renderCard(circuit: CircuitSummary, onActivate = vi.fn()) {
     <QueryClientProvider client={queryClient}>
       <CircuitCard
         circuit={circuit}
+        composedLayers={composedLayers}
         onActivate={onActivate}
         onDeactivate={noop}
         onDelete={noop}
@@ -184,5 +189,33 @@ describe('CircuitActivateControl (via CircuitCard)', () => {
     renderCard(makeCircuit({ is_active: true, serving_mode: 'full' }));
     expect(screen.getByText('Deactivate')).toBeInTheDocument();
     expect(screen.queryByTestId('activate-button')).not.toBeInTheDocument();
+  });
+});
+
+describe('CircuitCard — composed layers (F19 R2-14)', () => {
+  it('HIDES the rung badge while a layer is composed', () => {
+    // The runtime suppresses `X-miLLM-Circuit-Rung` in exactly this case,
+    // because no single circuit's evidence describes a summed response. A card
+    // still showing the rung would contradict the header and tell the operator
+    // the evidence still applies.
+    renderCard(makeCircuit({ is_active: true }), vi.fn(), [13]);
+    expect(screen.queryByTestId('rung-badge')).not.toBeInTheDocument();
+    expect(screen.getByTestId('composed-badge')).toHaveTextContent(
+      'rung suppressed',
+    );
+  });
+
+  it('shows the rung badge when NOTHING is composed', () => {
+    renderCard(makeCircuit({ is_active: true }), vi.fn(), []);
+    expect(screen.getByTestId('rung-badge')).toBeInTheDocument();
+    expect(screen.queryByTestId('composed-badge')).not.toBeInTheDocument();
+  });
+
+  it('never shows BOTH badges', () => {
+    // A rung next to "composed" is the contradiction this exists to prevent.
+    renderCard(makeCircuit({ is_active: true }), vi.fn(), [13]);
+    const both =
+      screen.queryByTestId('rung-badge') && screen.queryByTestId('composed-badge');
+    expect(both).toBeFalsy();
   });
 });

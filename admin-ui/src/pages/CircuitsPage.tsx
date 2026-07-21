@@ -155,6 +155,12 @@ export function CircuitsPage() {
               <CircuitCard
                 key={circuit.id}
                 circuit={circuit}
+                // R2-14: which of THIS circuit's layers are shared. Derived
+                // from the claims the strip already fetches, so the card and
+                // the strip cannot disagree.
+                composedLayers={claims
+                  .filter((c) => c.circuit_id === circuit.id && c.composed)
+                  .map((c) => c.layer)}
                 isActivating={isActivating}
                 isDeactivating={isDeactivating}
                 onActivate={(ack) => {

@@ -50,6 +50,109 @@ Dial a serving circuit per request with the `steering_intensity` extension field
 [the OpenAI-compatible API reference](../api/openai-compatible.md) and
 [the Open WebUI tutorial](../tutorials/open-webui.md).
 
+## Serving more than one circuit (layer contention)
+
+Several circuits can serve at once, **provided they do not share a layer**.
+
+### What a claim is
+
+When a circuit activates it **claims** every layer it steers. A claim is a hold
+on that layer, recorded in the database, released when the circuit is
+deactivated. `GET /api/circuits/claims` — and the strip at the top of the
+Circuits page — shows who holds what.
+
+### Why the unit is the LAYER, not the feature
+
+Steering adds into a single per-layer vector:
+
+```
+modified = original + Σ(strength × decoder_direction)
+```
+
+Two circuits steering *different* features on the same layer still interact,
+because both contribute to the same sum. Nothing bounds that sum — the ±200
+clamp bounds each member individually, not the total.
+
+This is not a theoretical concern. In close-out testing on
+LFM2.5-1.2B-Instruct, holding prompt, seed and temperature fixed:
+
+| Configuration | Result |
+|---|---|
+| 1 layer, 1 member at strength 5 | coherent, indistinguishable from baseline |
+| **2 layers**, 1 member each at strength 5 | **degenerate** — repeated tokens |
+
+Two steered layers destroyed generation at a strength two orders of magnitude
+below the per-member clamp. *(One model, one fixture — indicative, not
+exhaustive.)* That is why sharing a layer is refused by default rather than
+composed by default.
+
+### When activation is refused
+
+You will see one of two refusals, and the difference matters.
+
+**Contention** — the layers overlap but the features differ. Two ways forward:
+
+1. **Deactivate the circuit that holds the layer.** The refusal names it.
+2. **Compose anyway** — accept that both circuits contribute to those layers.
+
+**Collision** — both circuits steer the *same* feature on the same layer. There
+is **no override**. The two strengths would merge into one value belonging to
+neither author, so the only fix is to edit one circuit's members. The refusal
+lists the exact `(layer, feature)` pairs.
+
+### What composition costs
+
+Composing is a real decision, not a formality:
+
+- The layers carry the **summed** effect of both circuits. Neither author
+  designed for the combination.
+- **The `X-miLLM-Circuit-Rung` header disappears.** A rung describes *one*
+  circuit's evidence; when two circuits sum on a layer, no single rung
+  describes what the model produced. Emitting either would overclaim. The
+  Circuits page badges composed layers so you can see this has happened.
+- Every override is logged with both circuit names and the affected layers.
+
+### `CIRCUIT_ALLOW_CONCURRENT`
+
+Concurrent serving is **off by default** for one release. With the flag off, a
+contention refusal names configuration as the reason and **cannot be
+overridden** — "Compose anyway" will not appear. Set
+`CIRCUIT_ALLOW_CONCURRENT=true` to enable it.
+
+Treat enabling it as a considered change rather than a toggle: it is what makes
+composition reachable at all, and composition is the state in which the runtime
+stops making evidence claims about what the model produced.
+
+### If a layer stays claimed by a circuit that is not running
+
+Claims are released on deactivation and on restart. If one is ever stuck — an
+activation refused naming a circuit that is plainly not serving — release it
+without restarting:
+
+```
+POST /api/circuits/claims/release?circuit_id=circ_abc
+```
+
+It touches only that circuit's claims. There is deliberately no
+"release everything": that would strip live circuits of the protection they
+are relying on.
+
+### Watching for composition
+
+Three metrics, on `/metrics` and `/metrics/prometheus`:
+
+| Metric | Meaning |
+|---|---|
+| `millm_circuits_serving` | circuits currently steering |
+| `millm_circuit_layers_served` | distinct layers they steer |
+| `millm_circuit_layers_composed` | layers carrying **more than one** contributor |
+
+`millm_circuit_layers_composed > 0` is the one worth alerting on — it is
+exactly the condition in which the rung header is suppressed.
+
+Note that `millm_circuit_breaker_*` is the **HuggingFace HTTP** breaker and has
+nothing to do with circuit serving.
+
 ## Edge Sensing
 
 With a circuit active, **edge sensing** watches live traffic for moments where an edge's

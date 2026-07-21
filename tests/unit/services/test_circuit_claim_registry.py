@@ -213,10 +213,18 @@ class TestClaimAndRelease:
         await _circuit(test_session, "cB")
         reg = CircuitClaimRegistry(test_session)
         await reg.claim("cA", {10})
+        # R1-19: the requester must actually HOLD the layer before it can be
+        # composed. The original version of this test called `mark_composed`
+        # with only the incumbent present, which the scoping guard now
+        # correctly refuses — marking an unshared layer composed would strip
+        # its exclusivity protection for no reason. The real gate claims first,
+        # so this now mirrors it.
+        await reg.claim("cB", {10}, composed=True)
         await reg.mark_composed("cB", {10})
 
         live = {c.circuit_id: c.composed for c in await reg.live_claims()}
         assert live["cA"] is True, "the incumbent's row was not marked composed"
+        assert live["cB"] is True
 
     async def test_steering_keys_round_trip(self, test_session):
         await _circuit(test_session, "cA")
@@ -337,4 +345,60 @@ class TestR1ComposedIsNotPermanent:
         assert all(c.composed for c in survivors), (
             "the layer is still shared by two circuits — un-flagging it would "
             "restore a rung header that no single circuit's evidence supports"
+        )
+
+
+class TestR1MarkComposedIsSCOPED:
+    """F19 R1-19. `mark_composed` updated EVERY live claim on every layer
+    passed in, with no check that the layer is genuinely shared.
+
+    Composed rows are EXCLUDED from the partial unique index, so marking a row
+    composed permanently removes its exclusivity protection. A circuit that
+    never consented to composition could lose its exclusive hold, and a third
+    circuit could then claim its layer unopposed.
+
+    The gate only ever passes contended layers, so this was safe by the
+    CALLER's discipline rather than by construction.
+    """
+
+    async def test_an_UNSHARED_layer_is_not_marked(self, test_session):
+        await _circuit(test_session, "cA")
+        reg = CircuitClaimRegistry(test_session)
+        await reg.claim("cA", {10})
+
+        await reg.mark_composed("cA", {10})
+
+        claim = next(c for c in await reg.live_claims() if c.layer == 10)
+        assert claim.composed is False, (
+            "a layer with ONE holder was marked composed, stripping its "
+            "exclusivity protection so a third circuit could take it unopposed"
+        )
+
+    async def test_a_genuinely_shared_layer_IS_marked(self, test_session):
+        await _circuit(test_session, "cA")
+        await _circuit(test_session, "cB")
+        reg = CircuitClaimRegistry(test_session)
+        await reg.claim("cA", {10})
+        await reg.claim("cB", {10}, composed=True)
+
+        await reg.mark_composed("cB", {10})
+
+        assert all(c.composed for c in await reg.live_claims())
+
+
+class TestR1ClaimsCarryTheirNAME:
+    """F19 R1-20. `LayerClaim.circuit_name` was declared and never populated,
+    so every consumer got claims identifiable only by opaque id — and the one
+    place that needed names reached through the API boundary to call the
+    PRIVATE `_names_for`."""
+
+    async def test_live_claims_populate_the_name(self, test_session):
+        await _circuit(test_session, "cA", name="fear→threat")
+        reg = CircuitClaimRegistry(test_session)
+        await reg.claim("cA", {10})
+
+        claim = next(c for c in await reg.live_claims() if c.circuit_id == "cA")
+        assert claim.circuit_name == "fear→threat", (
+            "the field that makes a claim intelligible to an operator is "
+            "still empty"
         )

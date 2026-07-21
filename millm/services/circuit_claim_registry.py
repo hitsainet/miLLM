@@ -99,12 +99,21 @@ class CircuitClaimRegistry:
                 )
             )
         ).scalars().all()
+
+        # F19 R1-20: POPULATE `circuit_name`. The field was declared on
+        # `LayerClaim` and never filled, so every consumer got claims
+        # identifiable only by opaque id — and the one place that needed names
+        # (the /claims route) reached through the API boundary to call the
+        # PRIVATE `_names_for`. The one field that makes a claim intelligible
+        # to an operator was declared and left empty.
+        names = await self._names_for({r.circuit_id for r in rows})
         return [
             LayerClaim(
                 circuit_id=r.circuit_id,
                 layer=r.layer,
                 composed=bool(r.composed),
                 steering_keys=tuple(r.steering_keys or ()),
+                circuit_name=names.get(r.circuit_id),
             )
             for r in rows
         ]
@@ -335,10 +344,50 @@ class CircuitClaimRegistry:
         """
         if not layers:
             return
+        # F19 R1-19: mark ONLY layers this circuit actually shares.
+        #
+        # This updated every live claim on every layer passed in, with no
+        # circuit predicate and no check that the layer is genuinely shared.
+        # Composed rows are EXCLUDED from the partial unique index, so marking
+        # a row composed permanently removes its exclusivity protection — a
+        # circuit that never consented to composition could lose its exclusive
+        # hold and a third circuit could then claim its layer unopposed.
+        #
+        # The gate only ever passes contended layers today, so this was safe by
+        # the CALLER's discipline rather than by construction. Make it
+        # structural: a layer with one holder is not composed, whatever the
+        # caller asks.
+        shared: list[int] = []
+        for layer in sorted(layers):
+            holders = (
+                await self._session.execute(
+                    sa.select(CircuitLayerClaim).where(
+                        CircuitLayerClaim.layer == layer,
+                        CircuitLayerClaim.released_at.is_(None),
+                    )
+                )
+            ).scalars().all()
+            if len(holders) > 1:
+                shared.append(layer)
+            else:
+                logger.warning(
+                    "circuit_mark_composed_skipped_unshared_layer",
+                    circuit_id=circuit_id,
+                    layer=layer,
+                    detail=(
+                        "only one circuit holds this layer, so marking it "
+                        "composed would strip its exclusivity protection for "
+                        "no reason"
+                    ),
+                )
+
+        if not shared:
+            return
+
         await self._session.execute(
             sa.update(CircuitLayerClaim)
             .where(
-                CircuitLayerClaim.layer.in_(sorted(layers)),
+                CircuitLayerClaim.layer.in_(shared),
                 CircuitLayerClaim.released_at.is_(None),
             )
             .values(composed=True)

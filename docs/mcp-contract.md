@@ -1,6 +1,6 @@
 # miLLM ↔ Unified MCP Server Contract
 
-**Status:** Normative for miLLM Feature 9 (Unified MCP) and Feature 15 (Circuit Edge Sensing / circuit MCP surface). **Version:** 1.3 (2026-07-20)
+**Status:** Normative for miLLM Feature 9 (Unified MCP) and Feature 15 (Circuit Edge Sensing / circuit MCP surface) and Feature 19 (Concurrent Circuit Serving). **Version:** 1.4 (2026-07-21)
 **Consumer:** the unified MCP server that ships in the miStudio repo
 (`backend/src/mcp_server/`), exposing `millm_runtime` / `millm_clusters` /
 `millm_sensing` / `millm_circuits` tool categories against a miLLM deployment.
@@ -245,6 +245,69 @@ ever lost data.
 
 As in §4a-quater, none of these move an edge's rung or soften rung language.
 Truncation and throttling are load-shedding outcomes, never evidence.
+
+### 4a-sexies. Layer contention and composition (v1.4 — Feature 19)
+
+Several circuits may serve AT ONCE, provided their claim sets are disjoint. The
+unit of contention is the **LAYER**, not the feature, because steering composes
+additively into one per-layer dict:
+
+```
+modified = original + Σ(strength_i × W_dec[i])
+```
+
+Two circuits steering DIFFERENT features on the same layer still contend — both
+contribute to the same residual-stream sum, and nothing bounds that sum (the
+±200 clamp bounds each member individually).
+
+**New endpoints (additive):**
+
+| Endpoint | Purpose |
+|---|---|
+| `GET /api/circuits/claims` | `[{layer, circuit_id, circuit_name, composed, steering_keys}]` — who holds which layer. Not answerable from the circuit list: two circuits can both be active while contending for nothing. |
+| `POST /api/circuits/{id}/activate?allow_layer_overlap=true` | Compose onto a held layer. Refused by default. |
+
+**New refusal code — `CIRCUIT_LAYER_CONTENTION`** (200 + `success:false`, house
+style: the operation does not apply, nothing is missing).
+
+Two shapes, and an agent MUST distinguish them by `details.overridable`:
+
+| `overridable` | Meaning | Agent behaviour |
+|---|---|---|
+| `true` | **Contention** — same layer, different features. | May retry with `allow_layer_overlap=true`, but only on explicit human instruction. `details.measured_hazard` MUST be surfaced to the human first. |
+| `false` | **Collision** — same `(layer, feature_idx)`. One strength would silently overwrite the other and the served value would belong to neither author. | **Never retry.** `details.override_param` is ABSENT precisely so it cannot be guessed. Report `details.colliding_keys` and stop. |
+
+`details.measured_hazard` carries the close-out measurement behind the default
+refusal, including its own caveat:
+
+```json
+{ "source": "GPU close-out 2026-07-20, LFM2.5-1.2B-Instruct",
+  "one_layer_at_strength_5": "coherent, indistinguishable from baseline",
+  "two_layers_at_strength_5": "degenerate output (repeated tokens)",
+  "note": "one model, one fixture — indicative, not exhaustive" }
+```
+
+An agent must relay the `note` with the finding. Presenting the measurement as
+more than one model and one fixture is the same overclaim the evidence ladder
+exists to prevent.
+
+**Composition SUPPRESSES the rung header.** While any served layer is composed,
+`X-miLLM-Circuit-Rung` is OMITTED — the rung describes ONE circuit's evidence,
+and when two circuits sum on a layer no single rung describes what the user
+received. An agent must not substitute either circuit's rung for the missing
+header, and must not describe a composed response as carrying that circuit's
+evidence. This is the same rule that already omits the header for
+slice-fallback.
+
+`GET /api/circuits/{id}/activate` responses carry `composed_layers` and
+`allowed_layer_overlap` when an override was used, so the acceptance is
+recorded in the response and not only in the server log.
+
+**`CIRCUIT_ALLOW_CONCURRENT`** gates the whole capability and defaults FALSE for
+one release. With it off, a contention refusal names configuration as the
+reason and CANNOT be overridden — an agent that retries with
+`allow_layer_overlap=true` will be refused identically. It must report the
+configuration requirement rather than looping.
 
 ### 4b. Circuit per-request dial (v1.1 — Feature 14)
 

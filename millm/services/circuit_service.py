@@ -599,10 +599,52 @@ class CircuitService:
         # suppressed for any circuit on a composed layer, which cannot be
         # determined from the requester's rows alone.
         composed = sorted(verdict.contended_layers) if verdict.has_contention else []
+
+        # F19 R1-18: the self-release and the claim must be ATOMIC.
+        #
+        # `release()` flushes, and it is OUTSIDE `claim()`'s savepoint. So a
+        # re-activating circuit that then LOST a race had already dropped its
+        # own claims: the savepoint unwound only the INSERT, leaving it holding
+        # NOTHING while still `is_active=True` and still steering. Its layers
+        # became claimable by anyone, and the next activation on them would
+        # compose silently with no override ever requested.
+        #
+        # Snapshot what it held so the release can be undone if the claim
+        # fails. `mark_composed` state is re-derived by the claim itself, so
+        # only the layer set needs restoring.
+        held_before = [
+            c for c in await registry.live_claims() if c.circuit_id == circuit.id
+        ]
         await registry.release(circuit.id)  # idempotent re-activation
-        await registry.claim(
-            circuit.id, wanted, composed=bool(composed), steering_keys=keys
-        )
+        try:
+            await registry.claim(
+                circuit.id, wanted, composed=bool(composed), steering_keys=keys
+            )
+        except Exception:
+            # Put back exactly what this circuit held, so a lost race leaves it
+            # where it started rather than stripped of its own layers.
+            if held_before:
+                try:
+                    await registry.claim(
+                        circuit.id,
+                        {c.layer for c in held_before},
+                        composed=any(c.composed for c in held_before),
+                        steering_keys={
+                            c.layer: set(c.steering_keys) for c in held_before
+                        },
+                    )
+                except Exception:
+                    logger.error(
+                        "circuit_claim_restore_failed",
+                        circuit_id=circuit.id,
+                        layers=sorted(c.layer for c in held_before),
+                        detail=(
+                            "this circuit is active and steering but now holds "
+                            "no claims — its layers can be taken by anyone"
+                        ),
+                        exc_info=True,
+                    )
+            raise
         if composed:
             await registry.mark_composed(circuit.id, set(composed))
             # LOUD: every override is logged naming both circuits and layers.

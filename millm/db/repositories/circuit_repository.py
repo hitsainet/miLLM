@@ -131,12 +131,28 @@ class CircuitRepository:
     async def set_active(
         self, circuit_id: str, *, serving_mode: str | None = None
     ) -> Circuit | None:
-        """Activate a circuit, deactivating any other active circuit first.
+        """Activate a circuit. Does NOT disturb other active circuits.
 
-        The partial unique index enforces one active row; deactivating first
-        keeps the write ordering safe.
+        F19 R2-01: this called `deactivate_all()` first, and that single line
+        defeated the entire feature at the DB layer while every owner-map and
+        claim-registry test passed.
+
+        Activating two DISJOINT circuits left exactly one active row — proven
+        by execution: the claim gate passed, both circuits steered through the
+        owner map, and the first circuit's row read `is_active=False` with
+        `serving_mode=None`. The model was steering with nothing recording it,
+        `GET /circuits/active` reported only the second, and no operator could
+        stop the first through any surface that reads the row.
+
+        R1-04 fixed the READER (`get_active` no longer raises on two rows, and
+        `list_active` was added) and never touched the WRITER, so
+        `list_active()` returned a list that could never hold more than one
+        element.
+
+        Exclusivity is now enforced where it belongs: `circuit_layer_claims`
+        arbitrates per LAYER, which is the unit contention actually has. The
+        single-active index was dropped by migration 013 for the same reason.
         """
-        await self.deactivate_all()
         circuit = await self.get(circuit_id)
         if circuit is None:
             return None

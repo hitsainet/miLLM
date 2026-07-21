@@ -883,3 +883,87 @@ class TestF19R1TheCoTenantCopyIsTRUE:
             "the warning no longer says WHY the cluster had to go: it would "
             "be summed with nothing adjudicating the combination"
         )
+
+
+class TestF19R2TwoCircuitsAreACTIVEInTheDATABASE:
+    """F19 R2-01/02/03. The whole feature, asserted through the row-writing
+    path that nothing exercised.
+
+    Every concurrent-serving test drove `AttachedSAEState._owners` (in memory)
+    or the claim registry. NONE touched `CircuitRepository`. That fixture set
+    agrees by construction and never runs the writer — which is why
+    `set_active`'s `deactivate_all()` survived R1 and defeated the feature at
+    the DB layer while 20 findings were fixed above it.
+    """
+
+    async def test_activating_two_disjoint_circuits_leaves_BOTH_active(
+        self, service, monkeypatch
+    ):
+        monkeypatch.setattr(
+            "millm.core.config.settings.CIRCUIT_ALLOW_CONCURRENT", True
+        )
+        attach("sae-10", 10, make_sae())
+        attach("sae-13", 13, make_sae())
+        attach("sae-20", 20, make_sae())
+        attach("sae-23", 23, make_sae())
+
+        first = await service.import_definition(load_fixture())
+        await service.activate(first.id)
+
+        doc = load_fixture()
+        doc["name"] = "disjoint circuit"
+        for sae in doc["saes"]:
+            sae["layer"] += 10
+        for member in doc["members"]:
+            member["layer"] += 10
+        for edge in doc.get("edges", []):
+            for endpoint in ("up", "down"):
+                if endpoint in edge:
+                    edge[endpoint]["layer"] += 10
+        second = await service.import_definition(doc)
+        await service.activate(second.id)
+
+        actives = {c.id for c in await service.repository.list_active()}
+        assert actives == {first.id, second.id}, (
+            f"only {actives} is active — the second activation deactivated the "
+            "first, so one circuit steers the model with no row recording it "
+            "and no operator surface can stop it"
+        )
+
+    async def test_both_steer_AND_both_report_active(self, service, monkeypatch):
+        """The row and the runtime must agree. A circuit steering without an
+        active row is unstoppable through the API; an active row that is not
+        steering is a lie in the other direction."""
+        from millm.services.sae_service import AttachedSAEState
+
+        monkeypatch.setattr(
+            "millm.core.config.settings.CIRCUIT_ALLOW_CONCURRENT", True
+        )
+        attach("sae-10", 10, make_sae())
+        attach("sae-13", 13, make_sae())
+        attach("sae-20", 20, make_sae())
+        attach("sae-23", 23, make_sae())
+
+        first = await service.import_definition(load_fixture())
+        await service.activate(first.id)
+
+        doc = load_fixture()
+        doc["name"] = "disjoint circuit"
+        for sae in doc["saes"]:
+            sae["layer"] += 10
+        for member in doc["members"]:
+            member["layer"] += 10
+        for edge in doc.get("edges", []):
+            for endpoint in ("up", "down"):
+                if endpoint in edge:
+                    edge[endpoint]["layer"] += 10
+        second = await service.import_definition(doc)
+        await service.activate(second.id)
+
+        state = AttachedSAEState()
+        for circuit in (first, second):
+            assert state.owner_keys(f"circuit:{circuit.id}"), (
+                f"{circuit.name} is not steering"
+            )
+        active_ids = {c.id for c in await service.repository.list_active()}
+        assert active_ids == {first.id, second.id}

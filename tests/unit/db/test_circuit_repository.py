@@ -122,19 +122,36 @@ class TestCircuitRepository:
         assert (await repo.get_by_name("alpha")).id == "c1"
         assert await repo.get("nope") is None
 
-    async def test_set_active_deactivates_previous(self, test_session):
+    async def test_set_active_LEAVES_other_circuits_active(self, test_session):
+        """F19 R2-01. This asserted the OPPOSITE — that activating a second
+        circuit deactivates the first — and in doing so it PINNED THE DEFECT
+        rather than preventing it.
+
+        `set_active` called `deactivate_all()` first, which defeated the entire
+        feature at the DB layer while every owner-map and claim-registry test
+        passed. Activating two DISJOINT circuits left exactly one active row:
+        both steered through the owner map, but the first's row read inactive,
+        so the model steered with nothing recording it and no operator could
+        stop it through any surface that reads the row.
+
+        Exclusivity now lives in `circuit_layer_claims`, per LAYER, which is
+        the unit contention actually has. This test is INVERTED rather than
+        deleted so the supersession is recorded where the old rule lived.
+        """
         repo = CircuitRepository(test_session)
         await repo.create(id="c1", name="one", circuit_meta={}, layers=[1])
         await repo.create(id="c2", name="two", circuit_meta={}, layers=[2])
 
         await repo.set_active("c1", serving_mode="full")
-        assert (await repo.get_active()).id == "c1"
-
-        # Activating the second must deactivate the first (index safety).
         await repo.set_active("c2", serving_mode="slice_fallback")
-        active = await repo.get_active()
-        assert active.id == "c2" and active.serving_mode == "slice_fallback"
-        assert (await repo.get("c1")).is_active is False
+
+        actives = {c.id: c for c in await repo.list_active()}
+        assert set(actives) == {"c1", "c2"}, (
+            "activating a second circuit deactivated the first — concurrent "
+            "serving is impossible no matter what the claim registry decides"
+        )
+        assert actives["c1"].serving_mode == "full"
+        assert actives["c2"].serving_mode == "slice_fallback"
 
     async def test_deactivate_clears_serving_mode(self, test_session):
         repo = CircuitRepository(test_session)

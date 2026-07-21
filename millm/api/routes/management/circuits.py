@@ -131,15 +131,16 @@ async def list_claims(service: CircuitServiceDep) -> ApiResponse[list[dict]]:
         )
         return ApiResponse.ok([])
 
-    registry = CircuitClaimRegistry(session)
-    claims = await registry.live_claims()
-    names = await registry._names_for({c.circuit_id for c in claims})
+    # R1-20: `live_claims()` now populates `circuit_name` itself, so this no
+    # longer reaches through the API boundary into the registry's private
+    # `_names_for`.
+    claims = await CircuitClaimRegistry(session).live_claims()
     return ApiResponse.ok(
         [
             {
                 "layer": c.layer,
                 "circuit_id": c.circuit_id,
-                "circuit_name": names.get(c.circuit_id),
+                "circuit_name": c.circuit_name,
                 "composed": c.composed,
                 "steering_keys": list(c.steering_keys),
             }

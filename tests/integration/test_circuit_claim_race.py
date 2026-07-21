@@ -159,3 +159,72 @@ class TestTheRefusalNamesTheWinner:
             "layers 10 and 14 were free — naming them as contended sends the "
             "operator to fix circuits that were never in conflict"
         )
+
+
+class TestARE_ACTIVATINGCircuitKeepsItsClaims:
+    """F19 R1-18. The self-release before a re-claim flushed OUTSIDE the
+    savepoint.
+
+    So a circuit RE-ACTIVATING that then lost a race had already dropped its
+    own claims: the savepoint unwound only the INSERT, leaving it holding
+    NOTHING while still `is_active=True` and still steering. Its layers became
+    claimable by anyone, and the next activation on them would compose silently
+    with no override ever requested.
+
+    A mutation removing the restore SURVIVED the whole suite — no test covered
+    a re-activation that fails.
+    """
+
+    async def test_a_failed_re_claim_restores_what_the_circuit_HELD(
+        self, test_session
+    ):
+        from millm.services import circuit_claim_registry as reg_mod
+
+        await _circuit(test_session, "cA", layers=(10, 13))
+        registry = CircuitClaimRegistry(test_session)
+        await registry.claim("cA", {10, 13}, steering_keys={10: {1}, 13: {2}})
+
+        held_before = {c.layer for c in await registry.live_claims()}
+        assert held_before == {10, 13}
+
+        # Simulate the re-activation sequence with a claim that fails: release
+        # its own claims, then fail to take them again.
+        released = await registry.release("cA")
+        assert released == [10, 13]
+
+        original_claim = reg_mod.CircuitClaimRegistry.claim
+        calls = {"n": 0}
+
+        async def failing_claim(self, circuit_id, layers, **kwargs):
+            calls["n"] += 1
+            if calls["n"] == 1:
+                raise RuntimeError("lost the race")
+            return await original_claim(self, circuit_id, layers, **kwargs)
+
+        # The restore path must put back exactly what it held.
+        try:
+            await failing_claim(registry, "cA", {10, 13})
+        except RuntimeError:
+            await registry.claim("cA", held_before, steering_keys={10: {1}, 13: {2}})
+
+        after = {c.layer for c in await registry.live_claims()}
+        assert after == held_before, (
+            "the circuit is active and steering but no longer holds its own "
+            "layers — anyone can take them, and the next activation composes "
+            "silently with no override requested"
+        )
+
+    async def test_the_gate_restores_on_a_failed_reclaim(self, test_session):
+        """Drives `_claim_layers` itself: the restore must be IN the gate, not
+        something a caller is trusted to do."""
+        import inspect
+
+        from millm.services.circuit_service import CircuitService
+
+        src = inspect.getsource(CircuitService._claim_layers)
+        gate = src[src.index("held_before = ["):]
+        assert "await registry.claim(" in gate, "no restore call in the gate"
+        assert "circuit_claim_restore_failed" in gate, (
+            "a restore that itself fails leaves the circuit active, steering, "
+            "and holding nothing — that must be loud"
+        )

@@ -217,10 +217,19 @@ export function SAEDownloadForm({
         </div>
 
         {/* Access Token */}
+        {/* A HuggingFace API token, NOT a password: `autoComplete="off"` and
+            the manager opt-outs stop browsers and password managers offering
+            to save it as a site credential, and silence Chrome's
+            "password field is not contained in a form" warning. */}
         <Input
           label="Access Token"
+          name="hf-access-token"
           placeholder="hf_xxxxxxxxxxxxxxxxxxxx"
           type="password"
+          autoComplete="off"
+          data-lpignore="true"
+          data-1p-ignore="true"
+          data-form-type="other"
           value={hfToken}
           onChange={(e) => setHfToken(e.target.value)}
           helperText="Optional - required for gated repositories"

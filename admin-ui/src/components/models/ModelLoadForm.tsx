@@ -107,9 +107,17 @@ export function ModelLoadForm({
           />
         </div>
 
+        {/* An API token, NOT a password — see SAEDownloadForm for the same
+            treatment. `autoComplete="off"` keeps browsers from offering to
+            save it as a site credential. */}
         <Input
           label="Hugging Face Token"
+          name="hf-token"
           type="password"
+          autoComplete="off"
+          data-lpignore="true"
+          data-1p-ignore="true"
+          data-form-type="other"
           placeholder="hf_xxxx... (optional)"
           value={formData.hf_token}
           onChange={(e) => setFormData({ ...formData, hf_token: e.target.value })}

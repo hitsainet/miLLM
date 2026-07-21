@@ -229,10 +229,44 @@ class CircuitClaimRegistry:
             )
             from millm.core.errors import CircuitLayerContentionError
 
+            # F19 R1-14: NAME THE WINNER. This raised with `incumbent=None` and
+            # the FULL requested layer set, so a race loss reported "Layers
+            # [10, 13, 14] are already served by another active circuit" when
+            # only L13 actually collided and the winner is a named,
+            # discoverable circuit.
+            #
+            # The design requires a refusal to name the incumbent so the
+            # operator's next action is obvious; with None the dialog's
+            # "Deactivate '<incumbent>'" action disappears entirely (it is
+            # rendered only when `incumbent.id` is present), leaving the
+            # operator a refusal with no route out. Re-read the live claims
+            # after the rollback to find who actually won.
+            actual: tuple[int, ...] = tuple(sorted(layers))
+            winner_id: Optional[str] = None
+            winner_name: Optional[str] = None
+            try:
+                live = await self.live_claims()
+                held = {
+                    c.layer: c.circuit_id
+                    for c in live
+                    if c.circuit_id != circuit_id and c.layer in layers
+                }
+                if held:
+                    actual = tuple(sorted(held))
+                    winner_id = held[actual[0]]
+                    winner_name = (await self._names_for({winner_id})).get(winner_id)
+            except Exception:
+                # Naming is a courtesy; the refusal itself must still happen.
+                logger.warning(
+                    "circuit_claim_race_winner_unidentified",
+                    circuit_id=circuit_id,
+                    exc_info=True,
+                )
+
             raise CircuitLayerContentionError(
-                contended_layers=sorted(layers),
-                incumbent_id=None,
-                incumbent_name=None,
+                contended_layers=list(actual),
+                incumbent_id=winner_id,
+                incumbent_name=winner_name,
                 requested_id=circuit_id,
                 requested_name=None,
                 detail="lost a concurrent race for these layers",

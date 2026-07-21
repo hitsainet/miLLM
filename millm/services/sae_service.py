@@ -271,12 +271,47 @@ class AttachedSAEState:
         # (Found by a surviving mutation — the original `touched` read
         # `self._owners[owner_id]` AFTER the overwrite, so it could only ever
         # name the NEW keys and dropped layers were never rebuilt.)
-        previous = set(self._owners.get(owner_id, {}))
+        previous_map = self._owners.get(owner_id)
+        previous = set(previous_map or {})
         self._owners[owner_id] = {
             key: dict(values) for key, values in per_entry.items()
         }
-        for key in previous | set(per_entry):
-            self._rebuild_layer(key)
+
+        # F19 R1-12: ROLL BACK a partial rebuild. `_rebuild_layer` RAISES on a
+        # colliding owner map, and the raise can land on the third of five
+        # layers — leaving the first two written at the new values, the rest at
+        # the old, and this owner's entry already replaced. The exception then
+        # propagates out of `set_circuit_steering` into `activate`, which has
+        # no handler at that point, so the circuit is left a chimera: partial
+        # steering, a live owner entry, and a claim row it already took.
+        #
+        # That is exactly the class F18 R3-09/10 fixed for the legacy apply
+        # path, reintroduced on the owner path. Same remedy: restore the
+        # previous owner map and rebuild every touched layer from it.
+        touched = previous | set(per_entry)
+        done: list[tuple[str, int]] = []
+        try:
+            for key in touched:
+                self._rebuild_layer(key)
+                done.append(key)
+        except Exception:
+            if previous_map is None:
+                self._owners.pop(owner_id, None)
+            else:
+                self._owners[owner_id] = previous_map
+            for key in done:
+                try:
+                    self._rebuild_layer(key)
+                except Exception:
+                    # Restore what we can; a layer that cannot be rebuilt is
+                    # named rather than silently abandoned.
+                    logger.error(
+                        "circuit_owner_rollback_failed",
+                        owner_id=owner_id,
+                        layer=key[1],
+                        exc_info=True,
+                    )
+            raise
 
     def release_owner(self, owner_id: str) -> list[tuple[str, int]]:
         """Drop `owner_id`'s contribution and rebuild. Returns affected keys.
@@ -310,6 +345,30 @@ class AttachedSAEState:
         """
         entry = self._entries.get(key)
         if entry is None or entry.sae is None:
+            # F19 R1-13: DROP the contributions for a layer that is gone.
+            #
+            # Skipping alone left the owner map desynchronised: after a detach
+            # and re-attach (a reload), the new entry has empty steering while
+            # `_owners` still recorded the old contribution. The circuit read
+            # as serving that layer while steering nothing — and a LATER
+            # rebuild triggered by a co-tenant would include the stale
+            # contribution and RESURRECT steering the operator believed had
+            # stopped.
+            #
+            # The map is the record of what each owner is steering; a layer
+            # that no longer exists is not being steered by anyone.
+            stale = [o for o, contrib in self._owners.items() if key in contrib]
+            for owner_id in stale:
+                self._owners[owner_id].pop(key, None)
+                if not self._owners[owner_id]:
+                    self._owners.pop(owner_id, None)
+            if stale:
+                logger.info(
+                    "circuit_owner_contribution_dropped_detached_layer",
+                    layer=key[1],
+                    sae_id=key[0],
+                    owners=sorted(stale),
+                )
             return
 
         merged: dict[int, float] = {}

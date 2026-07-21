@@ -112,3 +112,50 @@ class TestTheIndexDecidesTheRace:
 
         holders = {c.circuit_id for c in await registry.live_claims() if c.layer == 10}
         assert holders == {"cA", "cB"}
+
+
+class TestTheRefusalNamesTheWinner:
+    """F19 R1-14. The race handler raised with `incumbent=None` and the FULL
+    requested layer set.
+
+    So a race loss reported "Layers [10, 13, 14] are already served by another
+    active circuit" when only L13 collided and the winner is a named,
+    discoverable circuit. Worse, the contention dialog renders its
+    "Deactivate '<incumbent>'" action ONLY when `incumbent.id` is present — so
+    the operator got a refusal with no route out of it.
+    """
+
+    async def test_the_loser_learns_WHO_won(self, test_session):
+        await _circuit(test_session, "cA", layers=(10,))
+        await _circuit(test_session, "cB", layers=(10, 13))
+        registry = CircuitClaimRegistry(test_session)
+        await registry.claim("cA", {10})
+
+        with pytest.raises(CircuitLayerContentionError) as exc:
+            await registry.claim("cB", {10, 13})
+
+        details = exc.value.details
+        assert details["incumbent"]["id"] == "cA", (
+            "the refusal named nobody, so the dialog cannot offer the one "
+            "action that resolves it"
+        )
+        assert details["incumbent"]["name"] == "cA"
+
+    async def test_only_the_ACTUALLY_contended_layers_are_reported(
+        self, test_session
+    ):
+        """Reporting the full requested set tells the operator three layers
+        are taken when one is — and sends them editing circuits that were
+        never in conflict."""
+        await _circuit(test_session, "cA", layers=(13,))
+        await _circuit(test_session, "cB", layers=(10, 13, 14))
+        registry = CircuitClaimRegistry(test_session)
+        await registry.claim("cA", {13})
+
+        with pytest.raises(CircuitLayerContentionError) as exc:
+            await registry.claim("cB", {10, 13, 14})
+
+        assert exc.value.details["contended_layers"] == [13], (
+            "layers 10 and 14 were free — naming them as contended sends the "
+            "operator to fix circuits that were never in conflict"
+        )

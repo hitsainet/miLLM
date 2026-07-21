@@ -170,3 +170,105 @@ class TestDetachedLayers:
         state.apply_owner("circuit:A", {("s10", 10): {42: 40.0}})
         state.reset_for_tests()
         state.release_owner("circuit:A")  # must not raise
+
+
+class TestR1PartialRebuildRollsBack:
+    """F19 R1-12. `_rebuild_layer` RAISES on a colliding owner map, and the
+    raise can land partway through a multi-layer apply — leaving earlier
+    layers written at the NEW values, later ones at the OLD, and this owner's
+    entry already replaced.
+
+    The exception then propagates out of `set_circuit_steering` into
+    `activate`, which has no handler there, so the circuit is left a chimera:
+    partial steering, a live owner entry, and a claim row it already took.
+    That is exactly the class F18 R3-09/10 fixed for the legacy apply path,
+    reintroduced on the owner path.
+    """
+
+    def test_a_collision_partway_through_restores_the_previous_state(self, state):
+        s10 = _attach(state, 10)
+        s11 = _attach(state, 11)
+        _attach(state, 12)
+
+        state.apply_owner("circuit:A", {("s10", 10): {1: 10.0}, ("s11", 11): {2: 20.0}})
+        # A co-tenant owns feature 9 on L12, so A cannot also take it.
+        state.apply_owner("circuit:B", {("s12", 12): {9: 90.0}})
+
+        with pytest.raises(ValueError, match="collision"):
+            state.apply_owner(
+                "circuit:A",
+                {
+                    ("s10", 10): {1: 99.0},
+                    ("s11", 11): {2: 99.0},
+                    ("s12", 12): {9: 50.0},  # collides with B
+                },
+            )
+
+        assert state.owner_keys("circuit:A") == {10: [1], 11: [2]}, (
+            "the failed apply left the owner map at its NEW value, so the "
+            "circuit reads as owning a layer it never took"
+        )
+        assert s10.get_steering_values() == {1: 10.0}, (
+            "layer 10 kept the new value from a partial apply that failed"
+        )
+        assert s11.get_steering_values() == {2: 20.0}
+
+    def test_a_FIRST_apply_that_fails_leaves_no_owner_behind(self, state):
+        _attach(state, 10)
+        state.apply_owner("circuit:B", {("s10", 10): {1: 10.0}})
+
+        with pytest.raises(ValueError, match="collision"):
+            state.apply_owner("circuit:A", {("s10", 10): {1: 99.0}})
+
+        assert state.owner_keys("circuit:A") == {}, (
+            "a first apply that failed registered the owner anyway"
+        )
+
+
+class TestR1DetachedLayersDropTheirContributions:
+    """F19 R1-13. Skipping a detached layer left the owner map desynchronised.
+
+    After a detach and re-attach (a reload) the new entry has empty steering
+    while `_owners` still records the old contribution: the circuit reads as
+    serving that layer while steering nothing — and a LATER rebuild triggered
+    by a co-tenant would include the stale contribution and RESURRECT steering
+    the operator believed had stopped.
+    """
+
+    def test_the_contribution_is_dropped_when_the_layer_goes(self, state):
+        """Driven through a rebuild triggered by SOMEONE ELSE, which is how
+        this is actually reached in production. `release_owner` pops the owner
+        regardless, so testing through it proves nothing about the drop —
+        verified by a mutation that survived that version of this test."""
+        _attach(state, 10)
+        _attach(state, 11)
+        state.apply_owner("circuit:A", {("s10", 10): {1: 40.0}})
+        state.apply_owner("circuit:B", {("s11", 11): {2: 20.0}})
+        assert state.owner_keys("circuit:A") == {10: [1]}
+
+        # L10 detaches. B re-applies, which rebuilds its own layer only — so
+        # A's stale contribution is dropped when something next touches L10.
+        del state._entries[("s10", 10)]
+        state.apply_owner("circuit:B", {("s11", 11): {2: 25.0}, ("s10", 10): {}})
+
+        assert state.owner_keys("circuit:A") == {}, (
+            "the detached layer's contribution survived in the owner map, so "
+            "the circuit reads as steering a layer that no longer exists"
+        )
+
+    def test_a_re_attach_does_not_resurrect_stale_steering(self, state):
+        """The operator-visible consequence, asserted directly."""
+        _attach(state, 10)
+        state.apply_owner("circuit:A", {("s10", 10): {1: 40.0}})
+
+        # Detach, then re-attach a fresh SAE at the same key (a reload).
+        state._entries.clear()
+        state.apply_owner("circuit:A", {})  # any rebuild touching the gone key
+        fresh = _attach(state, 10)
+
+        # A co-tenant arriving must not drag A's stale contribution back.
+        state.apply_owner("circuit:B", {("s10", 10): {9: 30.0}})
+        assert fresh.get_steering_values() == {9: 30.0}, (
+            "a detached circuit's steering was resurrected by a co-tenant's "
+            "rebuild — the operator stopped it and it came back"
+        )

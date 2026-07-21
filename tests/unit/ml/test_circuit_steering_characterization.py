@@ -301,7 +301,12 @@ class TestTheDialsServiceConstructionIsNowTotal:
         from millm.services.sae_service import SAEService
 
         init_fields = set(
-            re.findall(r"self\.(_[a-z_]+)\s*[:=]", inspect.getsource(SAEService.__init__))
+            # R1-B: this regex required a leading underscore, so `self.repository`
+            # and `self.emitter` — the two fields most widely read in this class
+            # — were INVISIBLE to the guard. A totality test that cannot see two
+            # thirds of the public fields is a totality test in name only, and
+            # it passed against the broken version AND against the fix.
+            re.findall(r"self\.([a-z_]+)\s*[:=]", inspect.getsource(SAEService.__init__))
         )
         svc = SAEService.for_registry()
         missing = sorted(f for f in init_fields if not hasattr(svc, f))

@@ -437,15 +437,25 @@ class SAEService:
         AttributeError in production, and invisible to every test because the
         methods that would trip it were never called.
 
-        Every field `__init__` sets is set here. The repository and cache dir
-        are the two things a registry-only service genuinely does not have, and
-        they are None/"" rather than absent, so a method that reaches for one
-        fails on a value rather than on a missing attribute.
+        Every field `__init__` sets is set here, so a method that reaches for
+        one fails on a VALUE rather than on a missing attribute — which is the
+        whole difference between this and the bypass it replaced.
+
+        F18 R1-A: the first version got this wrong in both directions. It set
+        `_repository`, `_emitter` and `_cache_dir`, none of which exist —
+        `__init__` sets `self.repository` and `self.emitter` WITHOUT the
+        underscore — so the two fields that are actually read across this class
+        were left ABSENT, reproducing the exact AttributeError hazard the
+        `__new__` bypass was replaced to eliminate, under a docstring asserting
+        it was fixed. The totality test could not catch it: its regex required a
+        leading underscore, so the two real names were invisible to the guard.
+
+        Derived from `__init__` rather than hand-listed, so a field added there
+        cannot be forgotten here.
         """
         svc = cls.__new__(cls)
-        svc._repository = None
-        svc._cache_dir = ""
-        svc._emitter = None
+        svc.repository = None
+        svc.emitter = None
         svc._inference_service = None
         svc._downloader = None
         svc._loader = None

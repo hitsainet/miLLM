@@ -4,7 +4,7 @@
 
 **Document Version:** 1.0
 **Created:** July 20, 2026
-**Status:** Draft
+**Status:** ✅ CLOSED 2026-07-21 — IMPLEMENTED + 3 review rounds (62 findings: R1 20, R2 22, R3 20; all fixed). Reachability is the durable deliverable: a capability is not shipped until a test FAILS when its wiring is removed. R3 found the ORIGINAL F20 defect reproducible one category over.
 **References:** `020_FPRD|MCP_Circuit_Surface.md` · `020_FTDD|MCP_Circuit_Surface.md` · `020_FTID|MCP_Circuit_Surface.md` · `docs/mcp-contract.md` (v1.1 → v1.2)
 
 ## Relevant Files

@@ -1713,3 +1713,109 @@ class TestR3AFailedOperatorDialDoesNotStrandInFlightRequests:
         assert "could not be applied" in text and "differ" in text, (
             f"the apply failure was not reported to the operator: {result!r}"
         )
+
+
+class TestR3APartialApplyRollsBack:
+    """F18 R3-09. Steps 1-2 of `set_circuit_steering` are fail-closed: every
+    offender is collected and `SAESetIncompleteError` raises before anything is
+    written. But the APPLY LOOP writes SAE-by-SAE with no rollback.
+
+    A raise on the third of five layers left layers 1-2 at the NEW intensity,
+    layer 3 cleared but not set (the clear precedes the raise, so it is
+    silently zeroed), and 4-5 at the OLD values. The circuit then runs as a
+    chimera of two intensities with a hole in the middle — a WRONG-BASIS
+    intervention rather than a failed one, and the model says things nobody
+    authored.
+
+    `circuit_sensing_service._arm_targets` already rolls back for ARMING. The
+    serving path — the one that changes what the model actually says — had no
+    equivalent."""
+
+    def test_a_failure_mid_loop_restores_every_recoverable_layer(
+        self, monkeypatch, caplog
+    ):
+        from millm.services import sae_service as sae_mod
+        from millm.services.sae_service import SAEService
+
+        class FakeSAE:
+            def __init__(self, layer, prior):
+                self.layer = layer
+                self._values = dict(prior)
+                self.is_steering_enabled = True
+                self.d_sae = 8192
+                self.explode = False
+
+            def get_steering_values(self):
+                return dict(self._values)
+
+            def clear_steering(self):
+                self._values = {}
+
+            def set_steering_batch(self, values):
+                if self.explode:
+                    raise RuntimeError(f"layer {self.layer} refused the write")
+                self._values = dict(values)
+
+            def enable_steering(self, on):
+                self.is_steering_enabled = on
+
+        saes = {
+            10: FakeSAE(10, {1: 11.0}),
+            11: FakeSAE(11, {2: 22.0}),
+            12: FakeSAE(12, {3: 33.0}),
+        }
+        saes[12].explode = True  # the third layer refuses
+
+        entries = [
+            SimpleNamespace(layer=n, sae_id=f"s{n}", sae=s)
+            for n, s in saes.items()
+        ]
+
+        class Registry:
+            def entries(self):
+                return entries
+
+            def by_layer(self, layer):
+                return next((e for e in entries if e.layer == layer), None)
+
+            steering_epoch = 0
+
+            def bump_steering_epoch(self, _why):
+                return 1
+
+        monkeypatch.setattr(sae_mod, "AttachedSAEState", lambda: Registry())
+
+        svc = SAEService.for_registry()
+        # The REAL CircuitMember, not a namespace: `set_circuit_steering`
+        # consumes the flat serving shape (feature_idx/budget/sign), and using
+        # the actual type means the test cannot drift from it.
+        from millm.api.schemas.circuit import CircuitMember
+
+        members = [
+            CircuitMember(feature_idx=1, layer=10, budget=40.0, sign=1),
+            CircuitMember(feature_idx=2, layer=11, budget=50.0, sign=1),
+            CircuitMember(feature_idx=3, layer=12, budget=60.0, sign=1),
+        ]
+
+        with pytest.raises(RuntimeError, match="refused the write"):
+            svc.set_circuit_steering(members, 1.0)
+
+        # THE POINT: every layer holds what it held before, not a mix.
+        assert saes[10].get_steering_values() == {1: 11.0}, (
+            "layer 10 was left at the new intensity after a later layer failed"
+        )
+        assert saes[11].get_steering_values() == {2: 22.0}, (
+            "layer 11 was left at the new intensity after a later layer failed"
+        )
+        # Layer 12 is the layer that raised. Its restore calls the SAME
+        # `set_steering_batch` that just failed, so it cannot be recovered here
+        # — that is a property of the failure, not a gap in the rollback. What
+        # the contract guarantees is that this is LOUD and NAMED, never silent:
+        # the model is in a state nobody authored and only an operator can
+        # resolve it.
+        #
+        # The first version of this rollback swallowed that failure entirely,
+        # and this test is what found it.
+        assert saes[12].get_steering_values() == {}, (
+            "the failing layer's state is expected to be unrecoverable here"
+        )

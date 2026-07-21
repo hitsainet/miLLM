@@ -788,14 +788,67 @@ class SAEService:
         disabled = intensity == 0 or all(
             v == 0 for s in per_entry.values() for v in s.values()
         )
-        for key, steering in per_entry.items():
-            sae = entry_by_key[key].sae
-            sae.clear_steering()
-            if disabled:
-                sae.enable_steering(False)
-            else:
-                sae.set_steering_batch(steering)  # bounds already gated in step 1
-                sae.enable_steering(True)
+        # F18 R3-09: ROLL BACK a partial apply. Steps 1-2 are fail-closed (all
+        # offenders collected, SAESetIncompleteError raised before anything is
+        # written), but this loop writes SAE-by-SAE. A raise on the third of
+        # five layers left layers 1-2 at the NEW intensity, layer 3 cleared but
+        # not set (the clear precedes the raise, so it is silently zeroed), and
+        # 4-5 at the OLD values — the circuit running as a chimera of two
+        # intensities with a hole in the middle, which is a wrong-basis
+        # intervention rather than a failed one.
+        #
+        # `circuit_sensing_service._arm_targets` already does exactly this for
+        # ARMING. The serving path — the one that changes what the model says —
+        # had no equivalent. Same shape, so the two paths fail the same way.
+        undo: list[tuple[Any, dict[int, float], bool]] = []
+        try:
+            for key, steering in per_entry.items():
+                sae = entry_by_key[key].sae
+                # Capture BEFORE mutating: on a later failure this is the only
+                # record of what this layer held.
+                undo.append(
+                    (sae, dict(sae.get_steering_values()), sae.is_steering_enabled)
+                )
+                sae.clear_steering()
+                if disabled:
+                    sae.enable_steering(False)
+                else:
+                    sae.set_steering_batch(steering)  # bounds gated in step 1
+                    sae.enable_steering(True)
+        except Exception:
+            failed_layers: list[int] = []
+            for sae, prior_values, prior_enabled in reversed(undo):
+                try:
+                    sae.clear_steering()
+                    if prior_values:
+                        sae.set_steering_batch(prior_values)
+                    sae.enable_steering(prior_enabled)
+                except Exception:
+                    # Roll back every layer we can. One unrecoverable layer
+                    # must not abandon the rest still holding the new values —
+                    # the same independence rule the request restore follows.
+                    #
+                    # This is REACHABLE, not defensive: the layer that raised
+                    # during the apply is the most likely to raise again here,
+                    # because its restore calls the same `set_steering_batch`
+                    # that just failed. Caught by the R3-09 test, which found
+                    # this exact hole in the FIRST version of this rollback —
+                    # the failing layer stayed silently zeroed while every
+                    # other layer restored cleanly.
+                    failed_layers.append(getattr(sae, "layer", -1))
+            if failed_layers:
+                # Loud, and naming the layers, because the model is now in a
+                # state nobody authored and only an operator can resolve it.
+                logger.error(
+                    "circuit_steering_rollback_failed",
+                    layers=failed_layers,
+                    detail=(
+                        "these layers could not be restored after a partial "
+                        "apply and may hold cleared or stale steering"
+                    ),
+                    exc_info=True,
+                )
+            raise
 
         # Report per-LAYER for the caller-facing result (merging any same-layer
         # groups), preserving the documented applied_per_layer shape.

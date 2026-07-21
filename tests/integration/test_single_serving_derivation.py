@@ -766,3 +766,59 @@ class TestR2TheNegativeGuardIsUnreachableFromUserInput:
             defn([]), SimpleNamespace(intensity=1.0), intensity=0.0
         )
         assert plan.intensity == 0.0
+
+
+class TestR2ClaimedEntriesAreLiveReferencesNotACopy:
+    """F18 R2-03, attacking R1-08. The tuple is frozen; the ENTRIES are live
+    references. A detach after the plan is built leaves stale handles, and
+    mutating an entry mutates what the plan reports.
+
+    Deliberately NOT deep-copied — the entries carry `LoadedSAE` objects with
+    GPU tensors, and the consumer needs the live SAE to read and restore its
+    steering values. What makes it safe is that the dial copies what it needs
+    into plain dicts IMMEDIATELY, with no await in between. These pin that
+    narrowness, because it is the whole safety argument."""
+
+    def test_the_entries_are_live_not_snapshots(self):
+        """Stated plainly so nobody mistakes the frozen tuple for a frozen
+        view."""
+        entry = SimpleNamespace(layer=10, sae_id="sae-A")
+
+        class Registry:
+            def __init__(self):
+                self.items = [entry]
+
+            def entries(self):
+                return list(self.items)
+
+        registry = Registry()
+        plan = CircuitSteeringEngine(registry).plan_for(
+            defn([mem(10, feature=feat(1))])
+        )
+        assert [e.sae_id for e in plan.claimed_entries] == ["sae-A"]
+
+        entry.sae_id = "MUTATED"
+        assert [e.sae_id for e in plan.claimed_entries] == ["MUTATED"], (
+            "if this ever becomes a copy, the docstring's safety argument "
+            "changes and the dial's immediate-copy discipline can relax"
+        )
+
+    def test_the_dial_copies_before_any_await(self):
+        """The safety argument itself: `saved_layers` is built from the entries
+        with nothing awaited in between, so the live-reference window is a few
+        statements rather than the whole request."""
+        import inspect
+
+        from millm.services.inference_service import InferenceService
+
+        src = inspect.getsource(
+            InferenceService._apply_request_circuit_steering
+        )
+        start = src.index("entries = list(plan.claimed_entries)")
+        end = src.index("saved_layers: list[dict] = [")
+        between = src[start:end]
+        assert "await" not in between, (
+            "an await appeared between reading the plan's entries and copying "
+            "their values — the entries can be detached across it, and the "
+            "restore would write to a stale handle:\n" + between
+        )

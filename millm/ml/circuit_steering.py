@@ -74,6 +74,22 @@ class ServingPlan:
     #: read is a drift window, because a detach between the two means the
     #: snapshot the plan reports and the entries a request saves and restores
     #: disagree (R1-08).
+    #:
+    #: R2-03, recorded precisely: the TUPLE is frozen, the ENTRIES are live
+    #: references. A detach after the plan is built leaves stale handles here,
+    #: and mutating an entry mutates what this reports. Verified by execution.
+    #:
+    #: NOT deep-copied, deliberately. The entries carry `LoadedSAE` objects
+    #: holding GPU tensors; copying them per request would be absurd, and the
+    #: consumer needs the live SAE to read and restore its steering values.
+    #: The dial's FIRST action is to copy the values it needs into plain dicts
+    #: (`saved_layers`), so the exposure is the few statements between
+    #: `plan_for` and that copy — strictly narrower than the two-read window
+    #: this replaced, and narrower than the pre-F18 code, which re-read the
+    #: registry even later.
+    #:
+    #: A consumer that holds a plan across an await MUST NOT assume these are
+    #: still attached.
     claimed_entries: tuple[Any, ...] = ()
 
     @property

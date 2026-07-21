@@ -41,6 +41,7 @@ both fields untouched is what keeps the sign from being applied twice.
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
 from typing import Any, Optional
 
@@ -294,6 +295,14 @@ class CircuitSteeringEngine:
         hard.
         """
         members = self.serving_members(definition)
+        if intensity is not None and not math.isfinite(intensity):
+            # R2-04: NaN and +inf both SURVIVE `max(lo, min(hi, x))` and
+            # resolve to the CEILING — a garbage dial silently producing the
+            # most aggressive intervention available, not a crash and not a
+            # no-op. `_resolve_circuit_intensity` has rejected non-finite
+            # values since F14 R3 for exactly this reason; R1-12 then
+            # introduced NaN into the sibling path with no such guard.
+            raise ValueError(f"serving intensity must be finite: {intensity}")
         if intensity is not None and intensity < 0:
             # R1-13: a negative λ passed straight through and only the
             # downstream clamp saved it, so `ServingPlan.intensity` could hold

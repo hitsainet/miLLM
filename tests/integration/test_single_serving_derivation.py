@@ -512,9 +512,22 @@ class TestR1TheDialUsesTheSnapshotItDerived:
         src = inspect.getsource(
             mod.InferenceService._apply_request_circuit_steering
         )
+        # R2-05: asserting the substring alone does NOT distinguish the
+        # placements — moving the same line back inside the `try` keeps it
+        # present and the test green. That was the sixth test in this increment
+        # that could not fail, and it repeats the lesson its own docstring
+        # cites. Compare POSITIONS against the try that reports apply failures.
         assert "dial_service = SAEService.for_registry()" in src, (
-            "the dial service is constructed inside the try again — a "
-            "construction fault would surface as circuit_dial_apply_failed, "
+            "the dial service is no longer constructed as a named local"
+        )
+        ctor_at = src.index("dial_service = SAEService.for_registry()")
+        # The `try:` guarding the apply — found by its body, not by the log
+        # event name, which also appears in an explanatory comment above.
+        apply_try_at = src.index("            outcome = dial_service.set_circuit_steering(")
+        guarding_try = src.rindex("try:", 0, apply_try_at)
+        assert ctor_at < guarding_try, (
+            "construction moved INSIDE the try that reports "
+            "circuit_dial_apply_failed — a construction fault would surface as "
             "an apply failure that never reached the apply"
         )
         # NOT an index comparison against the log event name: that string also
@@ -822,3 +835,78 @@ class TestR2ClaimedEntriesAreLiveReferencesNotACopy:
             "their values — the entries can be detached across it, and the "
             "restore would write to a stale handle:\n" + between
         )
+
+
+class TestR2ClaimedEntriesAreFilteredToTheCLAIMEDLayers:
+    """F18 R2-07, attacking R1-08. `claimed_entries` filters the registry to
+    the layers the circuit CLAIMS. That filter was load-bearing and completely
+    unprotected — removing it passed the whole suite.
+
+    What it prevents: the dial feeds these entries straight into save → dial →
+    restore. Unfiltered, a chat request would save, dial and restore a layer the
+    circuit never claims and never applies steering to — clobbering another
+    tenant's steering on a layer this circuit has no business touching. That is
+    the co-tenancy hazard F12's rounds fixed at the activation path, arriving
+    at the per-request path instead."""
+
+    def test_a_foreign_attachment_is_excluded(self):
+        registry = _Registry([10, 22])          # 22 belongs to someone else
+        plan = CircuitSteeringEngine(registry).plan_for(
+            defn([mem(10, feature=feat(1))])
+        )
+        assert sorted(plan.claimed_layers) == [10]
+        assert [e.layer for e in plan.claimed_entries] == [10], (
+            "a layer the circuit does not claim is in the entries the dial "
+            "saves, dials and restores"
+        )
+
+    def test_attached_layers_still_reports_the_WHOLE_registry(self):
+        """The two fields answer different questions: `attached_layers` is
+        what is attached anywhere (so `unattached_layers` can be computed),
+        `claimed_entries` is what this circuit may touch."""
+        plan = CircuitSteeringEngine(_Registry([10, 22])).plan_for(
+            defn([mem(10, feature=feat(1))])
+        )
+        assert plan.attached_layers == frozenset({10, 22})
+        assert [e.layer for e in plan.claimed_entries] == [10]
+
+    def test_a_claimed_but_unattached_layer_contributes_no_entry(self):
+        plan = CircuitSteeringEngine(_Registry([10])).plan_for(
+            defn([mem(10, feature=feat(1)), mem(13, feature=feat(2))])
+        )
+        assert sorted(plan.claimed_layers) == [10, 13]
+        assert [e.layer for e in plan.claimed_entries] == [10]
+
+
+class TestR2ANonFiniteIntensityIsRefused:
+    """F18 R2-04. NaN and +inf both SURVIVE `max(lo, min(hi, x))` and resolve
+    to the CEILING — a garbage dial silently producing the most aggressive
+    intervention available, not a crash and not a no-op:
+
+        max(0.0, min(2.0, nan)) == 2.0
+
+    `_resolve_circuit_intensity` has rejected non-finite values since F14 R3
+    for exactly this reason. R1-12 then introduced NaN into the sibling path
+    with no such guard, so an unset plan reaching the apply would have served a
+    member authored at 150 at λ=2 → raw 300 → clamped 200. Not 'nonsense
+    invisibly' as R2-01's message said — MAXIMUM AGGRESSION invisibly, which is
+    materially worse and worth stating correctly."""
+
+    def test_the_clamp_really_does_resolve_NaN_to_the_ceiling(self):
+        """The premise, asserted rather than assumed — if Python's min/max
+        semantics ever changed, the reasoning below would need revisiting."""
+        assert max(0.0, min(2.0, float("nan"))) == 2.0
+
+    @pytest.mark.parametrize("value", [float("nan"), float("inf"), float("-inf")])
+    def test_a_non_finite_override_is_refused(self, value):
+        with pytest.raises(ValueError, match="must be finite"):
+            CircuitSteeringEngine().plan_for(
+                defn([]), SimpleNamespace(intensity=1.0), intensity=value
+            )
+
+    def test_finite_values_still_pass(self):
+        for value in (0.0, 1.0, 2.0):
+            plan = CircuitSteeringEngine().plan_for(
+                defn([]), SimpleNamespace(intensity=1.0), intensity=value
+            )
+            assert plan.intensity == value

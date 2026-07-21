@@ -897,7 +897,9 @@ class InferenceService:
             logger.info("circuit_dial_noop_no_serving_members",
                         circuit_id=circuit.id)
             return None
-        member_layers = set(plan.claimed_layers)
+        # R2-06: `member_layers` was DELETED here — R1-08 replaced its only
+        # consumer with `plan.claimed_entries` and left the assignment behind.
+        # The claim set now travels with the plan, filtered into the entries.
 
         # R1-08: use the plan's OWN attachment snapshot rather than re-reading
         # the registry. `plan_for` already read it; a second read is both pure

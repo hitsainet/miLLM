@@ -22,6 +22,33 @@ import pytest
 
 CONTRACT = Path(__file__).resolve().parents[2] / "docs" / "mcp-contract.md"
 
+
+def _contract_text() -> str:
+    """The contract, or an honest unavailable.
+
+    F20 R3-21. `docs/` is DEV-INTERNAL and the sync-to-clean workflow strips it
+    (`find docs/ -mindepth 1 -maxdepth 1 ! -name schemas -exec rm -rf {} +`),
+    so the contract does not exist in the public mirror at all. Every test here
+    read it unconditionally, which turned a deliberate packaging decision into
+    **ten hard failures on six consecutive mirror builds** — red on a repo
+    where the file is not supposed to be, while the same commit was green on
+    the source.
+
+    This is R2-13's lesson applied to the wrong half. I made the SIBLING-repo
+    checkout degrade honestly and left the contract file itself asserting. An
+    environment limit must read as UNVERIFIED, never as a parity result — in
+    either direction.
+    """
+    if not CONTRACT.exists():
+        _unavailable(
+            f"{CONTRACT} is absent. `docs/` is dev-internal and the "
+            "sync-to-clean workflow strips it, so this guard cannot run in "
+            "the public mirror — the contract it checks is not published "
+            "there. UNVERIFIED, not verified-clean: it runs in the source "
+            "repo and in the cross-repo CI job, which is where it matters."
+        )
+    return CONTRACT.read_text()
+
 #: Sibling checkout. Overridable so CI can point at a different layout rather
 #: than silently skipping.
 MISTUDIO = Path(
@@ -104,7 +131,8 @@ def _claims_mcp(status: str) -> bool:
 
 class TestContractMatchesTheRegistry:
     def test_the_contract_file_exists(self):
-        assert CONTRACT.exists(), f"contract missing at {CONTRACT}"
+        # R3-21: absent in the public mirror BY DESIGN — degrade, do not fail.
+        _contract_text()
 
     def test_millm_circuits_is_registered(self):
         """The defect this feature closed: the contract described a tool
@@ -118,7 +146,7 @@ class TestContractMatchesTheRegistry:
     def test_every_category_the_contract_names_is_registered(self):
         registry = _registry()
         # Category headings look like: ### `millm_circuits` (v1.1 — …)
-        named = set(re.findall(r"^### `(millm_[a-z_]+)`", CONTRACT.read_text(),
+        named = set(re.findall(r"^### `(millm_[a-z_]+)`", _contract_text(),
                                re.MULTILINE))
         assert named, "no millm_* category headings found — has the format changed?"
         missing = named - set(registry)
@@ -139,7 +167,7 @@ class TestContractMatchesTheRegistry:
         DESCRIBES the original defect, and no row is left in the state the
         correction says was fixed.
         """
-        text = CONTRACT.read_text()
+        text = _contract_text()
         assert "STATUS CORRECTION" in text, (
             "the status-correction block was deleted rather than resolved"
         )
@@ -262,7 +290,7 @@ class TestEveryRegisteredToolHasACorrectRow:
         Duplicates inside the table are an error rather than a silent
         overwrite.
         """
-        text = CONTRACT.read_text()
+        text = _contract_text()
         lines = text.splitlines()
 
         start = next(
@@ -371,7 +399,7 @@ class TestEveryRegisteredToolHasACorrectRow:
 
         This fails if such a tool appears, and points at the reason.
         """
-        text = CONTRACT.read_text()
+        text = _contract_text()
         # The prose names the forbidden capability; derive the check from the
         # contract rather than hardcoding, so a new "not served" row is
         # covered the moment it is written.
@@ -489,7 +517,7 @@ class TestTheExampleFlowIsRunnable:
         postmortem — and scanning that made the guard flag its own
         explanation.
         """
-        text = CONTRACT.read_text()
+        text = _contract_text()
         start = text.index("Circuit flow (v")
         block = text[start:]
         fence = block.index("```")

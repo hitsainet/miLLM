@@ -468,14 +468,61 @@ miLLM:    millm_sensing_enable(profile_id)
 miLLM:    millm_sensing_events(profile_id, limit=20)
 ```
 
-Circuit flow (v1.1) — discover/validate in miStudio, serve/sense in miLLM:
+Circuit flow (v1.5) — discover/validate in miStudio, serve/sense in miLLM.
+
+**F20 R2-11: this was not runnable.** It showed
+`millm_import_circuit(definition=…, activate=true, acknowledge_unvalidated=…)`
+— two arguments the tool does not take — so an agent following the reference
+flow failed on line one with unexpected keyword arguments. It also contradicted
+this section's own §4 row, which says import does NOT activate.
 
 ```
-miStudio: export circuit               → circuit-definition/v1 (multi-SAE, edges, rungs)
-miLLM:    millm_import_circuit(definition=…, activate=true,
-                               acknowledge_unvalidated=<true if rung<2>)
-          → serving_mode "full" (all SAEs attached) or "slice_fallback"
-miLLM:    millm_set_circuit_intensity(1.2)          → one λ scales all layers
-miLLM:    millm_circuit_sensing_enable(circuit_id)  → watch EDGES fire (up→down)
+miStudio: export circuit          → circuit-definition/v1 (multi-SAE, edges, rungs)
+
+miLLM:    millm_import_circuit(definition=…, on_conflict="rename")
+          → import NEVER activates: the evidence gate is always a separate,
+            explicit step
+
+miLLM:    millm_list_circuits()   → read `rung` / `rung_language` BEFORE serving.
+                                    Activation is gated at rung 2.
+
+miLLM:    millm_activate_circuit(circuit_id)
+          ├─ UNVALIDATED_CIRCUIT      → rung < 2. Report the phrase; re-send with
+          │                             acknowledge_unvalidated=true ONLY on
+          │                             explicit human instruction.
+          ├─ CIRCUIT_LAYER_CONTENTION → read details.overridable:
+          │    overridable=true       → surface details.measured_hazard INCLUDING
+          │                             its note, then optionally re-send with
+          │                             allow_layer_overlap=true
+          │    overridable=false      → same feature on the same layer. NEVER
+          │                             retry; report details.colliding_keys.
+          │    incumbent not in millm_circuit_status()
+          │                          → its claim is STUCK:
+          │                             millm_release_circuit_claims(incumbent_id)
+          │                             NOT a retry, NOT the override.
+          └─ ok → serving_mode "full", or "slice_fallback" when the SAE set is
+                  incomplete (a PER-LAYER PROJECTION — the circuit's own rung
+                  does not describe it)
+
+miLLM:    millm_circuit_status()   → a LIST. While several circuits serve, the
+                                     dial and the rung header are BOTH
+                                     suppressed.
+
+miLLM:    millm_set_circuit_intensity(1.2)
+          ├─ NO_ACTIVE_CIRCUIT        → activate something first
+          ├─ AMBIGUOUS_ACTIVE_CIRCUIT → several serving; deactivate all but one
+          └─ rung < 2                 → pass acknowledge_unvalidated=true again;
+                                        the gate re-applies on every dial
+
+miLLM:    millm_circuit_sensing_enable(circuit_id)
+miLLM:    millm_circuit_sensing_status()   → if no events: this says WHETHER the
+                                             circuit is armed and which edges are
+                                             unsensable, with reasons. Do not poll
+                                             events waiting for what cannot fire.
 miLLM:    millm_circuit_sensing_events(circuit_id, limit=20)
+          → OBSERVATIONS. A row is a correlation on live traffic; it NEVER
+            raises a rung.
+
+cleanup:  millm_circuit_sensing_clear(circuit_id="…")  ← scope is REQUIRED
+          millm_deactivate_circuit(circuit_id)         ← releases its claims
 ```

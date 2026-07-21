@@ -149,6 +149,20 @@ class TestContractMatchesTheRegistry:
             "it did not"
         )
 
+    @pytest.mark.skipif(
+        os.environ.get("MISTUDIO_SETTINGS_AVAILABLE") != "1",
+        reason=(
+            "F20 R2-13: importing miStudio's schema package pulls its OWN app "
+            "settings (database, redis, celery, cache paths) under the SAME "
+            "env-var names miLLM uses — the two repos cannot both be "
+            "configured in one process. Set MISTUDIO_SETTINGS_AVAILABLE=1 "
+            "where they can. Recorded as a KNOWN LIMIT rather than left "
+            "permanently red or quietly green: a parity check that cannot run "
+            "is UNVERIFIED, and saying so is the honest state. The path half "
+            "of this parity IS covered by test_mcp_tool_paths_are_real.py, "
+            "which reads the tool module as TEXT and needs no settings."
+        ),
+    )
     def test_the_evidence_ladder_constants_agree(self):
         """Reciprocal parity: miLLM renders the rung phrases, miStudio's MCP
         tools transport them. A drift means an agent relays language this
@@ -165,9 +179,18 @@ class TestContractMatchesTheRegistry:
                 RUNG_LANGUAGE as THEIRS,
             )
         except ImportError:
-            pytest.skip(
+            _unavailable(
                 "miStudio's evidence_ladder is not importable from this "
                 "checkout — parity unverified, NOT verified-clean"
+            )
+        except Exception as exc:
+            # Importing miStudio's schema package pulls its app settings,
+            # which can fail on a cache directory this process cannot write.
+            # That is an ENVIRONMENT limit, not a parity result — report it as
+            # unverified rather than as agreement or disagreement.
+            _unavailable(
+                f"miStudio's evidence_ladder could not be imported ({exc}). "
+                "Parity is UNVERIFIED — this is not a clean result."
             )
         finally:
             sys.path.remove(str(backend))
@@ -276,3 +299,105 @@ class TestEveryRegisteredToolHasACorrectRow:
             "the contract prescribes claim release as the recovery path and "
             "does not list the tool that performs it"
         )
+
+
+class TestTheExampleFlowIsRunnable:
+    """F20 R2-11/12. §7's circuit flow showed
+    `millm_import_circuit(definition=…, activate=true, acknowledge_unvalidated=…)`
+    — two arguments the tool does not take — so an agent following the
+    reference flow failed on LINE ONE. It also contradicted its own §4 row,
+    which says import does not activate.
+
+    R1-03's lesson recurring one section later: the corrected guard read the
+    Status COLUMN and never the EXAMPLE CODE beneath it, which is where the
+    surviving defect lived. An example is executable prose, and nothing was
+    executing it.
+    """
+
+    def _circuit_flow(self) -> str:
+        """The fenced CODE BLOCK only.
+
+        The prose above it quotes the broken call deliberately — it is the
+        postmortem — and scanning that made the guard flag its own
+        explanation.
+        """
+        text = CONTRACT.read_text()
+        start = text.index("Circuit flow (v")
+        block = text[start:]
+        fence = block.index("```")
+        end = block.index("```", fence + 3)
+        return block[fence:end]
+
+    def _tool_signatures(self) -> dict:
+        """`{tool_name: {param names}}` from the LIVE registry."""
+        import asyncio
+        from unittest.mock import AsyncMock, MagicMock
+
+        registry = _registry()
+        try:
+            from mcp.server.fastmcp import FastMCP
+        except ImportError as exc:
+            _unavailable(f"mcp not importable ({exc})")
+
+        gate = MagicMock()
+        gate.check = AsyncMock(return_value=(True, None))
+        mcp = FastMCP("flow-check")
+        for module in registry["millm_circuits"]:
+            module.register(mcp, MagicMock(), gate)
+        return {
+            # `Tool.inputSchema`, not `.parameters` — the attribute name is
+            # the MCP SDK's, and guessing it produced an AttributeError that
+            # only surfaced when the guard finally ran.
+            t.name: set((getattr(t, "inputSchema", None) or {}).get("properties", {}))
+            for t in asyncio.run(mcp.list_tools())
+        }
+
+    def test_every_tool_named_in_the_flow_exists(self):
+        flow = self._circuit_flow()
+        signatures = self._tool_signatures()
+        named = set(re.findall(r"\b(millm_[a-z_]+)\(", flow))
+        assert named, "no tool calls found in the flow — has the format changed?"
+        unknown = sorted(named - set(signatures))
+        assert not unknown, (
+            f"the reference flow calls {unknown}, which do not exist — an "
+            "agent following it fails on that line"
+        )
+
+    def test_every_ARGUMENT_in_the_flow_exists_on_its_tool(self):
+        """The defect: `activate=true` on a tool with no `activate`."""
+        flow = self._circuit_flow()
+        signatures = self._tool_signatures()
+
+        bad = []
+        for call in re.finditer(r"\b(millm_[a-z_]+)\(([^)]*)\)", flow):
+            tool, args = call.group(1), call.group(2)
+            if tool not in signatures:
+                continue
+            for kwarg in re.findall(r"(\w+)\s*=", args):
+                if kwarg not in signatures[tool]:
+                    bad.append(f"{tool}({kwarg}=…)")
+        assert not bad, (
+            f"the reference flow passes arguments that do not exist: {bad} — "
+            "an agent copying it gets an unexpected-keyword error"
+        )
+
+    def test_the_flow_does_not_contradict_the_import_row(self):
+        """§4 says import does NOT activate. The flow said otherwise."""
+        flow = self._circuit_flow()
+        # Strip the block explaining the DEFECT — it quotes the broken call on
+        # purpose, and matching your own postmortem is a false positive.
+        body = flow.split("```", 1)[1] if "```" in flow else flow
+        assert "activate=true" not in body, (
+            "the flow shows import activating, and the table row two hundred "
+            "lines above says it does not"
+        )
+        assert "NEVER activates" in body or "does NOT activate" in body
+
+    def test_the_flow_covers_the_recovery_tools(self):
+        """R2-12: the two tools with the most dangerous failure modes —
+        irreversible deletion, and the stuck-claim recovery — were absent from
+        the only end-to-end narrative in the contract."""
+        flow = self._circuit_flow()
+        assert "millm_release_circuit_claims" in flow
+        assert "millm_circuit_sensing_clear" in flow
+        assert "scope is REQUIRED" in flow

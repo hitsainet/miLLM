@@ -42,6 +42,8 @@ const sidebars: SidebarsConfig = {
         'features/probe-monitoring',
         'features/profiles',
         'features/clusters',
+        'features/circuits',
+        'features/mcp-circuits',
       ],
     },
     {

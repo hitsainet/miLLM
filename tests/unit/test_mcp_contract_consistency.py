@@ -332,6 +332,57 @@ class TestEveryRegisteredToolHasACorrectRow:
             module.register(mcp, MagicMock(), gate)
         return {t.name for t in asyncio.run(mcp.list_tools())}
 
+    def test_a_tool_the_contract_says_must_NOT_exist_does_not_exist(self):
+        """F20 R2-21. The guard enforced "no row without a tool" and "no tool
+        without a row" — never "no tool where the contract says there
+        deliberately is NONE."
+
+        Those rows are structurally invisible to `_rows()`: they open with
+        `| _(` rather than a tool name, because the whole point is that no tool
+        name exists. So the one class of row carrying a SAFETY decision was the
+        one class nothing checked.
+
+        EC-20.5: hub-import has deliberately no tool because a circuit
+        references several SAEs by id, and importing one from a remote pack
+        without checking those references serves it against the WRONG FEATURE
+        BASIS — the model is steered by vectors that mean something else.
+        Adding `millm_hub_import_circuit` later would be a one-line change that
+        reads like filling a gap.
+
+        This fails if such a tool appears, and points at the reason.
+        """
+        text = CONTRACT.read_text()
+        # The prose names the forbidden capability; derive the check from the
+        # contract rather than hardcoding, so a new "not served" row is
+        # covered the moment it is written.
+        not_served = [
+            line for line in text.splitlines()
+            if line.startswith("| _(") and "not served" in line
+        ]
+        assert not_served, (
+            "no 'deliberately not served' rows found — either they were "
+            "removed (in which case the capabilities they forbid are now "
+            "unguarded) or the row format changed and this guard has gone "
+            "blind. Both need a human."
+        )
+
+        tool_names = self._registered_tools()
+        forbidden = {
+            "millm_hub_import_circuit",
+            "millm_import_circuit_from_hub",
+            "millm_hub_search_circuits",
+            "millm_search_circuit_hub",
+        }
+        leaked = sorted(tool_names & forbidden)
+        assert not leaked, (
+            f"{leaked} is registered, and the contract records it as "
+            "DELIBERATELY not served (EC-20.5): a circuit references several "
+            "SAEs by id, so importing one from a remote pack without checking "
+            "those references serves it against the wrong feature basis. If "
+            "this is now intended, the contract row must change FIRST and say "
+            "how the reference check is done."
+        )
+
     def test_the_row_extraction_works(self):
         """An empty dict passes every assertion below it."""
         rows = self._rows()

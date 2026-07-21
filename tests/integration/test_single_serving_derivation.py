@@ -1116,3 +1116,64 @@ class TestR2DegenerateDefinitionsFailLOUDLY:
         d = defn([mem(10, feature=feat(1))], sae_by_layer={})
         members = CircuitSteeringEngine.serving_members(d)
         assert len(members) == 1 and members[0].sae_id is None
+
+
+class TestR2DedupeAcrossEverySourceShape:
+    """F18 R2-14. The dedupe is what keeps a legitimate circuit serveable — the
+    serving path rejects a repeated `(layer, feature_idx)` outright. Probed the
+    shapes the characterization fixtures do not cover: a duplicate WITHIN one
+    expansion, the same feature in two separate members, an empty expansion,
+    and an expansion with no own feature."""
+
+    def test_a_duplicate_inside_one_expansion_is_collapsed(self):
+        d = defn([mem(10, feature=feat(1), expanded=[feat(2), feat(2)])])
+        out = CircuitSteeringEngine.serving_members(d)
+        assert [(m.layer, m.feature_idx) for m in out] == [(10, 2), (10, 1)]
+
+    def test_the_same_feature_in_two_members_is_collapsed(self):
+        """Dedupe is global across the definition, not per member — two members
+        naming the same (layer, feature) would otherwise reach the serving path
+        as a repeated key and be rejected outright."""
+        d = defn([mem(10, feature=feat(1)), mem(10, feature=feat(1))])
+        assert len(CircuitSteeringEngine.serving_members(d)) == 1
+
+    def test_an_empty_expansion_falls_back_to_the_own_feature(self):
+        d = defn([mem(10, feature=feat(1), expanded=[])])
+        out = CircuitSteeringEngine.serving_members(d)
+        assert [(m.layer, m.feature_idx) for m in out] == [(10, 1)]
+
+    def test_an_expansion_with_no_own_feature_still_contributes(self):
+        d = defn([mem(10, feature=None, expanded=[feat(7)])])
+        out = CircuitSteeringEngine.serving_members(d)
+        assert [(m.layer, m.feature_idx) for m in out] == [(10, 7)]
+
+
+class TestR2TheServeabilityBoundary:
+    """F18 R2-15. `is_serveable` decides whether a response may carry a rung
+    header. Over-claiming attaches an evidence claim to an intervention that
+    never happened; under-claiming loses a true one. Every boundary combination
+    is pinned because this predicate is the honesty gate."""
+
+    @pytest.mark.parametrize(
+        "claimed,attached,expected",
+        [
+            ([10, 13], [10, 13], True),    # fully attached
+            ([10, 13], [10], True),        # partially — one layer IS steering
+            ([10, 13], [99], False),       # attached, but nothing claimed
+            ([10], [], False),             # empty registry
+            ([], [10], False),             # no members
+        ],
+    )
+    def test_serveability(self, claimed, attached, expected):
+        d = defn([mem(n, feature=feat(1)) for n in claimed])
+        plan = CircuitSteeringEngine(_Registry(attached)).plan_for(d)
+        assert plan.is_serveable is expected
+
+    def test_a_partial_attachment_is_serveable_because_it_really_steers(self):
+        """The subtle one: one attached claimed layer means the apply DOES
+        something, so withholding the header would under-claim a real
+        intervention."""
+        d = defn([mem(10, feature=feat(1)), mem(13, feature=feat(2))])
+        plan = CircuitSteeringEngine(_Registry([10])).plan_for(d)
+        assert plan.is_serveable is True
+        assert plan.unattached_layers == frozenset({13})

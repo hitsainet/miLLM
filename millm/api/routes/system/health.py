@@ -570,12 +570,29 @@ async def get_metrics(
     circuit_layers: set[int] = set()
     for owner in circuit_owners:
         circuit_layers.update(sae_state.owner_keys(owner))
-    # A layer held by more than one circuit owner IS composed, whatever the
-    # claims table says — this is the runtime truth.
+    # F19 R2-11: count EVERY owner on a circuit-held layer, not just circuit
+    # owners.
+    #
+    # Counting `circuit:` owners alone made the metric blind to the case it
+    # most needed to catch: a layer whose co-tenant arrived through
+    # SLICE-FALLBACK materialises a CLUSTER PROFILE, not a circuit owner. That
+    # layer has one circuit owner, so `circuit_layers_composed` read 0 — the
+    # documented alertable condition never firing — while `GET /circuits/claims`
+    # badged the layer composed and the rung header WAS being suppressed.
+    #
+    # Two authorities disagreeing is worse than either being wrong: the metric
+    # said "nothing composed" while the response headers said otherwise. The
+    # metric now agrees with what actually suppresses the header — more than
+    # one contributor on a layer a circuit is steering.
     layer_holders: dict[int, int] = {}
+    circuit_held: set[int] = set()
     for owner in circuit_owners:
         for layer in sae_state.owner_keys(owner):
-            layer_holders[layer] = layer_holders.get(layer, 0) + 1
+            circuit_held.add(layer)
+    for owner in sae_state._owners:
+        for layer in sae_state.owner_keys(owner):
+            if layer in circuit_held:
+                layer_holders[layer] = layer_holders.get(layer, 0) + 1
     composed_layers = sorted(l for l, n in layer_holders.items() if n > 1)
 
     return MetricsResponse(
@@ -634,12 +651,18 @@ async def get_prometheus_metrics(
     _circuit_owners = [
         owner for owner in _sae_state._owners if owner.startswith("circuit:")
     ]
-    _holders: dict[int, int] = {}
+    # R2-11: same rule as the JSON surface — every owner on a circuit-held
+    # layer counts, so a slice-fallback co-tenant is not invisible.
+    _circuit_held: set[int] = set()
     for _owner in _circuit_owners:
+        _circuit_held.update(_sae_state.owner_keys(_owner))
+    _holders: dict[int, int] = {}
+    for _owner in _sae_state._owners:
         for _layer in _sae_state.owner_keys(_owner):
-            _holders[_layer] = _holders.get(_layer, 0) + 1
+            if _layer in _circuit_held:
+                _holders[_layer] = _holders.get(_layer, 0) + 1
     circuits_serving = len(_circuit_owners)
-    circuit_layers_served = len(_holders)
+    circuit_layers_served = len(_circuit_held)
     circuit_layers_composed = sum(1 for n in _holders.values() if n > 1)
 
     # Build Prometheus format

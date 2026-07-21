@@ -300,3 +300,50 @@ class TestTheRestorePreservesEACHLayersState:
             "a partial restore leaves the circuit steering layers it does not "
             "claim — that must be loud"
         )
+
+
+class TestEveryIncumbentIsNamed:
+    """F19 R2-12. The refusal named only the holder of the numerically lowest
+    contended layer.
+
+    With cC on L10 and cD on L13, only cC was named. The operator deactivates
+    cC, retries, and is refused AGAIN by cD — with nothing in the first refusal
+    hinting a second incumbent existed. The remedy looked like it had failed.
+
+    `incumbent` stays singular for the dialog's "Deactivate '<name>'" action
+    (it can only offer one), and `all_incumbents` carries the rest so the
+    refusal is complete.
+    """
+
+    async def test_two_incumbents_are_BOTH_reported(self, test_session):
+        await _circuit(test_session, "cC", layers=(10,))
+        await _circuit(test_session, "cD", layers=(13,))
+        await _circuit(test_session, "cB", layers=(10, 13))
+        registry = CircuitClaimRegistry(test_session)
+        await registry.claim("cC", {10})
+        await registry.claim("cD", {13})
+
+        with pytest.raises(CircuitLayerContentionError) as exc:
+            await registry.claim("cB", {10, 13})
+
+        details = exc.value.details
+        named = {i["id"] for i in details["all_incumbents"]}
+        assert named == {"cC", "cD"}, (
+            f"only {named} reported — deactivating that one and retrying is "
+            "refused again by an incumbent the operator was never told about"
+        )
+        # The singular field the dialog uses is still populated.
+        assert details["incumbent"]["id"] in {"cC", "cD"}
+
+    async def test_a_single_incumbent_still_appears_in_the_list(
+        self, test_session
+    ):
+        await _circuit(test_session, "cA", layers=(10,))
+        await _circuit(test_session, "cB", layers=(10,))
+        registry = CircuitClaimRegistry(test_session)
+        await registry.claim("cA", {10})
+
+        with pytest.raises(CircuitLayerContentionError) as exc:
+            await registry.claim("cB", {10})
+
+        assert [i["id"] for i in exc.value.details["all_incumbents"]] == ["cA"]

@@ -388,3 +388,56 @@ class TestR1CircuitServingIsOBSERVABLE:
             "a serve-without-claiming path must not be a warning — it restores "
             "the pre-F19 silent-clobber behaviour"
         )
+
+
+class TestR2TheComposedMetricSeesSLICECoTenants:
+    """F19 R2-11. `circuit_layers_composed` counted only `circuit:` owners, so
+    it was blind to the case it most needed to catch.
+
+    A layer whose co-tenant arrived through SLICE-FALLBACK materialises a
+    CLUSTER PROFILE, not a circuit owner. That layer has ONE circuit owner, so
+    the metric read 0 — the documented alertable condition never firing — while
+    `GET /circuits/claims` badged the layer composed and the rung header WAS
+    being suppressed.
+
+    Two authorities disagreeing is worse than either being wrong: the metric
+    said "nothing composed" while the response headers said otherwise.
+    """
+
+    async def test_a_non_circuit_co_tenant_counts_as_composed(self):
+        from millm.api.routes.system.health import get_metrics
+
+        attach(10)
+        svc = SAEService.for_registry()
+        svc.set_circuit_steering(
+            [CircuitMember(feature_idx=1, layer=10, budget=40.0, sign=1)],
+            1.0,
+            owner_id="circuit:A",
+        )
+        # A cluster profile — NOT a `circuit:` owner — takes the same layer.
+        AttachedSAEState().apply_owner("cluster:prof_1", {("sae-10", 10): {9: 20.0}})
+
+        metrics = await get_metrics()
+        assert metrics.circuit_layers_composed == 1, (
+            "a slice-fallback co-tenant on a circuit's layer is invisible to "
+            "the metric, so the alertable condition never fires while the "
+            "rung header is already suppressed"
+        )
+
+    async def test_a_co_tenant_on_an_UNRELATED_layer_does_not_count(self):
+        """The metric is about CIRCUIT-held layers. A cluster steering a layer
+        no circuit touches is not a composition of anything."""
+        from millm.api.routes.system.health import get_metrics
+
+        attach(10)
+        attach(13)
+        SAEService.for_registry().set_circuit_steering(
+            [CircuitMember(feature_idx=1, layer=10, budget=40.0, sign=1)],
+            1.0,
+            owner_id="circuit:A",
+        )
+        AttachedSAEState().apply_owner("cluster:prof_1", {("sae-13", 13): {9: 20.0}})
+
+        metrics = await get_metrics()
+        assert metrics.circuit_layers_composed == 0
+        assert metrics.circuits_serving == 1

@@ -568,6 +568,12 @@ class CircuitService:
         if verdict.has_contention:
             incumbent_id = next(iter(verdict.incumbents), None)
             name, _l = verdict.incumbents.get(incumbent_id, (None, ()))
+            # R2-12: the verdict already knows about every incumbent; carry
+            # them all so the operator is not sent to deactivate one, retry,
+            # and be refused by a second they were never told about.
+            all_incumbents = [
+                {"id": cid, "name": n} for cid, (n, _layers) in verdict.incumbents.items()
+            ]
             if not settings.CIRCUIT_ALLOW_CONCURRENT:
                 logger.warning(
                     "circuit_activation_refused_flag_off",
@@ -580,6 +586,7 @@ class CircuitService:
                     incumbent_name=name,
                     requested_id=circuit.id,
                     requested_name=circuit.name,
+                    all_incumbents=all_incumbents,
                     detail=(
                         "concurrent circuit serving is disabled by "
                         "configuration (CIRCUIT_ALLOW_CONCURRENT=false), so "
@@ -593,6 +600,7 @@ class CircuitService:
                     incumbent_name=name,
                     requested_id=circuit.id,
                     requested_name=circuit.name,
+                    all_incumbents=all_incumbents,
                 )
 
         # 3. Claim. Composition marks BOTH sides — the rung header is

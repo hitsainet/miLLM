@@ -343,6 +343,7 @@ class CircuitLayerContentionError(MiLLMError):
         requested_id: Optional[str] = None,
         requested_name: Optional[str] = None,
         colliding_keys: Any = (),
+        all_incumbents: Any = (),
         detail: Optional[str] = None,
     ) -> None:
         layers = sorted(contended_layers or [])
@@ -396,6 +397,11 @@ class CircuitLayerContentionError(MiLLMError):
                     {"layer": layer, "feature_idx": idx, "incumbent": cid}
                     for layer, idx, cid in (colliding_keys or ())
                 ],
+                # R2-12: every incumbent, not just the one the dialog can
+                # offer to deactivate. With two circuits holding two contended
+                # layers, naming one sent the operator to deactivate it, retry,
+                # and be refused again with no hint the second existed.
+                "all_incumbents": list(all_incumbents or []),
                 "overridable": not bool(colliding_keys),
                 "measured_hazard": CONTENTION_MEASURED_HAZARD,
             },

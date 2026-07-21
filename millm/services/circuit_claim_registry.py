@@ -253,6 +253,7 @@ class CircuitClaimRegistry:
             actual: tuple[int, ...] = tuple(sorted(layers))
             winner_id: Optional[str] = None
             winner_name: Optional[str] = None
+            extra_incumbents: list[dict[str, Any]] = []
             try:
                 live = await self.live_claims()
                 held = {
@@ -262,8 +263,25 @@ class CircuitClaimRegistry:
                 }
                 if held:
                     actual = tuple(sorted(held))
+                    # F19 R2-12: name EVERY incumbent, not just the holder of
+                    # the numerically lowest layer.
+                    #
+                    # With cC on L10 and cD on L13, only cC was named. The
+                    # operator deactivates cC, retries, and is refused AGAIN by
+                    # cD — with nothing in the first refusal hinting a second
+                    # incumbent existed. The remedy looked like it failed.
+                    #
+                    # `incumbent` stays singular for the dialog's
+                    # "Deactivate '<name>'" action (it can only offer one), but
+                    # `all_incumbents` carries the rest so the refusal is
+                    # complete.
                     winner_id = held[actual[0]]
-                    winner_name = (await self._names_for({winner_id})).get(winner_id)
+                    all_names = await self._names_for(set(held.values()))
+                    winner_name = all_names.get(winner_id)
+                    extra_incumbents = [
+                        {"id": cid, "name": all_names.get(cid)}
+                        for cid in sorted(set(held.values()))
+                    ]
             except Exception:
                 # Naming is a courtesy; the refusal itself must still happen.
                 logger.warning(
@@ -278,6 +296,7 @@ class CircuitClaimRegistry:
                 incumbent_name=winner_name,
                 requested_id=circuit_id,
                 requested_name=None,
+                all_incumbents=extra_incumbents,
                 detail="lost a concurrent race for these layers",
             ) from exc
         return sorted(layers)

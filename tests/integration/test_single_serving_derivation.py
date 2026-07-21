@@ -363,3 +363,61 @@ class TestR1TheEngineFailsSAFELYAndVISIBLY:
         assert plan.attached_layers == frozenset()
         assert plan.members
         assert seen == [], "a deliberate absence was logged as a fault"
+
+
+class TestR1ForRegistryIsSafeForTheDialPath:
+    """F18 R1-04. `for_registry` sets `_repository=None` and `_cache_dir=""`
+    because a registry-only service genuinely has neither. That is safe ONLY
+    while the dial path never reaches them — a property of the code today, not
+    a guarantee, and exactly the kind that erodes silently.
+
+    The retired `__new__` bypass had the same exposure and worse: those fields
+    were ABSENT, so a reach was an AttributeError rather than a None."""
+
+    def test_the_dial_path_touches_only_the_registry(self):
+        """Traced from `set_circuit_steering` — if this grows, the None fields
+        become reachable and `for_registry` needs real values or a raising
+        sentinel."""
+        import inspect
+        import re
+
+        from millm.services.sae_service import SAEService
+
+        reached = set()
+        for name in ("set_circuit_steering", "_set_circuit_steering_locked"):
+            method = getattr(SAEService, name, None)
+            if method is None:
+                continue
+            reached |= set(re.findall(r"self\.(_[a-z_]+)\b", inspect.getsource(method)))
+
+        unset_by_for_registry = {
+            "_repository", "_cache_dir", "_downloader", "_loader",
+            "_hooker", "_emitter", "_inference_service",
+        }
+        assert not (reached & unset_by_for_registry), (
+            f"the dial path now reaches {sorted(reached & unset_by_for_registry)}, "
+            "which for_registry sets to None/'' — give them real values or make "
+            "them raise rather than returning a misleading default"
+        )
+
+    def test_a_registry_only_service_can_actually_steer(self):
+        """The positive half: it is not merely well-formed, it works."""
+        from millm.services.sae_service import AttachedSAEState, SAEService
+
+        svc = SAEService.for_registry()
+        assert svc._sae_state is AttachedSAEState()
+        assert callable(svc.set_circuit_steering)
+
+    def test_it_is_total_against___init__(self):
+        """Every field the real constructor sets. The bypass left four fields
+        and two collections absent."""
+        import inspect
+        import re
+
+        from millm.services.sae_service import SAEService
+
+        init_fields = set(
+            re.findall(r"self\.(_[a-z_]+)\s*[:=]", inspect.getsource(SAEService.__init__))
+        )
+        svc = SAEService.for_registry()
+        assert [f for f in sorted(init_fields) if not hasattr(svc, f)] == []

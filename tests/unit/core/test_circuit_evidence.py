@@ -333,3 +333,67 @@ class TestCopyAudit:
             "mechanism without using the word 'causal' — the ladder's "
             "distinction is erased either way:\n" + "\n".join(offenders)
         )
+
+    def test_the_published_manual_is_audited_too(self):
+        """F20 R3-20. The audit scanned `millm/` and `admin-ui/src` for
+        `.py`/`.ts`/`.tsx` — so the Docusaurus manual, the most-read
+        user-facing surface in the repo, could never match any suffix in the
+        tuple.
+
+        Verified before fixing: appending
+
+            "Every mined circuit is causally validated by observation; the
+             mechanism is confirmed."
+
+        to `manual/docs/features/circuits.md` left the suite 17/17 green.
+
+        The manual is where a user forms their belief about what the evidence
+        ladder means. An overclaim there is worse than one in a log line: it is
+        edited prose, it reads as considered, and nobody grep's it.
+        """
+        offenders = []
+        base = REPO / "manual" / "docs"
+        if not base.exists():
+            pytest.skip(f"no manual at {base}")
+        pages = list(base.rglob("*.md")) + list(base.rglob("*.mdx"))
+        assert len(pages) > 5, (
+            f"only found {len(pages)} manual pages — the layout changed and "
+            "this guard is checking nothing"
+        )
+        for path in pages:
+            rel = str(path.relative_to(REPO))
+            text = path.read_text(encoding="utf-8", errors="ignore")
+            for i, line in enumerate(text.splitlines(), 1):
+                if not re.search(r"\bcausal", line, re.IGNORECASE):
+                    continue
+                sentence = TestCopyAudit._causal_sentence(line)
+                if TestCopyAudit.UNRELATED_SENSE.search(sentence):
+                    continue
+                if not TestCopyAudit.EVIDENCE_CONTEXT.search(sentence):
+                    continue
+                lowered = sentence.lower()
+                # Manual prose legitimately EXPLAINS the ladder and states the
+                # prohibition; those are the two things it is for.
+                if any(
+                    m in lowered
+                    for m in (
+                        "never", "forbid", "must not", "not causal",
+                        "no causal", "below rung 2", "rung 2",
+                        "causally validated (edge)",   # the ladder label
+                        "2 causally validated",
+                        "is forbidden",
+                        # The ENUM CONSTANT named as a threshold — "below
+                        # **CAUSALLY_VALIDATED** is refused" states the gate,
+                        # which is a denial, not a claim about an artifact.
+                        "causally_validated",
+                        "is refused",
+                        "below **causally",
+                    )
+                ):
+                    continue
+                offenders.append(f"{rel}:{i}: {line.strip()[:140]}")
+        assert not offenders, (
+            "Unqualified causal language in the published manual — the "
+            "surface where a reader forms their belief about what the "
+            "evidence ladder means:\n" + "\n".join(offenders)
+        )

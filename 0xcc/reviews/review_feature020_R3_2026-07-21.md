@@ -2,7 +2,9 @@
 
 **Date:** 2026-07-21
 **Scope:** attack R2's fixes.
-**Status:** IN PROGRESS — 19 findings
+**Status:** CLOSED — 20 findings, 20 fixed, all controls verified
+**Suites:** miLLM 2133 passed / 12 skipped · miStudio unit suite exit 0
+**CI:** green, and the cross-repo contract job ran for the first time and PASSED
 
 ## The finding that matters most
 
@@ -92,6 +94,7 @@ structural defect. It is the most important thing this round found after R3-04.
 | R3-13 | miLLM's copy audit whitelisted by **whole-line substring**, so a marker anywhere licensed a claim elsewhere: *"This circuit is causally validated; we never cut corners."* passed. miStudio fixed exactly this in R1-09/10 by requiring same-sentence denial; **miLLM never adopted it**. | passed → **caught** |
 | R3-14 | `UNRELATED_SENSE` contained **`architecture`** — an ordinary word in circuit copy — so *"Circuit architecture: this edge is causally validated by observation."* was exempted by its own subject matter. Sentence-scoping could not fix it (word and claim share a sentence); the term had to go. | passed → **caught** |
 | R3-15 | Both audits keyed on the token **"causal"**, so plain-English overclaims were invisible: *"Ablation proves this edge causes the refusal, a confirmed mechanism."* and *"Verified effect size measured on live traffic."* assert rung-2/3 without the guarded word. New `PROOF_CLAIM` check. | passed → **caught** |
+| R3-20 | miLLM's copy audit scanned `millm/` and `admin-ui/src` for `.py`/`.ts`/`.tsx`, so **the published Docusaurus manual could never match any suffix** — the most-read user-facing surface in the repo, and the place a reader forms their belief about what the evidence ladder means. An overclaim there is worse than one in a log line: it is edited prose, it reads as considered, and nobody greps it. Verified: appending *"Every mined circuit is causally validated by observation; the mechanism is confirmed."* to `circuits.md` left the suite 17/17 green. | manual overclaim → **caught** |
 | R3-16 | miStudio's `SURFACES` was **hand-maintained at five files** — in a file whose own comment says a hand-maintained list "is only as good as the list" and globs the MCP tools for that reason. Sixteen circuit modules were unaudited, including all three REST endpoint modules whose responses reach the UI. An overclaim planted in an endpoint left the suite **26/26 green**. Now discovered (5 → 17 surfaces). | passed → **caught** |
 
 **The honesty guarantee was enforced at different strengths on either side of

@@ -227,7 +227,98 @@ class AttachedSAEState:
                     # writes. Initialised here (not __init__) because this is a
                     # singleton constructed via __new__.
                     cls._instance._steering_epoch: int = 0
+                    # Feature 19: per-OWNER steering provenance,
+                    # {owner_id: {(sae_id, layer): {feature_idx: strength}}}.
+                    #
+                    # Without this, releasing one circuit means clearing a
+                    # layer's whole steering dict — which tears out a
+                    # co-tenant's steering while its row still reads active.
+                    # That is the highest-consequence defect available in
+                    # concurrent serving: a circuit the operator never touched
+                    # silently stops, and nothing reports it.
+                    cls._instance._owners: dict[
+                        str, dict[tuple[str, int], dict[int, float]]
+                    ] = {}
         return cls._instance
+
+    # ── Feature 19: owner-scoped steering ──────────────────────────────────
+
+    def apply_owner(
+        self, owner_id: str, per_entry: dict[tuple[str, int], dict[int, float]]
+    ) -> None:
+        """Record `owner_id`'s steering and rebuild every affected layer.
+
+        Replaces the owner's previous contribution wholesale (an owner
+        re-applying at a new intensity must not accumulate its old values).
+        """
+        # Capture the PREVIOUS keys before overwriting: an owner whose new
+        # claim set covers fewer layers must stop steering the dropped ones,
+        # and after the assignment below there is no record of what they were.
+        # (Found by a surviving mutation — the original `touched` read
+        # `self._owners[owner_id]` AFTER the overwrite, so it could only ever
+        # name the NEW keys and dropped layers were never rebuilt.)
+        previous = set(self._owners.get(owner_id, {}))
+        self._owners[owner_id] = {
+            key: dict(values) for key, values in per_entry.items()
+        }
+        for key in previous | set(per_entry):
+            self._rebuild_layer(key)
+
+    def release_owner(self, owner_id: str) -> list[tuple[str, int]]:
+        """Drop `owner_id`'s contribution and rebuild. Returns affected keys.
+
+        A co-tenant's keys SURVIVE, because the rebuild recomputes each layer
+        from the remaining owners rather than clearing it.
+        """
+        contrib = self._owners.pop(owner_id, None)
+        if not contrib:
+            return []
+        keys = sorted(contrib)
+        for key in keys:
+            self._rebuild_layer(key)
+        return keys
+
+    def owner_keys(self, owner_id: str) -> dict[int, list[int]]:
+        """`{layer: [feature_idx, ...]}` this owner currently steers."""
+        out: dict[int, list[int]] = {}
+        for (_sae_id, layer), values in self._owners.get(owner_id, {}).items():
+            out.setdefault(layer, []).extend(sorted(values))
+        return {layer: sorted(idxs) for layer, idxs in out.items()}
+
+    def _rebuild_layer(self, key: tuple[str, int]) -> None:
+        """Recompute one SAE's steering from ALL owners, then write it once.
+
+        RAISES on a colliding owner map: two owners naming the same
+        `(layer, feature_idx)` have no honest composition — one strength would
+        silently win and the served value would belong to neither author. The
+        claim registry refuses that case up front; reaching it here means the
+        gate was bypassed, so this fails loudly rather than picking a winner.
+        """
+        entry = self._entries.get(key)
+        if entry is None or entry.sae is None:
+            return
+
+        merged: dict[int, float] = {}
+        seen: dict[int, str] = {}
+        for owner_id, contrib in self._owners.items():
+            for feature_idx, strength in contrib.get(key, {}).items():
+                if feature_idx in seen:
+                    raise ValueError(
+                        f"steering collision on L{key[1]} feature "
+                        f"{feature_idx}: owners {seen[feature_idx]!r} and "
+                        f"{owner_id!r} both set it — no honest composition "
+                        "exists, so the claim gate must refuse this before it "
+                        "reaches the apply"
+                    )
+                seen[feature_idx] = owner_id
+                merged[feature_idx] = strength
+
+        entry.sae.clear_steering()
+        if merged:
+            entry.sae.set_steering_batch(merged)
+            entry.sae.enable_steering(True)
+        else:
+            entry.sae.enable_steering(False)
 
     @property
     def steering_epoch(self) -> int:

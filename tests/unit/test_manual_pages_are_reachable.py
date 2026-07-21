@@ -40,16 +40,42 @@ def _doc_ids() -> set[str]:
     }
 
 
-def _sidebar_ids() -> set[str]:
-    """Every quoted string in sidebars.ts that names a doc.
+#: A quoted string preceded by `label:` / `type:` / `id:` is NOT a doc id.
+_KEYED = re.compile(r"\b(?:label|type|id|className|description)\s*:\s*$")
 
-    Deliberately crude: it over-collects (category labels, type names), which
-    can only make this guard MORE permissive, never falsely accusing. The
-    failure it must not have is the other direction — missing a real entry and
-    reporting a reachable page as orphaned.
+
+def _sidebar_ids() -> set[str]:
+    """Doc ids in sidebars.ts: bare quoted strings in an items array or the
+    top-level list.
+
+    F20 R3-01 rewrote this. The original took EVERY quoted string, reasoning
+    that over-collecting could only make the guard more permissive and never
+    falsely accuse. That reasoning was wrong in a way I proved by attack:
+    over-collecting means a doc id can be "covered" by an unrelated quoted
+    word elsewhere in the file.
+
+    Demonstrated: delete `'troubleshooting'` from the sidebar — genuinely
+    orphaning `troubleshooting.md` — and rename any category label to
+    `'troubleshooting'`. The page is unreachable and the guard passes. A
+    top-level page (no directory, so no slash in its id) is exactly the shape
+    most vulnerable, and this repo has one.
+
+    That is the same defect the guard exists to catch, inside the guard.
     """
-    text = SIDEBARS.read_text()
-    return set(re.findall(r"['\"]([a-z0-9][a-z0-9/_-]*)['\"]", text))
+    ids: set[str] = set()
+    for line in SIDEBARS.read_text().splitlines():
+        stripped = line.strip()
+        # A doc entry is a whole line that is just a quoted string, optionally
+        # comma-terminated: `'features/circuits',`
+        m = re.fullmatch(r"['\"]([A-Za-z0-9][A-Za-z0-9/_-]*)['\"],?", stripped)
+        if m:
+            ids.add(m.group(1))
+            continue
+        # Reject anything that is the VALUE of a key (label:, type:, …) — the
+        # over-collection that made the original foolable.
+        if _KEYED.search(line.split(":")[0] + ":"):
+            continue
+    return ids
 
 
 @pytest.mark.skipif(not DOCS.is_dir(), reason=f"no manual at {DOCS}")
@@ -80,11 +106,12 @@ class TestEveryPageIsReachable:
         """The other direction: a sidebar entry pointing at a deleted page
         breaks the docs build, which is loud — but it breaks it at deploy
         time, and this is cheaper."""
-        docs = _doc_ids()
-        # Only ids that look like doc paths (contain a slash) — the crude
-        # extraction also picks up bare words like 'category'.
-        named = {s for s in _sidebar_ids() if "/" in s}
-        missing = sorted(named - docs)
+        # R3-01: this used to filter on `"/" in s` to dodge the noise the old
+        # crude extraction produced. That filter also skipped every TOP-LEVEL
+        # page (no directory ⇒ no slash), so a sidebar entry naming a deleted
+        # top-level doc passed. The extraction no longer produces noise, so
+        # the filter is gone and top-level entries are checked too.
+        missing = sorted(_sidebar_ids() - _doc_ids())
         assert not missing, (
             f"sidebars.ts names {missing}, which do not exist under "
             f"{DOCS}. The docs build will fail on these."

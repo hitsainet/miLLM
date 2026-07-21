@@ -90,7 +90,14 @@ jobs:
       # Importing miStudio's schema package pulls its app settings, which
       # default to paths this runner cannot write. Point them at the workspace
       # so an ENVIRONMENT limit does not read as a parity failure.
-      HF_HOME: ${{ runner.temp }}/hf
+      #
+      # F20 R3-04: this said `${{ runner.temp }}/hf`. The `runner` context is
+      # NOT available in a job-level `env:` block — only inside steps — so
+      # GitHub rejected the WHOLE WORKFLOW FILE and ran NOTHING. Four commits
+      # went out with the entire backend test suite silently not running,
+      # while I reported it green from local runs. Hardcoded because a literal
+      # path cannot reference a context that is out of scope.
+      HF_HOME: /tmp/hf
       DATABASE_URL: postgresql+asyncpg://u:p@localhost/x
       DATABASE_URL_SYNC: postgresql://u:p@localhost/x
       REDIS_URL: redis://localhost:6379/0

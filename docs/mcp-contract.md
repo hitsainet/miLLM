@@ -105,17 +105,27 @@ healthy) mark the product unavailable; tools then return a structured
 
 ### `millm_circuits` (v1.1 — Circuit Runtime)
 
-> ⚠️ **STATUS CORRECTION (2026-07-20).** The `F13 ✅` / `F15 ✅` marks below
-> describe the **REST endpoints**, which do ship and are covered by tests.
-> They do **NOT** mean an MCP tool is registered. miStudio's MCP server
-> registers exactly three miLLM categories — `millm_runtime`,
-> `millm_clusters`, `millm_sensing` (`backend/src/mcp_server/tools/__init__.py`
-> `MILLM_CATEGORY_MODULES`). **There is no `millm_circuits` module**, so none
-> of the circuit tools named here are callable by an agent today. An agent
-> reaching a circuit must call the REST route directly.
+> ✅ **STATUS CORRECTION — RESOLVED (2026-07-21, Feature 20).**
 >
-> This table read as a shipped tool surface for an entire increment. Wiring
-> the category is tracked in BRD-MILLM-CIRCUITS-002.
+> **Kept, not deleted.** This is the record of how a contract table read as a
+> shipped tool surface for an entire increment, and deleting it would erase the
+> only evidence that it did.
+>
+> **What was wrong (2026-07-20):** the `F13 ✅` / `F15 ✅` marks described the
+> **REST endpoints**, which shipped and were tested. They did NOT mean an MCP
+> tool was registered — miStudio's server registered three miLLM categories,
+> and there was no `millm_circuits` module at all. Every circuit tool named
+> here was uncallable by an agent, and nothing said so.
+>
+> **What fixed it:** Feature 20 ships `millm_circuits` (16 tools) and, more
+> importantly, the REACHABILITY ASSURANCE that would have caught this:
+> registry, built-server and per-tool CALLER assertions, each proven by a
+> mutation that turns them red. A mark on this table is now backed by a test
+> that fails when the wiring is removed.
+>
+> **Marks below are three-state:** `REST ✅ · MCP ✅` (endpoint ships AND a tool
+> is registered and caller-asserted), `REST ✅ · MCP not registered` (endpoint
+> ships, no tool — an agent must call REST directly), `not served`.
 
 **REST endpoints implemented (Features 13 + 15).** The HUB rows below remain
 reserved and are NOT served — calls to them 404 today. They are listed so the

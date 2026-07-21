@@ -485,8 +485,30 @@ class CircuitService:
 
         session = getattr(self.repository, "session", None)
         if session is None:
-            # No session to claim through (unit fixtures with a stubbed repo).
-            # Claiming is a persistence concern; serving must still work.
+            # F19 R1-09: this is a SERVE-WITHOUT-CLAIMING path, and it used to
+            # take it silently.
+            #
+            # Production code branching on the shape of a test double is how a
+            # safety gate becomes a no-op: any repository not exposing
+            # `.session` (a caching wrapper, a DI regression, a future repo
+            # refactor) disables contention AND collision checking entirely,
+            # restoring the pre-F19 silent-clobber behaviour with a perfectly
+            # healthy-looking response.
+            #
+            # It still degrades rather than refusing — a persistence detail
+            # must not make the server unable to serve — but it can no longer
+            # do so quietly.
+            logger.error(
+                "circuit_claim_gate_BYPASSED",
+                circuit_id=circuit.id,
+                layers=sorted(served_layers),
+                detail=(
+                    "the repository exposes no session, so this activation "
+                    "was NOT checked for layer contention or same-key "
+                    "collisions and took no claims — concurrent circuits may "
+                    "now silently clobber each other"
+                ),
+            )
             return []
 
         registry = CircuitClaimRegistry(session)

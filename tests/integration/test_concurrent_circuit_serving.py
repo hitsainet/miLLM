@@ -26,6 +26,7 @@ class FakeSAE:
     def __init__(self):
         self._values: dict[int, float] = {}
         self.is_steering_enabled = False
+        self.is_monitoring_enabled = False
         self.d_sae = 8192
 
     def get_steering_values(self):
@@ -305,3 +306,85 @@ class TestRungSuppressionOnComposedLayers:
 
         monkeypatch.setattr(inf_mod, "async_session_factory", boom, raising=False)
         assert await svc._any_layer_composed() is False
+
+
+class TestR1CircuitServingIsOBSERVABLE:
+    """F19 R1-09/10/11 — the operator can see what is happening.
+
+    Before these, composition — the state in which the runtime deliberately
+    STOPS making evidence claims — was invisible to every dashboard and
+    unalertable. The only "circuit" metric on the surface is the unrelated
+    HuggingFace HTTP breaker, which is an active trap for anyone alerting on
+    the word.
+    """
+
+    async def test_metrics_report_circuits_layers_and_COMPOSITION(self):
+        from millm.api.routes.system.health import get_metrics
+
+        s10 = attach(10)
+        attach(13)
+        svc = SAEService.for_registry()
+        svc.set_circuit_steering(
+            [CircuitMember(feature_idx=1, layer=10, budget=40.0, sign=1)],
+            1.0,
+            owner_id="circuit:A",
+        )
+        svc.set_circuit_steering(
+            [CircuitMember(feature_idx=2, layer=13, budget=30.0, sign=1)],
+            1.0,
+            owner_id="circuit:B",
+        )
+
+        metrics = await get_metrics()
+        assert metrics.circuits_serving == 2
+        assert metrics.circuit_layers_served == 2
+        assert metrics.circuit_layers_composed == 0, (
+            "disjoint circuits are not composed"
+        )
+
+        # Now compose B onto A's layer.
+        svc.set_circuit_steering(
+            [CircuitMember(feature_idx=9, layer=10, budget=30.0, sign=1)],
+            1.0,
+            owner_id="circuit:B",
+        )
+        metrics = await get_metrics()
+        assert metrics.circuit_layers_composed == 1, (
+            "a composed layer is invisible to metrics — the one state where "
+            "the rung header is suppressed cannot be alerted on"
+        )
+        assert s10.get_steering_values() == {1: 40.0, 9: 30.0}
+
+    async def test_the_prometheus_surface_carries_the_same_gauges(self):
+        from millm.api.routes.system.health import get_prometheus_metrics
+
+        attach(10)
+        SAEService.for_registry().set_circuit_steering(
+            [CircuitMember(feature_idx=1, layer=10, budget=40.0, sign=1)],
+            1.0,
+            owner_id="circuit:A",
+        )
+        # The route takes its loader via Depends; call it directly with a stub.
+        loader = SimpleNamespace(is_loaded=False, model_name=None)
+        response = await get_prometheus_metrics(model_loader=loader)
+        body = response.body.decode() if hasattr(response, "body") else str(response)
+        assert "millm_circuits_serving 1" in body
+        assert "millm_circuit_layers_served 1" in body
+        assert "millm_circuit_layers_composed 0" in body
+
+    async def test_a_bypassed_claim_gate_is_LOUD(self):
+        """R1-09. A repository without a session disables contention AND
+        collision checking entirely. It still degrades rather than refusing —
+        a persistence detail must not stop the server serving — but it can no
+        longer do so silently."""
+        import inspect
+
+        from millm.services.circuit_service import CircuitService
+
+        src = inspect.getsource(CircuitService._claim_layers)
+        gate = src[src.index('session = getattr(self.repository, "session", None)'):]
+        assert "circuit_claim_gate_BYPASSED" in gate
+        assert "logger.error" in gate, (
+            "a serve-without-claiming path must not be a warning — it restores "
+            "the pre-F19 silent-clobber behaviour"
+        )

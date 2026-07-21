@@ -435,6 +435,18 @@ class MetricsResponse(BaseModel):
 
     # Steering metrics
     steering_enabled: bool = Field(False, description="Whether steering is enabled")
+    #: Feature 19. How many circuits are steering right now, over how many
+    #: layers, and how many of those layers carry MORE THAN ONE circuit.
+    #: `circuit_layers_composed > 0` is the alertable condition: on a composed
+    #: layer the rung header is suppressed, because no single circuit's
+    #: evidence describes the response.
+    circuits_serving: int = Field(0, description="Circuits currently steering")
+    circuit_layers_served: int = Field(
+        0, description="Distinct layers steered by circuits"
+    )
+    circuit_layers_composed: int = Field(
+        0, description="Layers carrying more than one circuit (rung suppressed)"
+    )
     active_features: int = Field(0, description="Number of active steering features")
 
     # Monitoring metrics
@@ -543,7 +555,33 @@ async def get_metrics(
         if e.sae and e.sae.is_steering_enabled
     )
 
+    # F19 R1-11: circuit-serving metrics. Composition — the state in which the
+    # runtime deliberately STOPS making evidence claims — was invisible to
+    # every dashboard and unalertable, and the only "circuit" metric on this
+    # surface is the unrelated HuggingFace HTTP breaker, which is an active
+    # trap for an operator alerting on the word.
+    #
+    # Read from the in-memory owner map rather than the claims table: /metrics
+    # is scraped continuously and must not add a DB round-trip per scrape, and
+    # the owner map is the authority on what is ACTUALLY steering right now.
+    circuit_owners = sorted(
+        owner for owner in sae_state._owners if owner.startswith("circuit:")
+    )
+    circuit_layers: set[int] = set()
+    for owner in circuit_owners:
+        circuit_layers.update(sae_state.owner_keys(owner))
+    # A layer held by more than one circuit owner IS composed, whatever the
+    # claims table says — this is the runtime truth.
+    layer_holders: dict[int, int] = {}
+    for owner in circuit_owners:
+        for layer in sae_state.owner_keys(owner):
+            layer_holders[layer] = layer_holders.get(layer, 0) + 1
+    composed_layers = sorted(l for l, n in layer_holders.items() if n > 1)
+
     return MetricsResponse(
+        circuits_serving=len(circuit_owners),
+        circuit_layers_served=len(circuit_layers),
+        circuit_layers_composed=len(composed_layers),
         total_requests=metrics_counter.total_requests,
         active_requests=metrics_counter.active_requests,
         request_errors=metrics_counter.request_errors,
@@ -590,6 +628,20 @@ async def get_prometheus_metrics(
     hf_status = get_circuit_breaker_status(huggingface_circuit)
     circuit_open = 1 if hf_status.is_open else 0
 
+    # F19: circuit serving, from the in-memory owner map (no DB round-trip on
+    # a continuously-scraped endpoint).
+    _sae_state = AttachedSAEState()
+    _circuit_owners = [
+        owner for owner in _sae_state._owners if owner.startswith("circuit:")
+    ]
+    _holders: dict[int, int] = {}
+    for _owner in _circuit_owners:
+        for _layer in _sae_state.owner_keys(_owner):
+            _holders[_layer] = _holders.get(_layer, 0) + 1
+    circuits_serving = len(_circuit_owners)
+    circuit_layers_served = len(_holders)
+    circuit_layers_composed = sum(1 for n in _holders.values() if n > 1)
+
     # Build Prometheus format
     lines = [
         "# HELP millm_requests_total Total number of requests processed",
@@ -599,6 +651,23 @@ async def get_prometheus_metrics(
         "# HELP millm_requests_active Currently active requests",
         "# TYPE millm_requests_active gauge",
         f"millm_requests_active {metrics_counter.active_requests}",
+        "",
+        # F19: composition is the alertable condition — on a composed layer
+        # the rung header is suppressed because no single circuit's evidence
+        # describes the response. NOTE for anyone alerting on "circuit":
+        # `millm_circuit_breaker_*` below is the HuggingFace HTTP breaker and
+        # is UNRELATED to circuit serving.
+        "# HELP millm_circuits_serving Circuits currently steering",
+        "# TYPE millm_circuits_serving gauge",
+        f"millm_circuits_serving {circuits_serving}",
+        "",
+        "# HELP millm_circuit_layers_served Distinct layers steered by circuits",
+        "# TYPE millm_circuit_layers_served gauge",
+        f"millm_circuit_layers_served {circuit_layers_served}",
+        "",
+        "# HELP millm_circuit_layers_composed Layers carrying more than one circuit (rung header suppressed)",
+        "# TYPE millm_circuit_layers_composed gauge",
+        f"millm_circuit_layers_composed {circuit_layers_composed}",
         "",
         "# HELP millm_request_errors_total Total number of request errors",
         "# TYPE millm_request_errors_total counter",

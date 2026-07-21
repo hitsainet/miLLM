@@ -35,6 +35,10 @@ from millm.api.schemas.circuit import (
 from millm.api.schemas.common import ApiResponse
 from millm.core.errors import UnvalidatedCircuitError
 
+from millm.core.logging import get_logger
+
+logger = get_logger(__name__)
+
 router = APIRouter(prefix="/api/circuits", tags=["circuits"])
 
 CircuitId = Annotated[str, Path(description="Circuit ID")]
@@ -110,6 +114,21 @@ async def list_claims(service: CircuitServiceDep) -> ApiResponse[list[dict]]:
 
     session = getattr(service.repository, "session", None)
     if session is None:
+        # F19 R1-10: an empty list here is rendered by ClaimsStrip as the
+        # affirmative statement "No layers are currently claimed" — a
+        # confident, wrong all-clear at exactly the moment the claims
+        # subsystem is unavailable. There is no third state in the UI for
+        # "could not determine", so this must at least be loud in the logs;
+        # an operator who then attempts an activation gets a contention
+        # refusal contradicting the strip they just read.
+        logger.error(
+            "circuit_claims_unavailable",
+            detail=(
+                "no session to read claims through — the claims view will "
+                "report NOTHING CLAIMED, which is indistinguishable from the "
+                "truth and may contradict the next activation's refusal"
+            ),
+        )
         return ApiResponse.ok([])
 
     registry = CircuitClaimRegistry(session)

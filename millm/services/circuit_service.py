@@ -446,6 +446,21 @@ class CircuitService:
         )
         members = plan.members
         edges = [e.model_dump(mode="json") for e in definition.edges]
+        # R2-01: a plan whose intensity could not be derived carries
+        # `UNSET_INTENSITY` (NaN), and NaN propagates SILENTLY through every
+        # multiplication in the apply — poisoning every steering value rather
+        # than failing. Reachable here whenever `circuit.intensity` is None and
+        # the document declares no budget.
+        #
+        # R1-12 replaced a visible 0.0 with an invisible NaN and did not make
+        # the one consumer check. Refuse instead: an activation that cannot
+        # determine how hard to steer must not steer.
+        if not plan.has_intensity:
+            raise ValidationError(
+                "Circuit has no serving intensity: the definition declares no "
+                "budget and the circuit row carries none",
+                details={"circuit_id": circuit.id},
+            )
         intensity = plan.intensity
         # R3 finding 2: `activate` bumps for the whole logical action, so this
         # write must NOT bump as well — one activation advanced the epoch by 2,

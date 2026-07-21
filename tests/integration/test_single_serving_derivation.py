@@ -688,3 +688,81 @@ class TestR1ClaimSetOnEveryCharacterizationFixture:
         assert CircuitSteeringEngine.claim_set(derived) == frozenset(
             m.layer for m in derived
         )
+
+
+class TestR2ANaNIntensityNeverReachesTheApply:
+    """F18 R2-01, attacking R1-12. `UNSET_INTENSITY` is NaN, and NaN propagates
+    SILENTLY through every multiplication in the apply — poisoning every
+    steering value rather than failing. R1-12 replaced a visible 0.0 with an
+    invisible NaN and did not make the one consumer check.
+
+    Reachable from `_serve_full` whenever `circuit.intensity` is None and the
+    document declares no budget."""
+
+    def test_the_engine_still_reports_an_underivable_intensity_as_unset(self):
+        d = defn([], budget=None)
+        plan = CircuitSteeringEngine().plan_for(d, SimpleNamespace(intensity=None))
+        assert plan.has_intensity is False
+
+    def test_NaN_would_poison_every_steering_value(self):
+        """Why this matters more than a 0.0: 0.0 serves nothing visibly, NaN
+        serves nonsense invisibly."""
+        import math
+
+        from millm.services.sae_service import _directional_budget
+
+        assert math.isnan(_directional_budget(float("nan"), 1))
+        assert math.isnan(float("nan") * 2.0)
+
+    @pytest.mark.asyncio
+    async def test_serve_full_REFUSES_rather_than_applying_NaN(self, monkeypatch):
+        """The consumer check. An activation that cannot determine how hard to
+        steer must not steer."""
+        from millm.core.errors import ValidationError
+        from millm.services.circuit_service import CircuitService
+
+        svc = CircuitService.__new__(CircuitService)
+        svc._sae_service = MagicMock()
+        circuit = SimpleNamespace(id="circ_1", intensity=None)
+        d = defn([mem(10, feature=feat(1))])
+
+        with pytest.raises(ValidationError, match="no serving intensity"):
+            await svc._serve_full(circuit, d)
+
+        svc._sae_service.set_circuit_steering.assert_not_called()
+
+
+class TestR2TheNegativeGuardIsUnreachableFromUserInput:
+    """F18 R2-02, attacking R1-13. A `ValueError` raised inside `plan_for`
+    would be a 500 if a user could trigger it. Traced the OpenAI
+    `steering_intensity` path: the schema bounds it to [0.0, 2.0], so a
+    negative is rejected at the edge and the engine guard is defence in depth.
+
+    Pinned so that relaxing the schema surfaces the interaction rather than
+    turning a validation error into an unhandled exception."""
+
+    @pytest.mark.parametrize(
+        "value,accepted",
+        [(-1.0, False), (0.0, True), (2.0, True), (3.0, False)],
+    )
+    def test_the_schema_bounds_the_user_supplied_lambda(self, value, accepted):
+        from millm.api.schemas.openai import ChatCompletionRequest
+
+        kwargs = dict(
+            model="m",
+            messages=[{"role": "user", "content": "x"}],
+            steering_intensity=value,
+        )
+        if accepted:
+            assert ChatCompletionRequest(**kwargs).steering_intensity == value
+        else:
+            with pytest.raises(Exception):
+                ChatCompletionRequest(**kwargs)
+
+    def test_a_zero_lambda_still_reaches_the_engine(self):
+        """0.0 is a legitimate dial position and must NOT be caught by the
+        negative guard."""
+        plan = CircuitSteeringEngine().plan_for(
+            defn([]), SimpleNamespace(intensity=1.0), intensity=0.0
+        )
+        assert plan.intensity == 0.0

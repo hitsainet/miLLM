@@ -299,6 +299,109 @@ class UnvalidatedCircuitError(MiLLMError):
     status_code = 200  # house style: handler-level refusal in the envelope
 
 
+#: The measurement behind the default refusal. Carried IN the refusal payload
+#: because §6.2 of the contention model makes it a binding retention condition:
+#: an operator who overrides has been told what happened last time. The caveat
+#: is part of the data, not a footnote — it is one model and one fixture, and
+#: stating it as more would be the same overclaim the evidence ladder exists to
+#: prevent.
+CONTENTION_MEASURED_HAZARD: dict[str, Any] = {
+    "source": "GPU close-out 2026-07-20, LFM2.5-1.2B-Instruct",
+    "one_layer_at_strength_5": "coherent, indistinguishable from baseline",
+    "two_layers_at_strength_5": "degenerate output (repeated tokens)",
+    "note": "one model, one fixture — indicative, not exhaustive",
+}
+
+
+class CircuitLayerContentionError(MiLLMError):
+    """Activating a circuit whose layers another active circuit already holds.
+
+    Refused BY DEFAULT rather than composed, because composition on a layer is
+    additive and unbounded in aggregate: the ±200 clamp bounds each member
+    individually and nothing bounds the sum. The GPU close-out measured two
+    steered layers at strength 5 destroying generation entirely, two orders of
+    magnitude below that clamp.
+
+    The refusal NAMES THE INCUMBENT so the operator's next action is obvious
+    (deactivate it, or edit one circuit's layers), and carries the measurement
+    so an override is an informed act rather than a guess. A refusal that
+    states only the fact of contention does not satisfy BR-011.
+
+    A same-key COLLISION uses this same code but is never overridable — see
+    `colliding_keys` in the details.
+    """
+
+    code = "CIRCUIT_LAYER_CONTENTION"
+    status_code = 200  # house style: handler-level refusal in the envelope
+
+    def __init__(
+        self,
+        *,
+        contended_layers: Any,
+        incumbent_id: Optional[str] = None,
+        incumbent_name: Optional[str] = None,
+        requested_id: Optional[str] = None,
+        requested_name: Optional[str] = None,
+        colliding_keys: Any = (),
+        detail: Optional[str] = None,
+    ) -> None:
+        layers = sorted(contended_layers or [])
+        who = f"circuit '{incumbent_name}'" if incumbent_name else "another active circuit"
+        if incumbent_id:
+            who += f" ({incumbent_id})"
+
+        if colliding_keys:
+            pairs = ", ".join(
+                f"L{layer}/feature {idx}" for layer, idx, _cid in colliding_keys
+            )
+            message = (
+                f"{pairs} are steered by BOTH this circuit and {who}. "
+                "Composition merges into one steering dict, so one strength "
+                "would silently overwrite the other and the served value would "
+                "belong to neither author. This cannot be overridden — edit "
+                "one circuit's members."
+            )
+        else:
+            message = (
+                f"Layers {layers} are already served by {who}. Overriding "
+                "composes both circuits additively on those layers. In "
+                "close-out testing, TWO steered layers at individually-harmless "
+                "strength (5) destroyed generation entirely — two orders of "
+                "magnitude below the per-member clamp. Pass "
+                "allow_layer_overlap=true only if you intend a compounding "
+                "study; the circuit-rung header is omitted while any layer is "
+                "composed, because no single circuit's evidence describes the "
+                "response."
+            )
+        if detail:
+            message = f"{message} ({detail})"
+
+        super().__init__(
+            message,
+            details={
+                "contended_layers": layers,
+                "incumbent": {"id": incumbent_id, "name": incumbent_name},
+                "requested": {"id": requested_id, "name": requested_name},
+                # Absent for a collision: naming an override parameter that
+                # cannot help would be an invitation to try it.
+                **(
+                    {}
+                    if colliding_keys
+                    else {
+                        "override_param": "allow_layer_overlap",
+                        "rung_header_suppressed_if_overridden": True,
+                    }
+                ),
+                "colliding_keys": [
+                    {"layer": layer, "feature_idx": idx, "incumbent": cid}
+                    for layer, idx, cid in (colliding_keys or ())
+                ],
+                "overridable": not bool(colliding_keys),
+                "measured_hazard": CONTENTION_MEASURED_HAZARD,
+            },
+        )
+
+
 class NoActiveCircuitError(MiLLMError):
     """An operation needing an active circuit was called with none serving."""
 
@@ -318,6 +421,7 @@ class CircuitSensingEventNotFoundError(MiLLMError):
 
 
 ERROR_CLASSES: dict[str, type[MiLLMError]] = {
+    "CIRCUIT_LAYER_CONTENTION": CircuitLayerContentionError,
     "CIRCUIT_SENSING_EVENT_NOT_FOUND": CircuitSensingEventNotFoundError,
     "INTERNAL_ERROR": MiLLMError,
     "MODEL_NOT_FOUND": ModelNotFoundError,

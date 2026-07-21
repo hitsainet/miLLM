@@ -70,14 +70,37 @@ class TestCircuitModel:
 
 
 class TestSingleActiveIndex:
-    async def test_only_one_active_circuit(self, test_session, make_circuit):
-        test_session.add(make_circuit(id="c1", name="one", is_active=True))
+    async def test_SEVERAL_circuits_may_now_be_active(
+        self, test_session, make_circuit
+    ):
+        """Feature 19 SUPERSEDES the single-active index.
+
+        This test previously asserted that a second active circuit raises
+        `IntegrityError`. That guarantee is deliberately gone: the constraint
+        moved from "one circuit" to "one circuit PER LAYER", enforced by
+        `circuit_layer_claims.uq_circuit_layer_claim_live`, because the layer
+        is the unit contention actually has — two circuits on the same layer
+        sum into one steering dict and nothing bounds that sum.
+
+        Kept rather than deleted, and INVERTED rather than weakened, so the
+        supersession is recorded where the old rule lived. Two circuits on
+        DISJOINT layers is the whole point of the feature; the per-layer rule
+        is asserted in `test_circuit_claim_registry.py`.
+        """
+        test_session.add(
+            make_circuit(id="c1", name="one", is_active=True, layers=[10])
+        )
+        test_session.add(
+            make_circuit(id="c2", name="two", is_active=True, layers=[13])
+        )
         await test_session.commit()
 
-        test_session.add(make_circuit(id="c2", name="two", is_active=True))
-        with pytest.raises(IntegrityError):
-            await test_session.commit()
-        await test_session.rollback()
+        actives = (
+            await test_session.execute(
+                select(Circuit).where(Circuit.is_active.is_(True))
+            )
+        ).scalars().all()
+        assert len(actives) == 2
 
     async def test_many_inactive_allowed(self, test_session, make_circuit):
         test_session.add(make_circuit(id="c1", name="one"))

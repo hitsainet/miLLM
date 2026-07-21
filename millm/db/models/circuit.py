@@ -4,8 +4,8 @@ Circuit database model (Feature 13: Circuit Import).
 A circuit is a multi-layer graph over several SAEs — unlike a cluster it is not
 a ``profiles`` row. ``circuit_meta`` stores the full original
 ``mistudio.circuit-definition/v1`` document verbatim so re-export is lossless.
-At most one circuit may be active at a time (partial unique index, mirroring
-``idx_active_profile``).
+Several circuits may be active at once (Feature 19), provided their claim sets
+are disjoint — see ``circuit_layer_claim.py``.
 """
 
 from datetime import datetime
@@ -92,16 +92,18 @@ class Circuit(Base):
         nullable=False,
     )
 
-    __table_args__ = (
-        Index(
-            "uq_circuits_active",
-            "is_active",
-            unique=True,
-            postgresql_where=(is_active == True),  # noqa: E712
-            sqlite_where=(is_active == True),  # noqa: E712
-        ),
-        Index("idx_circuits_rung", "rung"),
-    )
+    # Feature 19: `uq_circuits_active` is GONE. Several circuits may be active
+    # at once, provided their claim sets are disjoint — the constraint moved
+    # from "one circuit" to "one circuit PER LAYER"
+    # (`circuit_layer_claims.uq_circuit_layer_claim_live`), which is the unit
+    # contention actually has.
+    #
+    # Dropping it in migration 013 is not sufficient on its own: the index also
+    # lives in `Base.metadata`, so every test database built by
+    # `create_all` would keep enforcing single-active and make concurrent
+    # serving untestable. That is exactly how this was caught — the first
+    # registry test could not insert a second active circuit.
+    __table_args__ = (Index("idx_circuits_rung", "rung"),)
 
     @property
     def validated(self) -> bool:

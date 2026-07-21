@@ -1031,3 +1031,43 @@ class TestR2TwoSAEsOnOneClaimedLayerAreBothCarried:
 
         doc = inspect.getdoc(AttachedSAEState) or ""
         assert "(sae_id, layer)" in doc or "sae_id" in doc
+
+
+class TestR2TheFrozenPlanIsFrozenAllTheWayDown:
+    """F18 R2-12. The dataclass is frozen, but it held `members` as a LIST — a
+    frozen dataclass wrapping a mutable list is only half frozen. Appending to
+    it broke the `claimed_layers == member layers` identity, which is the exact
+    invariant F18 exists to make structural, while every field still reported
+    its original value.
+
+    Four consumers share this object. One of them mutating it changes what the
+    others read, which is the class of drift this feature was built to end."""
+
+    def test_members_cannot_be_appended_to(self):
+        plan = CircuitSteeringEngine().plan_for(defn([mem(10, feature=feat(1))]))
+        with pytest.raises(AttributeError):
+            plan.members.append("INJECTED")
+
+    def test_the_claim_set_identity_survives_a_mutation_attempt(self):
+        plan = CircuitSteeringEngine().plan_for(defn([mem(10, feature=feat(1))]))
+        try:
+            plan.members.append(SimpleNamespace(layer=99))
+        except AttributeError:
+            pass
+        assert plan.claimed_layers == frozenset(m.layer for m in plan.members)
+
+    def test_the_top_level_fields_are_still_frozen(self):
+        import dataclasses
+
+        plan = CircuitSteeringEngine().plan_for(defn([mem(10, feature=feat(1))]))
+        with pytest.raises(dataclasses.FrozenInstanceError):
+            plan.intensity = 9.0
+
+    def test_members_is_still_iterable_and_indexable(self):
+        """The change must not break the consumers that read it."""
+        plan = CircuitSteeringEngine().plan_for(
+            defn([mem(10, feature=feat(1)), mem(13, feature=feat(2))])
+        )
+        assert len(plan.members) == 2
+        assert plan.members[0].layer == 10
+        assert [m.layer for m in plan.members] == [10, 13]

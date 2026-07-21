@@ -66,7 +66,12 @@ class ServingPlan:
     layers its apply drives cannot drift, because they are the same set.
     """
 
-    members: list[Any]
+    #: R2-12: a TUPLE, not a list. The dataclass is frozen, but a frozen
+    #: dataclass holding a mutable list is only half frozen: appending to
+    #: `members` broke the `claimed_layers == member layers` identity — the
+    #: exact invariant F18 exists to make structural — while every field still
+    #: reported its original value. Four consumers share this object.
+    members: tuple[Any, ...]
     intensity: float
     claimed_layers: frozenset[int]
     attached_layers: frozenset[int]
@@ -319,7 +324,7 @@ class CircuitSteeringEngine:
         # ONE registry read for the whole plan (R1-08).
         entries = self._entries()
         return ServingPlan(
-            members=members,
+            members=tuple(members),
             intensity=resolved,
             claimed_layers=claimed,
             attached_layers=frozenset(e.layer for e in entries),

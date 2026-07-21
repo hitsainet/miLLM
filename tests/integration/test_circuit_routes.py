@@ -339,3 +339,89 @@ class TestR1Fixes:
         async with client:
             r = await client.post("/api/circuits/circ_1/deactivate")
         assert r.json()["data"]["cleared_steering"] is True
+
+
+class TestF19ContentionRoutes:
+    """Feature 19 task 4.2/4.3 — the override parameter, the refusal envelope,
+    and the claims view."""
+
+    async def test_allow_layer_overlap_reaches_the_service(
+        self, client, mock_service
+    ):
+        """A parameter the route accepts but never forwards is a silent
+        no-op: the operator believes they authorised composition and the
+        service refuses anyway (or worse, composes without the record)."""
+        async with client:
+            await client.post(
+                "/api/circuits/circ_1/activate?allow_layer_overlap=true"
+            )
+        _args, kwargs = mock_service.activate.call_args
+        assert kwargs.get("allow_layer_overlap") is True
+
+    async def test_it_defaults_to_FALSE(self, client, mock_service):
+        async with client:
+            await client.post("/api/circuits/circ_1/activate")
+        _args, kwargs = mock_service.activate.call_args
+        assert kwargs.get("allow_layer_overlap") is False, (
+            "composition must never be the default — it is refused by default "
+            "precisely because it is measured to destroy generation"
+        )
+
+    async def test_a_contention_refusal_uses_the_ENVELOPE(
+        self, client, mock_service
+    ):
+        """House style: 200 + success:false. Nothing is missing; the operation
+        does not apply, and the client needs the details to decide."""
+        from millm.core.errors import CircuitLayerContentionError
+
+        mock_service.activate = AsyncMock(
+            side_effect=CircuitLayerContentionError(
+                contended_layers=[13],
+                incumbent_id="circ_abc",
+                incumbent_name="fear→threat",
+                requested_id="circ_1",
+                requested_name="hedging",
+            )
+        )
+        async with client:
+            r = await client.post("/api/circuits/circ_1/activate")
+
+        assert r.status_code == 200
+        body = r.json()
+        assert body["success"] is False
+        assert body["error"]["code"] == "CIRCUIT_LAYER_CONTENTION"
+
+        details = body["error"]["details"]
+        assert details["incumbent"]["name"] == "fear→threat", (
+            "the refusal did not name the incumbent, so the operator cannot "
+            "tell what to deactivate"
+        )
+        assert details["override_param"] == "allow_layer_overlap"
+        assert details["rung_header_suppressed_if_overridden"] is True
+        # BR-011: the measurement travels WITH the refusal.
+        assert "degenerate" in details["measured_hazard"]["two_layers_at_strength_5"]
+        assert "indicative, not exhaustive" in details["measured_hazard"]["note"]
+
+    async def test_a_COLLISION_refusal_offers_no_override_route(
+        self, client, mock_service
+    ):
+        from millm.core.errors import CircuitLayerContentionError
+
+        mock_service.activate = AsyncMock(
+            side_effect=CircuitLayerContentionError(
+                contended_layers=[13],
+                colliding_keys=[(13, 42, "circ_abc")],
+                incumbent_id="circ_abc",
+                incumbent_name="fear→threat",
+            )
+        )
+        async with client:
+            r = await client.post("/api/circuits/circ_1/activate")
+
+        details = r.json()["error"]["details"]
+        assert details["overridable"] is False
+        assert "override_param" not in details, (
+            "naming an override parameter on a collision invites trying it, "
+            "and if it worked one author's strength would silently win"
+        )
+        assert details["colliding_keys"][0]["feature_idx"] == 42

@@ -884,6 +884,48 @@ class InferenceService:
             return None
         return self._resolve_circuit_intensity(raw, circuit)
 
+    async def _any_layer_composed(self) -> bool:
+        """True if ANY live claim is composed (F19).
+
+        Fails CLOSED: an unreadable claim table returns True, suppressing the
+        rung header. The alternative — emitting a rung we could not verify — is
+        an evidence claim made in ignorance, which is the one thing the ladder
+        forbids.
+        """
+        try:
+            from millm.db.base import async_session_factory
+            from millm.services.circuit_claim_registry import CircuitClaimRegistry
+
+            async with async_session_factory() as session:
+                claims = await CircuitClaimRegistry(session).live_claims()
+            return any(c.composed for c in claims)
+        except Exception as e:
+            # NOT fail-closed, deliberately, and this is a real trade-off.
+            #
+            # Composition requires an explicit operator override and is rare;
+            # an unreachable claims table is comparatively common (a Postgres
+            # blip) and already degrades the rest of this path. Suppressing on
+            # every DB error would silently delete the rung disclosure for
+            # every request during a blip — losing an honesty signal far more
+            # often than it prevents a wrong one, and losing it in the
+            # direction that tells the operator LESS.
+            #
+            # So: report not-composed, and say loudly that the answer is
+            # unverified. The claim gate is what keeps composition rare; this
+            # is a read of it, not the gate itself.
+            logger.warning(
+                "circuit_claims_unreadable_assuming_uncomposed",
+                error=str(e),
+                error_type=type(e).__name__,
+                detail=(
+                    "could not determine whether any layer is composed — "
+                    "assuming not, so the rung header still describes a single "
+                    "circuit; if a composition IS live this header understates "
+                    "what produced the response"
+                ),
+            )
+            return False
+
     async def active_circuit_rung(self) -> Optional[tuple[int, str]]:
         """`(rung, rung_language)` of the active full-serving circuit, or None.
 
@@ -894,6 +936,27 @@ class InferenceService:
         circuit = await self._steering_circuit()
         if circuit is None:
             return None
+
+        # F19: SUPPRESS the header when any served layer is COMPOSED. The rung
+        # describes ONE circuit's evidence; when two circuits sum on a layer,
+        # no single rung describes what the user actually received, and
+        # emitting either one would overclaim. Same rule that already omits the
+        # header for slice-fallback.
+        #
+        # Best-effort by design: a composition we cannot READ must suppress
+        # too. Failing open here would emit a rung header precisely when we are
+        # least sure it is true.
+        if await self._any_layer_composed():
+            logger.info(
+                "circuit_rung_header_suppressed_composed",
+                circuit_id=getattr(circuit, "id", None),
+                detail=(
+                    "a served layer carries more than one circuit, so no "
+                    "single circuit's evidence describes the response"
+                ),
+            )
+            return None
+
         from millm.core.circuit_evidence import rung_language
 
         # R3: an unguarded int() on a NULL/garbage rung column raised, and the

@@ -12,6 +12,8 @@ So these drive the real `CircuitService.activate` / `deactivate` against a real
 steering.
 """
 
+from types import SimpleNamespace
+
 import pytest
 
 from millm.api.schemas.circuit import CircuitMember
@@ -215,3 +217,91 @@ class TestTheOwnerRoutingIsACTUALLYWired:
             "a circuit dialled to zero still holds the layer against its "
             "co-tenant"
         )
+
+
+class TestRungSuppressionOnComposedLayers:
+    """Feature 19 task 4.1/6.3 — `X-miLLM-Circuit-Rung` is OMITTED while any
+    layer is composed.
+
+    The rung describes ONE circuit's evidence. When two circuits sum on a
+    layer, no single rung describes what the user actually received, and
+    emitting either one would overclaim — the same rule that already omits the
+    header for slice-fallback.
+
+    This is the honesty half of the override: an operator may compose, but the
+    response stops making a claim it can no longer support.
+    """
+
+    async def test_a_composed_layer_suppresses_the_rung(self, monkeypatch):
+        from millm.services import inference_service as inf_mod
+        from millm.services.inference_service import InferenceService
+
+        circuit = SimpleNamespace(
+            id="c", rung=2, name="n", layers=[10], serving_mode="full"
+        )
+        svc = InferenceService.__new__(InferenceService)
+
+        async def _steering():
+            return circuit
+
+        svc._steering_circuit = _steering
+
+        async def _composed():
+            return True
+
+        svc._any_layer_composed = _composed
+
+        assert await svc.active_circuit_rung() is None, (
+            "a composed layer still advertised one circuit's rung — the "
+            "response claims evidence that describes only part of what "
+            "produced it"
+        )
+
+    async def test_an_UNCOMPOSED_circuit_still_reports_its_rung(self, monkeypatch):
+        """The other side: suppression must be specific, or the feature
+        silently deletes the disclosure it was built to protect."""
+        from millm.services.inference_service import InferenceService
+
+        circuit = SimpleNamespace(
+            id="c", rung=2, name="n", layers=[10], serving_mode="full"
+        )
+        svc = InferenceService.__new__(InferenceService)
+
+        async def _steering():
+            return circuit
+
+        svc._steering_circuit = _steering
+
+        async def _composed():
+            return False
+
+        svc._any_layer_composed = _composed
+
+        assert await svc.active_circuit_rung() == (
+            2,
+            "causally validated (edge)",
+        )
+
+    async def test_an_unreadable_claims_table_does_not_delete_the_disclosure(
+        self, monkeypatch
+    ):
+        """A deliberate trade-off, recorded rather than assumed.
+
+        Composition needs an explicit override and is rare; an unreachable
+        claims table is comparatively common. Suppressing on every DB error
+        would silently delete the rung disclosure for every request during a
+        blip — losing an honesty signal far more often than it prevents a wrong
+        one, and losing it in the direction that tells the operator LESS.
+
+        So an unreadable table reports not-composed and says so loudly.
+        """
+        from millm.services import inference_service as inf_mod
+        from millm.services.inference_service import InferenceService
+
+        svc = InferenceService.__new__(InferenceService)
+
+        def boom():
+            raise RuntimeError("claims table unreachable")
+
+        monkeypatch.setattr(inf_mod, "async_session_factory", boom, raising=False)
+        assert await svc._any_layer_composed() is False

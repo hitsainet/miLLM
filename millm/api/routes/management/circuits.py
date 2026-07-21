@@ -94,6 +94,42 @@ async def list_circuits(
 
 
 @router.get(
+    "/claims",
+    response_model=ApiResponse[list[dict]],
+    summary="Which circuit holds which layer",
+)
+async def list_claims(service: CircuitServiceDep) -> ApiResponse[list[dict]]:
+    """Live layer claims: `[{layer, circuit_id, circuit_name, composed}]`.
+
+    F19. The unit of contention is the LAYER, so "what is serving" is not
+    answerable from the circuit list alone — two circuits can both be active
+    while contending for nothing. This is the view that makes a refusal
+    intelligible before it happens.
+    """
+    from millm.services.circuit_claim_registry import CircuitClaimRegistry
+
+    session = getattr(service.repository, "session", None)
+    if session is None:
+        return ApiResponse.ok([])
+
+    registry = CircuitClaimRegistry(session)
+    claims = await registry.live_claims()
+    names = await registry._names_for({c.circuit_id for c in claims})
+    return ApiResponse.ok(
+        [
+            {
+                "layer": c.layer,
+                "circuit_id": c.circuit_id,
+                "circuit_name": names.get(c.circuit_id),
+                "composed": c.composed,
+                "steering_keys": list(c.steering_keys),
+            }
+            for c in sorted(claims, key=lambda c: (c.layer, c.circuit_id))
+        ]
+    )
+
+
+@router.get(
     "/active",
     response_model=ApiResponse[CircuitSummary | None],
     summary="The currently serving circuit",
@@ -212,6 +248,17 @@ async def activate_circuit(
             "(not causally validated)"
         ),
     ),
+    allow_layer_overlap: bool = Query(
+        False,
+        description=(
+            "Compose onto layers another active circuit already serves. "
+            "Refused by default: composition is additive and unbounded in "
+            "aggregate, and close-out testing measured TWO steered layers at "
+            "individually-harmless strength destroying generation. While any "
+            "layer is composed the X-miLLM-Circuit-Rung header is omitted, "
+            "because no single circuit's evidence describes the response."
+        ),
+    ),
 ) -> ApiResponse[CircuitActivationResponse]:
     """
     Serve a circuit. Fully-bound SAE set ⇒ `serving_mode="full"` (multi-SAE);
@@ -221,8 +268,22 @@ async def activate_circuit(
     """
     try:
         result = await service.activate(
-            circuit_id, acknowledge_unvalidated=acknowledge_unvalidated
+            circuit_id,
+            acknowledge_unvalidated=acknowledge_unvalidated,
+            allow_layer_overlap=allow_layer_overlap,
         )
+    # F19: `CircuitLayerContentionError` deliberately has NO handler here.
+    #
+    # A route-level `except` was written first, then a mutation removing it
+    # SURVIVED the whole suite. Probing showed why: the error class sets
+    # `status_code = 200`, so `millm_error_handler` already produces a
+    # byte-identical envelope — same code, same message, same details, and it
+    # logs the refusal too. The handler was pure duplication that only looked
+    # load-bearing.
+    #
+    # Removed rather than kept-and-tested: two paths producing the same
+    # response is a place for them to drift, and the class-level contract is
+    # the one that also covers every other route raising this error.
     except UnvalidatedCircuitError as e:
         # House style: handler-level refusal as 200 + success:false so the
         # client can surface the rung and re-send with the acknowledgement.

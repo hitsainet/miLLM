@@ -379,3 +379,50 @@ class TestTheDialsServiceConstructionIsNowTotal:
         ).stdout
         offenders = [ln for ln in out.splitlines() if ln.strip()]
         assert not offenders, f"the __new__ bypass is back: {offenders}"
+
+
+class TestR2TotalityIsProvenByUseNotByNameMatching:
+    """F18 R2-20. The R2-08 totality test compares the field NAMES that
+    `for_registry` assigns against those `__init__` assigns, and
+    `test_it_shares_the_singleton_registry` checks one value. Neither exercises
+    the instance.
+
+    That leaves a real gap: a field set to the WRONG VALUE passes both. The
+    R1-A defect — `_repository`/`_emitter` instead of `repository`/`emitter` —
+    was a naming error and so was in the name test's reach once its regex was
+    fixed. A value error is not. `_sae_state = None` would satisfy name parity
+    exactly and fail the moment the dial ran.
+
+    So this drives the real `set_circuit_steering` against a real
+    `for_registry()` instance. It asserts the construction is sufficient for
+    the ONE path it exists to serve, which is what the docstring actually
+    claims."""
+
+    def test_the_real_dial_path_runs_on_a_registry_only_instance(self):
+        from millm.services.sae_service import AttachedSAEState, SAEService
+
+        svc = SAEService.for_registry()
+
+        # No repository, no emitter, no DI — exactly the hot-path shape.
+        assert svc.repository is None
+        assert svc.emitter is None
+
+        # The registry must be the live singleton, not a placeholder: the dial
+        # resolves members through it.
+        assert svc._sae_state is AttachedSAEState()
+
+        # The path the construction exists to serve, actually executed. With
+        # nothing attached this dials zero layers, which is a legitimate
+        # outcome and still walks every field the method touches.
+        svc.set_circuit_steering(members=[], intensity=1.0)
+
+    def test_every_field_is_reachable_without_raising(self):
+        """A field left absent — the `__new__` hazard — raises AttributeError
+        on read. Reading them all is the cheapest proof none is missing, and
+        unlike the AST test it cannot be fooled by an assignment the parser
+        sees but the runtime never performs."""
+        from millm.services.sae_service import SAEService
+
+        svc = SAEService.for_registry()
+        for field in _fields_assigned_in(SAEService.__init__):
+            getattr(svc, field)  # AttributeError if for_registry missed one

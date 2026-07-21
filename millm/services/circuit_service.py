@@ -437,7 +437,11 @@ class CircuitService:
         # reports. The comment asserted a guarantee the code below did not make,
         # which would have convinced the next reader that a drift was
         # impossible here.
-        plan = CircuitSteeringEngine(self._sae_service._sae_state).plan_for(
+        # R1-14: `AttachedSAEState()` directly, not `self._sae_service._sae_state`.
+        # It is the same singleton — both inference call sites use it — and
+        # reaching through another service's private attribute was the only
+        # cross-service private access of its kind here.
+        plan = CircuitSteeringEngine(AttachedSAEState()).plan_for(
             definition, circuit
         )
         members = plan.members

@@ -48,6 +48,12 @@ from millm.core.logging import get_logger
 
 logger = get_logger(__name__)
 
+#: No serving intensity could be derived — the document declares no budget and
+#: no circuit row was supplied. A distinguishable value rather than 0.0, which
+#: means "serve nothing" and would make a missing basis look like a deliberate
+#: off switch (R1-12).
+UNSET_INTENSITY = float("nan")
+
 
 @dataclass(frozen=True)
 class ServingPlan:
@@ -69,6 +75,16 @@ class ServingPlan:
     #: snapshot the plan reports and the entries a request saves and restores
     #: disagree (R1-08).
     claimed_entries: tuple[Any, ...] = ()
+
+    @property
+    def has_intensity(self) -> bool:
+        """False when no serving intensity could be derived.
+
+        A consumer that is about to APPLY must check this: `UNSET_INTENSITY` is
+        NaN, so using it silently produces NaN steering values rather than
+        raising — worse than either a crash or a zero.
+        """
+        return self.intensity == self.intensity  # NaN is the only self-inequality
 
     @property
     def unattached_layers(self) -> frozenset[int]:
@@ -177,7 +193,24 @@ class CircuitSteeringEngine:
         budget = getattr(definition, "budget", None)
         if budget is not None and getattr(budget, "intensity", None) is not None:
             return budget.intensity
-        return getattr(circuit, "intensity", 0.0) if circuit is not None else 0.0
+        # R1-12: with no document budget AND no circuit row there is no basis
+        # at all. The pre-move expression raised AttributeError here; returning
+        # a bare 0.0 would mean "serve nothing", turning a loud failure into a
+        # silent no-op on the path that decides how hard to steer.
+        #
+        # But raising is wrong too: `plan_for(definition)` with no circuit is a
+        # legitimate members-only derivation — ten tests and several callers do
+        # exactly that, and my first attempt at this fix broke all of them.
+        # What is NOT legitimate is USING an intensity that was never derived.
+        #
+        # So the absence is represented, not guessed: `UNSET_INTENSITY` is a
+        # float (arithmetic and comparisons still work) that is distinguishable
+        # from a real 0.0, and `ServingPlan.has_intensity` lets a consumer that
+        # needs one check before relying on it.
+        if circuit is None:
+            return UNSET_INTENSITY
+        intensity = getattr(circuit, "intensity", None)
+        return UNSET_INTENSITY if intensity is None else intensity
 
     @staticmethod
     def claim_set(members: list[Any]) -> frozenset[int]:
@@ -237,6 +270,13 @@ class CircuitSteeringEngine:
         hard.
         """
         members = self.serving_members(definition)
+        if intensity is not None and intensity < 0:
+            # R1-13: a negative λ passed straight through and only the
+            # downstream clamp saved it, so `ServingPlan.intensity` could hold
+            # a value the system will never serve — a plan that does not
+            # describe what happens. The dial's own validation should catch
+            # this first; refusing here means a plan is always truthful.
+            raise ValueError(f"serving intensity must not be negative: {intensity}")
         resolved = (
             intensity
             if intensity is not None

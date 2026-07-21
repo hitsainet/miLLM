@@ -522,3 +522,53 @@ class TestR1TheDialUsesTheSnapshotItDerived:
         # `src.index(...)` compares comment positions and fails on correct
         # code. Tried it, watched it fail, replaced it — the assertion above is
         # the one that distinguishes the two placements.
+
+
+class TestR1AMissingIntensityIsNotZero:
+    """F18 R1-12/13. `serving_intensity` returned a bare 0.0 when there was no
+    basis at all — no document budget and no circuit row. The pre-move
+    expression raised AttributeError there. 0.0 means "serve nothing", so a
+    missing basis became indistinguishable from a deliberate off switch: a loud
+    failure turned into a silent no-op on the path that decides how hard to
+    steer."""
+
+    def test_no_basis_is_distinguishable_from_an_authored_zero(self):
+        d = defn([], budget=None)
+        no_basis = CircuitSteeringEngine().plan_for(d)
+        authored_off = CircuitSteeringEngine().plan_for(
+            d, SimpleNamespace(intensity=0.0)
+        )
+        assert authored_off.intensity == 0.0
+        assert authored_off.has_intensity is True
+        assert no_basis.has_intensity is False, (
+            "a missing basis reads as a deliberate 'serve nothing'"
+        )
+
+    def test_a_members_only_derivation_is_still_legitimate(self):
+        """`plan_for(definition)` with no circuit is how the operator dial
+        derives members. Raising here broke ten tests — the absence has to be
+        REPRESENTED, not refused."""
+        plan = CircuitSteeringEngine().plan_for(defn([mem(10, feature=feat(1))]))
+        assert plan.members
+        assert plan.claimed_layers == frozenset({10})
+
+    def test_an_authored_zero_still_wins_over_the_column(self):
+        d = defn([], budget=SimpleNamespace(intensity=0.0))
+        plan = CircuitSteeringEngine().plan_for(d, SimpleNamespace(intensity=100.0))
+        assert plan.intensity == 0.0 and plan.has_intensity is True
+
+    def test_a_negative_override_is_refused(self):
+        """R1-13: a negative λ passed straight through and only the downstream
+        clamp saved it, so the plan could hold a value the system will never
+        serve — a plan that does not describe what happens."""
+        with pytest.raises(ValueError, match="must not be negative"):
+            CircuitSteeringEngine().plan_for(
+                defn([]), SimpleNamespace(intensity=1.0), intensity=-1.0
+            )
+
+    def test_a_zero_override_is_allowed(self):
+        """0.0 is a legitimate dial position meaning off."""
+        plan = CircuitSteeringEngine().plan_for(
+            defn([]), SimpleNamespace(intensity=1.0), intensity=0.0
+        )
+        assert plan.intensity == 0.0 and plan.has_intensity is True

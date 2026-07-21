@@ -1200,6 +1200,16 @@ SAE_CACHE_DIR=./data/saes
 **Trade-off:** A slightly more complex threshold expression vs a single number an operator can read at a glance
 **Rationale:** Both constants were written when exactly one SAE could ever be armed, and both produce a guaranteed alarm in a multi-SAE world. The VRAM envelope's 200 MB was the two-SAE spike's close-out TARGET and flagged a healthy 5-SAE attach on a 24 GB card; the sensing threshold's 5 ms was measured against 5.4–7.3 ms across five armed layers (~1.1–1.5 ms/layer, entirely proportionate), so every single request warned. An alarm that always fires trains operators to ignore alarms, which is worse than no alarm.
 
+#### Single serving derivation vs four coordinated call sites (v1.3, 2026-07-21 — Feature 18)
+**Decision:** One `CircuitSteeringEngine` (`millm/ml/circuit_steering.py`) derives a frozen `ServingPlan`; activation, the operator dial, the per-request dial and the echo predicate all consume it. `CircuitService._serving_members`, `InferenceService._circuit_serving_members` and `_sae_service_for_dial` are DELETED with no shims, and `SAEService.for_registry()` replaces the `SAEService.__new__` construction bypass.
+**Trade-off:** A new module and an indirection on four hot-ish paths, versus four call sites that each read the document directly.
+**Rationale:** The four sites had to agree about an operator-visible claim, and agreement was maintained by care alone — Feature 14's review rounds caught them disagreeing twice. **R1-01**: the dial resolved λ from the `circuits.intensity` column while activation used the document's authored budget, so a circuit authored at 150 dialled to λ=1.0 served 100. **R2-01**: the dial snapshotted `circuits.layers` while the apply drove the layers the MEMBERS claim, so any layer in one and not the other was dialled and never restored — a per-request override leaking permanently into global state. Both were fixed at their own call site; the shape that produced them was not. `ServingPlan.claimed_layers` is now DEFINED as the layers of `plan.members`, so the snapshot and the apply cannot drift — an identity rather than an agreement. The `__new__` bypass left four fields and two collections unset on the inference hot path, working only because the dial happened to touch none of them.
+
+#### The canonical sign rule is normative, not incidental (v1.3, 2026-07-21)
+**Decision:** A NEGATIVE `strength` is ALREADY DIRECTIONAL. Every layer that carries a member — the flattening, the plan, the wire format — carries `budget` and `sign` UNTOUCHED, and `SAEService._directional_budget` is the single place they are combined.
+**Trade-off:** Two fields travel where one signed number would do, and every new consumer must be told not to "helpfully" combine them.
+**Rationale:** This rule lived only in `_directional_budget`'s docstring while being depended on by every path that moves a member. Combining early applies the sign twice and silently inverts an intervention — a steering change that looks plausible and is backwards. Promoting it to architecture text makes it reviewable rather than discoverable, and F18's characterization gate now pins it: the flattening is asserted to carry `-3.0`/`sign=-1` verbatim.
+
 #### Circuit Runtime increment (v1.2, 2026-07-20)
 
 #### Relax `AttachedSAEState` singleton vs one-SAE swap-on-load

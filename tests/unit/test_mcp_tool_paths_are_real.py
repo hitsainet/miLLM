@@ -37,9 +37,23 @@ ROUTERS = {
 }
 
 #: `millm.get("/api/x")` / `millm.raw_get(...)` / `millm.post(f"/api/x/{id}")`
+#: Accepts either quote style; `\s*` spans newlines, so a call whose path sits
+#: on the following line is matched too.
 CALL = re.compile(
-    r"millm\.(get|post|put|delete|raw_get)\(\s*f?\"([^\"]+)\"", re.MULTILINE
+    r"millm\.(get|post|put|delete|raw_get)\(\s*f?[\"']([^\"']+)[\"']",
+    re.MULTILINE,
 )
+
+#: Every call SITE, regardless of how its path is written. R2-15: `CALL` can
+#: only parse literal paths, so a call built from a constant, an aliased
+#: receiver, or a verb not in the list above is invisible to it — and an
+#: extraction that silently drops a call reports green for the exact call it
+#: failed to check. Counting sites independently turns that silent miss into a
+#: failure that names the unparseable line.
+CALL_SITE = re.compile(r"millm\.([a-z_]+)\(", re.MULTILINE)
+
+#: Verbs `CALL_SITE` may see that are not HTTP calls and need no path check.
+NON_HTTP_ATTRS = {"close", "aclose"}
 
 VERB = {"get": "GET", "raw_get": "GET", "post": "POST", "put": "PUT",
         "delete": "DELETE"}
@@ -67,11 +81,29 @@ def _tool_calls() -> set[tuple[str, str]]:
             "MISTUDIO_REPO. Skipping loudly: a cross-repo guard that passes "
             "vacuously reports green for the condition it exists to detect."
         )
+    source = TOOL_MODULE.read_text()
     calls: set[tuple[str, str]] = set()
-    for method, path in CALL.findall(TOOL_MODULE.read_text()):
+    for method, path in CALL.findall(source):
         # `f"/api/circuits/{circuit_id}/activate"` → the router's literal form.
         normalised = re.sub(r"\{[a-z_]+\}", lambda m: m.group(0), path)
         calls.add((VERB[method], normalised))
+
+    # R2-15: every call site must have been PARSED, not merely most of them.
+    sites = [v for v in CALL_SITE.findall(source) if v not in NON_HTTP_ATTRS]
+    unknown = sorted({v for v in sites if v not in VERB})
+    assert not unknown, (
+        f"MCP tool calls use verb(s) {unknown}, which this guard cannot map to "
+        "an HTTP method — so their paths are NEVER checked against the served "
+        "routes. Add them to VERB (or to NON_HTTP_ATTRS if they are not HTTP "
+        "calls). Failing loudly beats silently skipping the call."
+    )
+    parsed = len(CALL.findall(source))
+    assert parsed == len(sites), (
+        f"{len(sites)} millm.* call sites exist but only {parsed} had a "
+        "parseable literal path. The unparsed ones are invisible to this "
+        "guard — a typo in them would ship. Rewrite the path as a literal, or "
+        "teach CALL to read the form used."
+    )
     return calls
 
 

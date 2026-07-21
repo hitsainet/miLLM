@@ -274,6 +274,28 @@ git commit -m "feat: [brief description]" -m "- [key change 1]" -m "- [key chang
 - [ ] Functions/methods have docstrings if required
 - [ ] Error handling implemented per ADR standards
 
+### Reachability (a shipping gate, not a style preference)
+
+**A capability is not shipped until a test FAILS when its wiring is removed.**
+
+Before marking any user-facing capability complete — an MCP tool, a route, a UI
+control, an event handler, a metric — delete the line that REGISTERS it, run the
+suite, and require a red. Green means the capability is unreachable in
+production, untested, or both.
+
+This increment (BRD-MILLM-CIRCUITS-002) found **three shipped-but-unreachable
+capabilities**, the worst being 16 MCP circuit tools that were fully implemented,
+unit-tested and documented while never registered with the server. Every test
+passed by importing the module directly, so the suite was green and the docs said
+✅ while no caller could reach the feature. Two review rounds had read that code
+without noticing.
+
+- [ ] Assert presence in the **live registry**, never that the module imports
+- [ ] Assert the **payload and the call count** — "was called" passes against a
+      call sending the wrong arguments
+- [ ] When a round fixes an unreachable capability, mutate the new wiring as a
+      negative control to prove the guard bites
+
 ### File Organization Rules
 - **Backend:** Layer-based (api/, services/, ml/, db/, sockets/, core/)
 - **Frontend:** Feature-based (components/, pages/, stores/, services/, hooks/, types/)

@@ -44,6 +44,10 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, Optional
 
+from millm.core.logging import get_logger
+
+logger = get_logger(__name__)
+
 
 @dataclass(frozen=True)
 class ServingPlan:
@@ -149,6 +153,20 @@ class CircuitSteeringEngine:
         Note the explicit ``is not None`` — a budget of 0.0 is a legitimate
         authored value meaning "off", and a truthiness check would silently
         fall through to the column.
+
+        F18 R1-01, a DELIBERATE divergence from the pre-move expression
+        (``definition.budget.intensity if definition.budget else
+        circuit.intensity``), recorded because a "verbatim move" that quietly
+        changes behaviour is how F17 lost an O(log n) fix for three rounds:
+
+            budget.intensity is None   old -> None   new -> the DB column
+
+        The schema declares ``intensity: float = Field(1.0, ge=0.0, le=2.0)``,
+        so a null is unreachable through a parsed document and this only shows
+        on a hand-built object. The new behaviour is nonetheless the correct
+        one: returning None here would propagate a null into the apply, where
+        it multiplies a budget. Falling back to the column degrades to the last
+        known-good value instead.
         """
         budget = getattr(definition, "budget", None)
         if budget is not None and getattr(budget, "intensity", None) is not None:
@@ -170,13 +188,31 @@ class CircuitSteeringEngine:
     # ------------------------------------------------------------------
 
     def attached_layers(self) -> frozenset[int]:
-        """Layers with an SAE attached right now, or empty with no registry."""
+        """Layers with an SAE attached right now, or empty with no registry.
+
+        F18 R1-02: a registry failure returns EMPTY, which makes a circuit that
+        IS steering read as `is_serveable=False` and every claimed layer read as
+        unattached. The direction is deliberately safe — the echo predicate then
+        withholds a rung header rather than attaching an evidence claim to an
+        intervention it cannot confirm, and under-claiming is the right way to
+        fail on an evidence surface.
+
+        But it was SILENT, and the same empty set also feeds
+        `unattached_layers`, which drives slice-fallback decisions. A registry
+        that cannot be read is an operational fault, not an empty registry, so
+        it is logged at WARNING. `state is None` stays quiet: that is a
+        deliberate construction (no registry supplied), not a failure.
+        """
         state = self._state
         if state is None:
             return frozenset()
         try:
             return frozenset(e.layer for e in state.entries())
         except Exception:
+            logger.warning(
+                "circuit_attachment_registry_unreadable",
+                exc_info=True,
+            )
             return frozenset()
 
     def plan_for(

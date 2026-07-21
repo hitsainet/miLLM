@@ -293,3 +293,73 @@ class TestThePlanIsImmutable:
         plan = CircuitSteeringEngine().plan_for(defn([mem(10, feature=feat(1))]))
         with pytest.raises(Exception):
             plan.intensity = 99.0
+
+
+class TestR1TheEngineFailsSAFELYAndVISIBLY:
+    """F18 R1-01/02. Two behaviours the engine inherits or introduces at its
+    boundaries, both on paths that decide whether an evidence claim is made."""
+
+    def test_a_null_authored_intensity_falls_back_to_the_column(self):
+        """R1-01, a DELIBERATE divergence from the pre-move expression, which
+        returned None here. The schema declares `intensity: float` with a
+        default so a null is unreachable through a parsed document — but
+        returning None would propagate a null into the apply, where it
+        multiplies a budget. Falling back to the last known-good value is the
+        correct degradation."""
+        d = defn([mem(10, feature=feat(1))],
+                 budget=SimpleNamespace(intensity=None))
+        plan = CircuitSteeringEngine().plan_for(d, SimpleNamespace(intensity=100.0))
+        assert plan.intensity == 100.0
+
+    def test_an_unreadable_registry_makes_the_circuit_look_UNSERVEABLE(self):
+        """R1-02. The direction is the safe one: the echo predicate then
+        withholds a rung header rather than attaching an evidence claim to an
+        intervention it cannot confirm. Under-claiming is how an evidence
+        surface should fail."""
+
+        class Broken:
+            def entries(self):
+                raise RuntimeError("registry unavailable")
+
+        d = defn([mem(10, feature=feat(1))])
+        plan = CircuitSteeringEngine(Broken()).plan_for(d)
+        assert plan.attached_layers == frozenset()
+        assert plan.is_serveable is False
+        assert plan.members, "members are unaffected — only attachment failed"
+
+    def test_an_unreadable_registry_is_LOGGED_not_swallowed(self, monkeypatch):
+        """It was silent. A registry that cannot be read is an operational
+        fault, and the same empty set also drives slice-fallback decisions.
+
+        Spies on the module logger rather than using `caplog`: this codebase
+        logs through structlog, so `caplog` sees nothing and a test written
+        against it would pass whether or not the warning existed."""
+        from millm.ml import circuit_steering as mod
+
+        seen = []
+        monkeypatch.setattr(
+            mod.logger, "warning", lambda event, **kw: seen.append(event)
+        )
+
+        class Broken:
+            def entries(self):
+                raise RuntimeError("registry unavailable")
+
+        CircuitSteeringEngine(Broken()).plan_for(defn([]))
+        assert seen == ["circuit_attachment_registry_unreadable"], (
+            f"a registry failure was swallowed silently (logged: {seen})"
+        )
+
+    def test_NO_registry_supplied_is_quiet(self, monkeypatch):
+        """`state is None` is a deliberate construction, not a failure — the
+        operator dial derives members without needing attachment at all."""
+        from millm.ml import circuit_steering as mod
+
+        seen = []
+        monkeypatch.setattr(
+            mod.logger, "warning", lambda event, **kw: seen.append(event)
+        )
+        plan = CircuitSteeringEngine(None).plan_for(defn([mem(10, feature=feat(1))]))
+        assert plan.attached_layers == frozenset()
+        assert plan.members
+        assert seen == [], "a deliberate absence was logged as a fault"

@@ -7,14 +7,27 @@
  */
 
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
+import { useEffect, useRef } from 'react';
 
 import { circuitApi } from '@/services/circuits';
 import { ApiError } from '@/services/api';
 import { useToast } from './useToast';
+import type { ContentionDetails } from '@components/circuits';
 
 export const CIRCUITS_KEY = ['circuits'] as const;
 
-export function useCircuits() {
+export function useCircuits(
+  onContention?: (details: ContentionDetails, message: string) => void,
+) {
+  // Held in a ref so the mutation's onError closure always calls the CURRENT
+  // handler. Capturing it directly would pin the first render's callback and
+  // silently drop later ones — a stale-closure bug that presents as "the
+  // dialog stopped opening" and is miserable to trace.
+  const onContentionRef = useRef(onContention);
+  useEffect(() => {
+    onContentionRef.current = onContention;
+  }, [onContention]);
+
   const queryClient = useQueryClient();
   const toast = useToast();
 
@@ -44,10 +57,17 @@ export function useCircuits() {
     mutationFn: ({
       circuitId,
       acknowledgeUnvalidated,
+      allowLayerOverlap,
     }: {
       circuitId: string;
       acknowledgeUnvalidated?: boolean;
-    }) => circuitApi.activate(circuitId, acknowledgeUnvalidated ?? false),
+      allowLayerOverlap?: boolean;
+    }) =>
+      circuitApi.activate(
+        circuitId,
+        acknowledgeUnvalidated ?? false,
+        allowLayerOverlap ?? false,
+      ),
     onSuccess: (result) => {
       invalidate();
       if (result.serving_mode === 'slice_fallback') {
@@ -72,6 +92,24 @@ export function useCircuits() {
           'not causally validated';
         toast.warning(
           `This circuit is ${phrase} — tick the acknowledgement to steer with it anyway`,
+        );
+        return;
+      }
+      // F19: a layer-contention refusal is a DECISION POINT, not a failure.
+      // The payload carries the incumbent, the measurement behind the refusal,
+      // and (for ordinary contention) the override route — a toast would throw
+      // all of it away, leaving the operator with a sentence and no actions.
+      // Surfaced through `onContention` so the page can render the dialog.
+      //
+      // Before this, the entire contention UI was DEAD CODE: both components
+      // were written, exported and unit-tested with no consumer anywhere, so
+      // BR-011 §6.2's binding condition — every override is surfaced in the UI
+      // — was unmet in production while the suite stayed green.
+      if (error instanceof ApiError && error.code === 'CIRCUIT_LAYER_CONTENTION') {
+        invalidate();
+        onContentionRef.current?.(
+          error.details as unknown as ContentionDetails,
+          error.message,
         );
         return;
       }
@@ -113,6 +151,10 @@ export function useCircuits() {
     importCircuit: importMutation.mutateAsync,
     isImporting: importMutation.isPending,
     activateCircuit: activateMutation.mutateAsync,
+    //: Fire-and-forget form. `mutateAsync` rethrows after `onError`, so a
+    //: caller that only cares about the side effect (the contention dialog
+    //: opening) would have to swallow a rejection it never wanted.
+    activateCircuitQuiet: activateMutation.mutate,
     isActivating: activateMutation.isPending,
     deactivateCircuit: deactivateMutation.mutateAsync,
     isDeactivating: deactivateMutation.isPending,

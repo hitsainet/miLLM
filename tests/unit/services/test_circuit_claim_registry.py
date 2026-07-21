@@ -283,3 +283,58 @@ class TestReconcile:
         result = await reg.reconcile(allow_concurrent=False)
         assert result == {"orphans_released": [], "demoted": []}
         assert len(await reg.live_claims()) == 1
+
+
+class TestR1ComposedIsNotPermanent:
+    """F19 R1-08. `mark_composed` flips both sides — correct — but nothing ever
+    un-flipped it.
+
+    When the composing circuit left, the incumbent's row stayed
+    `composed=True` FOREVER: a validated rung-2 circuit serving alone,
+    permanently badged composed in the UI and permanently stripped of its
+    `X-miLLM-Circuit-Rung` disclosure because something once composed onto it.
+
+    That UNDER-claims rather than over-claims, so no honesty test would have
+    caught it — it just quietly deletes a disclosure the feature exists to
+    protect. It also leaves the row outside the exclusive index, so a third
+    circuit could claim the layer unopposed.
+    """
+
+    async def test_the_survivor_stops_being_composed(self, test_session):
+        await _circuit(test_session, "cA")
+        await _circuit(test_session, "cB")
+        reg = CircuitClaimRegistry(test_session)
+        await reg.claim("cA", {10})
+        await reg.claim("cB", {10}, composed=True)
+        await reg.mark_composed("cB", {10})
+
+        assert all(c.composed for c in await reg.live_claims())
+
+        await reg.release("cB")
+
+        survivors = await reg.live_claims()
+        assert len(survivors) == 1
+        assert survivors[0].composed is False, (
+            "the surviving circuit is still flagged composed, so its rung "
+            "header stays suppressed forever and it sits outside the "
+            "exclusive index"
+        )
+
+    async def test_a_STILL_shared_layer_stays_composed(self, test_session):
+        """Un-flipping must be specific: three circuits composed, one leaves,
+        the remaining two are still genuinely composed."""
+        for cid in ("cA", "cB", "cC"):
+            await _circuit(test_session, cid)
+        reg = CircuitClaimRegistry(test_session)
+        for cid in ("cA", "cB", "cC"):
+            await reg.claim(cid, {10}, composed=True)
+        await reg.mark_composed("cC", {10})
+
+        await reg.release("cC")
+
+        survivors = await reg.live_claims()
+        assert len(survivors) == 2
+        assert all(c.composed for c in survivors), (
+            "the layer is still shared by two circuits — un-flagging it would "
+            "restore a rung header that no single circuit's evidence supports"
+        )

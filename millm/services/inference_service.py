@@ -887,10 +887,29 @@ class InferenceService:
     async def _any_layer_composed(self) -> bool:
         """True if ANY live claim is composed (F19).
 
-        Fails CLOSED: an unreadable claim table returns True, suppressing the
-        rung header. The alternative — emitting a rung we could not verify — is
-        an evidence claim made in ignorance, which is the one thing the ladder
-        forbids.
+        Fails OPEN — deliberately, and this is a real trade-off rather than an
+        oversight. An unreadable claim table reports NOT composed, so the rung
+        header still describes a single circuit.
+
+        F19 R1-07: this docstring previously claimed the opposite ("fails
+        CLOSED"), as did a comment in `active_circuit_rung`, while the code
+        below returned False. Two of the three statements were wrong, and a
+        reader auditing this for honesty would have read the prose. Whichever
+        behaviour is chosen, they must agree — a docstring that lies about a
+        safety property is worse than either choice.
+
+        The reasoning for fail-open: composition requires an explicit operator
+        override and is rare; an unreachable claims table is comparatively
+        common (a Postgres blip) and already degrades the rest of this path.
+        Suppressing on every DB error would silently delete the rung disclosure
+        for every request during a blip — losing an honesty signal far more
+        often than it prevents a wrong one, and losing it in the direction that
+        tells the operator LESS.
+
+        The residual risk is stated, not hidden: during a blip WITH a live
+        composition, a response carries a rung header describing one circuit
+        when two contributed. The warning logged on that path says so
+        explicitly, and the claim gate is what keeps composition rare.
         """
         try:
             from millm.db.base import async_session_factory
@@ -943,9 +962,10 @@ class InferenceService:
         # emitting either one would overclaim. Same rule that already omits the
         # header for slice-fallback.
         #
-        # Best-effort by design: a composition we cannot READ must suppress
-        # too. Failing open here would emit a rung header precisely when we are
-        # least sure it is true.
+        # An unreadable claims table reports NOT composed (see
+        # `_any_layer_composed` — fail-OPEN, with the trade-off argued there).
+        # The residual risk is a rung header describing one circuit during a DB
+        # blip that hides a live composition; that path logs the ambiguity.
         if await self._any_layer_composed():
             logger.info(
                 "circuit_rung_header_suppressed_composed",

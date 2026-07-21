@@ -66,3 +66,13 @@ export interface CircuitDefinitionV1 {
   edges?: Array<Record<string, unknown>>;
   [key: string]: unknown;
 }
+
+
+/** One circuit's hold on one layer (Feature 19). */
+export interface LayerClaim {
+  layer: number;
+  circuit_id: string;
+  circuit_name: string | null;
+  composed: boolean;
+  steering_keys?: number[];
+}

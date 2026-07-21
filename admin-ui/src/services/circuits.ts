@@ -11,6 +11,7 @@ import type {
   CircuitDefinitionV1,
   CircuitListResponse,
   CircuitSummary,
+  LayerClaim,
 } from '@/types/circuits';
 
 export const circuitApi = {
@@ -49,13 +50,26 @@ export const circuitApi = {
    * @param acknowledgeUnvalidated - required when rung < 2; the server refuses
    *   with UNVALIDATED_CIRCUIT otherwise.
    */
-  activate: (circuitId: string, acknowledgeUnvalidated = false) => {
-    const qs = acknowledgeUnvalidated ? '?acknowledge_unvalidated=true' : '';
+  activate: (
+    circuitId: string,
+    acknowledgeUnvalidated = false,
+    allowLayerOverlap = false,
+  ) => {
+    const params = new URLSearchParams();
+    if (acknowledgeUnvalidated) params.set('acknowledge_unvalidated', 'true');
+    // F19: composing onto a layer another circuit holds. Defaults false — the
+    // server refuses by default because two steered layers were measured to
+    // destroy generation.
+    if (allowLayerOverlap) params.set('allow_layer_overlap', 'true');
+    const qs = params.toString() ? `?${params.toString()}` : '';
     return request<CircuitActivationResponse>(
       `/circuits/${circuitId}/activate${qs}`,
       { method: 'POST' },
     );
   },
+
+  /** Live layer claims: who holds which layer, and what is composed (F19). */
+  claims: () => request<LayerClaim[]>('/circuits/claims'),
 
   /** Stops serving a circuit and clears its steering. */
   deactivate: (circuitId: string) =>

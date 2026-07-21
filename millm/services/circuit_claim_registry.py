@@ -261,6 +261,33 @@ class CircuitClaimRegistry:
             row.released_at = now
             released.append(row.layer)
         await self._session.flush()
+
+        # F19 R1-08: UN-FLIP `composed` on layers that are no longer shared.
+        #
+        # `mark_composed` flips every live row on a composed layer — correct,
+        # because the rung header must be suppressed for BOTH sides. But
+        # nothing ever cleared it, so when the composing circuit left, the
+        # incumbent's row stayed `composed=True` forever: a validated rung-2
+        # circuit serving alone, permanently badged composed in the UI and
+        # permanently stripped of its `X-miLLM-Circuit-Rung` disclosure because
+        # something once composed onto it.
+        #
+        # That under-claims rather than over-claims, so no honesty test would
+        # have caught it — it just quietly deletes a disclosure the feature
+        # exists to protect. It also leaves those rows outside the exclusive
+        # index, so a third circuit could claim the layer unopposed.
+        for layer in set(released):
+            survivors = (
+                await self._session.execute(
+                    sa.select(CircuitLayerClaim).where(
+                        CircuitLayerClaim.layer == layer,
+                        CircuitLayerClaim.released_at.is_(None),
+                    )
+                )
+            ).scalars().all()
+            if len(survivors) == 1:
+                survivors[0].composed = False
+        await self._session.flush()
         return sorted(released)
 
     async def mark_composed(self, circuit_id: str, layers: set[int]) -> None:

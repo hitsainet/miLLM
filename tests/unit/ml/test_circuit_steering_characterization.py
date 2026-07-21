@@ -52,6 +52,42 @@ class _EngineUnderTest:
 # ─────────────────────────────────────────────────────────────────────────
 
 
+def _fields_assigned_in(func) -> set:
+    """Every `self.X` an ``__init__`` actually assigns, via the AST.
+
+    F18 R2-08: this was a regex, and it was wrong in BOTH directions —
+    `self\.([a-z_]+)\s*[:=]` misses `self.myField`, `self.SAE_STATE` and
+    `self._cache2` (a false PASS: the guard cannot see the field), while
+    matching `# self.ghost = 1` in a comment and `self.x == y` in a comparison
+    (a false FAIL). It was correct for today's `__init__` only by luck of
+    naming convention, which is the same class of blindness R1-06 was written
+    to fix — a field added with a capital or a digit would be invisible again.
+
+    The AST knows exactly what is assigned, including annotated assignments,
+    and cannot see comments at all.
+    """
+    import ast
+    import inspect
+    import textwrap
+
+    tree = ast.parse(textwrap.dedent(inspect.getsource(func)))
+    found = set()
+    for node in ast.walk(tree):
+        targets = []
+        if isinstance(node, ast.Assign):
+            targets = node.targets
+        elif isinstance(node, ast.AnnAssign):
+            targets = [node.target]
+        for t in targets:
+            if (
+                isinstance(t, ast.Attribute)
+                and isinstance(t.value, ast.Name)
+                and t.value.id == "self"
+            ):
+                found.add(t.attr)
+    return found
+
+
 def feat(idx, strength=1.0, sign=1, label=None):
     return SimpleNamespace(
         feature_idx=idx, strength=strength, sign=sign, label=label
@@ -315,14 +351,7 @@ class TestTheDialsServiceConstructionIsNowTotal:
 
         from millm.services.sae_service import SAEService
 
-        init_fields = set(
-            # R1-B: this regex required a leading underscore, so `self.repository`
-            # and `self.emitter` — the two fields most widely read in this class
-            # — were INVISIBLE to the guard. A totality test that cannot see two
-            # thirds of the public fields is a totality test in name only, and
-            # it passed against the broken version AND against the fix.
-            re.findall(r"self\.([a-z_]+)\s*[:=]", inspect.getsource(SAEService.__init__))
-        )
+        init_fields = _fields_assigned_in(SAEService.__init__)
         svc = SAEService.for_registry()
         missing = sorted(f for f in init_fields if not hasattr(svc, f))
         assert missing == [], f"partially constructed: {missing} unset"

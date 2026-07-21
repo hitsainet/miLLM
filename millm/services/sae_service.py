@@ -437,9 +437,20 @@ class SAEService:
         AttributeError in production, and invisible to every test because the
         methods that would trip it were never called.
 
-        Every field `__init__` sets is set here, so a method that reaches for
-        one fails on a VALUE rather than on a missing attribute — which is the
-        whole difference between this and the bypass it replaced.
+        Every field `__init__` sets is set here.
+
+        R2-09: an earlier version of this docstring claimed that made a reach
+        "fail on a VALUE rather than on a missing attribute". That distinction
+        does not exist — `await self.repository.get(x)` on a None raises
+        `AttributeError: 'NoneType' object has no attribute 'get'`, the same
+        exception class, differing only in message. `repository` has 19 reads
+        across 8 methods and none are None-guarded.
+        
+        What totality actually buys is narrower and still worth having: the
+        failure names the METHOD that was misused rather than the construction
+        that was incomplete, and a field added to `__init__` cannot silently go
+        missing here. `emitter=None` IS genuinely safe — all 12 of its reads are
+        `if self.emitter:` guarded.
 
         F18 R1-A: the first version got this wrong in both directions. It set
         `_repository`, `_emitter` and `_cache_dir`, none of which exist —

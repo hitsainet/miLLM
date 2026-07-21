@@ -372,22 +372,52 @@ class TestR1CircuitServingIsOBSERVABLE:
         assert "millm_circuit_layers_served 1" in body
         assert "millm_circuit_layers_composed 0" in body
 
-    async def test_a_bypassed_claim_gate_is_LOUD(self):
+    async def test_a_bypassed_claim_gate_is_LOUD(self, monkeypatch):
         """R1-09. A repository without a session disables contention AND
         collision checking entirely. It still degrades rather than refusing —
         a persistence detail must not stop the server serving — but it can no
         longer do so silently."""
-        import inspect
-
+        # F19 R3-14: this greped the source for the event name and
+        # "logger.error". Moving either string, or logging at a different
+        # level in a different branch, passed it.
+        #
+        # Driven instead — but by patching the MODULE's logger rather than
+        # reconfiguring structlog globally. The first version called
+        # `structlog.configure()`, and `reset_defaults()` does not restore the
+        # app's own configuration, so it passed alone and failed in the full
+        # suite depending on test order. A test that mutates global logging
+        # config is a test defect, not a finding about the code.
+        from millm.api.routes.system.health import metrics_counter
+        from millm.services import circuit_service as cs_mod
         from millm.services.circuit_service import CircuitService
 
-        src = inspect.getsource(CircuitService._claim_layers)
-        gate = src[src.index('session = getattr(self.repository, "session", None)'):]
-        assert "circuit_claim_gate_BYPASSED" in gate
-        assert "logger.error" in gate, (
-            "a serve-without-claiming path must not be a warning — it restores "
-            "the pre-F19 silent-clobber behaviour"
+        calls: list[tuple[str, str]] = []
+
+        class Spy:
+            def __getattr__(self, level):
+                def record(event, **_kw):
+                    calls.append((level, event))
+
+                return record
+
+        monkeypatch.setattr(cs_mod, "logger", Spy())
+
+        before = metrics_counter.circuit_claim_faults
+        svc = CircuitService.__new__(CircuitService)
+        svc.repository = SimpleNamespace()  # no `.session`
+        composed = await svc._claim_layers(
+            SimpleNamespace(id="c", name="n"), [10, 13], None, False
         )
+
+        assert composed == []
+        bypass = [lvl for lvl, event in calls if event == "circuit_claim_gate_BYPASSED"]
+        assert bypass, "a serve-without-claiming path emitted nothing"
+        assert bypass[0] == "error", (
+            f"the bypass logged at {bypass[0]!r} — a warning is "
+            "indistinguishable from routine noise, and this restores pre-F19 "
+            "silent-clobber behaviour behind a healthy-looking response"
+        )
+        assert metrics_counter.circuit_claim_faults > before
 
 
 class TestR2TheComposedMetricSeesSLICECoTenants:

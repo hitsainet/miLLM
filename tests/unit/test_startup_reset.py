@@ -72,77 +72,55 @@ class TestResetsAreIndependent:
         assert "loaded_at = NULL" in block
 
 
-class TestF19ClaimReconciliationIsWIRED:
-    """F19 R1-01. `CircuitClaimRegistry.reconcile()` had ZERO production
-    callers — written, unit-tested, and never invoked.
+class TestF19ReconcileIsDELIBERATELYNotCalledAtStartup:
+    """F19 R3-15. R1-01 wired `reconcile()` at startup because nothing called
+    it. R2-09 then made startup release EVERY claim outright — correct, since
+    nothing is steering after a restart — and that left reconcile dead in BOTH
+    directions:
 
-    A grep-the-source test would pass the moment the call APPEARS in the file,
-    including inside dead code or a branch that never runs. So this EXECUTES
-    the lifespan handler and asserts `reconcile` was actually awaited, which is
-    the only form of this assertion that distinguishes a wired mechanism from a
-    declared one.
+      * the ORPHAN branch computes {live claims} - {active circuits}, and the
+        release empties the first set;
+      * the DEMOTION branch reads active circuits, and the bulk
+        `UPDATE circuits SET is_active=false` empties that set.
+
+    Calling it anyway is theatre: a green log line implying a check ran when
+    both its inputs are empty by construction. And the previous test here
+    asserted reconcile was "WIRED" by MOCKING it — so it would have kept
+    passing after the method body was deleted, which is the dead-mechanism trap
+    this increment has hit four times.
+
+    The method is KEPT (recovery for a database written by an older build,
+    gated by `at_startup=True`), so these tests pin the DECISION rather than
+    the absence.
     """
 
-    def test_the_lifespan_actually_calls_reconcile(self):
-        import asyncio
-        from unittest.mock import AsyncMock, MagicMock, patch
-
-        from millm.main import lifespan
-
-        reconcile = AsyncMock(
-            return_value={"orphans_released": [], "demoted": []}
-        )
-
-        class FakeRegistry:
-            def __init__(self, _session):
-                pass
-
-            async def reconcile(self, **kwargs):
-                return await reconcile(**kwargs)
-
-        async def drive():
-            with patch(
-                "millm.services.circuit_claim_registry.CircuitClaimRegistry",
-                FakeRegistry,
-            ), patch("millm.main.setup_logging"), patch(
-                "millm.db.base.async_session_factory"
-            ) as factory:
-                session = MagicMock()
-                session.execute = AsyncMock(
-                    return_value=MagicMock(rowcount=0)
-                )
-                session.commit = AsyncMock()
-                factory.return_value.__aenter__ = AsyncMock(return_value=session)
-                factory.return_value.__aexit__ = AsyncMock(return_value=False)
-                async with lifespan(MagicMock()):
-                    pass
-
-        asyncio.run(drive())
-
-        assert reconcile.await_count >= 1, (
-            "startup never reconciled layer claims — orphaned claims survive "
-            "a restart and refuse every future activation on their layers, "
-            "for circuits nobody can deactivate"
-        )
-
-    def test_reconcile_runs_AFTER_the_circuits_are_deactivated(self):
-        """Ordering matters: reconcile computes orphans against the ACTIVE set,
-        so running it before the deactivation would see every circuit as
-        legitimately active and release nothing."""
+    def test_startup_does_not_call_reconcile(self):
+        # Strip comments before asserting: the word appears in the block
+        # explaining WHY it is not called, and matching prose would make this
+        # test fail on its own documentation.
         text = MAIN.read_text()
-        deactivate = text.index("deactivated_stale_circuits")
-        reconcile = text.index("CircuitClaimRegistry(session).reconcile")
-        assert deactivate < reconcile, (
-            "reconcile runs before the stale-circuit deactivation, so it sees "
-            "the pre-reset active set and releases no orphans"
+        code = "\n".join(
+            line for line in text.splitlines() if not line.strip().startswith("#")
+        )
+        assert ".reconcile(" not in code, (
+            "reconcile is called at startup again — both its inputs are "
+            "emptied by the steps above it, so it can only report an empty "
+            "result while implying a check ran"
         )
 
-    def test_the_flag_is_passed_through(self):
-        """With CIRCUIT_ALLOW_CONCURRENT false, a database written while it was
-        true must be demoted to a single active circuit — otherwise the flag
-        is a lie about what the server is doing."""
+    def test_the_reasoning_is_recorded_where_the_call_was(self):
+        """So the next reader does not re-add it as a missing safety step."""
         text = MAIN.read_text()
-        assert "allow_concurrent=settings.CIRCUIT_ALLOW_CONCURRENT" in text
+        assert "F19 R3-15" in text
+        assert "dead in" in text
+
+    def test_the_method_still_exists_for_older_databases(self):
+        from millm.services.circuit_claim_registry import CircuitClaimRegistry
+
+        assert hasattr(CircuitClaimRegistry, "reconcile"), (
+            "reconcile was deleted — it is the recovery path for a database "
+            "written by a build that did not release claims at startup"
+        )
 
 
 class TestF19R2StartupReleasesClaimsPLAINLY:
@@ -170,13 +148,17 @@ class TestF19R2StartupReleasesClaimsPLAINLY:
             "anomaly rather than as the expected outcome"
         )
 
-    def test_it_runs_BEFORE_reconcile(self):
-        """Ordering: the plain release is what actually frees the layers, so
-        reconcile's orphan branch is left for genuine orphans."""
+    def test_it_runs_AFTER_the_circuits_are_deactivated(self):
+        """Ordering still matters, just against a different neighbour.
+
+        (This asserted the release ran BEFORE reconcile; R3-15 removed the
+        reconcile call, so the meaningful ordering is now against the bulk
+        deactivation — the release must see the post-reset state.)
+        """
         text = MAIN.read_text()
+        deactivate = text.index("deactivated_stale_circuits")
         release = text.index("circuit_claims_released_on_startup")
-        reconcile = text.index("CircuitClaimRegistry(session).reconcile")
-        assert release < reconcile
+        assert deactivate < release
 
     def test_a_failed_release_is_an_ERROR_not_a_warning(self):
         """Stale claims refuse every activation on those layers for the life of
@@ -240,13 +222,13 @@ class TestF19R2ClaimsDegradationIsVISIBLE:
         claims = next(c for c in result.components if c.name == "circuit_claims")
         assert claims.status == health_mod.HealthStatus.HEALTHY
 
-    def test_startup_flags_both_failure_paths(self):
+    def test_the_release_failure_path_flags_degraded(self):
+        """R3-15 removed the reconcile call, so there is one startup claim path
+        left — and its failure must still reach `/health/detailed`."""
         text = MAIN.read_text()
-        release = text.index("circuit_claim_startup_release_failed")
-        reconcile = text.index("circuit_claim_reconcile_failed")
-        for name, idx in (("release", release), ("reconcile", reconcile)):
-            window = text[max(0, idx - 400) : idx]
-            assert "_note_claims_degraded" in window, (
-                f"the {name} failure path does not flag claims as degraded, so "
-                "/health stays green while activations are refused"
-            )
+        idx = text.index("circuit_claim_startup_release_failed")
+        window = text[max(0, idx - 400) : idx]
+        assert "_note_claims_degraded" in window, (
+            "the release failure path does not flag claims as degraded, so "
+            "/health stays green while activations are refused"
+        )

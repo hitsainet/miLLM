@@ -249,58 +249,28 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
             exc_info=True,
         )
 
-    # F19 R1-01/02: reconcile circuit LAYER CLAIMS.
+    # F19 R3-15: `reconcile()` is NOT called here, deliberately.
     #
-    # Two defects, one fix:
+    # R1-01 wired it at startup because nothing called it. R2-09 then made the
+    # startup path release EVERY claim outright — which is correct, since
+    # nothing is steering after a restart — and that left reconcile dead in
+    # both directions:
     #
-    # R1-01 — `CircuitClaimRegistry.reconcile()` had ZERO production callers.
-    #   It was written, unit-tested, and never invoked: a declared mechanism is
-    #   not a wired one, and this increment has now been bitten by that twice.
+    #   * its ORPHAN branch computes {live claims} - {active circuits}, and the
+    #     release above empties the first set, so it can never fire;
+    #   * its DEMOTION branch reads active circuits, and the bulk
+    #     `UPDATE circuits SET is_active=false` above empties that set too.
     #
-    # R1-02 — the reset above deactivates every circuit but does NOT release
-    #   their claims, so each becomes an ORPHAN: a live claim whose circuit is
-    #   inactive. Orphans refuse every future activation on those layers, for a
-    #   circuit nobody can deactivate (deactivating an inactive circuit is a
-    #   no-op). One restart would have made the affected layers permanently
-    #   unclaimable, and the operator's only signal would be a contention
-    #   refusal naming a circuit that is plainly not running.
+    # Calling it anyway would be theatre: a green log line implying a check ran
+    # when both its inputs are empty by construction. Worse, a test asserting
+    # reconcile is "WIRED" would keep passing after its body was deleted —
+    # which is exactly the dead-mechanism trap this increment has hit four
+    # times.
     #
-    # Runs unconditionally, AFTER the deactivation above so it sees the true
-    # active set. Also demotes to a single active circuit when
-    # CIRCUIT_ALLOW_CONCURRENT is false, so a database written while the flag
-    # was on cannot keep serving two circuits after an operator turns it off —
-    # the flag would otherwise be a lie.
-    try:
-        from millm.services.circuit_claim_registry import CircuitClaimRegistry
-
-        async with async_session_factory() as session:
-            outcome = await CircuitClaimRegistry(session).reconcile(
-                allow_concurrent=settings.CIRCUIT_ALLOW_CONCURRENT,
-                at_startup=True,
-            )
-            await session.commit()
-        if outcome["orphans_released"] or outcome["demoted"]:
-            logger.info(
-                "circuit_claims_reconciled",
-                orphans_released=outcome["orphans_released"],
-                demoted=outcome["demoted"],
-            )
-    except Exception as e:
-        # R2-19: surface it on /health/detailed. Serving continues — refusing
-        # to start over a bookkeeping table would be worse — but a readiness
-        # probe must be able to see that activations on the affected layers
-        # will be refused for the life of this process.
-        _note_claims_degraded(f"reconcile failed: {e}")
-        logger.error(
-            "circuit_claim_reconcile_failed",
-            error=str(e),
-            error_type=type(e).__name__,
-            detail=(
-                "stale layer claims may remain — they would refuse "
-                "activations on those layers until cleared"
-            ),
-            exc_info=True,
-        )
+    # The method is KEPT, not deleted: it is the recovery path for a database
+    # written by an older build, and `at_startup=True` gates it (R2-18). If a
+    # future startup stops releasing claims wholesale, this is where it goes
+    # back.
 
     # Clear any stale in-memory SAE attachment state
     try:

@@ -40,3 +40,51 @@ index comparison against a string that also appears in a comment, and a
 mutation aimed at an anchor that does not exist.
 
 Every one was caught by the negative control and by nothing else.
+
+## Closing findings (R2-16 … R2-20)
+
+**R2-16/17.** The realistic four-way identity, and the unchanged `_serve_full`
+response shape. Together these pin that consolidating four derivations into one
+engine did not move the observable output.
+
+**R2-18.** R2-03 established that `claimed_entries` holds LIVE registry entries,
+so a detach mid-request leaves stale handles in the plan. What makes that safe
+is the restore path, and no F18 test asserted it. The restore does not trust the
+captured handle: it re-resolves through `state.get(sae_id, layer)` and skips
+what has gone. Without that, a restore writes steering values into a DETACHED
+SAE — reviving an intervention on a layer the operator deliberately released.
+
+Also pinned: each layer restores independently. A failing layer must not abort
+the loop, or the survivors stay permanently dialled — the per-request override
+leaking into global state that restore exists to prevent.
+
+**R2-19.** `_steering_circuit_uncached` now asks `plan.is_serveable`; its
+verdict must follow CURRENT attachment. Asserted by driving the real method
+across an attach/detach transition. A verdict surviving a detach puts a rung
+header on a response describing an intervention that is no longer running.
+
+**R2-20 — totality by use, not by name-matching.** R2-08's AST guard compares
+the field NAMES `for_registry` assigns against `__init__`'s. Neither it nor the
+registry-identity test exercises the instance, so a field set to the WRONG VALUE
+passes both. The R1-A defect (`_repository` for `repository`) was a NAMING
+error, in the AST test's reach once its regex was fixed; a value error is not.
+`_sae_state = None` satisfies name parity exactly and fails the moment the dial
+runs. Fixed by driving the real `set_circuit_steering` on a real
+`for_registry()` instance.
+
+Negative controls: `_sae_state = None` is caught **only** by the new use-test;
+dropping `svc.repository` is caught by both. Tree confirmed clean after restore.
+
+## Round verdict
+
+**20 findings, 20 fixed. Suite 1904 → 1956 green. CI green.**
+
+Seven of the first nine findings were collisions with R1's own fixes — R1-08
+orphaning `attached_layers()` and leaving `member_layers` dead, R1-12's
+`UNSET_INTENSITY` resolving through `max(0.0, min(2.0, nan))` to the CEILING,
+R1-05's underscore error surviving under a docstring asserting it was fixed.
+The pattern holds across every round of this increment: **the most productive
+target in round N is round N-1's fix.**
+
+The standing lesson, now sixfold: a test is not evidence until a mutation has
+made it fail.

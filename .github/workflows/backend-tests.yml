@@ -81,6 +81,18 @@ jobs:
     # a contract row that claims a tool miStudio does not register FAILS here
     # rather than skipping in silence.
     name: Contract ↔ MCP registry
+    # F20 R3-22: SOURCE REPO ONLY. This job checks out the PRIVATE sibling
+    # `Onegaishimas/miStudio`, which the public mirror has no credentials for —
+    # so on the mirror the checkout fails, `MILLM_REQUIRE_CROSS_REPO_CHECKS=1`
+    # correctly turns the degrade into a failure, and the build goes red for a
+    # guard that cannot meaningfully run there. The contract it checks is
+    # stripped from the mirror by sync-to-clean anyway (see R3-21).
+    #
+    # Every other cross-repo-sensitive job in this repo already gates on
+    # `github.repository` (docker-images, release, deploy-manual,
+    # sync-main-to-gitops-pilot). I added this one without the guard the
+    # codebase had already standardised on.
+    if: github.repository == 'Onegaishimas/miLLM'
     runs-on: ubuntu-latest
     env:
       SECRET_KEY: ci-test-secret-key-minimum-32-characters-long

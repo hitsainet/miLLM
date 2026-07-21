@@ -29,6 +29,12 @@ export interface ContentionDetails {
   override_param?: string;
   rung_header_suppressed_if_overridden?: boolean;
   overridable: boolean;
+  /** F19 R3-03: EVERY circuit holding a contended layer, not just the one the
+   *  dialog can offer to deactivate. R2-12 added this to the server payload
+   *  precisely so an operator is not sent to deactivate one incumbent, retry,
+   *  and be refused by a second they were never told about — and then it was
+   *  never rendered, so that scenario still happened verbatim in the browser. */
+  all_incumbents?: Array<{ id: string | null; name: string | null }>;
   colliding_keys: Array<{ layer: number; feature_idx: number; incumbent: string }>;
   measured_hazard: {
     source: string;
@@ -56,6 +62,9 @@ export function ContentionDialog({
   isBusy = false,
 }: ContentionDialogProps) {
   const incumbentName = details.incumbent?.name ?? 'another active circuit';
+  const otherIncumbents = (details.all_incumbents ?? []).filter(
+    (inc) => inc.id !== details.incumbent?.id,
+  );
   const hazard = details.measured_hazard;
 
   return (
@@ -93,6 +102,31 @@ export function ContentionDialog({
               <strong className="text-slate-100">{incumbentName}</strong>
             </span>
           </div>
+
+          {/* R3-03: when SEVERAL circuits hold these layers, say so. Otherwise
+              the operator deactivates the named one, retries, and is refused
+              again by a circuit this dialog knew about and did not mention. */}
+          {otherIncumbents.length > 0 && (
+            <div
+              className="rounded border border-slate-700 bg-slate-800/60 p-2 text-xs"
+              data-testid="other-incumbents"
+            >
+              <p className="text-slate-300">
+                {otherIncumbents.length === 1
+                  ? 'Another circuit also holds one of these layers:'
+                  : `${otherIncumbents.length} other circuits also hold these layers:`}
+              </p>
+              <ul className="mt-1 space-y-0.5 text-slate-200">
+                {otherIncumbents.map((inc) => (
+                  <li key={inc.id ?? inc.name}>{inc.name ?? inc.id}</li>
+                ))}
+              </ul>
+              <p className="mt-1 text-slate-400">
+                Deactivating one will not be enough — the next activation will
+                be refused by the others.
+              </p>
+            </div>
+          )}
 
           {!details.overridable && details.colliding_keys.length > 0 && (
             <div

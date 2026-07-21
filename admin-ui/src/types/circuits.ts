@@ -53,6 +53,10 @@ export interface CircuitActivationResponse extends CircuitSummary {
   hazards: Array<Record<string, unknown>>;
   warnings: string[];
   acknowledged_unvalidated: boolean;
+  /** F19: layers this activation COMPOSED onto. Non-empty means the
+   *  circuit-rung header is suppressed for responses it steers. */
+  composed_layers?: number[];
+  allowed_layer_overlap?: boolean;
 }
 
 /** The portable artifact (frozen v1 contract) — imported, never produced here. */

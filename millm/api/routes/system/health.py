@@ -538,9 +538,26 @@ def circuit_serving_snapshot() -> tuple[int, int, int]:
 
 
 def note_claims_degraded(reason: str) -> None:
-    """Record that startup left layer claims in an unknown state."""
+    """Record that layer claims are in an unknown state."""
     CIRCUIT_CLAIMS_DEGRADED["degraded"] = True
     CIRCUIT_CLAIMS_DEGRADED["reason"] = reason
+
+
+def note_claims_healthy() -> None:
+    """Clear the degraded flag once claims are known-good again.
+
+    F19 R3-01: `note_claims_degraded` had no counterpart, so the flag was a
+    LATCH, not a status. Once set it reported DEGRADED for the life of the
+    process — including after an operator had already resolved the problem
+    with `POST /circuits/claims/release`, which is the documented remedy.
+
+    A health signal that cannot recover trains operators to ignore it, and it
+    would keep a Kubernetes readiness probe unhappy over a condition that no
+    longer exists. Cleared whenever the claims subsystem is demonstrably
+    working again.
+    """
+    CIRCUIT_CLAIMS_DEGRADED["degraded"] = False
+    CIRCUIT_CLAIMS_DEGRADED["reason"] = None
 
 
 class MetricsCounter:

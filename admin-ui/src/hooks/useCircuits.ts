@@ -74,6 +74,22 @@ export function useCircuits(
         toast.warning(
           `Serving the L${result.slice_layer} slice — a partial rendering, not the whole circuit`,
         );
+      } else if (result.composed_layers?.length) {
+        // F19 R3-04: do NOT report a rung here. Composition is exactly the
+        // state where the runtime SUPPRESSES `X-miLLM-Circuit-Rung`, because
+        // no single circuit's evidence describes a summed response — so
+        // asserting "causally validated (edge)" in the success toast makes the
+        // claim at the one moment the server has stopped making it.
+        //
+        // R2-14 fixed this same contradiction on the circuit card and missed
+        // the toast on the compose path.
+        toast.warning(
+          `"${result.name}" is now steering, COMPOSED on L${result.composed_layers.join(
+            ', L',
+          )}. Those layers carry the summed effect of more than one circuit, ` +
+            'so the circuit-rung header is omitted — no single circuit\'s ' +
+            'evidence describes the response.',
+        );
       } else {
         toast.success(`"${result.name}" is now steering (${result.rung_language})`);
       }

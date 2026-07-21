@@ -148,6 +148,21 @@ async def release_claims(
     await session.commit()
 
     warnings: list[str] = []
+    # R3-02: an unknown circuit id returned success with `released_layers: []`
+    # — indistinguishable from "the claim was already gone". An operator
+    # recovering from a stuck claim, working from a name they may have
+    # mistyped, could not tell whether they had fixed anything.
+    if circuit is None:
+        warnings.append(
+            f"No circuit '{circuit_id}' exists. Nothing was released — check "
+            "the id against GET /api/circuits/claims."
+        )
+    elif not released:
+        warnings.append(
+            "This circuit held no live claims, so nothing changed. If an "
+            "activation is still being refused, the layers are held by a "
+            "different circuit — check GET /api/circuits/claims."
+        )
     if circuit is not None and getattr(circuit, "is_active", False):
         # Say it plainly rather than refusing: an operator clearing a claim on
         # a circuit that still reads active is usually recovering from exactly
@@ -158,6 +173,17 @@ async def release_claims(
             "take them. Deactivate it unless you are deliberately recovering "
             "from a stuck claim."
         )
+
+    # R3-01: a successful release PROVES the claims subsystem is working, so
+    # clear the degraded flag. Without this, `/health/detailed` stayed DEGRADED
+    # for the life of the process even after the operator had used the
+    # documented remedy — a health signal that cannot recover.
+    try:
+        from millm.api.routes.system.health import note_claims_healthy
+
+        note_claims_healthy()
+    except Exception:  # pragma: no cover - reporting must not fail the release
+        pass
 
     logger.warning(
         "circuit_claims_manually_released",

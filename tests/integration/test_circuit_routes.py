@@ -498,3 +498,99 @@ class TestF19R2ClaimReleaseEndpoint:
         async with client:
             r = await client.post("/api/circuits/claims/release")
         assert r.status_code == 422
+
+    async def test_a_successful_release_CLEARS_the_degraded_flag(
+        self, client, mock_service
+    ):
+        """F19 R3-01. `note_claims_degraded` had no counterpart, so the flag
+        was a LATCH, not a status: once set it reported DEGRADED for the life
+        of the process — including after the operator had already fixed the
+        problem with this very endpoint, which is the documented remedy.
+
+        The two mechanisms R2 added in the same round contradicted each other:
+        the remedy could not clear the signal reporting the condition it
+        remedies, so the operator restarts anyway — the multi-minute GPU outage
+        R2-10 exists to avoid.
+        """
+        from unittest.mock import AsyncMock, MagicMock, patch
+
+        from millm.api.routes.system import health as health_mod
+
+        health_mod.note_claims_degraded("reconcile failed: boom")
+        assert health_mod.CIRCUIT_CLAIMS_DEGRADED["degraded"] is True
+
+        session = MagicMock()
+        session.commit = AsyncMock()
+        mock_service.repository.session = session
+        mock_service.repository.get = AsyncMock(
+            return_value=MagicMock(is_active=False)
+        )
+
+        try:
+            with patch(
+                "millm.services.circuit_claim_registry.CircuitClaimRegistry"
+            ) as registry_cls:
+                registry_cls.return_value.release = AsyncMock(return_value=[10])
+                async with client:
+                    await client.post(
+                        "/api/circuits/claims/release?circuit_id=circ_1"
+                    )
+
+            assert health_mod.CIRCUIT_CLAIMS_DEGRADED["degraded"] is False, (
+                "the documented remedy ran successfully and /health still "
+                "reports DEGRADED — a health signal that cannot recover"
+            )
+        finally:
+            health_mod.CIRCUIT_CLAIMS_DEGRADED["degraded"] = False
+            health_mod.CIRCUIT_CLAIMS_DEGRADED["reason"] = None
+
+    async def test_an_UNKNOWN_circuit_id_says_so(self, client, mock_service):
+        """F19 R3-02. A typo'd id returned success with `released_layers: []` —
+        indistinguishable from "the claim was already gone". An operator
+        recovering from a stuck claim, working from a name they may have
+        mistyped, could not tell whether they had fixed anything."""
+        from unittest.mock import AsyncMock, MagicMock, patch
+
+        session = MagicMock()
+        session.commit = AsyncMock()
+        mock_service.repository.session = session
+        mock_service.repository.get = AsyncMock(return_value=None)
+
+        with patch(
+            "millm.services.circuit_claim_registry.CircuitClaimRegistry"
+        ) as registry_cls:
+            registry_cls.return_value.release = AsyncMock(return_value=[])
+            async with client:
+                r = await client.post(
+                    "/api/circuits/claims/release?circuit_id=typo"
+                )
+
+        warnings = r.json()["data"]["warnings"]
+        assert any("No circuit 'typo' exists" in w for w in warnings)
+
+    async def test_a_known_circuit_with_no_claims_says_something_DIFFERENT(
+        self, client, mock_service
+    ):
+        """The two 'nothing happened' cases have different remedies, so they
+        must not read the same."""
+        from unittest.mock import AsyncMock, MagicMock, patch
+
+        session = MagicMock()
+        session.commit = AsyncMock()
+        mock_service.repository.session = session
+        mock_service.repository.get = AsyncMock(
+            return_value=MagicMock(is_active=False)
+        )
+
+        with patch(
+            "millm.services.circuit_claim_registry.CircuitClaimRegistry"
+        ) as registry_cls:
+            registry_cls.return_value.release = AsyncMock(return_value=[])
+            async with client:
+                r = await client.post(
+                    "/api/circuits/claims/release?circuit_id=circ_1"
+                )
+
+        warnings = " ".join(r.json()["data"]["warnings"])
+        assert "held no live claims" in warnings
+        assert "different circuit" in warnings

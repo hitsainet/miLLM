@@ -135,6 +135,18 @@ class TestCopyAudit:
             for path in base.rglob("*"):
                 if path.suffix not in suffixes or "node_modules" in path.parts:
                     continue
+                # F19 R3-05: TEST files are not a runtime surface.
+                #
+                # The audit exists to stop causal language reaching a USER. A
+                # test asserting the phrase is ABSENT — `expect(msg).not
+                # .toContain('causally validated')` — is the opposite of an
+                # overclaim, and it tripped this gate while pinning the very
+                # honesty rule the gate protects. Excluding tests keeps the
+                # audit aimed at copy rather than at the assertions about copy.
+                if "__tests__" in path.parts or path.name.startswith("test_"):
+                    continue
+                if path.name.endswith((".test.tsx", ".test.ts", ".spec.ts")):
+                    continue
                 rel = str(path.relative_to(REPO))
                 if rel in self.ALLOWED:
                     continue

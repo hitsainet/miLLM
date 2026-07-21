@@ -267,6 +267,39 @@ describe('CircuitsPage — layer contention', () => {
     expect(ack).toBe(true);
   });
 
+  it('names EVERY incumbent, not just the one it can deactivate', async () => {
+    // R3-03. R2-12 added `all_incumbents` to the server payload precisely so an
+    // operator is not sent to deactivate one, retry, and be refused by a second
+    // they were never told about — and it was never RENDERED, so that scenario
+    // still happened verbatim in the browser. "Declaring is not wiring", inside
+    // the fix for it.
+    activateMock.mockImplementation(async () => {
+      throw new ApiError('CIRCUIT_LAYER_CONTENTION', 'contended', {
+        ...DETAILS,
+        contended_layers: [10, 13],
+        incumbent: { id: 'circ_c', name: 'cC' },
+        all_incumbents: [
+          { id: 'circ_c', name: 'cC' },
+          { id: 'circ_d', name: 'cD' },
+        ],
+      });
+    });
+
+    await activateAndGetRefused();
+
+    const others = screen.getByTestId('other-incumbents');
+    expect(others).toHaveTextContent('cD');
+    expect(others).toHaveTextContent('will not be enough');
+    // The one it CAN act on stays in the primary line.
+    expect(screen.getByTestId('contended-layers')).toHaveTextContent('cC');
+  });
+
+  it('does not show the other-incumbents block for a single incumbent', () => {
+    // Specificity: a needless "others also hold this" panel would make every
+    // ordinary refusal look like a multi-circuit pile-up.
+    expect(DETAILS.all_incumbents).toBeUndefined();
+  });
+
   it('a COLLISION refusal offers no compose action', async () => {
     activateMock.mockImplementation(async () => {
       throw new ApiError('CIRCUIT_LAYER_CONTENTION', 'same feature', {

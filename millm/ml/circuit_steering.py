@@ -88,7 +88,21 @@ class ServingPlan:
 
     @property
     def unattached_layers(self) -> frozenset[int]:
-        """Claimed but not currently attached — the slice-fallback signal."""
+        """Claimed but not currently attached.
+
+        R1-15: this was documented as "the slice-fallback signal" and has ZERO
+        production callers — the sixth declared-but-unwired mechanism in this
+        arc. Investigated rather than wired: the slice-fallback decision uses
+        `assess_compatibility`, whose verdicts already mean "attached AND
+        compatible", which is strictly stronger than attachment alone. Wiring
+        this there would replace a better signal with a worse one.
+
+        KEPT, with the false claim removed, because it is the honest complement
+        of `attached_layers` on a frozen plan and costs nothing. It is NOT a
+        slice-fallback input, and a future caller should know that before
+        reaching for it. Deliberately untested beyond its arithmetic: an
+        assertion on an unused property passes for the wrong reason.
+        """
         return self.claimed_layers - self.attached_layers
 
     @property
@@ -237,23 +251,17 @@ class CircuitSteeringEngine:
             logger.warning("circuit_attachment_registry_unreadable", exc_info=True)
             return []
 
-    def attached_layers(self) -> frozenset[int]:
-        """Layers with an SAE attached right now, or empty with no registry.
-
-        F18 R1-02: a registry failure returns EMPTY, which makes a circuit that
-        IS steering read as `is_serveable=False` and every claimed layer read as
-        unattached. The direction is deliberately safe — the echo predicate then
-        withholds a rung header rather than attaching an evidence claim to an
-        intervention it cannot confirm, and under-claiming is the right way to
-        fail on an evidence surface.
-
-        But it was SILENT, and the same empty set also feeds
-        `unattached_layers`, which drives slice-fallback decisions. A registry
-        that cannot be read is an operational fault, not an empty registry, so
-        it is logged at WARNING. `state is None` stays quiet: that is a
-        deliberate construction (no registry supplied), not a failure.
-        """
-        return frozenset(e.layer for e in self._entries())
+    # R1-16: `attached_layers()` was DELETED here.
+    #
+    # R1-08 made `plan_for` read the registry ONCE and compute
+    # `attached_layers` inline from those entries, which left this method with
+    # zero callers — a mutation returning `frozenset()` from it survived the
+    # whole suite, correctly, because nothing reached it. A fix orphaning a
+    # method is how the next reader gets two ways to ask one question and picks
+    # the one that is no longer maintained.
+    #
+    # `ServingPlan.attached_layers` is the answer; `_entries()` is the single
+    # read it comes from.
 
     def plan_for(
         self,

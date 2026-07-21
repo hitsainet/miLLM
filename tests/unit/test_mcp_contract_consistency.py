@@ -124,3 +124,103 @@ class TestContractMatchesTheRegistry:
             "the two repos disagree about the evidence-ladder phrasing, so an "
             "agent would relay a phrase this server never renders"
         )
+
+
+class TestEveryRegisteredToolHasACorrectRow:
+    """F20 R1-02/03. The guard above checks category HEADINGS. The defect that
+    shipped — twice — was in the Status COLUMN.
+
+    Round 1 found every row still reading `REST ✅ · MCP not registered` while
+    the resolution block above declared the surface shipped. An agent reading
+    top-down would bypass 16 registered tools and hand-roll HTTP, or refuse the
+    task as unsupported. That is the identical failure mode F20 exists to
+    abolish, INVERTED: last increment the marks over-claimed, this time they
+    under-claimed.
+
+    The reachability rule was applied rigorously to the miStudio registry and
+    not at all to the contract table — the artifact that actually failed. These
+    close it in BOTH directions: no row may claim a tool that is not
+    registered, and no registered tool may be missing or mismarked.
+    """
+
+    def _rows(self) -> dict:
+        """`{tool_name: status}` from the millm_circuits table."""
+        text = CONTRACT.read_text()
+        rows = {}
+        for line in text.splitlines():
+            if not line.startswith("| `millm_"):
+                continue
+            cells = [c.strip() for c in line.strip("|").split("|")]
+            if len(cells) < 3:
+                continue
+            for name in re.findall(r"`(millm_[a-z_]+)`", cells[0]):
+                rows[name] = cells[-1]
+        return rows
+
+    def _registered_tools(self) -> set:
+        import asyncio
+        from unittest.mock import AsyncMock, MagicMock
+
+        registry = _registry()
+        try:
+            from mcp.server.fastmcp import FastMCP
+        except ImportError as exc:
+            pytest.skip(f"mcp package not importable from this venv ({exc})")
+
+        gate = MagicMock()
+        gate.check = AsyncMock(return_value=(True, None))
+        mcp = FastMCP("contract-check")
+        for module in registry["millm_circuits"]:
+            module.register(mcp, MagicMock(), gate)
+        return {t.name for t in asyncio.run(mcp.list_tools())}
+
+    def test_the_row_extraction_works(self):
+        """An empty dict passes every assertion below it."""
+        rows = self._rows()
+        assert len(rows) >= 14, (
+            f"only parsed {len(rows)} tool rows — the table format changed and "
+            "this guard is checking nothing"
+        )
+
+    def test_no_row_claims_a_tool_that_is_not_registered(self):
+        registered = self._registered_tools()
+        claimed = {
+            name for name, status in self._rows().items()
+            if "MCP ✅" in status
+        }
+        phantom = sorted(claimed - registered)
+        assert not phantom, (
+            f"the contract marks {phantom} as MCP-registered and miStudio does "
+            "not register them — an agent would call tools that do not exist, "
+            "which is the defect this feature was built to close"
+        )
+
+    def test_every_registered_tool_has_a_row_marked_MCP(self):
+        rows = self._rows()
+        registered = self._registered_tools()
+
+        missing = sorted(t for t in registered if t not in rows)
+        assert not missing, (
+            f"{missing} ship as MCP tools and have NO contract row — an agent "
+            "using the contract as its index of capability never learns they "
+            "exist"
+        )
+
+        mismarked = sorted(
+            t for t in registered if "MCP ✅" not in rows[t]
+        )
+        assert not mismarked, (
+            f"{mismarked} are registered and their rows say otherwise "
+            f"({[rows[t] for t in mismarked]}) — an agent reads the row, "
+            "bypasses the tool, and hand-rolls HTTP or refuses the task"
+        )
+
+    def test_the_recovery_tool_is_documented(self):
+        """§4a-sexies tells an agent to use the claim-release endpoint when a
+        refusal names a circuit that is not running. A prescribed remedy whose
+        tool is absent from the table is a dead end."""
+        rows = self._rows()
+        assert "millm_release_circuit_claims" in rows, (
+            "the contract prescribes claim release as the recovery path and "
+            "does not list the tool that performs it"
+        )

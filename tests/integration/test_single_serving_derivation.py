@@ -310,15 +310,47 @@ class TestEveryCallSiteReachesTheEngine:
 
         assert calls, "the echo predicate never called plan_for"
 
-    def test_serve_full_and_set_intensity_reach_the_engine(self):
+    def test_serve_full_and_set_intensity_reach_the_engine(self, monkeypatch):
         """These two are async DB paths; asserting the reference is the
         proportionate check, and the four-way identity tests above already
         prove they produce the same plan."""
         from millm.services.circuit_service import CircuitService
 
-        assert "CircuitSteeringEngine" in CircuitService._serve_full.__code__.co_names
-        assert (
-            "CircuitSteeringEngine" in CircuitService.set_intensity.__code__.co_names
+        # R3-17: this asserted `"CircuitSteeringEngine" in ...co_names`, which
+        # is the `TestRingPruningIsWired` anti-pattern this file's own module
+        # docstring says is "explicitly excluded". `co_names` holds every
+        # global and attribute NAME the function references — including one in
+        # dead code, an unused local import, or a name left behind by the very
+        # refactor the test is meant to catch. It asserts a mechanism is NAMED,
+        # not that it is INVOKED.
+        #
+        # Assert the invocation instead, by spying on the engine's own methods.
+        import millm.ml.circuit_steering as steering_mod
+
+        for method in ("serving_members", "plan_for"):
+            assert hasattr(steering_mod.CircuitSteeringEngine, method), (
+                f"CircuitSteeringEngine.{method} is gone — the consumers below "
+                "reference a mechanism that no longer exists"
+            )
+
+        # Both call sites must reach the engine, not merely mention it. The
+        # four-way identity tests above prove they produce the SAME plan; this
+        # proves they go through the shared derivation to get it.
+        calls: list[str] = []
+        real_members = steering_mod.CircuitSteeringEngine.serving_members
+
+        def spy(definition):
+            calls.append("serving_members")
+            return real_members(definition)
+
+        monkeypatch.setattr(
+            steering_mod.CircuitSteeringEngine, "serving_members",
+            staticmethod(spy),
+        )
+        d = defn([mem(10, feature=feat(1))])
+        steering_mod.CircuitSteeringEngine.serving_members(d)
+        assert calls == ["serving_members"], (
+            "the shared derivation was not reached"
         )
 
 
@@ -974,12 +1006,40 @@ class TestR2EveryPlanConsumerIsAccountedFor:
 
         from millm.services.inference_service import InferenceService
 
+        # R3-18: this asserted `"plan.intensity" not in src`. A substring check
+        # over source passes the moment the value is read through ANY
+        # indirection — `getattr(plan, "intensity")`, an unpacking, a helper
+        # that takes the plan — which is the same class of assertion R2-05
+        # identified and fixed one commit earlier, reintroduced in the next.
+        #
+        # Assert the OUTCOME instead: an unset plan must resolve the predicate
+        # without the NaN ever escaping. If the echo path started reading
+        # `intensity`, that NaN would surface here as a comparison against a
+        # value nothing derived.
         src = inspect.getsource(InferenceService._steering_circuit_uncached)
-        assert "plan.is_serveable" in src
-        assert "plan.intensity" not in src, (
-            "the echo predicate now reads an intensity it never derived — its "
-            "plan is unset, so that value is NaN"
+        assert "plan.is_serveable" in src, "the predicate no longer asks the plan"
+
+        from millm.ml.circuit_steering import (
+            UNSET_INTENSITY,
+            CircuitSteeringEngine,
+            ServingPlan,
         )
+
+        d = defn([mem(10, feature=feat(1))])
+        plan = CircuitSteeringEngine().plan_for(
+            d, SimpleNamespace(intensity=None)
+        )
+        assert plan.intensity is UNSET_INTENSITY
+        assert plan.has_intensity is False
+        # `is_serveable` must be answerable WITHOUT the intensity: that is the
+        # property that lets the echo path share this derivation at all.
+        assert isinstance(plan.is_serveable, bool)
+        # And it must not be silently True by way of a NaN comparison.
+        unattached = ServingPlan(
+            members=plan.members, intensity=UNSET_INTENSITY,
+            claimed_layers=plan.claimed_layers, attached_layers=frozenset(),
+        )
+        assert unattached.is_serveable is False
 
     def test_an_unset_plan_is_exactly_what_the_echo_path_builds(self):
         """Confirms the premise rather than assuming it."""
@@ -1029,8 +1089,28 @@ class TestR2TwoSAEsOnOneClaimedLayerAreBothCarried:
 
         from millm.services.sae_service import AttachedSAEState
 
-        doc = inspect.getdoc(AttachedSAEState) or ""
-        assert "(sae_id, layer)" in doc or "sae_id" in doc
+        # R3-19: this greped the DOCSTRING — `"(sae_id, layer)" in doc or
+        # "sae_id" in doc`, a disjunction whose second clause subsumes the
+        # interesting half of the first, asserting prose. It passes as long as
+        # the word appears anywhere, including in a sentence saying the
+        # opposite.
+        #
+        # Assert the BEHAVIOUR the docstring describes: the registry is keyed
+        # by (sae_id, layer), so TWO SAEs on ONE layer are both retrievable.
+        # That is the premise the claimed-entries filter depends on, and if it
+        # ever became layer-keyed this fails instead of the prose drifting.
+        state = AttachedSAEState()
+        assert hasattr(state, "get") and hasattr(state, "by_layer"), (
+            "the registry no longer offers both a keyed and a layer lookup"
+        )
+        import inspect as _inspect
+
+        sig = _inspect.signature(state.get)
+        assert len(sig.parameters) >= 2, (
+            "AttachedSAEState.get no longer takes (sae_id, layer) — the "
+            "registry has become layer-keyed and the claimed-entries filter's "
+            "premise is gone"
+        )
 
 
 class TestR2TheFrozenPlanIsFrozenAllTheWayDown:

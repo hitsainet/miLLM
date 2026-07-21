@@ -300,12 +300,32 @@ class TestEveryRegisteredToolHasACorrectRow:
 
         rows: dict = {}
         for line in section:
-            if not line.startswith("| `millm_"):
+            if not line.startswith("|"):
                 continue
             cells = [c.strip() for c in line.strip("|").split("|")]
             if len(cells) <= status_col:
                 continue
-            for name in re.findall(r"`(millm_[a-z_]+)`", cells[0]):
+
+            # F20 R3-06: this used to require the line to START with
+            # `` | `millm_ ``, i.e. the tool name in cells[0], backticked, with
+            # no leading empty cell. Any row that put the name ANYWHERE else
+            # was dropped before every downstream check — the duplicate check,
+            # the phantom check and `_claims_mcp` all never saw it.
+            #
+            # Demonstrated: inserting
+            #     | | `millm_hub_import_circuit` | POST … | REST ✅ · MCP ✅ |
+            # left the parse at 16 rows, unchanged. The row-count tripwire did
+            # not move. So the contract could advertise hub-import as
+            # MCP-registered — the EC-20.5 wrong-feature-basis hazard — and
+            # nothing checked it, because the sibling guard for forbidden tools
+            # queries the live REGISTRY and never reads the table.
+            #
+            # Now every cell before the status column is searched for a tool
+            # name, so a leading empty cell or a reordered column cannot hide
+            # a row.
+            for name in re.findall(
+                r"`(millm_[a-z_]+)`", " ".join(cells[:status_col])
+            ):
                 assert name not in rows, (
                     f"`{name}` appears in the circuits table twice. The guard "
                     "refuses to pick one: a stale duplicate can overwrite a "
@@ -381,6 +401,20 @@ class TestEveryRegisteredToolHasACorrectRow:
             "those references serves it against the wrong feature basis. If "
             "this is now intended, the contract row must change FIRST and say "
             "how the reference check is done."
+        )
+
+        # F20 R3-07: and the CONTRACT must not advertise one either. This test
+        # queried only the registry, so the document could carry a row telling
+        # an agent that hub-import is MCP-registered while the tool did not
+        # exist — an agent trusting the contract would try to call it. The
+        # over-claim direction is exactly what this file was built to detect,
+        # and for the forbidden tools it was checking only one side.
+        advertised = sorted(set(self._rows()) & forbidden)
+        assert not advertised, (
+            f"the contract has a row for {advertised}, which EC-20.5 records "
+            "as deliberately having NO tool. Either the row is wrong, or the "
+            "prohibition changed and the 'not served' note must change with "
+            "it."
         )
 
     def test_the_row_extraction_works(self):
@@ -535,3 +569,72 @@ class TestTheExampleFlowIsRunnable:
         assert "millm_release_circuit_claims" in flow
         assert "millm_circuit_sensing_clear" in flow
         assert "scope is REQUIRED" in flow
+
+
+class TestTheManualPageMatchesTheTools:
+    """F20 R3-08. The manual page for the MCP surface named tools by hand.
+
+    A fact-check of the page as first written found it claimed "5 tools" for a
+    group of six, omitted `millm_circuit_sensing_event` entirely, and stated a
+    prohibition was "enforced by a test" when no such test existed. Prose about
+    an API drifts from the API silently — nothing breaks, the page just becomes
+    wrong, and a reader has no way to tell which sentence went stale.
+
+    So the page's tool names are checked against the live registry.
+    """
+
+    PAGE = (
+        Path(__file__).resolve().parents[2]
+        / "manual" / "docs" / "features" / "mcp-circuits.md"
+    )
+
+    def _page(self) -> str:
+        if not self.PAGE.exists():
+            pytest.fail(
+                f"{self.PAGE} is missing. The MCP circuit surface has no "
+                "human documentation — that is the state R2-22 fixed."
+            )
+        return self.PAGE.read_text()
+
+    def test_every_tool_the_page_names_exists(self):
+        named = set(re.findall(r"`(millm_[a-z_]+)`", self._page()))
+        # Suffix-only references like `_events` are expanded by the reader,
+        # not by this test; only fully-qualified names are checked.
+        assert named, "the page names no tools — has the format changed?"
+
+        registry = TestEveryRegisteredToolHasACorrectRow()._registered_tools()
+        # `millm_circuits` is the CATEGORY name, not a tool. Excluded by name
+        # rather than by pattern, so a real tool can never be waved through by
+        # a rule that happens to match it.
+        phantom = sorted(named - registry - {"millm_circuits"})
+        assert not phantom, (
+            f"the manual names {phantom}, which is not registered. A reader "
+            "following this page would ask an agent to call a tool that does "
+            "not exist."
+        )
+
+    def test_the_page_does_not_undercount_a_tool_group(self):
+        """The specific error made: '(5 tools)' for a group of six.
+
+        A count in prose is a claim like any other, and this one was wrong in
+        the direction that makes a reader stop looking for the sixth.
+        """
+        page = self._page()
+        registry = TestEveryRegisteredToolHasACorrectRow()._registered_tools()
+        sensing = {t for t in registry if "sensing" in t}
+        claimed = re.search(r"\((\d+) tools\)", page)
+        if claimed:
+            assert int(claimed.group(1)) == len(sensing), (
+                f"the page claims ({claimed.group(1)} tools) for the sensing "
+                f"group; the registry has {len(sensing)}: {sorted(sensing)}"
+            )
+
+    def test_the_page_states_the_total_correctly(self):
+        page = self._page()
+        registry = TestEveryRegisteredToolHasACorrectRow()._registered_tools()
+        m = re.search(r"(\d+) MCP tools", page)
+        assert m, "the page no longer states a tool total"
+        assert int(m.group(1)) == len(registry), (
+            f"the page says {m.group(1)} MCP tools; {len(registry)} are "
+            "registered"
+        )

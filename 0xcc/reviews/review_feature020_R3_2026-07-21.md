@@ -78,9 +78,48 @@ The page as first written carried seven wrong or overstated claims:
 - **Omitted `slice_fallback`**, `steering: null` meaning NOT EVALUATED, and
   `requests_sensed == 0` as the wiring-fault signal.
 
+
+## The pattern R3 exposed: every earlier fix was applied to ONE representative
+
+Two independent adversarial passes, both mutation-driven, converged on the same
+structural defect. It is the most important thing this round found after R3-04.
+
+| # | Finding | Surviving mutation → now |
+|---|---|---|
+| R3-10 | **The original F20 defect was reproducible TODAY, one category over.** The built-server test hardcoded `millm_circuits`, so the reachability rule this file exists to enforce covered one of four categories. `if category == "millm_sensing": continue` in the registration loop left **119/119 green while an entire tool category was unreachable** — the exact shape of the defect that started this feature. Now parameterized over the live registry. | SURVIVED → **fails**, naming all five unreachable tools |
+| R3-11 | R1-06 fixed the hand-rolled gate on `millm_import_circuit` and **not on its two destructive siblings**. Deleting the `gate.check` block from `millm_circuit_sensing_clear` — irreversible and global in scope — left the suite green while the tool issued its DELETE against a miLLM known to be down. | SURVIVED → **fails**, printing the DELETE that would have gone out |
+| R3-12 | `TestGateDegradation` used `millm_circuit_status` as sole representative, so **eleven `@gated` tools could lose the decorator silently**, turning a structured `unavailable` into an unclassifiable connection error. | SURVIVED → **fails** |
+| R3-13 | miLLM's copy audit whitelisted by **whole-line substring**, so a marker anywhere licensed a claim elsewhere: *"This circuit is causally validated; we never cut corners."* passed. miStudio fixed exactly this in R1-09/10 by requiring same-sentence denial; **miLLM never adopted it**. | passed → **caught** |
+| R3-14 | `UNRELATED_SENSE` contained **`architecture`** — an ordinary word in circuit copy — so *"Circuit architecture: this edge is causally validated by observation."* was exempted by its own subject matter. Sentence-scoping could not fix it (word and claim share a sentence); the term had to go. | passed → **caught** |
+| R3-15 | Both audits keyed on the token **"causal"**, so plain-English overclaims were invisible: *"Ablation proves this edge causes the refusal, a confirmed mechanism."* and *"Verified effect size measured on live traffic."* assert rung-2/3 without the guarded word. New `PROOF_CLAIM` check. | passed → **caught** |
+| R3-16 | miStudio's `SURFACES` was **hand-maintained at five files** — in a file whose own comment says a hand-maintained list "is only as good as the list" and globs the MCP tools for that reason. Sixteen circuit modules were unaudited, including all three REST endpoint modules whose responses reach the UI. An overclaim planted in an endpoint left the suite **26/26 green**. Now discovered (5 → 17 surfaces). | passed → **caught** |
+
+**The honesty guarantee was enforced at different strengths on either side of
+the export path.** miStudio's audit received three review rounds; miLLM's never
+did — and miLLM is the SERVING side, the one a promoted circuit actually
+reaches. R3-13/14/15 close that asymmetry.
+
+Widening R3-16's scope surfaced three hits that were **legitimate**: the ladder
+file that DEFINES "causally validated", and the intervention/validation modules
+that ARE the rung-2 machinery. Exempted **by file with a stated reason each**
+rather than by loosening the pattern, because loosening it would weaken the
+audit everywhere to accommodate three places. The exemption `skip`s rather than
+silently passing, so it stays visible in the test output.
+
+## A fourth instrument failure
+
+Shell quoting mangled a four-probe control loop; the probes were never written
+to disk and all four reported "PASSED — gap" against fixes that were working.
+Re-run from a Python driver that **asserts the mutation applied before judging
+it**, all four came back CAUGHT.
+
+That assertion is now the rule: *verify the mutation landed before recording a
+survivor.* Five instrument failures this increment, and four of them would have
+produced a change to correct code.
+
 ## Instrument failures (continued from R2)
 
-R2 recorded three. R3 adds one: a `sed` extract that collapsed a blank line, which
+R2 recorded three. R3 adds two — the `sed` misread below, and the shell-quoting failure above: a `sed` extract that collapsed a blank line, which
 I read as a missing blank line and nearly "fixed". Withdrawn as R3-02.
 
 The pattern across both rounds is consistent enough to name: **when a tool reports

@@ -114,8 +114,20 @@ class TestCopyAudit:
 
     #: "causal" in an unrelated sense — the transformer architecture term and
     #: HuggingFace class names have nothing to do with the evidence ladder.
+    #: R3-14: `architecture` was in this list and is far too broad — it is an
+    #: ordinary word in circuit copy, so
+    #:     "Circuit architecture: this edge is causally validated by observation"
+    #: was exempted by its own subject matter. Sentence-scoping cannot fix that
+    #: (the word and the claim share a sentence); the term had to go.
+    #:
+    #: What remains is anchored to the transformer/HuggingFace sense, where
+    #: "causal" is a model-architecture term with no evidential meaning. Kept
+    #: narrow deliberately: an over-broad exemption in an HONESTY audit is not
+    #: a convenience, it is a hole.
     UNRELATED_SENSE = re.compile(
-        r"causal[- ]?lm|causallm|autoregressive|architecture", re.IGNORECASE
+        r"causal[- ]?lm\b|causallm|autoregressive|"
+        r"causal\s+attention|causal\s+mask|is_causal",
+        re.IGNORECASE,
     )
 
     #: The audit only fires when "causal" appears in an EVIDENCE-GRADING
@@ -124,6 +136,44 @@ class TestCopyAudit:
     #: generally is a different, legitimate sense and is not an overclaim.)
     EVIDENCE_CONTEXT = re.compile(
         r"circuit|rung|edge|evidence|validated", re.IGNORECASE
+    )
+
+    @staticmethod
+    def _causal_sentence(code: str) -> str:
+        """The SENTENCE containing 'causal', not the whole line.
+
+        F20 R3-13. Every exemption below was a substring test over the entire
+        line, so a marker ANYWHERE licensed a claim ELSEWHERE:
+
+            "This circuit is causally validated; we never cut corners."
+            "Circuit architecture: this edge is causally validated by observation."
+
+        Both passed. miStudio's audit fixed exactly this in R1-09/10 by
+        requiring the denial to be in the SAME SENTENCE as the claim; miLLM's
+        never adopted it, so the honesty guarantee was materially weaker on the
+        SERVING side — the side a promoted circuit actually reaches.
+        """
+        parts = re.split(r"(?<=[.;!?])\s+", code)
+        for part in parts:
+            if re.search(r"\bcausal", part, re.IGNORECASE):
+                return part
+        return code
+
+    #: F20 R3-15. Both repos' audits keyed on the token "causal", so an
+    #: overclaim phrased in ordinary English was invisible:
+    #:
+    #:     "Ablation proves this edge causes the refusal, a confirmed mechanism."
+    #:     "Verified effect size measured on live traffic for every edge."
+    #:
+    #: Those assert rung-2/3 without the guarded word. The ladder's whole value
+    #: is that "we observed a correlation" and "we established a mechanism" stay
+    #: distinguishable, and it does not matter which vocabulary erases the
+    #: distinction.
+    PROOF_CLAIM = re.compile(
+        r"\bprove[sd]?\b|\bproof\b|\bdemonstrat(?:e|es|ed)\s+that\b|"
+        r"\bconfirmed\s+mechanism\b|\bverified\s+effect\b|"
+        r"\bestablishes?\s+(?:that\s+)?(?:the\s+)?caus",
+        re.IGNORECASE,
     )
 
     def _scan(self, roots: list[str], suffixes: tuple[str, ...]) -> list[tuple[str, int, str]]:
@@ -157,9 +207,15 @@ class TestCopyAudit:
                 for i, line in enumerate(text.splitlines(), 1):
                     if not re.search(r"\bcausal", line, re.IGNORECASE):
                         continue
-                    if self.UNRELATED_SENSE.search(line):
+                    # R3-14: both of these were whole-LINE tests, so an
+                    # unrelated word anywhere on the line disarmed the check:
+                    #   "Circuit architecture: this edge is causally validated"
+                    # passed because "architecture" appeared. Scope them to the
+                    # sentence carrying the word, same as the marker list.
+                    sentence = TestCopyAudit._causal_sentence(line)
+                    if self.UNRELATED_SENSE.search(sentence):
                         continue  # "causal LM" / CausalLMOutputWithPast etc.
-                    if not self.EVIDENCE_CONTEXT.search(line):
+                    if not self.EVIDENCE_CONTEXT.search(sentence):
                         continue  # not an evidence-ladder claim
                     hits.append((rel, i, line.strip()))
         return hits
@@ -188,7 +244,9 @@ class TestCopyAudit:
             code = self._code_only(line)
             if not re.search(r"\bcausal", code, re.IGNORECASE):
                 continue  # the only occurrence was in a comment — prose, not copy
-            lowered = code.lower()
+            # R3-13: anchored to the sentence carrying the claim.
+            sentence = self._causal_sentence(code)
+            lowered = sentence.lower()
             # Permitted: prose that states the prohibition/contract, or a
             # reference to the ladder constant//vocabulary function.
             if any(
@@ -235,3 +293,43 @@ class TestCopyAudit:
 
     def test_rung_two_and_above_may_use_causal(self):
         assert "causally validated" in rung_language(EvidenceRung.CAUSALLY_VALIDATED)
+
+    def test_no_proof_language_on_runtime_surfaces(self):
+        """F20 R3-15. An overclaim need not use the word "causal".
+
+        "proves", "confirmed mechanism", "verified effect" all assert a
+        validated mechanism in plain English, and the audit's vocabulary saw
+        none of them. Scanned in the same evidence-grading context as the
+        causal check, so ordinary uses of "proves" elsewhere are untouched.
+        """
+        offenders = []
+        for root in ("millm", "admin-ui/src"):
+            base = REPO / root
+            if not base.exists():
+                continue
+            for path in base.rglob("*"):
+                if path.suffix not in (".py", ".ts", ".tsx"):
+                    continue
+                rel = str(path.relative_to(REPO))
+                if rel in TestCopyAudit.ALLOWED:
+                    continue
+                try:
+                    text = path.read_text(encoding="utf-8", errors="ignore")
+                except OSError:
+                    continue
+                for i, line in enumerate(text.splitlines(), 1):
+                    code = TestCopyAudit._code_only(line)
+                    if not TestCopyAudit.PROOF_CLAIM.search(code):
+                        continue
+                    sentence = TestCopyAudit._causal_sentence(code) or code
+                    if not TestCopyAudit.EVIDENCE_CONTEXT.search(sentence):
+                        continue  # not a claim about circuit evidence
+                    lowered = sentence.lower()
+                    if any(m in lowered for m in ("never", "must not", "forbid", "does not")):
+                        continue  # states the prohibition
+                    offenders.append(f"{rel}:{i}: {line.strip()}")
+        assert not offenders, (
+            "Proof language on a runtime/UI surface asserts a validated "
+            "mechanism without using the word 'causal' — the ladder's "
+            "distinction is erased either way:\n" + "\n".join(offenders)
+        )

@@ -164,6 +164,19 @@ class CircuitSteeringResult:
     #: report a false "still current". An unset field must never be able to
     #: alias a genuine value.
     applied_epoch: int = -1
+    #: F18 R3-15: True when the circuit resolved to OFF — either λ=0 or every
+    #: effective strength is 0.0. `applied_per_layer` is then EMPTY, because
+    #: the docstring above promises it is what was "actually written" and in
+    #: this case nothing was: the layers are cleared and steering is left
+    #: disabled. It previously listed every member at zero strength, so the API
+    #: reported N features "active" while `is_steering_enabled` was False — a
+    #: DB/GPU divergence the `set_intensity` warnings machinery cannot see,
+    #: contradicting the intent comment at the apply site ("leave steering
+    #: disabled rather than reporting N features active").
+    #:
+    #: Callers that need to distinguish "off" from "nothing matched" read this
+    #: rather than inferring from an empty map.
+    disabled: bool = False
 
 
 @dataclass
@@ -870,7 +883,9 @@ class SAEService:
             clamped=len(clamp_warnings),
         )
         return CircuitSteeringResult(
-            applied_per_layer=per_layer,
+            # R3-15: empty when disabled — nothing was written.
+            applied_per_layer={} if disabled else per_layer,
+            disabled=disabled,
             hazards=hazards,
             clamp_warnings=clamp_warnings,
         )

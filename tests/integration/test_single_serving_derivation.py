@@ -1963,3 +1963,144 @@ class TestR3GoingDarkIsNeverSILENT:
         assert "error_type" in handler and "exc_info=True" in handler, (
             "a DB blip is still indistinguishable from a clean 'nothing active'"
         )
+
+
+class TestR3AnOFFCircuitReportsNothingApplied:
+    """F18 R3-15. `applied_per_layer` is documented as what was "actually
+    written to each layer's SAE", and the apply site's own comment says an OFF
+    circuit should "clear and leave steering disabled rather than reporting N
+    features active at zero strength".
+
+    The code did the first half and not the second: it cleared and disabled,
+    then reported every member anyway. So the API said N features were active
+    while `is_steering_enabled` was False — a DB/GPU divergence the
+    `set_intensity` warnings machinery is blind to, because from its side the
+    apply succeeded.
+
+    Two ways to be OFF, and both must report identically: λ=0, and every
+    authored strength being 0.0 (a legitimate authored 'off')."""
+
+    def _run(self, monkeypatch, intensity, strength):
+        from millm.api.schemas.circuit import CircuitMember
+        from millm.services import sae_service as sae_mod
+        from millm.services.sae_service import SAEService
+
+        class FakeSAE:
+            def __init__(self):
+                self._values = {}
+                self.is_steering_enabled = False
+                self.d_sae = 8192
+
+            def get_steering_values(self):
+                return dict(self._values)
+
+            def clear_steering(self):
+                self._values = {}
+
+            def set_steering_batch(self, values):
+                self._values = dict(values)
+
+            def enable_steering(self, on):
+                self.is_steering_enabled = on
+
+        sae = FakeSAE()
+        entries = [SimpleNamespace(layer=10, sae_id="s10", sae=sae)]
+
+        class Registry:
+            def entries(self):
+                return entries
+
+            def by_layer(self, layer):
+                return entries[0] if layer == 10 else None
+
+            steering_epoch = 0
+
+            def bump_steering_epoch(self, _why):
+                return 1
+
+        monkeypatch.setattr(sae_mod, "AttachedSAEState", lambda: Registry())
+        svc = SAEService.for_registry()
+        members = [
+            CircuitMember(feature_idx=1, layer=10, budget=strength, sign=1)
+        ]
+        return svc.set_circuit_steering(members, intensity), sae
+
+    def test_lambda_zero_reports_nothing_applied(self, monkeypatch):
+        result, sae = self._run(monkeypatch, 0.0, 40.0)
+        assert result.disabled is True
+        assert result.applied_per_layer == {}, (
+            "the circuit is OFF but the API reported features as applied"
+        )
+        assert sae.is_steering_enabled is False
+
+    def test_all_zero_strengths_report_nothing_applied(self, monkeypatch):
+        """An authored 'off' — every strength 0.0 — at a NON-zero lambda. The
+        operator dialled 1.5 and nothing steers, which is correct; what must
+        not happen is the result claiming otherwise."""
+        result, sae = self._run(monkeypatch, 1.5, 0.0)
+        assert result.disabled is True
+        assert result.applied_per_layer == {}
+        assert sae.is_steering_enabled is False
+
+    def test_a_live_circuit_still_reports_what_it_wrote(self, monkeypatch):
+        """The other side of the fix: a real serve must be unchanged."""
+        result, sae = self._run(monkeypatch, 1.5, 40.0)
+        assert result.disabled is False
+        assert result.applied_per_layer == {10: {1: 60.0}}  # 40 * 1 * 1.5
+        assert sae.is_steering_enabled is True
+        assert sae.get_steering_values() == {1: 60.0}
+
+
+class TestR3TheDialSerialisationDEPENDENCYIsPinned:
+    """F18 R3-16. A review round raised this concurrency scenario:
+
+        two concurrent λ=0 dials. A saves the real values and clears. B saves
+        the ALREADY-CLEARED values (same epoch, so no supersession is
+        detected) and clears. A restores its originals; B then restores empty
+        — permanently wiping the operator's steering.
+
+    Investigated rather than fixed, because it is NOT REACHABLE at the default
+    configuration: the dial runs inside `self._request_queue.acquire()` and
+    `MAX_CONCURRENT_REQUESTS` defaults to 1, so save/apply/restore are
+    serialised end to end. The epoch guard is not what saves this; the
+    semaphore is.
+
+    That makes the safety a property of a CONFIG VALUE, held in a different
+    file from the code that depends on it, with nothing connecting them. F19 is
+    Concurrent Circuit Serving — the increment whose entire purpose is to raise
+    this number. So the dependency is pinned HERE, where breaking it will
+    surface as a failing test naming the hazard, rather than as silently wiped
+    operator steering.
+
+    This is recorded as a finding because an unstated load-bearing assumption
+    is a defect in the same way an unpinned fix is."""
+
+    def test_the_dial_relies_on_serialisation_the_config_currently_provides(self):
+        from millm.core.config import settings
+
+        assert settings.MAX_CONCURRENT_REQUESTS == 1, (
+            "MAX_CONCURRENT_REQUESTS is no longer 1. The per-request circuit "
+            "dial's save/apply/restore is NOT safe under concurrency: two "
+            "concurrent dials can each save the other's partially-applied "
+            "state and restore over the operator's real steering. Before "
+            "raising this, the dial needs per-request isolation of the saved "
+            "snapshot (F19), not just the epoch guard — the epoch cannot "
+            "distinguish 'someone wrote after me' from 'someone saved the "
+            "state I was midway through clearing'."
+        )
+
+    def test_the_dial_still_runs_inside_the_request_queue(self):
+        """The other half of the assumption: the semaphore only helps if the
+        dial is actually inside it."""
+        import inspect
+
+        from millm.services.inference_service import InferenceService
+
+        src = inspect.getsource(InferenceService.create_chat_completion)
+        acquire = src.index("self._request_queue.acquire()")
+        apply_call = src.index("_apply_request_steering(")
+        assert acquire < apply_call, (
+            "the per-request steering apply moved OUTSIDE the request-queue "
+            "semaphore — concurrent dials can now race on global steering "
+            "state regardless of MAX_CONCURRENT_REQUESTS"
+        )

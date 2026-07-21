@@ -128,6 +128,25 @@ class ServingPlan:
         A consumer that is about to APPLY must check this: `UNSET_INTENSITY` is
         NaN, so using it silently produces NaN steering values rather than
         raising — worse than either a crash or a zero.
+
+        F18 R3-20: that sentence described a CONVENTION, and only one of the
+        two apply consumers followed it. `circuit_service._serve_full` checks
+        and raises; the per-request dial never did. The dial was safe anyway,
+        but only because `_resolve_circuit_intensity` rejects non-finite values
+        two functions away in a different file — so the invariant READ as
+        enforced by the plan while actually being enforced by a caller-side
+        precondition nothing pinned.
+
+        It is now genuinely enforced, at the sink: `set_circuit_steering`
+        refuses any non-finite intensity (R3-02), which is the single point all
+        four paths converge on. This property therefore remains the way to ask
+        the question BEFORE applying — a cheap, local, non-raising check — but
+        the safety no longer depends on remembering to ask it.
+
+        The distinction matters for the next edit: a new caller that supplies λ
+        from a new source cannot reintroduce R2-01/R2-04 (NaN resolving through
+        `max(0, min(2, nan))` to the CEILING, maximum aggression, silently),
+        because the sink refuses it regardless of whether the caller checked.
         """
         return self.intensity == self.intensity  # NaN is the only self-inequality
 

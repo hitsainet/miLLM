@@ -2184,3 +2184,96 @@ class TestR3TheDialSerialisationDEPENDENCYIsPinned:
             "semaphore — concurrent dials can now race on global steering "
             "state regardless of MAX_CONCURRENT_REQUESTS"
         )
+
+
+class TestR3TheNaNInvariantIsENFORCEDNotDocumented:
+    """F18 R3-20. `has_intensity`'s docstring said "a consumer that is about to
+    APPLY must check this", and only ONE of the two apply consumers did.
+    `_serve_full` checks and raises; the per-request dial never has.
+
+    The dial was safe anyway — but only because `_resolve_circuit_intensity`
+    rejects non-finite values two functions away in a DIFFERENT FILE. So the
+    invariant read as enforced by the plan while actually being enforced by a
+    caller-side precondition that nothing pinned. That is the shape of the
+    R2-01/R2-04 defect exactly: a property of today's code that the next caller
+    silently breaks.
+
+    The R3-02 sink guard is what makes it real. These tests assert that the
+    protection does not depend on any caller remembering to check — which is
+    the only version of this invariant worth having."""
+
+    def test_every_apply_path_refuses_nan_regardless_of_caller_checks(
+        self, monkeypatch
+    ):
+        """The sink refuses, so no caller-side precondition is load-bearing."""
+        from millm.api.schemas.circuit import CircuitMember
+        from millm.ml.circuit_steering import UNSET_INTENSITY
+        from millm.services import sae_service as sae_mod
+        from millm.services.sae_service import SAEService
+
+        entries = [
+            SimpleNamespace(
+                layer=10, sae_id="s10",
+                sae=SimpleNamespace(
+                    d_sae=8192,
+                    get_steering_values=lambda: {},
+                    is_steering_enabled=False,
+                    clear_steering=lambda: None,
+                    set_steering_batch=lambda v: None,
+                    enable_steering=lambda e: None,
+                ),
+            )
+        ]
+
+        class Registry:
+            def entries(self):
+                return entries
+
+            def by_layer(self, layer):
+                return entries[0] if layer == 10 else None
+
+            steering_epoch = 0
+
+            def bump_steering_epoch(self, _why):
+                return 1
+
+        monkeypatch.setattr(sae_mod, "AttachedSAEState", lambda: Registry())
+        svc = SAEService.for_registry()
+        members = [CircuitMember(feature_idx=1, layer=10, budget=40.0, sign=1)]
+
+        # The sentinel itself must be refused at the apply — it is NaN, and a
+        # plan carrying it is by definition not ready to serve.
+        with pytest.raises(ValueError, match="finite"):
+            svc.set_circuit_steering(members, UNSET_INTENSITY)
+
+    def test_the_dial_cannot_reach_the_apply_with_an_unset_intensity(self):
+        """The dial resolves λ before building its plan, and `plan_for` refuses
+        a non-finite override. Both halves asserted, so neither can quietly
+        become the only one."""
+        from millm.ml.circuit_steering import CircuitSteeringEngine
+
+        d = defn([mem(10, feature=feat(1))])
+        circuit = SimpleNamespace(
+            id="c", intensity=1.0, layers=[10], serving_mode="full",
+            rung=2, circuit_meta={}, name="n",
+        )
+        engine = CircuitSteeringEngine()
+        for bad in (float("nan"), float("inf")):
+            with pytest.raises(ValueError, match="finite"):
+                engine.plan_for(d, circuit, intensity=bad)
+
+    def test_has_intensity_remains_a_cheap_local_check(self):
+        """It stays useful as a NON-RAISING question a consumer can ask before
+        applying — the safety just no longer depends on asking it."""
+        from millm.ml.circuit_steering import UNSET_INTENSITY, ServingPlan
+
+        unset = ServingPlan(
+            members=(), intensity=UNSET_INTENSITY,
+            claimed_layers=frozenset(), attached_layers=frozenset(),
+        )
+        assert unset.has_intensity is False
+        live = ServingPlan(
+            members=(), intensity=1.0,
+            claimed_layers=frozenset(), attached_layers=frozenset(),
+        )
+        assert live.has_intensity is True

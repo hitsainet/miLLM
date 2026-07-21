@@ -339,19 +339,52 @@ class ProfileService:
         try:
             from millm.db.repositories.circuit_repository import CircuitRepository
 
+            from millm.services.circuit_claim_registry import CircuitClaimRegistry
+
             repo = CircuitRepository(self.repository.session)
-            active = await repo.get_active()
-            if active is None:
+            # F19 R1-05: EVERY active circuit, not one. This read
+            # `get_active()` (singular), which under concurrency either raised
+            # `MultipleResultsFound` into the broad handler below — logged as
+            # one line, activation proceeding — or released an ARBITRARY one of
+            # them. Either way the profile applied steering on top of a still
+            # active, still claimed circuit's layers: the silent co-tenant
+            # clobbering F19 exists to eliminate, reintroduced from the
+            # profile side.
+            actives = await repo.list_active()
+            if not actives:
                 return []
-            await repo.deactivate(active.id)
-            logger.info("circuit_released_for_profile_activation",
-                        circuit_id=active.id)
-            warnings.append(
-                f"Deactivated circuit '{active.name}' — a profile takes over the "
-                "layers it was steering"
-            )
+
+            registry = CircuitClaimRegistry(self.repository.session)
+            for active in actives:
+                await repo.deactivate(active.id)
+                # Release the claims too, or the layers stay locked against
+                # every future activation (R1-03, same defect, this path).
+                try:
+                    await registry.release(active.id)
+                except Exception as claim_error:
+                    logger.error(
+                        "circuit_claim_release_failed_on_profile_activation",
+                        circuit_id=active.id,
+                        error=str(claim_error),
+                        exc_info=True,
+                    )
+                logger.info("circuit_released_for_profile_activation",
+                            circuit_id=active.id)
+                warnings.append(
+                    f"Deactivated circuit '{active.name}' — a profile takes "
+                    "over the layers it was steering"
+                )
         except Exception as e:
-            logger.warning("circuit_release_failed", error=str(e))
+            logger.warning(
+                "circuit_release_failed",
+                error=str(e),
+                error_type=type(e).__name__,
+                detail=(
+                    "a circuit may still be active and claiming layers this "
+                    "profile is about to steer"
+                ),
+                exc_info=True,
+            )
         return warnings
 
     async def activate_profile(

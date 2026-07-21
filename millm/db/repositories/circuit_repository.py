@@ -75,12 +75,45 @@ class CircuitRepository:
         result = await self.session.execute(stmt)
         return len(list(result.scalars().all()))
 
-    async def get_active(self) -> Circuit | None:
-        """The currently active circuit, if any."""
+    async def list_active(self) -> list[Circuit]:
+        """EVERY active circuit (Feature 19).
+
+        Several circuits may serve at once when their claim sets are disjoint,
+        so "what is active" is a LIST. Callers that must act on all of them —
+        releasing co-tenants, reporting status — use this.
+        """
         result = await self.session.execute(
-            select(Circuit).where(Circuit.is_active == True)  # noqa: E712
+            select(Circuit)
+            .where(Circuit.is_active == True)  # noqa: E712
+            .order_by(Circuit.updated_at.desc(), Circuit.id.desc())
         )
-        return result.scalar_one_or_none()
+        return list(result.scalars().all())
+
+    async def get_active(self) -> Circuit | None:
+        """The most recently activated circuit, if any.
+
+        F19 R1-04: this used `scalar_one_or_none()`, which RAISES
+        `MultipleResultsFound` the moment two circuits are active — the exact
+        state this feature exists to make possible. Verified by execution
+        before the fix.
+
+        The consequence was not a loud failure. `_active_full_circuit` catches
+        broadly and returns None, so every chat request would have served
+        UNSTEERED while both circuit rows read active, and `GET /circuits/active`
+        would 500. The feature's SUCCESS state broke the feature.
+
+        Returns the most recently updated one, matching what an operator most
+        recently asked for and what the migration downgrade keeps. Callers that
+        need all of them use `list_active()` — this exists for the surfaces
+        that are genuinely singular (a status summary, a dial target).
+        """
+        result = await self.session.execute(
+            select(Circuit)
+            .where(Circuit.is_active == True)  # noqa: E712
+            .order_by(Circuit.updated_at.desc(), Circuit.id.desc())
+            .limit(1)
+        )
+        return result.scalars().first()
 
     async def update(self, circuit_id: str, **kwargs: Any) -> Circuit | None:
         """Patch a circuit row."""

@@ -11,6 +11,7 @@ by miStudio's OWN contract classes (tests/fixtures/real_circuit_definition.json)
 
 import json
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -606,3 +607,175 @@ class TestF19TheClaimGate:
             "both sides of a composition must be marked, or the rung header "
             "cannot be suppressed for the incumbent"
         )
+
+
+class TestF19R1TheClaimLifecycleIsCLOSED:
+    """F19 R1-03/04. Two defects that a fully green suite could not see.
+
+    R1-03 — `deactivate()` released the steering owner and left the DB claim
+    row LIVE FOREVER. After activate(cA) → deactivate(cA), activating cB on
+    cA's layers was refused naming cA as the incumbent; the obvious remedy —
+    deactivate cA — is a NO-OP because cA is already inactive. The layer became
+    permanently unclaimable and the only signal was a refusal naming a circuit
+    plainly not running. Routine deactivation was a leak, not an edge case.
+
+    R1-04 — `get_active()` used `scalar_one_or_none()`, which RAISES
+    `MultipleResultsFound` on two active circuits: the exact state this feature
+    exists to create. `_active_full_circuit` catches broadly and returns None,
+    so every chat request would have served UNSTEERED while both rows read
+    active. Verified by execution before the fix.
+    """
+
+    async def test_deactivating_RELEASES_the_layer_claims(
+        self, service, monkeypatch
+    ):
+        from millm.services.circuit_claim_registry import CircuitClaimRegistry
+
+        monkeypatch.setattr(
+            "millm.core.config.settings.CIRCUIT_ALLOW_CONCURRENT", True
+        )
+        attach("sae-10", 10, make_sae())
+        attach("sae-13", 13, make_sae())
+
+        circuit = await service.import_definition(load_fixture())
+        await service.activate(circuit.id)
+
+        registry = CircuitClaimRegistry(service.repository.session)
+        assert [c.layer for c in await registry.live_claims()] == [10, 13]
+
+        await service.deactivate(circuit.id)
+
+        assert await registry.live_claims() == [], (
+            "deactivation left the layer claims live — those layers now refuse "
+            "every future activation, for a circuit nobody can deactivate"
+        )
+
+    async def test_the_layers_are_REUSABLE_after_a_deactivation(
+        self, service, monkeypatch
+    ):
+        """The operator-visible consequence, asserted end to end."""
+        monkeypatch.setattr(
+            "millm.core.config.settings.CIRCUIT_ALLOW_CONCURRENT", True
+        )
+        attach("sae-10", 10, make_sae())
+        attach("sae-13", 13, make_sae())
+
+        first = await service.import_definition(load_fixture())
+        await service.activate(first.id)
+        await service.deactivate(first.id)
+
+        doc = load_fixture()
+        doc["name"] = "second circuit"
+        second = await service.import_definition(doc)
+
+        # Must NOT raise: the first circuit is gone and its layers are free.
+        await service.activate(second.id)
+
+        from millm.services.sae_service import AttachedSAEState
+
+        assert AttachedSAEState().owner_keys(f"circuit:{second.id}"), (
+            "the second circuit could not take layers the first had released"
+        )
+
+    async def test_get_active_survives_TWO_active_circuits(self, service):
+        """R1-04. `scalar_one_or_none()` raised here, and the caller's broad
+        handler turned that into a silent unsteered serve."""
+        from millm.db.models.circuit import Circuit
+
+        session = service.repository.session
+        for cid, layer in (("cA", 10), ("cB", 13)):
+            session.add(
+                Circuit(
+                    id=cid, name=cid, circuit_meta={}, rung=2, edge_count=0,
+                    layers=[layer], per_sae_warnings=[], serveable=True,
+                    is_active=True, provenance={},
+                )
+            )
+        await session.commit()
+
+        active = await service.repository.get_active()
+        assert active is not None, "get_active returned nothing with two active"
+
+        every = await service.repository.list_active()
+        assert {c.id for c in every} == {"cA", "cB"}, (
+            "list_active did not report every serving circuit, so callers that "
+            "must act on all of them (co-tenant release, status) see one"
+        )
+
+
+class TestF19R1AProfileReleasesEVERYCircuit:
+    """F19 R1-05. `_release_active_circuit` read `get_active()` — SINGULAR.
+
+    Under concurrency that either raised `MultipleResultsFound` into a broad
+    handler (logged as one line, activation proceeding) or released an
+    ARBITRARY one of the active circuits. Either way the profile then applied
+    steering on top of a still-active, still-claimed circuit's layers: the
+    silent co-tenant clobbering F19 exists to eliminate, arriving from the
+    profile side instead.
+
+    This path had ZERO test coverage — a mutation reverting it to
+    `get_active()` survived the whole suite.
+    """
+
+    async def test_it_deactivates_ALL_active_circuits(self, test_session):
+        from millm.db.models.circuit import Circuit
+        from millm.services.profile_service import ProfileService
+
+        for cid, layer in (("cA", 10), ("cB", 13)):
+            test_session.add(
+                Circuit(
+                    id=cid, name=cid, circuit_meta={}, rung=2, edge_count=0,
+                    layers=[layer], per_sae_warnings=[], serveable=True,
+                    is_active=True, provenance={},
+                )
+            )
+        await test_session.commit()
+
+        svc = ProfileService.__new__(ProfileService)
+        svc.repository = SimpleNamespace(session=test_session)
+
+        warnings = await svc._release_active_circuit()
+
+        assert len(warnings) == 2, (
+            f"only {len(warnings)} circuit(s) released — a profile taking "
+            "these layers left the other one active and steering them"
+        )
+
+        from millm.db.repositories.circuit_repository import CircuitRepository
+
+        assert await CircuitRepository(test_session).list_active() == [], (
+            "a circuit is still active after a profile took its layers"
+        )
+
+    async def test_it_releases_their_CLAIMS_too(self, test_session):
+        """Otherwise the layers stay locked against every future activation —
+        R1-03's defect reachable through the profile path."""
+        from millm.db.models.circuit import Circuit
+        from millm.services.circuit_claim_registry import CircuitClaimRegistry
+        from millm.services.profile_service import ProfileService
+
+        test_session.add(
+            Circuit(
+                id="cA", name="cA", circuit_meta={}, rung=2, edge_count=0,
+                layers=[10], per_sae_warnings=[], serveable=True,
+                is_active=True, provenance={},
+            )
+        )
+        await test_session.commit()
+        registry = CircuitClaimRegistry(test_session)
+        await registry.claim("cA", {10})
+
+        svc = ProfileService.__new__(ProfileService)
+        svc.repository = SimpleNamespace(session=test_session)
+        await svc._release_active_circuit()
+
+        assert await registry.live_claims() == [], (
+            "the profile took the layers but left the circuit's claims live"
+        )
+
+    async def test_no_active_circuits_is_a_clean_no_op(self, test_session):
+        from millm.services.profile_service import ProfileService
+
+        svc = ProfileService.__new__(ProfileService)
+        svc.repository = SimpleNamespace(session=test_session)
+        assert await svc._release_active_circuit() == []

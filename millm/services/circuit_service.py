@@ -900,6 +900,48 @@ class CircuitService:
 
         self._disarm_edge_sensing()
 
+        # F19 R1-03: RELEASE THE LAYER CLAIMS. Deactivation released the
+        # steering owner and left the DB claim rows live forever.
+        #
+        # The consequence was unrecoverable by the operator: after
+        # activate(cA) → deactivate(cA), cA's claim on L10 still reads live, so
+        # activating cB on L10 is refused with cA named as the incumbent. The
+        # obvious remedy — deactivate cA — is a NO-OP, because cA is already
+        # inactive. L10 becomes permanently unclaimable, and the only signal is
+        # a refusal naming a circuit that is plainly not running.
+        #
+        # The registry's own docstring names this exact failure and assigns
+        # recovery to `reconcile()`, which now runs at startup (R1-01) — but a
+        # restart is not an acceptable remedy for an ordinary deactivation.
+        try:
+            from millm.services.circuit_claim_registry import CircuitClaimRegistry
+
+            session = getattr(self.repository, "session", None)
+            if session is not None:
+                released_layers = await CircuitClaimRegistry(session).release(
+                    circuit.id
+                )
+                if released_layers:
+                    logger.info(
+                        "circuit_layer_claims_released",
+                        circuit_id=circuit.id,
+                        layers=released_layers,
+                    )
+        except Exception as e:
+            # Loud: an unreleased claim locks those layers against every future
+            # activation, so this must never pass unnoticed.
+            logger.error(
+                "circuit_layer_claim_release_failed",
+                circuit_id=circuit.id,
+                error=str(e),
+                error_type=type(e).__name__,
+                detail=(
+                    "this circuit's layers remain claimed and will refuse "
+                    "future activations until a restart reconciles them"
+                ),
+                exc_info=True,
+            )
+
         await self.repository.deactivate(circuit.id)
         refreshed = await self.repository.get(circuit.id)
         # Feature 16: deactivation is authoritative

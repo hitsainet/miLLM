@@ -178,6 +178,53 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     except Exception as e:
         logger.warning("failed_to_reset_stale_status", error=str(e))
 
+    # F19 R1-01/02: reconcile circuit LAYER CLAIMS.
+    #
+    # Two defects, one fix:
+    #
+    # R1-01 — `CircuitClaimRegistry.reconcile()` had ZERO production callers.
+    #   It was written, unit-tested, and never invoked: a declared mechanism is
+    #   not a wired one, and this increment has now been bitten by that twice.
+    #
+    # R1-02 — the reset above deactivates every circuit but does NOT release
+    #   their claims, so each becomes an ORPHAN: a live claim whose circuit is
+    #   inactive. Orphans refuse every future activation on those layers, for a
+    #   circuit nobody can deactivate (deactivating an inactive circuit is a
+    #   no-op). One restart would have made the affected layers permanently
+    #   unclaimable, and the operator's only signal would be a contention
+    #   refusal naming a circuit that is plainly not running.
+    #
+    # Runs unconditionally, AFTER the deactivation above so it sees the true
+    # active set. Also demotes to a single active circuit when
+    # CIRCUIT_ALLOW_CONCURRENT is false, so a database written while the flag
+    # was on cannot keep serving two circuits after an operator turns it off —
+    # the flag would otherwise be a lie.
+    try:
+        from millm.services.circuit_claim_registry import CircuitClaimRegistry
+
+        async with async_session_factory() as session:
+            outcome = await CircuitClaimRegistry(session).reconcile(
+                allow_concurrent=settings.CIRCUIT_ALLOW_CONCURRENT,
+            )
+            await session.commit()
+        if outcome["orphans_released"] or outcome["demoted"]:
+            logger.info(
+                "circuit_claims_reconciled",
+                orphans_released=outcome["orphans_released"],
+                demoted=outcome["demoted"],
+            )
+    except Exception as e:
+        logger.warning(
+            "circuit_claim_reconcile_failed",
+            error=str(e),
+            error_type=type(e).__name__,
+            detail=(
+                "stale layer claims may remain — they would refuse "
+                "activations on those layers until cleared"
+            ),
+            exc_info=True,
+        )
+
     # Clear any stale in-memory SAE attachment state
     try:
         from millm.services.sae_service import AttachedSAEState

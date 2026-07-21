@@ -328,6 +328,51 @@ class CircuitService:
         # activation never leaves the user with nothing steering.
         served_layers = bound_layers if all_bound else bound_layers[:1]
 
+        if not all_bound:
+            # F19 R3-08: a SLICE serve cannot run concurrently, and pretending
+            # otherwise is mutually destructive.
+            #
+            # A slice materialises a CLUSTER PROFILE, and profiles are still
+            # strictly single-active (`ProfileRepository.set_active` calls
+            # `deactivate_all`). So activating a second slice-fallback circuit
+            # silently deactivates the first's profile: two circuit rows read
+            # active, both hold live claims, and only ONE is steering. That is
+            # the row-disagrees-with-runtime divergence F19 exists to remove —
+            # and R2-01's fix, which stopped `circuits` from deactivating each
+            # other, is what made it reachable.
+            #
+            # Refuse rather than compose: making profiles concurrent is a
+            # separate change with its own contention model, and the operator
+            # can serve the slice alone. Recorded as follow-on work rather than
+            # silently half-supported.
+            other_active = [
+                c
+                for c in await self.repository.list_active()
+                if c.id != circuit.id
+            ]
+            if other_active:
+                names = ", ".join(f"'{c.name}'" for c in other_active)
+                logger.warning(
+                    "circuit_slice_refused_concurrent",
+                    circuit_id=circuit.id,
+                    others=[c.id for c in other_active],
+                )
+                raise ValidationError(
+                    f"'{circuit.name}' can only serve a per-layer SLICE (its "
+                    "SAE set is incomplete), and a slice is steered by a "
+                    "cluster profile — of which only one can be active. "
+                    f"Deactivate {names} first, or attach the missing SAEs so "
+                    "this circuit can serve in full alongside them.",
+                    details={
+                        "circuit_id": circuit.id,
+                        "blocking_circuits": [
+                            {"id": c.id, "name": c.name} for c in other_active
+                        ],
+                        "reason": "slice_fallback_is_single_active",
+                    },
+                )
+
+
         # ── Feature 19: the CLAIM GATE ────────────────────────────────────
         # After the serving derivation (so the claim set is the real one) and
         # BEFORE the serve (so a refusal is atomic — nothing applied, incumbent
@@ -341,7 +386,9 @@ class CircuitService:
         else:
             result = await self._serve_slices(circuit, definition, bound_layers, verdicts)
 
-        co_tenant_warnings = await self._release_co_tenants(served_layers)
+        co_tenant_warnings = await self._release_co_tenants(
+            served_layers, circuit_id=circuit.id
+        )
 
         # F19: SURFACE the composition. `_claim_layers` computed this and
         # nothing reported it, so an operator who passed
@@ -455,7 +502,9 @@ class CircuitService:
                 },
             ) from e
 
-    async def _release_co_tenants(self, target_layers: list[int]) -> list[str]:
+    async def _release_co_tenants(
+        self, target_layers: list[int], circuit_id: str | None = None
+    ) -> list[str]:
         """Deactivate an active cluster/profile that steers a target layer.
 
         F19 R1-15: this said "circuit serving takes EXCLUSIVE ownership of the
@@ -488,6 +537,39 @@ class CircuitService:
         # its layer is unknown (we cannot prove it is safe to leave running).
         if active_layer is not None and int(active_layer) not in target_layers:
             return []
+
+        # F19 R3-09: NEVER tear down a cluster that is another live circuit's
+        # slice profile.
+        #
+        # `_release_co_tenants` had no notion of who owns the active cluster,
+        # so activating circuit B could silently deactivate the profile that IS
+        # circuit A's steering — while A's row still read active with
+        # `serving_mode='slice_fallback'` and its claims still live. That
+        # violates the invariant this feature is built on: releasing A must
+        # never disturb B.
+        try:
+            owners = [
+                c
+                for c in await self.repository.list_active()
+                if c.id != circuit_id
+                and (c.provenance or {}).get("slice_profile_id") == active.id
+            ]
+        except Exception:  # pragma: no cover - the guard must not fail the serve
+            owners = []
+        if owners:
+            names = ", ".join(f"'{c.name}'" for c in owners)
+            logger.warning(
+                "circuit_co_tenant_is_another_circuits_slice",
+                profile_id=active.id,
+                owner_circuits=[c.id for c in owners],
+            )
+            return [
+                f"Cluster '{getattr(active, 'name', active.id)}' on this layer "
+                f"is the live steering of circuit {names} — it was NOT "
+                "deactivated. Both will contribute to this layer; deactivate "
+                f"{names} if that is not intended."
+            ]
+
         try:
             await self._cluster_service.deactivate(active.id)
         except Exception as e:  # pragma: no cover - defensive

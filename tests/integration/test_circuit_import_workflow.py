@@ -1010,3 +1010,101 @@ class TestF19R2TheCompositionWarningCARRIESTheCaveat:
             "the evidence ladder exists to prevent"
         )
         assert "indicative, not exhaustive" in warnings
+
+
+class TestF19R3SliceServesAreSingleActive:
+    """F19 R3-08/09. A SLICE serve materialises a CLUSTER PROFILE, and profiles
+    are still strictly single-active (`ProfileRepository.set_active` calls
+    `deactivate_all`).
+
+    So two slice-fallback circuits were MUTUALLY DESTRUCTIVE: the second's
+    profile import silently deactivated the first's, leaving two circuit rows
+    reading active with live claims while only ONE was steering. That is the
+    row-disagrees-with-runtime divergence F19 exists to remove — and R2-01's
+    fix, which stopped `circuits` from deactivating each other, is what made it
+    reachable.
+    """
+
+    async def test_a_second_SLICE_activation_is_REFUSED(
+        self, service, monkeypatch
+    ):
+        from millm.core.errors import ValidationError
+
+        monkeypatch.setattr(
+            "millm.core.config.settings.CIRCUIT_ALLOW_CONCURRENT", True
+        )
+        # Only L10 attached, so the fixture (L10+L13) degrades to a slice.
+        attach("sae-10", 10, make_sae())
+
+        first = await service.import_definition(load_fixture())
+        await service.activate(first.id)
+
+        doc = load_fixture()
+        doc["name"] = "second slice circuit"
+        # Distinct features, so the COLLISION gate (which correctly fires
+        # first) does not pre-empt the slice check under test.
+        for i, member in enumerate(doc["members"]):
+            member["feature"]["feature_idx"] = 900 + i
+        second = await service.import_definition(doc)
+
+        with pytest.raises(ValidationError) as exc:
+            await service.activate(second.id)
+
+        assert "only one can be active" in str(exc.value) or "cluster profile" in str(
+            exc.value
+        ), f"the refusal does not explain WHY: {exc.value}"
+        assert exc.value.details["reason"] == "slice_fallback_is_single_active"
+
+    async def test_the_refusal_names_what_to_deactivate(
+        self, service, monkeypatch
+    ):
+        from millm.core.errors import ValidationError
+
+        monkeypatch.setattr(
+            "millm.core.config.settings.CIRCUIT_ALLOW_CONCURRENT", True
+        )
+        attach("sae-10", 10, make_sae())
+        first = await service.import_definition(load_fixture())
+        await service.activate(first.id)
+
+        doc = load_fixture()
+        doc["name"] = "second slice circuit"
+        for i, member in enumerate(doc["members"]):
+            member["feature"]["feature_idx"] = 900 + i
+        second = await service.import_definition(doc)
+
+        with pytest.raises(ValidationError) as exc:
+            await service.activate(second.id)
+
+        blocking = exc.value.details["blocking_circuits"]
+        assert [b["id"] for b in blocking] == [first.id]
+
+    async def test_a_co_tenant_that_is_ANOTHER_circuits_slice_is_spared(
+        self, service, cluster_service, monkeypatch
+    ):
+        """R3-09. `_release_co_tenants` had no notion of who owns the active
+        cluster, so activating B could silently deactivate the profile that IS
+        circuit A's steering — while A's row still read active."""
+        from types import SimpleNamespace as NS
+
+        attach("sae-10", 10, make_sae())
+        attach("sae-13", 13, make_sae())
+
+        # A circuit that is serving a slice through profile prof_1.
+        owner = await service.import_definition(load_fixture())
+        await service.repository.update(
+            owner.id, provenance={"slice_profile_id": "prof_1"}
+        )
+        await service.repository.set_active(owner.id, serving_mode="slice_fallback")
+
+        cluster_service.get_active_cluster = AsyncMock(
+            return_value=NS(id="prof_1", name="a cluster", layer=10)
+        )
+
+        warnings = await service._release_co_tenants([10], circuit_id="other")
+
+        cluster_service.deactivate.assert_not_awaited()
+        assert any("is the live steering of circuit" in w for w in warnings), (
+            "another circuit's slice profile was torn down, so that circuit "
+            "stopped steering while its row still read active"
+        )

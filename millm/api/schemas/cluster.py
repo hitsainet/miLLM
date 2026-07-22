@@ -99,6 +99,21 @@ class DefinitionModelRef(BaseModel):
 
 
 class DefinitionSAERef(BaseModel):
+    """One SAE the definition references.
+
+    `mistudio_sae_id` is the wire name, and `sae_id` is accepted as an input
+    alias because that is what every other tool in this codebase calls the same
+    value (`start_circuit_capture` takes `[{layer, sae_id}]`). Pydantic's
+    default `extra="ignore"` used to turn a caller's `sae_id` into a SILENTLY
+    NULL `mistudio_sae_id`: the definition validated, persisted and exported
+    clean, then failed much later at miLLM as an unbound SAE, with nothing
+    pointing back here.
+
+    An entry that names no SAE id at all is rejected by `CircuitService`, not
+    by this model — see the implementation comment below for why the check
+    cannot live in the schema without publishing a contract that lies.
+    """
+
     mistudio_sae_id: str | None = None
     layer: int | None = None
     hook_type: str | None = None

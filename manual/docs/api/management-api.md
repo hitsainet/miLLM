@@ -114,7 +114,7 @@ Circuits are multi-layer interventions spanning several SAEs, each carrying an e
 
 ## Circuit sensing (`/api/circuit-sensing`) — observed edge firings ([WebSocket event](/api/websockets))
 
-Records when a served circuit's causal **edges** fire during generation. Instrument, not gate — context text is never sent over WebSocket; fetch event detail for the ±K window.
+Records when a served circuit's **edges** co-activate during generation. This is an observation of firing, not a causal claim — an edge earns a causal reading only from rung-2 edge validation upstream in miStudio, never from a sensing event. Instrument, not gate — context text is never sent over WebSocket; fetch event detail for the ±K window.
 
 | Endpoint | Method | Description |
 |----------|--------|-------------|

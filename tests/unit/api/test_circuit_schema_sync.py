@@ -129,3 +129,36 @@ def test_unknown_additive_fields_survive_round_trip():
     dumped = parsed.model_dump(mode="json")
     assert dumped["future_top_level"] == {"hello": "world"}
     assert dumped["edges"][0]["future_edge_field"] == 42
+
+
+def test_calibration_block_survives_import_and_reexport():
+    """The circuit `calibration` block (IDL-37) must round-trip losslessly.
+
+    The mirror model lacked this field after miStudio re-vendored the contract,
+    so a calibrated circuit imported into miLLM would SILENTLY DROP its usable
+    band on re-export — the served dial would no longer be clamped to
+    [onset, cliff]. The schema-sync guard catches the missing field; this pins
+    the behaviour it protects.
+    """
+    doc = {
+        "kind": CIRCUIT_DEFINITION_KIND,
+        "schema_version": "1",
+        "name": "calibrated",
+        "saes": [{"layer": 10, "n_features": 8192}],
+        "members": [{"layer": 10, "feature": {"feature_idx": 1, "strength": 10.0}}],
+        "calibration": {
+            "onset": 0.3,
+            "sweet_spot": 0.45,
+            "cliff": 0.6,
+            "provisional": True,
+            "probe_set": [{"prompt": "What is the capital of France?",
+                           "expected": "Paris"}],
+            "manifest_ref": "vman_abc123",
+        },
+    }
+    dumped = CircuitDefinitionV1.model_validate(doc).model_dump(mode="json")
+    cal = dumped["calibration"]
+    assert cal is not None, "calibration was dropped on re-export"
+    assert (cal["onset"], cal["sweet_spot"], cal["cliff"]) == (0.3, 0.45, 0.6)
+    assert cal["probe_set"][0]["expected"] == "Paris"
+    assert cal["manifest_ref"] == "vman_abc123"

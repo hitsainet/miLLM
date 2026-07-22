@@ -1,5 +1,28 @@
 {
   "$defs": {
+    "CalibrationProbe": {
+      "description": "One falsifiable correctness probe used to find the cliff (IDL-37).\n\nDeliberately a NEUTRAL factual question \u2014 a topic the circuit should NOT\ninfluence \u2014 so that degradation shows up as the circuit's tint corrupting an\nunrelated fact (detectable), rather than as a change to output on the\ncircuit's own concept (whose \"right answer\" is not falsifiable). The probe\ntravels in the contract so a serve-time re-verify is one cheap pass.",
+      "properties": {
+        "expected": {
+          "maxLength": 2000,
+          "minLength": 1,
+          "title": "Expected",
+          "type": "string"
+        },
+        "prompt": {
+          "maxLength": 2000,
+          "minLength": 1,
+          "title": "Prompt",
+          "type": "string"
+        }
+      },
+      "required": [
+        "prompt",
+        "expected"
+      ],
+      "title": "CalibrationProbe",
+      "type": "object"
+    },
     "CircuitBudget": {
       "description": "Per-layer budgets composed under one global intensity (IDL-31).",
       "properties": {
@@ -40,6 +63,90 @@
       "title": "CircuitBudget",
       "type": "object"
     },
+    "CircuitCalibration": {
+      "description": "Calibrated usable-strength band for the circuit's serving dial (IDL-37).\n\nBadge, not gate. When present, its `[onset, cliff]` is what\n`CircuitBudget.intensity_range` is clamped to (a served dial cannot reach\nthe nonsense zone) and `sweet_spot` is the default `intensity`.\n\n`provisional` is True whenever the probes were GENERATED (not authored) or\nthe band was measured on the discovery-plane model rather than re-verified\nagainst the served model \u2014 an honest confidence marker, never a blocker.",
+      "properties": {
+        "cliff": {
+          "description": "max dial still correct; above this the judge flips to broken",
+          "minimum": 0.0,
+          "title": "Cliff",
+          "type": "number"
+        },
+        "judge_metric_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Judge Metric Id"
+        },
+        "manifest_ref": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Manifest Ref"
+        },
+        "non_monotone": {
+          "default": false,
+          "title": "Non Monotone",
+          "type": "boolean"
+        },
+        "onset": {
+          "description": "min dial with influence above baseline noise",
+          "minimum": 0.0,
+          "title": "Onset",
+          "type": "number"
+        },
+        "probe_set": {
+          "items": {
+            "$ref": "#/$defs/CalibrationProbe"
+          },
+          "title": "Probe Set",
+          "type": "array"
+        },
+        "provisional": {
+          "default": true,
+          "title": "Provisional",
+          "type": "boolean"
+        },
+        "step_budget": {
+          "anyOf": [
+            {
+              "minimum": 1,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Step Budget"
+        },
+        "sweet_spot": {
+          "description": "usable dial: strongest still-correct point, with margin",
+          "minimum": 0.0,
+          "title": "Sweet Spot",
+          "type": "number"
+        }
+      },
+      "required": [
+        "onset",
+        "sweet_spot",
+        "cliff"
+      ],
+      "title": "CircuitCalibration",
+      "type": "object"
+    },
     "CircuitDefinitionV1": {
       "description": "One portable circuit definition (IDL-33).",
       "properties": {
@@ -47,6 +154,17 @@
           "anyOf": [
             {
               "$ref": "#/$defs/CircuitBudget"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "calibration": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/CircuitCalibration"
             },
             {
               "type": "null"

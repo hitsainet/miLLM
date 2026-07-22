@@ -167,7 +167,7 @@ never blocks your message.
 | Model list empty | No model loaded in miLLM, or wrong base URL — `curl http://<host>:8000/v1/models` from the Open WebUI host |
 | Connection refused from container | `localhost` inside the container; use the host's LAN IP or cluster DNS name |
 | Replies but no steering effect | SAE not attached, steering disabled, or strength too low — check `steering_apply_count` ([verification](/concepts/steering#verifying-steering-is-active)) |
-| `429` errors under load | Serial queue full (`MAX_PENDING_REQUESTS`); Open WebUI parallel title-generation requests can pile up — raise the limit or disable title generation |
+| `503 queue_full` errors under load | Serial queue full (`MAX_PENDING_REQUESTS`) — miLLM returns HTTP `503` (`queue_full`) as backpressure. Open WebUI parallel title-generation requests can pile up; raise the limit or disable title generation |
 | CORS errors (browser direct) | Set `CORS_ORIGINS` to include your Open WebUI origin — see [Configuration](/reference/configuration) |
 | Dial has no effect | All by-design silent no-ops — check in order: Function enabled on *this model*? master valve on? SAE attached? steering enabled in miLLM (a dial never re-enables disabled steering)? an active cluster or live steering values to scale? miLLM build new enough (older builds ignore the field)? Scripted clients can check for the `X-miLLM-Steering-Intensity` response header — absent means the dial didn't apply Circuit-specific: is `min` resolving to `0`? (a circuit that declares no floor makes `min` identical to `off` — the status line says so); is the circuit in `slice_fallback` (dialled through its cluster profile, different floor); is an SAE attached on **every** member layer? |
 

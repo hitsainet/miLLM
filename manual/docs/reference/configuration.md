@@ -32,8 +32,8 @@ miLLM is configured entirely through environment variables (with `.env` file sup
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `MAX_CONCURRENT_REQUESTS` | `2` | Generation requests running simultaneously. On a single GPU, `1` gives the most predictable latency; higher values interleave on the same device |
-| `MAX_PENDING_REQUESTS` | `10` | Queue depth beyond the concurrent slots; overflow returns `429` |
+| `MAX_CONCURRENT_REQUESTS` | `1` | **Must stay `1`.** This is a correctness constraint, not a throughput knob: values above `1` race on steering apply/restore and on the shared sensing buffer. Leave it at `1` |
+| `MAX_PENDING_REQUESTS` | `10` | Queue depth beyond the concurrent slots; overflow returns `503` (`QUEUE_FULL`, backpressure) |
 | `MAX_DOWNLOAD_WORKERS` | `2` | Parallel model/SAE downloads |
 | `MAX_LOAD_WORKERS` | `1` | Parallel model loads (keep at 1) |
 | `GRACEFUL_UNLOAD_TIMEOUT` | `30.0` | Seconds to wait for in-flight requests before unloading a model |

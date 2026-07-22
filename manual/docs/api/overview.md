@@ -91,5 +91,5 @@ curl -s http://localhost:8000/api/health
 
 - **Content type** is `application/json` for all request bodies
 - **IDs**: models use integer IDs; SAEs and profiles use string IDs (`sae_...`-style hashes, `prof_...`)
-- **Queueing**: generation requests beyond the concurrency limit wait in a bounded queue; when full, requests are rejected with `429`
+- **Queueing**: generation requests beyond the concurrency limit wait in a bounded queue; when full, requests are rejected with `503` (`QUEUE_FULL` — backpressure, so clients back off and retry rather than treating it as a rate limit)
 - **Timestamps** are ISO-8601 UTC

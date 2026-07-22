@@ -16,7 +16,7 @@ Go from zero to steered inference in about 10 minutes. This path uses Docker Com
 ## 1. Start the stack
 
 ```bash
-git clone https://github.com/hitsainet/miLLM.git
+git clone https://github.com/Onegaishimas/miLLM.git
 cd miLLM
 docker compose up -d
 ```

@@ -60,12 +60,12 @@ Captures the live steering values plus the attached SAE/layer context. Requires 
 ## Update
 
 ```bash
-curl -X PUT http://localhost:8000/api/profiles/prof_1a2b3c \
+curl -X PATCH http://localhost:8000/api/profiles/prof_1a2b3c \
   -H "Content-Type: application/json" \
   -d '{"steering": {"12082": 55.0}}'
 ```
 
-Partial updates; `steering`, when provided, **replaces** the map.
+Partial updates (`PATCH`); `steering`, when provided, **replaces** the map.
 
 ## Activate / deactivate
 
@@ -94,7 +94,7 @@ curl -X POST http://localhost:8000/api/profiles/import \
   --data-binary @dogs-40.json
 ```
 
-The export format includes model/SAE provenance (see [Profiles](/features/profiles#import--export)). Imports are validated — malformed entries return `400 INVALID_PROFILE_FORMAT` rather than being silently dropped. Feature indices are only meaningful with the same SAE the profile was built for.
+The export format includes model/SAE provenance (see [Profiles](/features/profiles#import--export)). Imports are validated — steering entries that can't convert to `int→float` return `VALIDATION_ERROR` (in the envelope, `details.invalid_keys` names them) rather than being silently dropped. Posting a **cluster** definition/bundle here returns `IS_CLUSTER_DOCUMENT` pointing at `/api/clusters/import` (see the [Management API index](/api/management-api)) — the flat profile format has no member/budget semantics. Feature indices are only meaningful with the same SAE the profile was built for.
 
 ## Delete
 
@@ -110,6 +110,9 @@ Deleting the active profile deactivates it first.
 |------|--------|------|
 | `PROFILE_NOT_FOUND` | 404 | Unknown ID or (for per-request use) unknown name |
 | `PROFILE_ALREADY_EXISTS` | 409 | Duplicate name on create/rename |
-| `INVALID_PROFILE_FORMAT` | 400 | Malformed import payload |
+| `VALIDATION_ERROR` | 200* | Malformed import payload — steering entries that can't convert to `int→float` (envelope, `details.invalid_keys`) |
+| `IS_CLUSTER_DOCUMENT` | 200* | A cluster definition/bundle was posted to `/api/profiles/import` — use `/api/clusters/import` |
 | `SAE_NOT_ATTACHED` | 400 | Activate/save-current without an attached SAE |
 | `INVALID_FEATURE_INDEX` | 400 | Profile steering doesn't fit the attached SAE |
+
+\* Returned in the `{success:false, error}` envelope with HTTP 200 — see [the 200-envelope house style](/reference/error-codes#the-200-envelope-house-style).

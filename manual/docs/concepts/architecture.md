@@ -27,16 +27,16 @@ How miLLM is put together, and what happens to a request between the HTTP socket
                    └──────────────┴─────────────────────────────┘
 ```
 
-PostgreSQL stores metadata only (model/SAE registry, profiles); weights live on disk caches and are loaded into GPU memory on demand. One model and one SAE are resident at a time.
+PostgreSQL stores metadata only (model/SAE registry, profiles, clusters, circuits); weights live on disk caches and are loaded into GPU memory on demand. **One model** is resident at a time, but **multiple SAEs** can be attached concurrently across different layers: `attach_set()` installs one forward hook per `(sae_id, layer)` so a cross-layer **circuit** can be served (Feature 12). A single SAE is still the common case for feature-level steering; a **cluster** serves through one SAE, while a **circuit** spans several. See the multi-SAE attachment status at `GET /api/saes/attachments` and attach a set with `POST /api/saes/attach-set` (both in the [Management API index](/api/management-api)).
 
 ## The forward hook
 
-Steering and monitoring share a single mechanism: a PyTorch **forward hook** registered on one decoder layer of the loaded model. On every forward pass it:
+Steering and monitoring share a single mechanism: a PyTorch **forward hook** registered on a decoder layer of the loaded model — one hook per attached `(sae_id, layer)`, so multi-SAE circuit serving installs several. On every forward pass each hook:
 
 1. (If monitoring) encodes the layer output through the SAE encoder and captures activations
 2. (If steering) adds the precomputed steering delta to the layer output
 
-The hook is installed at SAE attach and removed at detach. Attach/detach waits for in-flight requests to drain before touching the hook, and the attach response reports the exact module path hooked (`layer_module_path`).
+Hooks are installed at SAE attach (or `attach_set`) and removed at detach. Attach/detach waits for in-flight requests to drain before touching the hook, and the attach response reports the exact module path hooked (`layer_module_path`).
 
 ### torch.compile and the hook
 
@@ -46,7 +46,7 @@ On CUDA with non-quantized models, miLLM compiles the model's forward (`TORCH_CO
 
 ### Serial queue (default)
 
-Requests acquire a slot in a semaphore-guarded queue (`MAX_CONCURRENT_REQUESTS`, with `MAX_PENDING_REQUESTS` waiting slots; overflow returns `429`). Each generation runs `model.generate()` in a worker thread; streaming bridges tokens to SSE via `TextIteratorStreamer`. The serial path supports everything: per-request sampling params, per-request profiles, stop sequences with prompt cancellation, speculative decoding, and exact monitoring attribution.
+Requests acquire a slot in a semaphore-guarded queue (`MAX_CONCURRENT_REQUESTS`, with `MAX_PENDING_REQUESTS` waiting slots; overflow returns `503 QUEUE_FULL` as backpressure). Each generation runs `model.generate()` in a worker thread; streaming bridges tokens to SSE via `TextIteratorStreamer`. The serial path supports everything: per-request sampling params, per-request profiles, stop sequences with prompt cancellation, speculative decoding, and exact monitoring attribution.
 
 ### Continuous batching (opt-in)
 

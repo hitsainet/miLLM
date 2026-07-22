@@ -61,7 +61,8 @@ sio.wait()
 | `steering:update` | `enabled`, `values` (feature → strength), `active_count` | Emitted on every steering change from any source |
 | `monitoring:state` | monitoring configuration | On configure/toggle |
 | `monitoring:activation` | `timestamp`, `request_id`, `features` (top-k `[index, activation]` pairs), `position` | Throttled (~10/sec max); one per recorded generation |
-| `sensing:event` | One persisted co-activation event: `id`, `profile_id`, `phase`, span, `fired_members`, `score`, `summary` — **context text is never sent over WS** (fetch `/api/sensing/events/{id}`) | Throttled (max 5 per request flush, min 100 ms between flushes); the DB is complete regardless |
+| `sensing:event` | One persisted **cluster** co-activation event: `id`, `profile_id`, `phase`, span, `fired_members`, `score`, `summary` — **context text is never sent over WS** (fetch `/api/sensing/events/{id}`) | Throttled (max 5 per request flush, min 100 ms between flushes); the DB is complete regardless |
+| `circuit:sensing:event` | One persisted **circuit edge** firing (Feature 15): `id`, `circuit_id`, `request_id`, `phase`, `edge_key`, `token_lag`, `edge_rung`, `summary` — **context text is never sent over WS** (fetch `/api/circuit-sensing/events/{id}`) | Same throttle discipline; the payload is built with `include_context=False`, so no decoded prompt text leaves the box |
 
 ## Patterns
 

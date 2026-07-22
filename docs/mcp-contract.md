@@ -1,6 +1,6 @@
 # miLLM ↔ Unified MCP Server Contract
 
-**Status:** Normative for miLLM Feature 9 (Unified MCP) and Feature 15 (Circuit Edge Sensing / circuit MCP surface) and Feature 19 (Concurrent Circuit Serving). **Version:** 1.5 (2026-07-21)
+**Status:** Normative for miLLM Feature 9 (Unified MCP) and Feature 15 (Circuit Edge Sensing / circuit MCP surface) and Feature 19 (Concurrent Circuit Serving). **Version:** 1.5.1 (2026-07-22)
 **Consumer:** the unified MCP server that ships in the miStudio repo
 (`backend/src/mcp_server/`), exposing `millm_runtime` / `millm_clusters` /
 `millm_sensing` / `millm_circuits` tool categories against a miLLM deployment.
@@ -141,13 +141,13 @@ sub-collection of a circuit, and the flat prefix matches `/api/sensing`.
 |---|---|---|
 | `millm_circuit_status` | `GET /api/circuits/active` (active circuit + attached-SAE set + rung; `null` when none) | REST ✅ · MCP ✅ |
 | `millm_list_circuits` | `GET /api/circuits?promoted=&min_rung=&limit=&offset=` (slim rows carry `rung`, `rung_language`, layers, edge_count) | REST ✅ · MCP ✅ |
-| `millm_import_circuit` (inline) | `POST /api/circuits/import?on_conflict=` (body = raw `mistudio.circuit-definition/v1` document). Import does NOT activate — call `/{id}/activate?acknowledge_unvalidated=` separately, so the evidence gate is always an explicit step. | REST ✅ · MCP ✅ |
+| `millm_import_circuit` (inline) | `POST /api/circuits/import?on_conflict=` (body = raw circuit-definition document; its `kind` is bare `mistudio.circuit-definition` — the `/v1` names the schema VERSION, never the kind). Import does NOT activate — call `/{id}/activate?acknowledge_unvalidated=` separately, so the evidence gate is always an explicit step. | REST ✅ · MCP ✅ |
 | _(hub import — deliberately NO tool, EC-20.5: a circuit references several SAEs by id, and importing one from a remote pack without checking those references serves it against the wrong feature basis)_ | `POST /api/circuits/hub/import` (`{repo_id, filename, revision?, activate?, on_conflict?, acknowledge_unvalidated?}`) | **F15 — not served** |
 | _(hub search — deliberately no tool, same reason)_ | `GET /api/circuits/hub/search?q=&base_model=&limit=` (tag `mistudio-circuit-definition`) | **F15 — not served** |
 | `millm_activate_circuit` | `POST /api/circuits/{id}/activate?acknowledge_unvalidated=` (fully serveable, or slice-fallback when the SAE set is incomplete) | REST ✅ · MCP ✅ |
 | `millm_deactivate_circuit` | `POST /api/circuits/{id}/deactivate` | REST ✅ · MCP ✅ |
 | `millm_export_circuit` | `GET /api/circuits/{id}/export` (raw circuit document — no envelope) | REST ✅ · MCP ✅ |
-| `millm_set_circuit_intensity` | `PUT /api/circuits/active/intensity` (`{intensity, reapply}`; one global λ scales all layers) | REST ✅ · MCP ✅ |
+| `millm_set_circuit_intensity` | `PUT /api/circuits/active/intensity` (`{intensity, reapply, acknowledge_unvalidated}`; one global λ scales all layers. `acknowledge_unvalidated` re-passes the rung-2 gate on every dial — see §4a) | REST ✅ · MCP ✅ |
 | `millm_circuit_sensing_status` | `GET /api/circuit-sensing/status` (armed state, layers, **`sensable_edges` + `unsensable_edges[{edge_key,reason,detail}]`**, `max_token_lag`, overhead, **`truncated_layers[]` (v1.2)**, **`requests_sensed`/`requests_truncated`/`ws_throttled` (v1.3)**, `enabled_circuits`) | REST ✅ · MCP ✅ |
 | `millm_circuit_sensing_events` | `GET /api/circuit-sensing/events?circuit_id=&edge_key=&limit=&since=` (rows carry nested `up`/`down` `{layer,feature_idx,pos,act}`, `token_lag`, ±K `context_parts`, `edge_rung` + `edge_rung_language`) | REST ✅ · MCP ✅ |
 | `millm_circuit_sensing_enable` | `POST /api/circuit-sensing/{circuit_id}/enable` (off by default, opt-in) | REST ✅ · MCP ✅ |
@@ -437,7 +437,11 @@ verbatim — messages are written to be user/agent-safe.
 `INCOMPATIBLE_FEATURE_SPACE` (422 — a referenced SAE's feature space does not
 match the attached SAE at that layer), `UNVALIDATED_CIRCUIT` (200+envelope —
 rung < 2 activation without `acknowledge_unvalidated=true`), `NO_ACTIVE_CIRCUIT`
-(200+envelope — intensity/sensing call with no active circuit). Reused as-is:
+(200+envelope — intensity/sensing call with no active circuit),
+`AMBIGUOUS_ACTIVE_CIRCUIT` (200+envelope — the `PUT /api/circuits/active/intensity`
+dial while more than one circuit is serving, so there is no single "active
+circuit"; carries `details.active_circuits[{id, name}]`. Deactivate all but one,
+or dial the layers through the owning cluster). Reused as-is:
 `UNKNOWN_KIND`, `PAYLOAD_TOO_LARGE`, `HUB_UNAVAILABLE`. `CIRCUIT_SENSING_EVENT_NOT_FOUND` (404 — an edge sensing event id that does not exist; F15).
 
 ## 6. Auth posture & deployment guidance (Task 1.3)

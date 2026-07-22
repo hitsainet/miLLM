@@ -170,7 +170,7 @@ curl http://localhost:8000/v1/models
 {"object": "list", "data": [{"id": "gemma-2-2b", "object": "model", "created": 1774046346, "owned_by": "google/gemma-2-2b"}]}
 ```
 
-Only the currently loaded model is listed — use the [Management API](/api/models) to see everything on disk.
+By default `/v1/models` lists **all available models** (READY, LOADED, LOADING). When a model is **locked for steering**, only that locked model is listed — so a steering-locked server presents a single stable model id to OpenAI clients. Use the [Management API](/api/models) to see everything on disk (including states not surfaced here).
 
 ## Errors & backpressure
 
@@ -182,7 +182,7 @@ Only the currently loaded model is listed — use the [Management API](/api/mode
 | Unknown model name in request | 404 | `model_not_found` |
 | Prompt + `max_tokens` exceeds context window | 400 | `context_length_exceeded` |
 | Steering error on an in-flight stream (mismatched cluster, bad index) | SSE `error` event, then `[DONE]` | `invalid_feature_index` |
-| Request queue full | 429 | `rate_limit_exceeded` |
+| Request queue full (backpressure) | 503 | `queue_full` |
 | Unknown `profile` | 404 | `profile_not_found` |
 | Invalid `steering_intensity` (outside 0–2 / unknown symbol) | 400 | `invalid_parameter` |
 

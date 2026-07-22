@@ -227,7 +227,7 @@ The manifests live in `k8s/base/` as a Kustomize base (one file per component:
 
 Clone the repository from the machine with kubectl access:
 ```bash
-git clone https://github.com/hitsainet/miLLM.git
+git clone https://github.com/Onegaishimas/miLLM.git
 cd miLLM
 cp -r k8s/base k8s/local
 ```

@@ -29,7 +29,7 @@ The most important failure mode in miLLM — an intervention that silently isn't
 | Symptom | Cause | Fix |
 |---------|-------|-----|
 | OOM during model load | Model too large for GPU | More aggressive quantization (Q8/Q4), or let `device_map=auto` offload to CPU |
-| OOM during inference | model + KV cache + SAE exceeds VRAM | Reduce `max_tokens`, use a narrower SAE (16k vs 65k+), lower `MAX_CONCURRENT_REQUESTS` |
+| OOM during inference | model + KV cache + SAE exceeds VRAM | Reduce `max_tokens`, use a narrower SAE (16k vs 65k+), or reduce `MAX_PENDING_REQUESTS` to bound queued work (`MAX_CONCURRENT_REQUESTS` must stay `1` — see [Configuration](/reference/configuration)) |
 | OOM only with hybrid/Mamba models | `mamba-ssm` not installed; naive fallback allocates 20 GB+ intermediates | Install `mamba-ssm`, or set `PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True` |
 | VRAM used but no model loaded | Leaked memory after a crash | Restart the backend process/pod, then reload |
 
@@ -67,7 +67,7 @@ Sizing guidance: [Hardware Requirements](/getting-started/hardware).
 | Symptom | Cause | Fix |
 |---------|-------|-----|
 | `503 model_not_loaded` on `/v1/*` | No model loaded | Load one; consider `AUTO_LOAD_MODEL` for restarts |
-| `429` errors | Request queue full (`MAX_PENDING_REQUESTS`) | Raise the limit, or slow the client (Open WebUI's parallel title-generation is a common culprit) |
+| `503 QUEUE_FULL` errors | Request queue full (`MAX_PENDING_REQUESTS`) — backpressure | Raise the limit, or slow the client (Open WebUI's parallel title-generation is a common culprit) |
 | `400 context_length_exceeded` | prompt + `max_tokens` > model context | Shorten the prompt or reduce `max_tokens` |
 | Streaming stops with an in-stream `error` event | Generation failed after headers were sent (HTTP is already 200) | Check server logs; SSE consumers should watch for `error` objects before `[DONE]` |
 | Responses look like completions, not chat | Base (non-`-it`) model | Expected — base models aren't instruction-tuned ([why you might want that](/tutorials/open-webui)) |
@@ -97,4 +97,4 @@ GPU scheduling requires the NVIDIA device plugin and a node with the GPU visible
 
 - Set `LOG_LEVEL=DEBUG` and reproduce — steering/hook activity is logged
 - `GET /api/health/detailed` gives a per-component health breakdown
-- Open an issue: [github.com/hitsainet/miLLM](https://github.com/hitsainet/miLLM/issues) with logs and your model/SAE combination
+- Open an issue: [github.com/Onegaishimas/miLLM](https://github.com/Onegaishimas/miLLM/issues) with logs and your model/SAE combination

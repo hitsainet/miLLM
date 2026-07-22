@@ -153,6 +153,23 @@ class TestRequestQueueOverflow:
         release_gate.set()
         await asyncio.gather(task1, task2, return_exceptions=True)
 
+    def test_queue_full_error_is_a_millm_error_with_503_backpressure_code(self):
+        """QueueFullError must carry the QUEUE_FULL contract so the OpenAI error
+        handler maps it to HTTP 503 (backpressure), not a generic 500. It used to
+        be a bare Exception, which never reached the handler → 500, while the docs
+        claimed 429. Both were wrong; this pins the 503 contract."""
+        from millm.core.errors import MiLLMError
+        from millm.api.routes.openai.errors import ERROR_STATUS_MAP
+
+        err = QueueFullError("Request queue is full")
+        assert isinstance(err, MiLLMError), (
+            "QueueFullError must subclass MiLLMError or the OpenAI handler never "
+            "sees it and it falls through to a generic 500")
+        assert err.code == "QUEUE_FULL"
+        # The handler resolves the HTTP status from this map by err.code.
+        status, _type = ERROR_STATUS_MAP[err.code]
+        assert status == 503, "queue-full is backpressure → 503, not 500 or 429"
+
     @pytest.mark.asyncio
     async def test_queue_full_error_message_includes_count(self, small_queue):
         """Test that QueueFullError message includes pending count."""

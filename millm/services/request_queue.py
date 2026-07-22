@@ -15,15 +15,23 @@ import asyncio
 from contextlib import asynccontextmanager
 from typing import AsyncGenerator, Optional
 
+from millm.core.errors import MiLLMError
 from millm.core.logging import get_logger
 
 logger = get_logger(__name__)
 
 
-class QueueFullError(Exception):
-    """Raised when request queue is at capacity."""
+class QueueFullError(MiLLMError):
+    """Raised when the request queue is at capacity.
 
-    pass
+    A MiLLMError with code QUEUE_FULL so the OpenAI error handler maps it to a
+    proper 503 backpressure response (ERROR_STATUS_MAP). It was previously a bare
+    Exception, so it fell through to a generic HTTP 500 — the intended 503 path
+    was never reached and the docs (which said 429) were also wrong.
+    """
+
+    code = "QUEUE_FULL"
+    status_code = 503
 
 
 class RequestQueue:

@@ -7,6 +7,7 @@ and error handling for common scenarios (gated models, missing repos).
 
 import shutil
 import threading
+import time
 from pathlib import Path
 from typing import Any, Callable, Optional
 
@@ -30,58 +31,106 @@ from millm.core.resilience import huggingface_circuit, CircuitOpenError
 
 logger = structlog.get_logger()
 
-# Type alias for progress callback: (progress_pct, downloaded_bytes, total_bytes)
-ProgressCallback = Callable[[float, int, int], None]
+# Type alias for progress callback: (progress_pct, downloaded_bytes, total_bytes, speed_bps)
+ProgressCallback = Callable[[float, int, int, float], None]
+
+# How often the filesystem-size poller samples on-disk progress. Module-level so
+# tests can shrink it; download() constructs the poller with the default.
+POLL_INTERVAL_SECONDS = 1.0
 
 
-class _DownloadProgressTqdm(tqdm_auto):
+class _SilentTqdm(tqdm_auto):
     """
-    Custom tqdm that aggregates byte-level progress from parallel HF downloads.
+    No-op tqdm used to suppress huggingface_hub's console progress bars.
 
-    HuggingFace's snapshot_download creates one tqdm instance per file.
-    This class aggregates all instances into a single progress percentage
-    and reports it via a callback.
+    Download progress is tracked out-of-band by _DownloadSizePoller (from the
+    filesystem), so HF's own bars are pure console/log noise here.
     """
-
-    _lock = threading.Lock()
-    _total_bytes: int = 0
-    _downloaded_bytes: int = 0
-    _callback: Optional[ProgressCallback] = None
-    _last_pct: int = 0
-
-    @classmethod
-    def _reset(cls, callback: Optional[ProgressCallback] = None) -> None:
-        """Reset shared state before a new download."""
-        with cls._lock:
-            cls._total_bytes = 0
-            cls._downloaded_bytes = 0
-            cls._callback = callback
-            cls._last_pct = 0
 
     def __init__(self, *args: Any, **kwargs: Any) -> None:
-        # Disable actual tqdm output
         kwargs["disable"] = True
         super().__init__(*args, **kwargs)
-        # Each instance tracks one file; self.total is that file's size
-        if self.total and self.total > 0:
-            with _DownloadProgressTqdm._lock:
-                _DownloadProgressTqdm._total_bytes += int(self.total)
 
-    def update(self, n: int = 1) -> None:  # type: ignore[override]
-        super().update(n)
-        if n <= 0:
-            return
-        with _DownloadProgressTqdm._lock:
-            _DownloadProgressTqdm._downloaded_bytes += int(n)
-            total = _DownloadProgressTqdm._total_bytes
-            downloaded = _DownloadProgressTqdm._downloaded_bytes
-            cb = _DownloadProgressTqdm._callback
-        if cb and total > 0:
-            pct = min(int((downloaded / total) * 100), 99)
-            # Only call back when percentage actually changes
-            if pct > _DownloadProgressTqdm._last_pct:
-                _DownloadProgressTqdm._last_pct = pct
-                cb(float(pct), downloaded, total)
+
+class _DownloadSizePoller:
+    """
+    Filesystem-based download progress tracker.
+
+    Polls the on-disk size of the target directory (including HuggingFace's
+    ``*.incomplete`` partial files under ``.cache/huggingface/download/``) on a
+    fixed interval and reports percentage + speed via a callback.
+
+    This is deliberately independent of how — or whether — huggingface_hub drives
+    its tqdm progress bars. For ``snapshot_download`` the ``tqdm_class`` argument
+    only wraps the outer "Fetching N files" bar (a file *count*, not bytes), so a
+    tqdm-based tracker sits at 0% through a multi-GB shard and then jumps. Reading
+    bytes from disk advances smoothly through a single large file, and also works
+    when the Rust ``hf_transfer`` fast path bypasses Python entirely.
+    """
+
+    def __init__(
+        self,
+        local_dir: Path,
+        expected_total: int,
+        callback: ProgressCallback,
+        interval: Optional[float] = None,
+    ) -> None:
+        self._local_dir = Path(local_dir)
+        self._expected_total = int(expected_total)
+        self._callback = callback
+        self._interval = interval if interval is not None else POLL_INTERVAL_SECONDS
+        self._stop = threading.Event()
+        self._thread: Optional[threading.Thread] = None
+        self._last_bytes = 0
+        self._last_time = 0.0
+
+    @staticmethod
+    def _dir_size(path: Path) -> int:
+        """Sum the size of every regular file under ``path`` (recursively)."""
+        total = 0
+        if not path.exists():
+            return 0
+        for entry in path.rglob("*"):
+            try:
+                if entry.is_file() and not entry.is_symlink():
+                    total += entry.stat().st_size
+            except OSError:
+                continue
+        return total
+
+    def _emit(self) -> None:
+        downloaded = self._dir_size(self._local_dir)
+        now = time.monotonic()
+        elapsed = now - self._last_time if self._last_time else 0.0
+        speed = (downloaded - self._last_bytes) / elapsed if elapsed > 0 else 0.0
+        self._last_bytes = downloaded
+        self._last_time = now
+        total = self._expected_total
+        # Cap at 99% until the download is confirmed complete by the caller.
+        pct = min((downloaded / total) * 100.0, 99.0) if total > 0 else 0.0
+        try:
+            self._callback(pct, downloaded, total, max(speed, 0.0))
+        except Exception:  # noqa: BLE001 - a broken consumer must not kill the download
+            pass
+
+    def _run(self) -> None:
+        while not self._stop.wait(self._interval):
+            self._emit()
+
+    def start(self) -> None:
+        # Emit once immediately so the UI gets the authoritative total up front
+        # (percentage 0, but with a real denominator) instead of a blank bar.
+        self._last_time = time.monotonic()
+        self._emit()
+        self._thread = threading.Thread(
+            target=self._run, daemon=True, name="hf-download-poller"
+        )
+        self._thread.start()
+
+    def stop(self) -> None:
+        self._stop.set()
+        if self._thread is not None:
+            self._thread.join(timeout=self._interval + 1.0)
 
 
 class ModelDownloader:
@@ -109,20 +158,21 @@ class ModelDownloader:
         repo_id: str,
         local_dir: str,
         token: Optional[str],
-        resume: bool,
-        tqdm_class: Optional[type] = None,
     ) -> None:
-        """Download with circuit breaker protection."""
-        kwargs: dict[str, Any] = {
-            "repo_id": repo_id,
-            "local_dir": local_dir,
-            "local_dir_use_symlinks": False,
-            "token": token,
-            "resume_download": resume,
-        }
-        if tqdm_class is not None:
-            kwargs["tqdm_class"] = tqdm_class
-        snapshot_download(**kwargs)
+        """Download with circuit breaker protection.
+
+        Resume is automatic in huggingface_hub >= 1.x (the deprecated
+        ``resume_download`` flag is intentionally not passed). Console progress
+        bars are suppressed via ``_SilentTqdm`` because progress is tracked
+        out-of-band by ``_DownloadSizePoller``.
+        """
+        snapshot_download(
+            repo_id=repo_id,
+            local_dir=local_dir,
+            local_dir_use_symlinks=False,
+            token=token,
+            tqdm_class=_SilentTqdm,
+        )
 
     def _get_local_dir(self, repo_id: str, quantization: str) -> Path:
         """Generate the local directory path for a model."""
@@ -170,10 +220,12 @@ class ModelDownloader:
         Args:
             repo_id: HuggingFace repo (e.g., "google/gemma-2-2b")
             quantization: Q4, Q8, or FP16
-            progress_callback: Called with (progress_pct, downloaded_bytes, total_bytes)
+            progress_callback: Called with (progress_pct, downloaded_bytes,
+                total_bytes, speed_bps)
             token: HuggingFace access token for gated models
             trust_remote_code: Whether model requires trust_remote_code
-            resume: Whether to resume partial downloads (default True)
+            resume: Accepted for backward compatibility. Resume is automatic in
+                huggingface_hub >= 1.x, so this flag is a no-op.
 
         Returns:
             Path to downloaded model directory
@@ -193,21 +245,28 @@ class ModelDownloader:
             local_dir=str(local_dir),
         )
 
-        try:
-            # Set up progress tracking via custom tqdm class
-            tqdm_cls = None
-            if progress_callback is not None:
-                _DownloadProgressTqdm._reset(callback=progress_callback)
-                tqdm_cls = _DownloadProgressTqdm
+        # Set up filesystem-based progress tracking. The authoritative total is
+        # fetched from the Hub up front so the percentage never depends on a
+        # guessed denominator; the numerator is read from disk while downloading.
+        poller: Optional[_DownloadSizePoller] = None
+        if progress_callback is not None:
+            expected_total = self.get_expected_download_size(repo_id, token=token)
+            if expected_total <= 0:
+                logger.warning("expected_download_size_unavailable", repo_id=repo_id)
+            poller = _DownloadSizePoller(
+                local_dir=local_dir,
+                expected_total=expected_total,
+                callback=progress_callback,
+            )
+            poller.start()
 
+        try:
             # Use circuit-breaker-protected snapshot_download for reliable downloading
             # It handles resume, parallel downloads, caching, and failure detection
             self._snapshot_download_with_circuit(
                 repo_id=repo_id,
                 local_dir=str(local_dir),
                 token=token or settings.HF_TOKEN,
-                resume=resume,
-                tqdm_class=tqdm_cls,
             )
 
             logger.info(
@@ -278,6 +337,10 @@ class ModelDownloader:
                 f"Download failed: {str(e)}",
                 details={"repo_id": repo_id, "error": str(e)},
             )
+
+        finally:
+            if poller is not None:
+                poller.stop()
 
     @huggingface_circuit
     def _get_model_info_with_circuit(self, repo_id: str, token: Optional[str]) -> Any:

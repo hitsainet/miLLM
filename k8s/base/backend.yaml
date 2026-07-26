@@ -66,7 +66,19 @@ spec:
             - name: DEBUG
               value: "false"
             - name: TORCH_COMPILE
-              value: "false"
+              # NOTE: silently skipped while a model is loaded with bitsandbytes
+              # quantization (model_loader guards this — bnb and torch.compile
+              # are incompatible). Only takes effect for fp16/bf16 loads.
+              value: "true"
+            # Batch concurrent requests into single forward passes. Without it
+            # the server serialises: measured 4 sequential calls 2.9s vs 4
+            # concurrent 3.0s — a 0.96x "speedup", i.e. no concurrency at all.
+            # Bulk work (labeling 32k features) is the main beneficiary.
+            # Caveat from ContinuousBatchingBackend: per-request sampling params
+            # are fixed at manager creation; only max_new_tokens varies. Labeling
+            # uses temperature 0 throughout, so this is not a constraint there.
+            - name: ENABLE_CONTINUOUS_BATCHING
+              value: "true"
           volumeMounts:
             - name: millm-data
               mountPath: /data

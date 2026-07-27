@@ -43,6 +43,16 @@ RUN pip install --no-cache-dir . || pip install --no-cache-dir -e .
 RUN pip install --no-cache-dir causal-conv1d mamba-ssm --no-build-isolation 2>/dev/null || \
     echo "WARN: mamba-ssm not available as pre-built wheel, SSM models will use slow torch fallback"
 
+# FlashAttention-2 (SM80+; the RTX 3090 this deploys to is SM86).
+# Transformers falls back to SDPA without it, which is materially slower on the
+# long prompts labeling sends (~2,100 tokens each).
+# NON-FATAL by design, exactly like mamba-ssm above: flash-attn has no universal
+# pre-built wheel and compiling it from source can take 30+ minutes or fail
+# outright. A failure here must not break the image — attention silently falls
+# back to SDPA, which is correct, just slower.
+RUN pip install --no-cache-dir flash-attn --no-build-isolation 2>/dev/null || \
+    echo "WARN: flash-attn unavailable, attention falls back to SDPA (slower on long prompts)"
+
 # Copy application code
 COPY millm/ /app/millm/
 COPY alembic.ini /app/

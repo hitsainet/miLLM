@@ -328,7 +328,9 @@ class ModelService:
         self._download_progress[model_id] = 0
 
         # Create progress callback that emits WebSocket events
-        def on_progress(pct: float, downloaded: int, total: int) -> None:
+        def on_progress(
+            pct: float, downloaded: int, total: int, speed_bps: float = 0.0
+        ) -> None:
             progress = int(pct)
             self._download_progress[model_id] = progress
 
@@ -341,6 +343,7 @@ class ModelService:
                             progress=progress,
                             downloaded_bytes=downloaded,
                             total_bytes=total if total > 0 else None,
+                            speed_bps=int(speed_bps) if speed_bps > 0 else None,
                         ),
                         self._main_loop,
                     )
@@ -353,6 +356,7 @@ class ModelService:
                 progress=progress,
                 downloaded_bytes=downloaded,
                 total_bytes=total,
+                speed_bps=int(speed_bps),
             )
 
         try:

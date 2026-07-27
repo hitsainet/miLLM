@@ -38,7 +38,10 @@ dependencies = [
     # ML/AI
     "torch>=2.5.0",
     "transformers>=4.47.0",
-    "huggingface-hub>=0.27.0",
+    # Pinned to the 1.x line (deployed: 1.23.0). Progress tracking no longer
+    # depends on version-sensitive tqdm/resume_download behavior, but the major
+    # is capped so a surprise 2.x bump can't silently change download semantics.
+    "huggingface-hub>=1.23.0,<2.0",
     "bitsandbytes>=0.45.0",
     "accelerate>=1.2.0",
     "safetensors>=0.5.0",

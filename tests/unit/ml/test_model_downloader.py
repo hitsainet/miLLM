@@ -1,6 +1,7 @@
 """Unit tests for ModelDownloader."""
 
 import shutil
+import time
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -15,7 +16,11 @@ from millm.core.errors import (
     GatedModelError,
     RepoNotFoundError,
 )
-from millm.ml.model_downloader import ModelDownloader
+from millm.ml.model_downloader import (
+    ModelDownloader,
+    _DownloadSizePoller,
+    _SilentTqdm,
+)
 
 
 @pytest.fixture(autouse=True)
@@ -127,7 +132,11 @@ class TestModelDownloaderDownload:
         call_kwargs = mock_snapshot.call_args[1]
         assert call_kwargs["repo_id"] == "google/gemma-2-2b"
         assert call_kwargs["local_dir_use_symlinks"] is False
-        assert call_kwargs["resume_download"] is True
+        # resume_download is deprecated in huggingface_hub >= 1.x (resume is
+        # automatic) and must no longer be passed.
+        assert "resume_download" not in call_kwargs
+        # Console progress bars are suppressed; progress comes from the poller.
+        assert call_kwargs["tqdm_class"] is _SilentTqdm
 
     @patch("millm.ml.model_downloader.snapshot_download")
     def test_download_returns_local_path(self, mock_snapshot, downloader):
@@ -183,6 +192,186 @@ class TestModelDownloaderDownload:
             downloader.download("google/gemma", "Q4")
 
         mock_rmtree.assert_called_once()
+
+    @patch("millm.ml.model_downloader.snapshot_download")
+    def test_download_reports_byte_progress_during_download(
+        self, mock_snapshot, downloader
+    ):
+        """Progress must advance from on-disk bytes WHILE a large file is being
+        written — not jump 0 -> 100 at the end.
+
+        Regression for the tqdm_class bug: ``snapshot_download`` only applies the
+        custom tqdm to the outer file-count bar, so the old tracker sat at 0%
+        through a multi-GB shard. This proves the filesystem poller is wired into
+        ``download()`` and reports a real mid-download percentage. Deleting the
+        ``poller.start()`` line makes this test fail (reachability control).
+        """
+        local_dir = downloader._get_local_dir("google/gemma-2-2b", "Q4")
+        updates: list = []
+
+        def cb(pct, downloaded, total, speed):
+            updates.append((pct, downloaded, total))
+
+        def fake_snapshot(**kwargs):
+            # Simulate a large shard landing on disk mid-download.
+            local_dir.mkdir(parents=True, exist_ok=True)
+            (local_dir / "model.safetensors").write_bytes(b"\0" * 5000)
+            time.sleep(0.1)  # let the poller sample at least once
+
+        mock_snapshot.side_effect = fake_snapshot
+
+        with patch("millm.ml.model_downloader.POLL_INTERVAL_SECONDS", 0.02), patch.object(
+            downloader, "get_expected_download_size", return_value=10_000
+        ):
+            downloader.download("google/gemma-2-2b", "Q4", progress_callback=cb)
+
+        # A byte-based ~50% update (5000 / 10000) must have been reported while
+        # the single file was on disk — not only a terminal 0 or 100.
+        assert any(
+            d == 5000 and t == 10_000 and 40.0 <= p <= 60.0 for p, d, t in updates
+        ), f"expected a ~50% byte-based update mid-download, got {updates}"
+
+    @patch("millm.ml.model_downloader.snapshot_download")
+    def test_download_without_callback_skips_size_lookup(
+        self, mock_snapshot, downloader
+    ):
+        """No progress_callback => no poller and no (network) size lookup."""
+        with patch.object(
+            downloader, "get_expected_download_size"
+        ) as mock_size:
+            downloader.download("google/gemma-2-2b", "Q4")
+
+        mock_size.assert_not_called()
+
+
+class TestDownloadSizePoller:
+    """Tests for the filesystem-based download progress poller."""
+
+    @staticmethod
+    def _make_file(path: Path, size: int) -> None:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(b"\0" * size)
+
+    def test_reports_byte_based_percentage(self, tmp_path):
+        calls: list = []
+        poller = _DownloadSizePoller(
+            local_dir=tmp_path,
+            expected_total=1000,
+            callback=lambda p, d, t, s: calls.append((p, d, t, s)),
+        )
+        self._make_file(tmp_path / "model.safetensors", 500)
+        poller._emit()
+
+        assert calls, "callback should have fired"
+        pct, downloaded, total, _ = calls[-1]
+        assert downloaded == 500
+        assert total == 1000
+        assert 49.0 <= pct <= 51.0
+
+    def test_counts_incomplete_partial_files_in_subdir(self, tmp_path):
+        """The in-progress ``*.incomplete`` file under ``.cache`` must count.
+
+        This is the heart of the 0%-stuck fix: a shard is written to
+        ``.cache/huggingface/download/<hash>.incomplete`` while downloading and
+        its bytes must be visible before the file is finalized. Changing
+        ``_dir_size`` from ``rglob`` to a top-level ``glob`` makes this fail.
+        """
+        calls: list = []
+        poller = _DownloadSizePoller(
+            local_dir=tmp_path,
+            expected_total=1000,
+            callback=lambda p, d, t, s: calls.append((p, d, t, s)),
+        )
+        self._make_file(tmp_path / "config.json", 250)  # finalized
+        self._make_file(
+            tmp_path / ".cache" / "huggingface" / "download" / "abc123.incomplete",
+            250,  # still downloading
+        )
+        poller._emit()
+
+        pct, downloaded, total, _ = calls[-1]
+        assert downloaded == 500  # 250 finalized + 250 in-progress
+        assert 49.0 <= pct <= 51.0
+
+    def test_percentage_capped_at_99_until_complete(self, tmp_path):
+        calls: list = []
+        poller = _DownloadSizePoller(
+            local_dir=tmp_path,
+            expected_total=1000,
+            callback=lambda p, d, t, s: calls.append((p, d, t, s)),
+        )
+        self._make_file(tmp_path / "model.bin", 1000)  # fully on disk
+        poller._emit()
+
+        # Never 100 until the caller confirms completion (avoids a premature
+        # "done" while HF is still finalizing / verifying).
+        assert calls[-1][0] == 99.0
+
+    def test_unknown_total_still_reports_bytes(self, tmp_path):
+        calls: list = []
+        poller = _DownloadSizePoller(
+            local_dir=tmp_path,
+            expected_total=0,  # Hub metadata unavailable
+            callback=lambda p, d, t, s: calls.append((p, d, t, s)),
+        )
+        self._make_file(tmp_path / "model.bin", 500)
+        poller._emit()
+
+        pct, downloaded, total, _ = calls[-1]
+        assert pct == 0.0
+        assert downloaded == 500  # bytes still surfaced so the UI shows movement
+        assert total == 0
+
+    def test_speed_computed_across_samples(self, tmp_path):
+        calls: list = []
+        poller = _DownloadSizePoller(
+            local_dir=tmp_path,
+            expected_total=10_000,
+            callback=lambda p, d, t, s: calls.append((p, d, t, s)),
+        )
+        times = iter([100.0, 102.0])  # samples 2 seconds apart
+        with patch(
+            "millm.ml.model_downloader.time.monotonic", lambda: next(times)
+        ):
+            self._make_file(tmp_path / "part1", 1000)
+            poller._emit()  # first sample: speed 0
+            self._make_file(tmp_path / "part2", 3000)
+            poller._emit()  # +3000 bytes over 2s => 1500 B/s
+
+        speed = calls[-1][3]
+        assert 1400.0 <= speed <= 1600.0
+
+    def test_monotonic_progress_through_growing_file(self, tmp_path):
+        calls: list = []
+        poller = _DownloadSizePoller(
+            local_dir=tmp_path,
+            expected_total=1000,
+            callback=lambda p, d, t, s: calls.append((p, d, t, s)),
+        )
+        target = tmp_path / "model.safetensors"
+        for size in (100, 400, 800):
+            self._make_file(target, size)
+            poller._emit()
+
+        pcts = [c[0] for c in calls]
+        assert pcts == sorted(pcts)  # never goes backwards
+        assert pcts[0] < pcts[-1]  # actually advances (not stuck at one value)
+
+    def test_start_emits_total_immediately(self, tmp_path):
+        """start() emits once up front so the UI gets the denominator early."""
+        calls: list = []
+        poller = _DownloadSizePoller(
+            local_dir=tmp_path,
+            expected_total=2000,
+            callback=lambda p, d, t, s: calls.append((p, d, t, s)),
+            interval=60.0,  # long, so only the immediate emit fires
+        )
+        poller.start()
+        try:
+            assert calls, "start() should emit immediately"
+            assert calls[0][2] == 2000  # total present from the first event
+        finally:
+            poller.stop()
 
 
 class TestModelDownloaderGetModelInfo:

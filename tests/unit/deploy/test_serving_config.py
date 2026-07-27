@@ -149,3 +149,43 @@ class TestThePerformanceFlagsAreOn:
             "TORCH_COMPILE carries no note that it is a no-op under "
             "bitsandbytes quantization"
         )
+
+
+class TestContinuousBatchingActuallyCoversItsWorkload:
+    """CBM batches only ONE sampling profile; the rest fall back to serial.
+
+    Observed live 2026-07-27: CBM was running, and every benchmark and labeling
+    request logged
+
+        cbm_routing_fallback_to_serial
+        reason=sampling_params_mismatch request_temperature=0.0 cbm_temperature=0.7
+
+    The commit enabling CBM justified it with "labeling 32k features is the main
+    beneficiary ... labeling uses temperature 0 throughout, so this is not a
+    constraint there." That is inverted: temperature 0 != 0.7, so labeling was
+    precisely the workload excluded. The feature ran and helped nothing.
+
+    MUTATION CONTROL: set CBM_DEFAULT_TEMPERATURE back to 0.7 -> this fails.
+    """
+
+    def test_cbm_sampling_matches_the_bulk_workload(self):
+        from millm.core.config import Settings
+
+        temp = Settings.model_fields["CBM_DEFAULT_TEMPERATURE"].default
+        assert temp == 0.0, (
+            f"CBM batches only temperature={temp}; bulk labeling runs at 0.0 "
+            "and would fall back to the serial path, which is the whole "
+            "workload continuous batching was enabled for"
+        )
+
+    def test_the_mismatch_fallback_is_observable(self):
+        """An operator must be able to see that batching is being bypassed."""
+        import inspect
+
+        from millm.services import inference_service
+
+        src = inspect.getsource(inference_service)
+        assert "cbm_routing_fallback_to_serial" in src, (
+            "requests silently bypass CBM with nothing logged, so 'cbm_running: "
+            "true' would imply batching that is not happening"
+        )

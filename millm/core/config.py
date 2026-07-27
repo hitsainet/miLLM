@@ -160,8 +160,21 @@ class Settings(BaseSettings):
     # Performance: Continuous Batching
     ENABLE_CONTINUOUS_BATCHING: bool = False  # Opt-in, starts CBM on model load
     CBM_MAX_QUEUE_SIZE: int = 256
-    CBM_DEFAULT_TEMPERATURE: float = 0.7
-    CBM_DEFAULT_TOP_P: float = 0.95
+    # CBM fixes its sampling parameters at manager creation, and any request
+    # whose temperature/top_p differ FALLS BACK TO THE SERIAL PATH
+    # (cbm_routing_fallback_to_serial). So these values decide WHICH workload
+    # gets batched — they are not cosmetic defaults.
+    #
+    # 0.0 to match bulk labeling, which is the workload continuous batching was
+    # turned on for. It runs temperature 0 throughout. With the previous 0.7,
+    # every labeling request mismatched and fell back to serial: the stated
+    # beneficiary was the one workload excluded (observed live 2026-07-27).
+    #
+    # Interactive traffic at other temperatures still falls back to serial —
+    # i.e. exactly the behaviour it had before CBM existed, so this costs it
+    # nothing. Only one sampling profile can be batched at a time.
+    CBM_DEFAULT_TEMPERATURE: float = 0.0
+    CBM_DEFAULT_TOP_P: float = 1.0
     CBM_DEFAULT_MAX_TOKENS: int = 512
     # When True, requests with SAE monitoring enabled are routed through the serial
     # path instead of CBM, ensuring accurate per-request activation attribution.

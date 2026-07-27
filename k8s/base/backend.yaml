@@ -66,29 +66,19 @@ spec:
             - name: DEBUG
               value: "false"
             - name: TORCH_COMPILE
-              # Re-enabled 2026-07-27 only after the three things that made the
-              # earlier outage possible were fixed:
+              # OFF until the image carrying the compile-safety code is LIVE.
               #
-              #   1. the compile MODE. It was "reduce-overhead", which turns on
-              #      CUDA Graphs; every request after the first then died with
-              #      "accessing tensor output of CUDAGraphs that has been
-              #      overwritten by a subsequent run". Now "default" — no graphs.
+              # Sequencing lesson, learned the hard way twice in one day: the
+              # manifest and the image deploy on DIFFERENT timelines. A gitops
+              # sync lands in seconds; the image takes ~12 minutes to build. So
+              # enabling this in the same commit as the code that makes it safe
+              # ran the old code — reduce-overhead, single warmup, no revert —
+              # with the flag on, which is exactly the outage combination.
               #
-              #   2. the WARMUP. It was one uncached seq_len=1 forward, which
-              #      does not resemble decoding and would not have caught the
-              #      fault even if repeated. It is now a 3-pass soak through
-              #      cached generate(), reading each result back — the fault
-              #      raises on ACCESS, not on the call.
-              #
-              #   3. the FAILURE MODE. A failed warmup used to leave the
-              #      compiled forward installed, so the server kept returning
-              #      500. The soak now restores the uncompiled forward and logs
-              #      torch_compile_soak_failed_reverted_to_eager. Worst case is
-              #      slower, not down.
-              #
-              # Still a no-op under bitsandbytes quantization — model_loader
-              # guards that separately, so this only bites on fp16/bf16 loads.
-              value: "true"
+              # Re-enable in a SEPARATE commit, after confirming the running
+              # image contains the soak and the revert-to-eager. A flag whose
+              # safety depends on new code must never ship with that code.
+              value: "false"
             # Batch concurrent requests into single forward passes. Without it
             # the server serialises: measured 4 sequential calls 2.9s vs 4
             # concurrent 3.0s — a 0.96x "speedup", i.e. no concurrency at all.

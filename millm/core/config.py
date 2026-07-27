@@ -143,7 +143,12 @@ class Settings(BaseSettings):
     # True  → always attempt compilation (loader still skips for bitsandbytes)
     # False → never compile
     TORCH_COMPILE: Optional[bool] = None
-    TORCH_COMPILE_MODE: str = "reduce-overhead"  # "default", "reduce-overhead", "max-autotune"
+    # "default" deliberately. "reduce-overhead" enables CUDA Graphs, which broke
+    # this generate path in production (2026-07-27): compile and warmup both
+    # succeeded, then every request after the first raised "accessing tensor
+    # output of CUDAGraphs that has been overwritten by a subsequent run".
+    # Changing this back needs a multi-request soak on hardware, not a warmup.
+    TORCH_COMPILE_MODE: str = "default"  # "default" | "reduce-overhead" | "max-autotune"
 
     # Performance: KV cache
     KV_CACHE_MODE: str = "dynamic"  # "static" (requires C compiler for triton) or "dynamic"

@@ -278,7 +278,11 @@ class ModelLoadContext:
         trust_remote_code: bool = False,
         device: str = "cuda",
         torch_compile: bool = False,
-        torch_compile_mode: str = "reduce-overhead",
+        # "default", NOT "reduce-overhead". reduce-overhead enables CUDA Graphs,
+        # which broke this generate path in production on 2026-07-27: every
+        # request after the first failed with "accessing tensor output of
+        # CUDAGraphs that has been overwritten by a subsequent run".
+        torch_compile_mode: str = "default",
     ) -> LoadedModel:
         """
         Load model with quantization config.
@@ -638,6 +642,10 @@ class ModelLoadContext:
                     )
 
                 logger.info("torch_compile_starting", mode=torch_compile_mode)
+                # Kept so the soak below can UNDO the compile. Without a way
+                # back, a compiled path that fails at generate time leaves the
+                # server returning 500 for every request.
+                _uncompiled_forward = self.model.forward
                 self.model.forward = torch.compile(
                     self.model.forward,
                     mode=torch_compile_mode,
@@ -673,22 +681,55 @@ class ModelLoadContext:
                     except Exception:
                         pass
 
+                    # SOAK, not a single call.
+                    #
+                    # One warmup pass is what let the CUDA-Graphs breakage ship
+                    # looking clean on 2026-07-27: compile succeeded, the single
+                    # warmup succeeded, and then EVERY subsequent request failed
+                    # because the graph's output tensor had been overwritten by
+                    # the following run. That class of fault is invisible until
+                    # the second pass, so run several and read the outputs.
+                    _SOAK_PASSES = 3
+                    # Exercise the path that ACTUALLY broke: cached, multi-token
+                    # generation. The original warmup was a single uncached
+                    # seq_len=1 forward, which does not resemble decoding and
+                    # would not have reproduced the CUDA-Graphs fault even if it
+                    # had been run twice. A safety net that misses the failing
+                    # path is not a safety net.
                     with torch.no_grad():
-                        _dummy = torch.zeros(
-                            1, 1, dtype=torch.long, device=_input_device
+                        _prompt = torch.zeros(
+                            1, 8, dtype=torch.long, device=_input_device
                         )
-                        self.model(
-                            input_ids=_dummy,
-                            attention_mask=torch.ones_like(_dummy),
-                            use_cache=False,
-                        )
+                        _mask = torch.ones_like(_prompt)
+                        for _pass in range(_SOAK_PASSES):
+                            _gen = self.model.generate(
+                                input_ids=_prompt,
+                                attention_mask=_mask,
+                                max_new_tokens=4,
+                                do_sample=False,
+                                use_cache=True,
+                            )
+                            # Read the result back. A CUDA-Graphs violation
+                            # raises on ACCESS, not on the call, so a soak that
+                            # never touches the output still passes.
+                            _ = int(_gen[0, -1].item())
 
                     logger.info(
                         "torch_compile_warmup_complete",
                         elapsed_s=round(_time.monotonic() - _t0, 1),
+                        soak_passes=_SOAK_PASSES,
                     )
                 except Exception as e:
-                    logger.warning("torch_compile_warmup_failed", error=str(e))
+                    # Do NOT keep serving a compiled path that just failed its
+                    # soak — that is the 500-for-every-request outcome. Fall
+                    # back to eager, which is slower and correct.
+                    self.model.forward = _uncompiled_forward
+                    logger.error(
+                        "torch_compile_soak_failed_reverted_to_eager",
+                        error=str(e),
+                        mode=torch_compile_mode,
+                        hint="serving uncompiled; compile is disabled for this load",
+                    )
 
             except Exception as e:
                 logger.warning("torch_compile_failed_continuing_without", error=str(e))
@@ -769,7 +810,9 @@ class ModelLoader:
         estimated_memory_mb: int,
         trust_remote_code: bool = False,
         torch_compile: bool = False,
-        torch_compile_mode: str = "reduce-overhead",
+        # See ModelLoadContext.load: "reduce-overhead" enables CUDA Graphs and
+        # broke this generate path in production (2026-07-27).
+        torch_compile_mode: str = "default",
         is_pre_quantized: bool = False,
     ) -> LoadedModel:
         """

@@ -40,18 +40,29 @@ RUN pip install --no-cache-dir . || pip install --no-cache-dir -e .
 
 # Install mamba-ssm from pre-built wheels (requires CUDA at compile time,
 # so we use pre-built wheels that match the torch CUDA version)
-RUN pip install --no-cache-dir causal-conv1d mamba-ssm --no-build-isolation 2>/dev/null || \
+# stderr is NOT discarded: a `2>/dev/null` here is why the flash-attn failure
+# could not be diagnosed from the build log at all.
+RUN pip install --no-cache-dir causal-conv1d mamba-ssm --no-build-isolation || \
     echo "WARN: mamba-ssm not available as pre-built wheel, SSM models will use slow torch fallback"
 
-# FlashAttention-2 (SM80+; the RTX 3090 this deploys to is SM86).
-# Transformers falls back to SDPA without it, which is materially slower on the
-# long prompts labeling sends (~2,100 tokens each).
-# NON-FATAL by design, exactly like mamba-ssm above: flash-attn has no universal
-# pre-built wheel and compiling it from source can take 30+ minutes or fail
-# outright. A failure here must not break the image — attention silently falls
-# back to SDPA, which is correct, just slower.
-RUN pip install --no-cache-dir flash-attn --no-build-isolation 2>/dev/null || \
-    echo "WARN: flash-attn unavailable, attention falls back to SDPA (slower on long prompts)"
+# NOT installing the flash-attn package. Deliberate, and verified on the box.
+#
+# It was added on the premise that "SDPA is materially slower". That is FALSE
+# for the torch this image ships: PyTorch's own SDPA dispatches to the
+# FlashAttention kernel. Checked in the running container (torch 2.13.0+cu130):
+#
+#   torch.backends.cuda.flash_sdp_enabled()  -> True
+#   can_use_flash_attention(<fp16 2048-len>) -> True
+#
+# The separate package also never installed: the build attempt failed ~6s in and
+# hit the fallback below, so the image has been running on SDPA the whole time
+# regardless — while the build log implied an optimisation was being attempted.
+#
+# There is additionally no published flash-attn wheel for cu130 + torch 2.13, so
+# pip fell back to a source build that cannot succeed in this image.
+#
+# If this is revisited: prove the delta by MEASURING against SDPA on this
+# hardware first. Do not reintroduce it on the assumption that it is faster.
 
 # Copy application code
 COPY millm/ /app/millm/

@@ -149,11 +149,27 @@ class TestCBMBackendStart:
             eos_token_id=2,
             pad_token_id=1,
         )
-        MockCBM.assert_called_once_with(
-            model=mock_model,
-            generation_config=MockGenConfig.return_value,
-            max_queue_size=128,
-        )
+# The backend now builds its kwargs from the manager's ACTUAL
+        # signature, because that signature changed between transformers
+        # majors (5.0 took max_queue_size=; 5.14 takes a
+        # continuous_batching_config object). A bare MagicMock has neither
+        # parameter, so assert against whichever form applies to the class
+        # that was actually patched in.
+        import inspect as _inspect
+
+        _params = _inspect.signature(MockCBM.__init__).parameters
+        _, kwargs = MockCBM.call_args
+        assert kwargs["model"] is mock_model
+        assert "generation_config" in kwargs
+
+        if "continuous_batching_config" in _params:
+            assert kwargs["continuous_batching_config"].max_queue_size == 128
+        elif "max_queue_size" in _params:
+            assert kwargs["max_queue_size"] == 128
+        else:
+            # Unknown signature: the backend must still construct a manager
+            # rather than refuse to batch, but it must NOT invent a kwarg.
+            assert set(kwargs) == {"model", "generation_config"}
         mock_mgr.start.assert_called_once()
         assert backend._started is True
         assert backend._tokenizer is mock_tokenizer

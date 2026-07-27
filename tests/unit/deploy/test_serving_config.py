@@ -85,26 +85,48 @@ class TestThePerformanceFlagsAreOn:
             "measured 1.02x aggregate throughput at concurrency 4"
         )
 
-    def test_torch_compile_is_disabled_until_cuda_graphs_is_resolved(self):
-        """Deliberately OFF.
+    def test_torch_compile_is_only_on_with_a_graph_free_mode(self):
+        """The invariant, not a fixed value.
 
-        Enabling it on 2026-07-27 broke inference outright: model_loader
-        compiles with mode="reduce-overhead", which turns on CUDA Graphs, and
-        every generate call then failed with
-
-            RuntimeError: accessing tensor output of CUDAGraphs that has been
-            overwritten by a subsequent run
-
-        Compilation and the 31.7s warmup both SUCCEEDED — the failure appears
-        only on the second and later requests, so startup looks clean.
-
-        This asserts the safe value on purpose. Flipping it back without also
-        changing the compile mode away from reduce-overhead should fail here.
+        Enabling TORCH_COMPILE is safe ONLY while the compile mode avoids CUDA
+        Graphs. Pinning the flag to "false" would have blocked the fix; pinning
+        it to "true" would let someone re-enable reduce-overhead and repeat the
+        2026-07-27 outage. So assert the pair.
         """
+        from millm.core.config import Settings
+
         env = _backend_env()
-        assert env.get("TORCH_COMPILE") == "false", (
-            "TORCH_COMPILE is on again; with mode='reduce-overhead' this takes "
-            "inference down on the second request"
+        if env.get("TORCH_COMPILE") != "true":
+            return  # off is always safe
+
+        mode = env.get("TORCH_COMPILE_MODE") or Settings.model_fields[
+            "TORCH_COMPILE_MODE"
+        ].default
+        assert mode != "reduce-overhead", (
+            "TORCH_COMPILE is on with mode='reduce-overhead', which enables "
+            "CUDA Graphs and takes inference down on the second request"
+        )
+
+    def test_compile_cannot_be_on_without_the_soak_and_fallback(self):
+        """Enabling the flag is only defensible because a failed compile now
+        degrades to eager instead of serving 500s."""
+        import inspect
+
+        from millm.ml import model_loader
+
+        env = _backend_env()
+        if env.get("TORCH_COMPILE") != "true":
+            return
+
+        src = inspect.getsource(model_loader)
+        assert "_SOAK_PASSES" in src, "compile is on but nothing soaks it"
+        assert "self.model.forward = _uncompiled_forward" in src, (
+            "compile is on with no revert-to-eager; a bad compile would serve "
+            "500 for every request"
+        )
+        assert "self.model.generate(" in src, (
+            "the soak does not exercise cached generation — the path that "
+            "actually failed"
         )
 
     def test_the_cuda_graphs_hazard_is_recorded_in_the_manifest(self):

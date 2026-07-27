@@ -111,11 +111,47 @@ class ContinuousBatchingBackend:
             pad_token_id=pad_token_id,
         )
 
-        self._manager = ContinuousBatchingManager(
-            model=model,
-            generation_config=hf_config,
-            max_queue_size=self._max_queue_size,
-        )
+        # The manager's signature CHANGED between transformers majors, and
+        # pyproject pins only `transformers>=4.47.0`, so the image takes
+        # whatever is current at build time:
+        #
+        #   <= 5.0   ContinuousBatchingManager(..., max_queue_size=N)
+        #   >= 5.14  ContinuousBatchingManager(..., continuous_batching_config=
+        #                ContinuousBatchingConfig(max_queue_size=N))
+        #
+        # On 2026-07-27 the dev venv had 5.0.0 and the image shipped 5.14.1, so
+        # this raised "unexpected keyword argument 'max_queue_size'" at startup
+        # and continuous batching silently never ran — cbm_enabled reported true
+        # while cbm_running was false. Build the call from the ACTUAL signature
+        # rather than from an assumed one.
+        import inspect
+
+        _params = inspect.signature(ContinuousBatchingManager.__init__).parameters
+        _kwargs = {"model": model, "generation_config": hf_config}
+
+        if "continuous_batching_config" in _params:
+            from transformers.generation.configuration_utils import (
+                ContinuousBatchingConfig,
+            )
+
+            _kwargs["continuous_batching_config"] = ContinuousBatchingConfig(
+                max_queue_size=self._max_queue_size,
+            )
+            _api = "config-object"
+        elif "max_queue_size" in _params:
+            _kwargs["max_queue_size"] = self._max_queue_size
+            _api = "kwarg"
+        else:
+            # Unknown shape: start it with the two arguments every version has
+            # taken, rather than refusing to batch at all.
+            _api = "minimal"
+            logger.warning(
+                "cbm_unknown_signature_using_minimal_args",
+                extra={"parameters": list(_params)},
+            )
+
+        logger.info("cbm_manager_api_selected: %s", _api)
+        self._manager = ContinuousBatchingManager(**_kwargs)
         self._manager.start()
         self._started = True
 

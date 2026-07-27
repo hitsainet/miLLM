@@ -68,16 +68,28 @@ spec:
             - name: TORCH_COMPILE
               # OFF until the image carrying the compile-safety code is LIVE.
               #
-              # Sequencing lesson, learned the hard way twice in one day: the
-              # manifest and the image deploy on DIFFERENT timelines. A gitops
-              # sync lands in seconds; the image takes ~12 minutes to build. So
-              # enabling this in the same commit as the code that makes it safe
-              # ran the old code — reduce-overhead, single warmup, no revert —
-              # with the flag on, which is exactly the outage combination.
+              # SEQUENCING, learned the hard way: the manifest and the image
+              # deploy on DIFFERENT timelines. A gitops sync lands in seconds;
+              # the image takes ~12 minutes to build. Enabling this in the same
+              # commit as the code that makes it safe ran the OLD code with the
+              # flag on — which is exactly the outage combination. Re-enable in
+              # a SEPARATE commit, after confirming the running image contains
+              # the soak and the revert-to-eager.
               #
-              # Re-enable in a SEPARATE commit, after confirming the running
-              # image contains the soak and the revert-to-eager. A flag whose
-              # safety depends on new code must never ship with that code.
+              # WHY IT NEEDS THAT CODE: model_loader used to compile with
+              # mode="reduce-overhead", which enables CUDA Graphs. Compilation
+              # and warmup both succeeded, then every subsequent request died
+              # with "accessing tensor output of CUDAGraphs that has been
+              # overwritten by a subsequent run". The fault only shows on the
+              # SECOND cached generate, so nothing at startup revealed it.
+              # The fix is three parts: mode="default", a multi-pass soak
+              # through cached generate() that reads its output, and a revert
+              # to the uncompiled forward when that soak fails.
+              #
+              # ALSO: this is silently skipped under bitsandbytes quantization
+              # (model_loader guards it separately), so it only ever takes
+              # effect on fp16/bf16 loads — it was a no-op the whole time
+              # granite ran in Q4.
               value: "false"
             # Batch concurrent requests into single forward passes. Without it
             # the server serialises: measured 4 sequential calls 2.9s vs 4

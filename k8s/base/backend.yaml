@@ -79,6 +79,19 @@ spec:
             # uses temperature 0 throughout, so this is not a constraint there.
             - name: ENABLE_CONTINUOUS_BATCHING
               value: "true"
+            # Bring the served model back after a restart.
+            #
+            # Without this the pod comes up serving NOTHING: main.py resets every
+            # 'loaded'/'loading' row to 'ready' on startup (the status is process
+            # state, not durable state), and only AUTO_LOAD_MODEL reloads one.
+            # Every deploy therefore silently took inference offline until a human
+            # noticed and re-loaded an 8B model by hand.
+            #
+            # The dtype is NOT pinned here: load_model() passes the model row's
+            # own `quantization`, so this reloads whatever was last configured
+            # (currently FP16) rather than overriding an operator's choice.
+            - name: AUTO_LOAD_MODEL
+              value: "granite-4.1-8b"
           volumeMounts:
             - name: millm-data
               mountPath: /data

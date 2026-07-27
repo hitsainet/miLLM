@@ -85,16 +85,44 @@ class TestThePerformanceFlagsAreOn:
             "measured 1.02x aggregate throughput at concurrency 4"
         )
 
-    def test_torch_compile_is_enabled(self):
+    def test_torch_compile_is_disabled_until_cuda_graphs_is_resolved(self):
+        """Deliberately OFF.
+
+        Enabling it on 2026-07-27 broke inference outright: model_loader
+        compiles with mode="reduce-overhead", which turns on CUDA Graphs, and
+        every generate call then failed with
+
+            RuntimeError: accessing tensor output of CUDAGraphs that has been
+            overwritten by a subsequent run
+
+        Compilation and the 31.7s warmup both SUCCEEDED — the failure appears
+        only on the second and later requests, so startup looks clean.
+
+        This asserts the safe value on purpose. Flipping it back without also
+        changing the compile mode away from reduce-overhead should fail here.
+        """
         env = _backend_env()
-        assert env.get("TORCH_COMPILE") == "true"
+        assert env.get("TORCH_COMPILE") == "false", (
+            "TORCH_COMPILE is on again; with mode='reduce-overhead' this takes "
+            "inference down on the second request"
+        )
+
+    def test_the_cuda_graphs_hazard_is_recorded_in_the_manifest(self):
+        text = MANIFEST.read_text()
+        i = text.index("TORCH_COMPILE")
+        window = text[i:i + 1200].lower()
+        assert "cudagraph" in window or "cuda graph" in window, (
+            "the reason TORCH_COMPILE is disabled is undocumented, so the next "
+            "person re-enables it and takes inference down again"
+        )
 
     def test_torch_compile_is_documented_as_quantization_dependent(self):
         """It is silently skipped under bitsandbytes — a reader who does not
         know that will conclude it is working when it is not."""
         text = MANIFEST.read_text()
         i = text.index("TORCH_COMPILE")
-        window = text[max(0, i - 500):i + 200].lower()
+        # Look FORWARD: the caveat lives in the comment block under the key.
+        window = text[i:i + 1500].lower()
         assert "bitsandbytes" in window or "quantiz" in window, (
             "TORCH_COMPILE carries no note that it is a no-op under "
             "bitsandbytes quantization"

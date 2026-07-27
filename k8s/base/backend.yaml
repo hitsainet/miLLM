@@ -66,10 +66,28 @@ spec:
             - name: DEBUG
               value: "false"
             - name: TORCH_COMPILE
-              # NOTE: silently skipped while a model is loaded with bitsandbytes
-              # quantization (model_loader guards this — bnb and torch.compile
-              # are incompatible). Only takes effect for fp16/bf16 loads.
-              value: "true"
+              # DISABLED 2026-07-27 after it broke inference in production.
+              #
+              # model_loader compiles with mode="reduce-overhead", which enables
+              # CUDA Graphs. Against this transformers/generate path every
+              # request then failed with:
+              #
+              #   RuntimeError: accessing tensor output of CUDAGraphs that has
+              #   been overwritten by a subsequent run
+              #
+              # Compilation itself SUCCEEDED (torch_compile_complete, 31.7s
+              # warmup) — the failure is at generate time, on the second and
+              # subsequent runs, so nothing at startup reveals it.
+              #
+              # Re-enabling needs a compile mode without CUDA Graphs (plain
+              # "default") and a multi-request soak, not a single warmup call.
+              # Until then this stays false: 33.8 tok/s that works beats a
+              # faster path that 500s.
+              #
+              # (It is ALSO silently skipped under bitsandbytes quantization —
+              # model_loader guards that separately — so it only ever took
+              # effect on fp16/bf16 loads.)
+              value: "false"
             # Batch concurrent requests into single forward passes. Without it
             # the server serialises: measured 4 sequential calls 2.9s vs 4
             # concurrent 3.0s — a 0.96x "speedup", i.e. no concurrency at all.

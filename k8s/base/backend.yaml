@@ -91,15 +91,28 @@ spec:
               # effect on fp16/bf16 loads — it was a no-op the whole time
               # granite ran in Q4.
               value: "false"
-            # Batch concurrent requests into single forward passes. Without it
-            # the server serialises: measured 4 sequential calls 2.9s vs 4
-            # concurrent 3.0s — a 0.96x "speedup", i.e. no concurrency at all.
-            # Bulk work (labeling 32k features) is the main beneficiary.
-            # Caveat from ContinuousBatchingBackend: per-request sampling params
-            # are fixed at manager creation; only max_new_tokens varies. Labeling
-            # uses temperature 0 throughout, so this is not a constraint there.
+            # DISABLED 2026-07-27 after measuring it on hardware. It was
+            # enabled on a prediction; the measurement did not support it.
+            #
+            # Once actually running (the manager had never started before —
+            # see the signature fix), on an idle box, fp16 granite-4.1-8b:
+            #
+            #   single-stream    30.6 tok/s   vs 33.8 serial  (-9.5%)
+            #   concurrency 2-4  RuntimeError: Generation timed out after 300s
+            #   after a timeout  EVERY request fails instantly — the manager
+            #                    wedges and does not recover
+            #
+            # So it costs throughput on the common case, fails the case it
+            # exists for, and turns a slow request into a total outage. The
+            # serial queue is slower in theory and correct in practice.
+            #
+            # The integration itself is now sound (adaptive signature, sampling
+            # aligned to temperature 0). What is not sound is transformers
+            # 5.14.1's ContinuousBatchingManager under concurrent load on this
+            # hardware. Re-enabling needs that timeout root-caused first, and a
+            # concurrency soak before it goes anywhere near production.
             - name: ENABLE_CONTINUOUS_BATCHING
-              value: "true"
+              value: "false"
             # Bring the served model back after a restart.
             #
             # Without this the pod comes up serving NOTHING: main.py resets every

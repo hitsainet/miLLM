@@ -78,11 +78,23 @@ class TestTheModelComesBackAfterARestart:
 
 
 class TestThePerformanceFlagsAreOn:
-    def test_continuous_batching_is_enabled(self):
+    def test_continuous_batching_is_disabled_pending_a_timeout_fix(self):
+        """OFF on measurement, not on principle.
+
+        Measured on hardware once the manager actually started (idle box,
+        fp16 granite-4.1-8b):
+
+            single-stream    30.6 tok/s vs 33.8 serial  (-9.5%)
+            concurrency 2-4  RuntimeError: Generation timed out after 300s
+            after a timeout  every request fails instantly; it does not recover
+
+        It costs throughput on the common case, fails the case it exists for,
+        and escalates one slow request into a total outage.
+        """
         env = _backend_env()
-        assert env.get("ENABLE_CONTINUOUS_BATCHING") == "true", (
-            "without continuous batching the queue backend serialises: "
-            "measured 1.02x aggregate throughput at concurrency 4"
+        assert env.get("ENABLE_CONTINUOUS_BATCHING") == "false", (
+            "continuous batching timed out under concurrency and wedged the "
+            "server; re-enabling needs that root-caused and soaked first"
         )
 
     def test_torch_compile_is_only_on_with_a_graph_free_mode(self):

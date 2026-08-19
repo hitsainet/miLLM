@@ -1827,7 +1827,7 @@ class SAEService:
 
             async with async_session_factory() as session:
                 model_repo = ModelRepository(session)
-                await model_repo.update(model_state.loaded_model_id, locked=True)
+                await model_repo.set_exclusive_lock(model_state.loaded_model_id)
                 logger.info("model_auto_locked", model_id=model_state.loaded_model_id, sae_id=sae_id)
         except Exception as e:
             logger.warning("model_auto_lock_failed", error=str(e))
@@ -2070,8 +2070,8 @@ class SAEService:
                 from millm.db.repositories.model_repository import ModelRepository
 
                 async with async_session_factory() as session:
-                    await ModelRepository(session).update(
-                        model_state.loaded_model_id, locked=True
+                    await ModelRepository(session).set_exclusive_lock(
+                        model_state.loaded_model_id
                     )
                 logger.info("model_auto_locked", model_id=model_state.loaded_model_id)
             except Exception as e:
@@ -2252,8 +2252,21 @@ class SAEService:
 
                 async with async_session_factory() as session:
                     model_repo = ModelRepository(session)
-                    await model_repo.update(locked_model_id, locked=False)
-                    logger.info("model_auto_unlocked", model_id=locked_model_id, sae_id=sae_id)
+                    # CLEAR THE LOCK THAT IS HELD, not the model that happens to
+                    # be loaded. These are the same row in the normal case and
+                    # diverge in exactly the case that matters: when an earlier
+                    # lock leaked, `loaded_model_id` points at the model being
+                    # detached and the stale flag sits on a different row, so
+                    # the targeted unlock wrote `locked=False` over a `False`
+                    # and reported success while the real lock survived. That is
+                    # why detaching and unloading did not restore the listing.
+                    cleared = await model_repo.clear_locks()
+                    logger.info(
+                        "model_auto_unlocked",
+                        model_id=locked_model_id,
+                        sae_id=sae_id,
+                        locks_cleared=cleared,
+                    )
             except Exception as e:
                 logger.warning("model_auto_unlock_failed", error=str(e))
 

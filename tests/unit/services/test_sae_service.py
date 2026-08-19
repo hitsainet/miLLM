@@ -13,6 +13,7 @@ from millm.core.errors import (
     SAENotFoundError,
 )
 from millm.db.models.sae import SAE, SAEStatus
+from millm.ml.model_loader import LoadedModelState
 from millm.services.sae_service import (
     AttachedSAEState,
     AttachmentStatus,
@@ -900,3 +901,59 @@ class TestSteeringFeatureIndexValidation:
             service_with_sae.set_steering(0, 1.0)
         except InvalidFeatureIndexError:
             pytest.fail("Valid index raised InvalidFeatureIndexError")
+
+
+class TestDetachReleasesTheLockThatIsHeld:
+    """Detaching the last SAE must clear the lock, not the loaded model's row.
+
+    These are the same row whenever nothing has gone wrong, and they diverge in
+    the one case that matters. When an earlier lock has leaked, `loaded_model_id`
+    names the model being detached while the stale flag sits on a different row,
+    so a targeted `update(loaded_model_id, locked=False)` wrote False over False,
+    logged success, and left the real lock standing. That is why detaching the
+    SAE and unloading the model did not bring the other models back.
+    """
+
+    @pytest.mark.asyncio
+    async def test_detach_clears_every_lock_rather_than_one_row(
+        self, service, mock_repository, sample_sae, mock_loaded_sae
+    ):
+        mock_repository.get.return_value = sample_sae
+        mock_handle = MagicMock()
+
+        state = AttachedSAEState()
+        state.set(mock_loaded_sae, sample_sae.id, 12, mock_handle)
+
+        # LFM (31) is the loaded model; the stale lock sits on gemma (24).
+        model_state = LoadedModelState()
+        model_state.set(MagicMock(model_id=31))
+
+        model_repo = MagicMock()
+        model_repo.clear_locks = AsyncMock(return_value=1)
+        model_repo.update = AsyncMock()
+
+        session = MagicMock()
+        session.__aenter__ = AsyncMock(return_value=session)
+        session.__aexit__ = AsyncMock(return_value=False)
+
+        with patch("millm.services.sae_service.torch") as mock_torch, \
+             patch("millm.api.dependencies.get_inference_service", side_effect=Exception("na")), \
+             patch("millm.db.base.async_session_factory", return_value=session), \
+             patch(
+                 "millm.db.repositories.model_repository.ModelRepository",
+                 return_value=model_repo,
+             ):
+            mock_torch.cuda.is_available.return_value = False
+            await service.detach_sae(sample_sae.id)
+
+        model_repo.clear_locks.assert_called_once_with()
+        # And NOT the targeted write that let the stale row survive.
+        unlock_writes = [
+            c for c in model_repo.update.call_args_list
+            if c.kwargs.get("locked") is False
+        ]
+        assert unlock_writes == [], (
+            "detach wrote locked=False at a specific row; it must clear whatever "
+            f"lock is held: {unlock_writes}"
+        )
+        model_state.clear()

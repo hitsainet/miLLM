@@ -1034,7 +1034,11 @@ class ModelService:
                 details={"locked_model_id": locked.id, "locked_model_name": locked.name},
             )
 
-        model = await self.repository.update(model_id, locked=True)
+        # Through the exclusive writer even though the check above has already
+        # ruled out a rival lock: that check now ignores locks held by models
+        # that are not LOADED, so a leaked flag on a non-resident row can no
+        # longer block a legitimate lock — and this is what then clears it.
+        model = await self.repository.set_exclusive_lock(model_id)
         logger.info("model_locked", model_id=model_id)
         return model
 

@@ -1,31 +1,47 @@
 """Startup stale-state reset (Feature 13 R3 regression).
 
 The reset clears in-memory-derived state that cannot survive a restart: loaded
-models, attached SAEs, active attachments, and active circuits.
+models, the steering lock, attached SAEs, active attachments, and active
+circuits.
 
-The regression this pins: all four UPDATEs originally shared ONE transaction
+The regression this pins: the UPDATEs originally shared ONE transaction
 with a single commit, so a table that does not exist yet (a migration not run
 on this deployment) aborted the transaction and silently rolled back the resets
 that HAD succeeded — leaving exactly the stale state the block exists to clear,
 reported only as a warning. Each reset now owns its transaction.
 """
 
-import re
 from pathlib import Path
+
+from millm.main import STALE_STATE_RESETS
 
 REPO = Path(__file__).resolve().parents[2]
 MAIN = REPO / "millm" / "main.py"
 
 
 def _reset_block() -> str:
-    """The stale-reset region of the lifespan handler."""
+    """The region of `lifespan` that RUNS the resets.
+
+    Structure only — how the statements are executed. What they say is asserted
+    against the imported `STALE_STATE_RESETS` instead of scraped out of here: a
+    test that greps source for `"models",` keeps passing when the entry has been
+    renamed to something the runtime never looks up, and one that greps for SQL
+    keeps passing when nothing executes it.
+    """
     text = MAIN.read_text()
-    start = text.index("resets: list[tuple[str, str, str]]")
+    start = text.index("resets = STALE_STATE_RESETS")
     # F19: stop at the claim-reconciliation block, which now sits between the
     # resets and the SAE-state clear. Without this the helper swallowed the new
     # block and the "one session per reset" count went from 1 to 2.
     end = text.index("F19 R2-09: RELEASE ALL CLAIMS at startup")
     return text[start:end]
+
+
+def _sql_for(event: str) -> str:
+    """The statement the runtime will actually run for `event`."""
+    matches = [sql for name, sql, _ in STALE_STATE_RESETS if name == event]
+    assert matches, f"no {event!r} entry in STALE_STATE_RESETS"
+    return matches[0]
 
 
 class TestResetsAreIndependent:
@@ -50,26 +66,39 @@ class TestResetsAreIndependent:
         # guard wraps each iteration's own transaction.
         assert loop_at < try_at < session_at
 
-    def test_all_four_tables_are_reset(self):
-        block = _reset_block()
-        for table in ("models", "saes", "sae_attachments", "circuits"):
-            assert f'"{table}",' in block, f"{table} reset missing"
+    def test_every_kind_of_restart_scoped_state_is_reset(self):
+        tables = {table for _, _, table in STALE_STATE_RESETS}
+        assert {"models", "saes", "sae_attachments", "circuits"} <= tables
+
+    def test_the_STEERING_LOCK_is_among_them(self):
+        """The one this block forgot, and the cost of forgetting it.
+
+        A locked model is the only model `/v1/models` advertises. The lock is
+        taken when an SAE attaches — in-memory state, exactly like the three
+        resets either side of it — but nothing cleared it on restart, so one
+        restart mid-steer pinned the catalogue to a single model until somebody
+        unlocked the row by hand. `gemma-2-2b-it` held it from 2026-05-12 to
+        2026-08-19, hiding thirteen ready models.
+        """
+        sql = _sql_for("reset_stale_model_lock")
+        assert "locked = false" in sql
+        # Scoped on the FLAG, not on status. The stale row's status has already
+        # been reset to 'ready' by an earlier restart, so a status-scoped filter
+        # drops the exact row that still needs clearing.
+        assert "WHERE locked = true" in sql
 
     def test_circuits_reset_clears_serving_mode_too(self):
         """A stale is_active row with a serving_mode would keep claiming to
         serve — and would let set_intensity re-arm an unvalidated circuit."""
-        block = _reset_block()
-        m = re.search(r"UPDATE circuits SET[^\"]*", block)
-        assert m, "circuits reset SQL not found"
-        sql = m.group(0)
+        sql = _sql_for("deactivated_stale_circuits")
         assert "is_active = false" in sql
         assert "serving_mode = NULL" in sql
 
     def test_model_reset_still_clears_loaded_and_loading(self):
         """The pre-existing behaviour must survive the restructure."""
-        block = _reset_block()
-        assert "status IN ('loaded', 'loading')" in block
-        assert "loaded_at = NULL" in block
+        sql = _sql_for("reset_stale_model_status")
+        assert "status IN ('loaded', 'loading')" in sql
+        assert "loaded_at = NULL" in sql
 
 
 class TestF19ReconcileIsDELIBERATELYNotCalledAtStartup:

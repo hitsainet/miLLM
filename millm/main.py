@@ -122,6 +122,67 @@ def _note_claims_degraded(reason: str) -> None:
         pass
 
 
+#: Every kind of state that is derived from the running process and therefore
+#: cannot survive a restart, with the statement that clears it.
+#:
+#: MODULE LEVEL SO A TEST CAN BIND TO IT. While this lived as a local inside
+#: `lifespan`, a test could only assert against its own copy of the SQL — which
+#: passes just as happily when the entry has been deleted from the list. Every
+#: statement here exists because its absence was, at some point, a bug nobody
+#: noticed for months.
+STALE_STATE_RESETS: list[tuple[str, str, str]] = [
+    (
+        "reset_stale_model_status",
+        "UPDATE models SET status = 'ready', loaded_at = NULL "
+        "WHERE status IN ('loaded', 'loading')",
+        "models",
+    ),
+    (
+        # THE LOCK IS IN-MEMORY STATE TOO, and it was the one piece of
+        # it this block forgot. A model is locked while an SAE is
+        # attached to it for steering; the attachment lives in the
+        # process, so a restart ends it — the two resets directly below
+        # say exactly that about the SAE and the attachment row. The
+        # lock outlived both, and a locked model is the ONLY model
+        # `/v1/models` will advertise, so one restart during steering
+        # hid every other ready model from every OpenAI client until
+        # someone unlocked it by hand. It went unnoticed from
+        # 2026-05-12 to 2026-08-19.
+        #
+        # SEPARATE FROM THE STATUS RESET ABOVE, not folded into it.
+        # That one is scoped `WHERE status IN ('loaded','loading')`,
+        # and the stale row does not match: an earlier restart already
+        # set its status to 'ready' and left `locked` true. The exact
+        # row this exists to clear is the one that filter drops.
+        "reset_stale_model_lock",
+        "UPDATE models SET locked = false WHERE locked = true",
+        "models",
+    ),
+    (
+        "reset_stale_sae_status",
+        "UPDATE saes SET status = 'cached' WHERE status = 'attached'",
+        "saes",
+    ),
+    (
+        "deactivated_stale_attachments",
+        "UPDATE sae_attachments SET is_active = false, detached_at = NOW() "
+        "WHERE is_active = true",
+        "sae_attachments",
+    ),
+    (
+        # Feature 13: in-memory steering is lost on restart, so an
+        # is_active circuit row would claim live influence that does not
+        # exist — and because the evidence gate is checked at ACTIVATION,
+        # dialling that stale row would re-arm an unvalidated (rung<2)
+        # circuit without a fresh acknowledgement.
+        "deactivated_stale_circuits",
+        "UPDATE circuits SET is_active = false, serving_mode = NULL "
+        "WHERE is_active = true",
+        "circuits",
+    ),
+]
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     """
@@ -147,36 +208,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         # this deployment yet) aborts the transaction and rolls back the resets
         # that DID succeed — silently leaving exactly the stale state this block
         # exists to clear.
-        resets: list[tuple[str, str, str]] = [
-            (
-                "reset_stale_model_status",
-                "UPDATE models SET status = 'ready', loaded_at = NULL "
-                "WHERE status IN ('loaded', 'loading')",
-                "models",
-            ),
-            (
-                "reset_stale_sae_status",
-                "UPDATE saes SET status = 'cached' WHERE status = 'attached'",
-                "saes",
-            ),
-            (
-                "deactivated_stale_attachments",
-                "UPDATE sae_attachments SET is_active = false, detached_at = NOW() "
-                "WHERE is_active = true",
-                "sae_attachments",
-            ),
-            (
-                # Feature 13: in-memory steering is lost on restart, so an
-                # is_active circuit row would claim live influence that does not
-                # exist — and because the evidence gate is checked at ACTIVATION,
-                # dialling that stale row would re-arm an unvalidated (rung<2)
-                # circuit without a fresh acknowledgement.
-                "deactivated_stale_circuits",
-                "UPDATE circuits SET is_active = false, serving_mode = NULL "
-                "WHERE is_active = true",
-                "circuits",
-            ),
-        ]
+        resets = STALE_STATE_RESETS
         for event, sql, table in resets:
             try:
                 async with async_session_factory() as session:

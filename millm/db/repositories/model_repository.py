@@ -7,7 +7,7 @@ Provides CRUD operations for the Model ORM class.
 from datetime import datetime
 from typing import Any
 
-from sqlalchemy import select
+from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from millm.db.models.model import Model, ModelStatus, QuantizationType
@@ -114,15 +114,60 @@ class ModelRepository:
 
     async def get_locked_model(self) -> Model | None:
         """
-        Get the currently locked model (if any).
+        Get the currently locked model, if one is actually holding the lock.
 
-        Returns:
-            The locked Model instance or None.
+        A LOCK ONLY COUNTS WHILE THE MODEL IS LOADED. Both things the lock does
+        — keep `/v1/models` pinned to one entry, and stop an inference request
+        auto-unloading it — are meaningless for a model that is not resident,
+        and `lock_model` refuses to set the flag on anything but a LOADED model.
+        So a locked row in any other state is not a lock; it is debris, and the
+        read is where that has to be decided.
+
+        This is deliberately belt-and-braces with the startup reset in
+        `main.py`, which clears the flag outright. That reset is the cure; this
+        is the immunity. A lock that leaks by some route nobody has thought of
+        yet — a crash between two writes, a hand-edited row, a restore from a
+        backup taken mid-steer — costs a stale flag rather than a catalogue
+        that has silently collapsed to a single model. Which is exactly what
+        happened: `gemma-2-2b-it` held the lock from 2026-05-12 until
+        2026-08-19, and for three months `/v1/models` advertised it alone while
+        thirteen other ready models were invisible to every OpenAI client.
+
+        `.first()` rather than `scalar_one_or_none()`: two locked rows are not
+        supposed to be reachable — `set_exclusive_lock` is the only writer and
+        it clears the others in the same statement — but the previous form
+        RAISED `MultipleResultsFound` if they ever were, turning a stale flag
+        into a 500 on the models listing for every client at once. A listing
+        must degrade to "wrong entry" and never to "no service".
         """
         result = await self.session.execute(
-            select(Model).where(Model.locked == True)  # noqa: E712
+            select(Model)
+            .where(Model.locked.is_(True), Model.status == ModelStatus.LOADED)
+            .order_by(Model.id)
         )
-        return result.scalar_one_or_none()
+        return result.scalars().first()
+
+    async def clear_locks(self, except_model_id: int | None = None) -> int:
+        """Release every model lock, optionally sparing one. Returns rows changed."""
+        stmt = update(Model).where(Model.locked.is_(True)).values(locked=False)
+        if except_model_id is not None:
+            stmt = stmt.where(Model.id != except_model_id)
+        result = await self.session.execute(stmt)
+        return int(result.rowcount or 0)
+
+    async def set_exclusive_lock(self, model_id: int) -> Model | None:
+        """Lock this model and release every other lock, together.
+
+        THE ONLY WRITER THAT MAY SET THE FLAG. "Only one model can be locked at
+        a time" was documented on `lock_model` and enforced only there, by a
+        read-then-check that two callers in `sae_service` bypassed entirely by
+        writing `repository.update(..., locked=True)` straight to the row. An
+        invariant that a caller can skip by picking a different method is a
+        convention, not an invariant; making the exclusive write the only write
+        is what turns it back into one.
+        """
+        await self.clear_locks(except_model_id=model_id)
+        return await self.update(model_id, locked=True)
 
     async def get_available_models(self) -> list[Model]:
         """

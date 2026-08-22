@@ -41,6 +41,23 @@ from millm.sockets.progress import ProgressEmitter
 logger = structlog.get_logger()
 
 
+#: Download progress, keyed by model id, SHARED ACROSS SERVICE INSTANCES.
+#:
+#: This has to live outside the instance because `get_model_service` constructs
+#: a brand-new `ModelService` for every request. A dict on `self` is therefore
+#: written by the instance that started the download and read by a different,
+#: empty one — so `GET /api/models` reported `download_progress: null` for the
+#: entire duration of every download that has ever run. Observed on a 51.8 GB
+#: Qwen3.8-27B pull: the bytes were landing at 110 MB/s and the API said
+#: nothing, which is indistinguishable from a download that has died.
+#:
+#: In-process is sufficient and durable enough. The download runs in a thread of
+#: this same process, and a restart ends it anyway — startup already resets any
+#: model left in DOWNLOADING. Persisting to a column would add a write every
+#: poll interval to reconstruct state that cannot outlive the work it describes.
+_DOWNLOAD_PROGRESS: dict[int, int] = {}
+
+
 class ModelService:
     """
     Orchestration layer for model operations.
@@ -90,8 +107,9 @@ class ModelService:
         # Reference to main event loop for thread-safe async operations
         self._main_loop: Optional[asyncio.AbstractEventLoop] = None
 
-        # Track download progress (in-memory, model_id -> progress percentage)
-        self._download_progress: dict[int, int] = {}
+        # Progress lives in the module-level `_DOWNLOAD_PROGRESS`, not here —
+        # see the note on that dict. An instance attribute is invisible to the
+        # next request, which gets a different ModelService.
 
     def _run_async_from_thread(self, coro: Any) -> Any:
         """
@@ -121,7 +139,7 @@ class ModelService:
         Returns:
             Progress percentage (0-100) if downloading, None otherwise.
         """
-        return self._download_progress.get(model_id)
+        return _DOWNLOAD_PROGRESS.get(model_id)
 
     async def list_models(self) -> list[Model]:
         """
@@ -325,14 +343,14 @@ class ModelService:
         last_error: Optional[Exception] = None
 
         # Initialize progress tracking
-        self._download_progress[model_id] = 0
+        _DOWNLOAD_PROGRESS[model_id] = 0
 
         # Create progress callback that emits WebSocket events
         def on_progress(
             pct: float, downloaded: int, total: int, speed_bps: float = 0.0
         ) -> None:
             progress = int(pct)
-            self._download_progress[model_id] = progress
+            _DOWNLOAD_PROGRESS[model_id] = progress
 
             # Emit WebSocket progress event
             if self.emitter and self._main_loop:
@@ -391,7 +409,7 @@ class ModelService:
                         raise DownloadCancelledError("Download was cancelled")
 
                     # Mark progress as 100%
-                    self._download_progress[model_id] = 100
+                    _DOWNLOAD_PROGRESS[model_id] = 100
 
                     # Get disk size
                     disk_size_bytes = self.downloader.get_cache_size(
@@ -483,7 +501,7 @@ class ModelService:
             # Clean up download tracking
             self._active_downloads.pop(model_id, None)
             self._cancelled_downloads.discard(model_id)
-            self._download_progress.pop(model_id, None)
+            _DOWNLOAD_PROGRESS.pop(model_id, None)
 
     def _is_retryable_error(self, error: Exception) -> bool:
         """

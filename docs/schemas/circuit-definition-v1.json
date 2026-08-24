@@ -1383,7 +1383,7 @@
       "type": "object"
     }
   },
-  "$id": "https://mistudio.hitsai.net/schemas/circuit-definition-v1.json",
+  "$id": "https://raw.githubusercontent.com/hitsainet/miStudio/main/docs/schemas/circuit-definition-v1.json",
   "$ref": "#/$defs/CircuitDefinitionV1",
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "description": "Portable circuit definition (mistudio.circuit-definition/v1) \u2014 cross-layer feature circuits with evidence rungs, typed edges, attribution scores, validation-manifest references, and Tier-2.5-ready position fields (IDL-33). Generated from the pydantic contract; regenerate via backend/tests/unit/test_circuit_definition_schema_sync.py instructions.",

@@ -635,7 +635,7 @@
       "type": "object"
     }
   },
-  "$id": "https://mistudio.hitsai.net/schemas/cluster-definition-v1.json",
+  "$id": "https://raw.githubusercontent.com/hitsainet/miStudio/main/docs/schemas/cluster-definition-v1.json",
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "description": "Portable cluster definition (mistudio.cluster-definition/v1) \u2014 the consumer-neutral interchange artifact for cluster profiles (IDL-30). Also includes the bundle wrapper (mistudio.cluster-bundle/v1) under $defs. Generated from the pydantic contract; regenerate via backend/tests/unit/test_cluster_definition_schema_sync.py instructions.",
   "oneOf": [

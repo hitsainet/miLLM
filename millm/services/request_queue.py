@@ -118,26 +118,43 @@ class RequestQueue:
                 max_pending=self._max_pending,
             )
 
+        # Release ONLY what was actually acquired.
+        #
+        # The `finally` used to release unconditionally, so any exit before the
+        # semaphore was obtained handed back a permit that was never taken.
+        # asyncio.Semaphore is unbounded, so each such exit raised the effective
+        # concurrency limit BY ONE, PERMANENTLY.
+        #
+        # This was not theoretical. Cancellation while awaiting the semaphore is
+        # ordinary client behaviour — an SSE client hanging up, or a caller
+        # timing out, while its request is queued behind another. Measured on
+        # this code at max_concurrent=1: one cancelled waiter left the semaphore
+        # holding 2 permits, and two generations then ran concurrently.
+        #
+        # That matters far beyond throughput. Per-request steering apply/restore,
+        # the sensing buffers and monitoring attribution are all process-global
+        # and rely on this semaphore for isolation (see MAX_CONCURRENT_REQUESTS
+        # in core/config.py). A leaked permit silently removes the only thing
+        # preventing two generations interleaving their steering state.
+        #
+        # The timeout branch also decremented `_pending` and then let `finally`
+        # decrement it a second time, driving the count negative. `finally` now
+        # owns that decrement exactly once.
+        acquired = False
         try:
             # Wait for semaphore (actual GPU slot)
             if timeout:
-                try:
-                    await asyncio.wait_for(
-                        self._semaphore.acquire(), timeout=timeout
-                    )
-                except asyncio.TimeoutError:
-                    # Decrement pending on timeout
-                    async with self._lock:
-                        self._pending -= 1
-                    raise
+                await asyncio.wait_for(self._semaphore.acquire(), timeout=timeout)
             else:
                 await self._semaphore.acquire()
+            acquired = True
 
             logger.debug("request_slot_acquired", pending=self._pending)
             yield
 
         finally:
-            self._semaphore.release()
+            if acquired:
+                self._semaphore.release()
             async with self._lock:
                 self._pending -= 1
                 logger.debug(

@@ -99,8 +99,29 @@ class ContinuousBatchingBackend:
 
         self._tokenizer = tokenizer
 
-        eos_token_id = tokenizer.eos_token_id
-        pad_token_id = tokenizer.pad_token_id or eos_token_id
+        # Union the model's declared EOS ids with the tokenizer's, rather than
+        # using the tokenizer's scalar alone. See the long note in
+        # InferenceService._build_generate_kwargs: a scalar REPLACES a model's
+        # multi-id list (gemma ships [1, 106, 50]) and disables <end_of_turn>,
+        # so generation runs to max_new_tokens on every request.
+        # Only INTEGER ids are accepted; anything else is treated as declaring
+        # nothing, so a malformed generation_config cannot reach the manager.
+        tok_eos = tokenizer.eos_token_id
+        raw_eos = getattr(
+            getattr(model, "generation_config", None), "eos_token_id", None
+        )
+        if isinstance(raw_eos, int) and not isinstance(raw_eos, bool):
+            _declared = [raw_eos]
+        elif isinstance(raw_eos, (list, tuple)):
+            _declared = [i for i in raw_eos if isinstance(i, int) and not isinstance(i, bool)]
+        else:
+            _declared = []
+        if isinstance(tok_eos, int) and not isinstance(tok_eos, bool) and tok_eos not in _declared:
+            _declared.append(tok_eos)
+        eos_token_id = (
+            (_declared[0] if len(_declared) == 1 else _declared) if _declared else tok_eos
+        )
+        pad_token_id = tokenizer.pad_token_id or tok_eos
 
         hf_config = HFGenerationConfig(
             max_new_tokens=self._default_max_tokens,

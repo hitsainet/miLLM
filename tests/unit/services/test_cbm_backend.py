@@ -533,3 +533,36 @@ class TestCBMBackendGenerateStream:
         assert len(chunks) == 2
         assert chunks[0] == [10]
         assert chunks[1] == [11]
+
+
+class TestCBMEosListIsNotClobbered:
+    """The CBM path had the same EOS defect as the serial path.
+
+    A scalar tokenizer EOS replaced the model's declared list, so a model that
+    stops on several tokens (gemma ships [1, 106, 50]) lost all but one and ran
+    to max_new_tokens.
+
+    Mutation control:
+      C62 restore `eos_token_id = tokenizer.eos_token_id`
+           -> test_a_models_multi_id_eos_list_survives
+    """
+
+    def test_a_models_multi_id_eos_list_survives(
+        self, backend, mock_model, mock_tokenizer
+    ):
+        from types import SimpleNamespace
+
+        mock_model.generation_config = SimpleNamespace(eos_token_id=[1, 106, 50])
+        MockGenConfig = MagicMock()
+        with patch("transformers.ContinuousBatchingManager", MagicMock()):
+            with patch("transformers.GenerationConfig", MockGenConfig):
+                backend.start(mock_model, mock_tokenizer)
+
+        eos = MockGenConfig.call_args.kwargs["eos_token_id"]
+        assert isinstance(eos, list), (
+            f"CBM collapsed a multi-id EOS list to {eos!r}; <end_of_turn> would "
+            f"not stop generation"
+        )
+        for tok in (1, 106, 50):
+            assert tok in eos, f"declared EOS {tok} was dropped"
+        assert mock_tokenizer.eos_token_id in eos, "the tokenizer id was not unioned in"

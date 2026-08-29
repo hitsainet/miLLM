@@ -19,7 +19,12 @@ def _generate() -> dict:
     # Wrapper structure matches the miStudio generator byte-for-byte.
     schema = {
         "$schema": "https://json-schema.org/draft/2020-12/schema",
-        "$id": "https://mistudio.hitsai.net/schemas/cluster-definition-v1.json",
+        # Must match miStudio's generator byte-for-byte
+        # (backend/tests/unit/test_cluster_definition_schema_sync.py:24).
+        # miStudio moved this off the private host; the vendored contract was
+        # re-vendored in 3e34e70 but THIS wrapper was not, so the guard has
+        # been red ever since — reporting a drift it had itself introduced.
+        "$id": "https://raw.githubusercontent.com/hitsainet/miStudio/main/docs/schemas/cluster-definition-v1.json",
         "title": "miStudio Cluster Definition v1",
         "description": (
             "Portable cluster definition (mistudio.cluster-definition/v1) — the consumer-neutral "

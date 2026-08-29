@@ -4,6 +4,7 @@ import base64
 import json
 import struct
 from datetime import datetime
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -1982,3 +1983,128 @@ class TestCircuitSensingBoundaryIsClosedOnEveryPath:
         )
         assert ctx.is_closed is True, "a raising flush leaked the boundary"
         assert all(s._edge_ctx is None for s in saes.values())
+
+
+# =============================================================================
+# Tests: EOS list preservation and stop_strings passthrough
+# =============================================================================
+
+
+class TestEosTokenIdIsNotClobbered:
+    """A scalar tokenizer EOS must never replace a model's declared EOS list.
+
+    `tokenizer.eos_token_id` is one id. Chat models routinely stop on SEVERAL
+    and declare them in generation_config.json — gemma-4-12B-it ships
+    `eos_token_id: [1, 106, 50]`, where 106 is <end_of_turn>. Assigning the
+    scalar REPLACED that list, so the model closed its turn, the closing token
+    was not honoured, and generation ran on to max_new_tokens.
+
+    Measured against gemma-4-12B-it before the fix: valid JSON, then a bare
+    "thought" (a vocab token surviving skip_special_tokens=True), then the same
+    JSON again, repeating until the cap — ~1.7x the tokens of a correct stop,
+    on every request, for every model declaring more than one EOS.
+
+    Mutation control:
+      C60 restore `kwargs["eos_token_id"] = self._tokenizer.eos_token_id`
+           -> test_a_models_multi_id_eos_list_survives
+    """
+
+    def test_a_models_multi_id_eos_list_survives(self, service, mock_tokenizer):
+        """The gemma case: three declared ids, none may be dropped."""
+        service._model.generation_config = SimpleNamespace(eos_token_id=[1, 106, 50])
+        result = service._build_generate_kwargs(
+            GenerationConfig(max_new_tokens=100), {"input_ids": torch.tensor([[1, 2, 3]])}
+        )
+        eos = result["eos_token_id"]
+        assert isinstance(eos, list), (
+            f"a multi-id EOS list was collapsed to {eos!r}; <end_of_turn> is no "
+            f"longer a stop token and generation will run to max_new_tokens"
+        )
+        for tok in (1, 106, 50):
+            assert tok in eos, f"declared EOS {tok} was dropped"
+
+    def test_the_tokenizer_id_is_added_when_the_model_omits_it(self, service, mock_tokenizer):
+        """Union, not replace: a tokenizer id the model did not declare is kept."""
+        service._model.generation_config = SimpleNamespace(eos_token_id=[106])
+        result = service._build_generate_kwargs(
+            GenerationConfig(max_new_tokens=100), {"input_ids": torch.tensor([[1, 2, 3]])}
+        )
+        assert 106 in result["eos_token_id"]
+        assert mock_tokenizer.eos_token_id in result["eos_token_id"]
+
+    def test_no_duplicate_when_the_ids_already_agree(self, service, mock_tokenizer):
+        service._model.generation_config = SimpleNamespace(
+            eos_token_id=[mock_tokenizer.eos_token_id]
+        )
+        result = service._build_generate_kwargs(
+            GenerationConfig(max_new_tokens=100), {"input_ids": torch.tensor([[1, 2, 3]])}
+        )
+        eos = result["eos_token_id"]
+        ids = eos if isinstance(eos, list) else [eos]
+        assert ids.count(mock_tokenizer.eos_token_id) == 1
+
+    def test_falls_back_to_the_tokenizer_when_the_model_declares_none(
+        self, service, mock_tokenizer
+    ):
+        """The original behaviour, preserved for models with no declared EOS."""
+        service._model.generation_config = SimpleNamespace(eos_token_id=None)
+        result = service._build_generate_kwargs(
+            GenerationConfig(max_new_tokens=100), {"input_ids": torch.tensor([[1, 2, 3]])}
+        )
+        assert result["eos_token_id"] == mock_tokenizer.eos_token_id
+
+
+class TestStopStringsReachGenerate:
+    """OpenAI `stop` must stop generation, not just trim the output.
+
+    It was previously post-generation string truncation only: passing `stop`
+    flipped finish_reason to "stop" while completion_tokens and latency were
+    unchanged, i.e. every token was still generated and paid for.
+
+    Mutation control:
+      C61 remove the stop_strings block -> test_stop_sequences_are_passed_to_generate
+    """
+
+    def test_stop_sequences_are_passed_to_generate(self, service, mock_tokenizer):
+        gen_config = GenerationConfig(max_new_tokens=100, stop_sequences=["</done>", "\n\n"])
+        result = service._build_generate_kwargs(
+            gen_config, {"input_ids": torch.tensor([[1, 2, 3]])}
+        )
+        assert result["stop_strings"] == ["</done>", "\n\n"], (
+            "stop sequences never reached generate(); generation will run to "
+            "max_new_tokens and only the tail will be trimmed"
+        )
+        assert result["tokenizer"] is mock_tokenizer, (
+            "transformers requires the tokenizer alongside stop_strings"
+        )
+
+    def test_absent_stop_sequences_add_nothing(self, service, mock_tokenizer):
+        """No stop => neither key, so unrelated requests are unchanged."""
+        result = service._build_generate_kwargs(
+            GenerationConfig(max_new_tokens=100), {"input_ids": torch.tensor([[1, 2, 3]])}
+        )
+        assert "stop_strings" not in result
+        assert "tokenizer" not in result
+
+    def test_a_non_integer_generation_config_is_ignored(self, service, mock_tokenizer):
+        """A malformed generation_config must not reach generate().
+
+        Caught by an existing test: the mocked model's generation_config exposes
+        a MagicMock for eos_token_id, which is truthy. Forwarding it would hand
+        generate() a value it cannot use. Only ints are accepted.
+        """
+        service._model.generation_config = SimpleNamespace(eos_token_id="not-an-id")
+        result = service._build_generate_kwargs(
+            GenerationConfig(max_new_tokens=100), {"input_ids": torch.tensor([[1, 2, 3]])}
+        )
+        assert result["eos_token_id"] == mock_tokenizer.eos_token_id
+
+    def test_booleans_are_not_token_ids(self, service, mock_tokenizer):
+        service._model.generation_config = SimpleNamespace(eos_token_id=[True, 106])
+        result = service._build_generate_kwargs(
+            GenerationConfig(max_new_tokens=100), {"input_ids": torch.tensor([[1, 2, 3]])}
+        )
+        eos = result["eos_token_id"]
+        ids = eos if isinstance(eos, list) else [eos]
+        assert True not in [i for i in ids if isinstance(i, bool)]
+        assert 106 in ids

@@ -99,9 +99,11 @@ class GenerationConfig:
 
         Returns a dictionary suitable for passing to model.generate(**kwargs).
 
-        Note: stop_sequences requires custom StoppingCriteria,
-        which is not handled here. The InferenceService should
-        handle stop sequence logic separately.
+        Note: stop_sequences is NOT emitted here — transformers' `stop_strings`
+        also requires the tokenizer, which this pure config object does not
+        have. InferenceService._build_generate_kwargs adds both, and keeps its
+        post-generation truncation as well (needed for the streaming path, and
+        it makes the boundary exact when a stop string spans a token).
 
         Returns:
             Dictionary of kwargs for generate()

@@ -1691,7 +1691,61 @@ class InferenceService:
         kwargs["pad_token_id"] = (
             self._tokenizer.pad_token_id or self._tokenizer.eos_token_id
         )
-        kwargs["eos_token_id"] = self._tokenizer.eos_token_id
+
+        # Do NOT replace the model's EOS list with the tokenizer's single id.
+        #
+        # `tokenizer.eos_token_id` is a scalar. Many chat models stop on SEVERAL
+        # tokens and declare them in generation_config.json — gemma-4-12B-it
+        # ships `eos_token_id: [1, 106, 50]`, where 106 is <end_of_turn>.
+        # Assigning the scalar REPLACES that list, so the model closes its turn,
+        # the closing token is not honoured, and generation runs on to
+        # max_new_tokens. Observed against gemma-4-12B-it: valid JSON, then a
+        # bare "thought" (a vocab token that survives skip_special_tokens=True),
+        # then the same JSON again, repeating until the cap. It cost ~1.7x the
+        # tokens of a correct stop on every single request.
+        #
+        # Union instead: keep everything the model declares, and add the
+        # tokenizer's id only if it is missing. A model that declares nothing
+        # still falls back to the tokenizer, which is what this line was for.
+        # Only INTEGER ids are accepted. A generation_config carrying anything
+        # else is treated as declaring nothing and we fall back to the
+        # tokenizer, rather than forwarding a value generate() cannot use.
+        raw_eos = getattr(
+            getattr(self._model, "generation_config", None), "eos_token_id", None
+        )
+        if isinstance(raw_eos, int) and not isinstance(raw_eos, bool):
+            declared = [raw_eos]
+        elif isinstance(raw_eos, (list, tuple)):
+            declared = [i for i in raw_eos if isinstance(i, int) and not isinstance(i, bool)]
+        else:
+            declared = []
+
+        tok_eos = self._tokenizer.eos_token_id
+        if isinstance(tok_eos, int) and not isinstance(tok_eos, bool) and tok_eos not in declared:
+            declared.append(tok_eos)
+
+        if declared:
+            kwargs["eos_token_id"] = declared[0] if len(declared) == 1 else declared
+        else:
+            kwargs["eos_token_id"] = tok_eos
+
+        # Make the OpenAI `stop` parameter actually STOP generation.
+        #
+        # It was previously honoured only as post-generation string truncation,
+        # so a request with `stop` still generated every token up to
+        # max_new_tokens and merely had the tail trimmed off — measured against
+        # gemma-4-12B-it, passing `stop` flipped finish_reason to "stop" while
+        # completion_tokens and latency were unchanged. transformers supports
+        # this natively via `stop_strings`, which additionally requires the
+        # tokenizer to be handed to generate().
+        #
+        # The caller's post-hoc truncation stays as-is: it is still needed for
+        # the streaming path, and it makes the boundary exact when a stop string
+        # spans a token.
+        stop_sequences = getattr(gen_config, "stop_sequences", None)
+        if stop_sequences:
+            kwargs["stop_strings"] = list(stop_sequences)
+            kwargs["tokenizer"] = self._tokenizer
 
         draft_model = self._get_draft_model()
         if draft_model is not None:

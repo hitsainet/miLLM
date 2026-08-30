@@ -28,6 +28,20 @@ spec:
       labels:
         app: postgres
     spec:
+      # PINNED. This volume is a hostPath, so the data lives on ONE node's disk
+      # and the pod is only correct where that disk is. Unpinned, the scheduler
+      # may place it anywhere; `type: DirectoryOrCreate` then makes an EMPTY
+      # directory on the new node and postgres initialises a BRAND NEW EMPTY
+      # DATABASE. Nothing errors — the service comes up healthy against an empty
+      # DB while the real data sits untouched on the original node.
+      #
+      # That happened on 2026-08-30: a reboot moved this pod to mcs-lnxhost02
+      # and miLLM came back reporting 2 models where it had had 30+, because it
+      # was reading a database created minutes earlier. millm-backend was
+      # already pinned this way (it needs the GPU); postgres and redis simply
+      # never had the same treatment.
+      nodeSelector:
+        kubernetes.io/hostname: mcs-lnxgpu01
       containers:
         - name: postgres
           image: postgres:16

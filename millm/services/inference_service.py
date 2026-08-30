@@ -1688,8 +1688,18 @@ class InferenceService:
             if model_cache_impl:
                 kwargs["cache_implementation"] = model_cache_impl
         kwargs.update({k: v.to(self._get_input_device()) for k, v in inputs.items()})
+        # `or` is wrong here: a pad_token_id of 0 is FALSY, so a model that
+        # legitimately uses id 0 as its pad token silently got eos as the pad
+        # filler instead. gemma-4-12B-it is exactly that case
+        # (generation_config.json: pad_token_id 0, eos_token_id [1, 106, 50]).
+        #
+        # Harmless while every request is a single sequence — nothing is padded,
+        # so the value is never written. It stops being harmless the moment a
+        # batch is generated: transformers fills finished rows with this id each
+        # step, so the wrong value lands in every early-finishing row.
+        _pad = self._tokenizer.pad_token_id
         kwargs["pad_token_id"] = (
-            self._tokenizer.pad_token_id or self._tokenizer.eos_token_id
+            _pad if _pad is not None else self._tokenizer.eos_token_id
         )
 
         # Do NOT replace the model's EOS list with the tokenizer's single id.
@@ -2178,6 +2188,365 @@ class InferenceService:
     # Chat Completions
     # =========================================================================
 
+    async def _generate_batch_chunk(
+        self,
+        prompts: list[str],
+        gen_config: Any,
+        completion_id: str,
+        chunk_start: int,
+    ) -> list[dict]:
+        """Generate one chunk as a single batched forward pass.
+
+        Returns one dict per prompt, in input order.
+        """
+        # LEFT PADDING IS LOAD-BEARING AND ITS FAILURE IS SILENT.
+        #
+        # transformers defaults to RIGHT padding. For a decoder-only model that
+        # puts the pad tokens BETWEEN the prompt and the first generated token,
+        # so every row shorter than the longest continues from padding and
+        # produces fluent garbage — while the longest row, being unpadded, looks
+        # perfect. Nothing raises. Left padding keeps every row's prompt flush
+        # against the generation boundary.
+        #
+        # Passed per-call, never by assigning self._tokenizer.padding_side: that
+        # object is shared with the streaming path, embeddings, chat formatting
+        # and stop_strings, and a global mutation here would reach all of them.
+        inputs = self._tokenizer(
+            prompts,
+            return_tensors="pt",
+            padding=True,
+            padding_side="left",
+        ).to(self._get_input_device())
+
+        padded_width = inputs["input_ids"].shape[1]
+        # One check on the padded width — that is the width the model actually
+        # runs — rather than per prompt.
+        self._check_context_length(padded_width, gen_config.max_new_tokens)
+
+        generate_kwargs = self._build_generate_kwargs(gen_config, inputs)
+
+        # transformers raises "assisted generate is only supported for
+        # batch_size = 1". Drop the draft model for this pass rather than fail;
+        # the batch speedup is far larger than the speculative one anyway.
+        if generate_kwargs.pop("assistant_model", None) is not None:
+            logger.info(
+                "batch_speculative_disabled", batch_size=len(prompts),
+                request_id=completion_id,
+            )
+
+        outputs = await asyncio.to_thread(self._generate_sync, generate_kwargs)
+
+        self._notify_monitoring(request_id=f"{completion_id}:batch_{chunk_start}")
+
+        attention_mask = inputs.get("attention_mask")
+        pad_id = generate_kwargs.get("pad_token_id")
+        eos_ids = generate_kwargs.get("eos_token_id")
+        if isinstance(eos_ids, int):
+            eos_ids = [eos_ids]
+        eos_set = set(eos_ids or [])
+
+        results: list[dict] = []
+        for row_idx in range(len(prompts)):
+            # True prompt length is the unpadded count, not the padded width —
+            # billing the pad volume would over-report usage on every short row.
+            if attention_mask is not None:
+                prompt_tokens = int(attention_mask[row_idx].sum())
+            else:
+                prompt_tokens = padded_width
+
+            generated_ids = outputs[row_idx][padded_width:]
+
+            # generate() runs until EVERY row finishes, filling rows that
+            # stopped early with pad tokens. Without trimming here, a row that
+            # stopped at 20 tokens reports the batch's length and inherits the
+            # batch's finish_reason — so one long row would make every row in
+            # the batch claim "length".
+            trimmed = generated_ids
+            for pos in range(generated_ids.shape[0]):
+                tok = int(generated_ids[pos])
+                if tok in eos_set or (pad_id is not None and tok == pad_id):
+                    trimmed = generated_ids[:pos + 1]
+                    break
+
+            completion_text = self._tokenizer.decode(
+                trimmed, skip_special_tokens=True
+            )
+            completion_tokens = int(trimmed.shape[0])
+
+            completion_text, stopped_by_sequence = self._apply_stop_sequences(
+                completion_text, gen_config.stop_sequences
+            )
+
+            if stopped_by_sequence:
+                finish_reason = "stop"
+            else:
+                last_token_id = (
+                    int(trimmed[-1]) if completion_tokens > 0 else None
+                )
+                finish_reason = self._determine_finish_reason(
+                    completion_tokens,
+                    gen_config.max_new_tokens,
+                    last_token_id=last_token_id,
+                )
+
+            results.append({
+                "text": completion_text,
+                "finish_reason": finish_reason,
+                "prompt_tokens": prompt_tokens,
+                "completion_tokens": completion_tokens,
+            })
+
+        return results
+
+    # Batch 8 is the shipped default: 5.59x throughput with 4.8 GB of headroom
+    # on a 24 GB card serving gemma-4-12B-it at Q8. Batch 12 reaches 7.31x but
+    # leaves 1.7 GB, and 16 OOMed outright — too close to the edge for an
+    # unattended run. This ceiling is a safety net under that default, not a
+    # substitute for it.
+    MAX_BATCH_ROWS = 8
+
+    def _project_kv_bytes(self, rows: int, total_len: int) -> Optional[int]:
+        """Bytes of KV cache a `rows x total_len` batch would need, or None.
+
+        None means the projection could not be made (an unknown config shape),
+        and the caller must then fall back to the row cap rather than to an
+        unbounded batch — an unmeasurable batch is not a safe batch.
+        """
+        try:
+            cfg = self._model.config
+            layers = getattr(cfg, "num_hidden_layers", None)
+            hidden = getattr(cfg, "hidden_size", None)
+            heads = getattr(cfg, "num_attention_heads", None)
+            kv_heads = getattr(cfg, "num_key_value_heads", None) or heads
+            if not all(isinstance(v, int) and v > 0
+                       for v in (layers, hidden, heads, kv_heads)):
+                return None
+            head_dim = getattr(cfg, "head_dim", None) or (hidden // heads)
+            # key + value, 2 bytes per element at fp16/bf16 KV.
+            return 2 * 2 * rows * total_len * layers * kv_heads * head_dim
+        except Exception:
+            return None
+
+    def _chunk_batch_for_memory(
+        self, prompts: list[str], max_new_tokens: int
+    ) -> list[tuple[int, list[str]]]:
+        """Split a batch into chunks that fit, yielding (start_index, chunk).
+
+        Chunking rather than refusing: the caller asked for N conversations and
+        gets N back either way, so the API contract does not depend on how much
+        VRAM happened to be free. A slow answer beats a 500.
+        """
+        rows = min(len(prompts), self.MAX_BATCH_ROWS)
+
+        try:
+            from millm.ml.memory_utils import is_cuda_available, verify_memory_available
+
+            if is_cuda_available() and prompts:
+                longest = max(len(self._tokenizer.encode(p)) for p in prompts)
+                total_len = longest + max(int(max_new_tokens or 0), 0)
+                while rows > 1:
+                    projected = self._project_kv_bytes(rows, total_len)
+                    if projected is None:
+                        break  # unmeasurable -> keep the row cap, do not grow
+                    need_mb = int(projected / (1024 * 1024) * 1.2)  # +20% slack
+                    ok, available_mb = verify_memory_available(need_mb)
+                    if ok:
+                        break
+                    rows -= 1
+                    logger.info(
+                        "batch_chunk_reduced", rows=rows,
+                        needed_mb=need_mb, available_mb=available_mb,
+                    )
+        except Exception:
+            logger.warning("batch_memory_projection_failed", exc_info=True)
+
+        rows = max(1, rows)
+        return [
+            (i, prompts[i:i + rows]) for i in range(0, len(prompts), rows)
+        ]
+
+    # Batch position IS conversation index in this path: row i of the batch is
+    # prompts[i], which is `messages` at 0 and `extra_messages[i-1]` after. The
+    # ":batch_i" monitoring tag below therefore names the conversation. (CBM
+    # borrows the same suffix for a different quantity; see its docstring.)
+    async def _create_batched_chat_completion(
+        self, request: ChatCompletionRequest
+    ) -> ChatCompletionResponse:
+        """Generate every conversation in the request in ONE forward pass.
+
+        The weights are read once and amortised across the batch — the vLLM
+        mechanism. Measured 5.59x aggregate throughput at batch 8 on
+        gemma-4-12B-it. Running the same N as independent concurrent requests
+        does NOT do this: each re-reads the full weights, which is why this is
+        a batch and why MAX_CONCURRENT_REQUESTS stays at 1.
+
+        The whole batch is ONE request holding ONE queue slot, so the steering
+        isolation that the concurrency limit provides is untouched. Steering
+        applies uniformly to every row (the delta is expanded over the batch
+        dimension in sae_wrapper), which is correct for a single request.
+
+        NOT BIT-REPRODUCIBLE AGAINST SERIAL, and this is inherent rather than a
+        defect to be fixed. Measured on gemma-4-12B-it at int8 (2026-08-30):
+        a prompt that is the LONGEST in its batch — and therefore receives no
+        padding at all — still produces different greedy text at batch 1, 2 and
+        4. Each shape is individually deterministic (repeat a shape, get the
+        same bytes), so the cause is the batched GEMM's reduction order under
+        bitsandbytes dequantisation: tiny FP differences flip a near-tie argmax
+        and greedy decoding diverges from that token on.
+
+        Quality is unaffected — over 8 realistic labeling prompts, 5/8 labels
+        were identical and the other 3 differed only in wording between equally
+        good answers ("physical floor covering" vs "household floor covering"),
+        with zero parse failures on either path.
+
+        The consequence that matters: BATCH COMPOSITION IS AN INPUT. For bulk
+        labeling that is harmless. For a labeling TRIAL, where the template is
+        supposed to be the only variable, it is not — vary the batching and the
+        template stops being the only thing that changed. Trials must hold the
+        batch size and the panel order fixed, or run serially.
+        """
+        conversations = [request.messages] + list(request.extra_messages or [])
+        completion_id = f"chatcmpl-{uuid.uuid4().hex[:24]}"
+        created = int(datetime.now().timestamp())
+
+        # CBM has no batched path. Falling through to it would silently drop
+        # every conversation after the first, so serve serially instead: slower
+        # than a batch, identical in result.
+        if self._use_cbm_for_request(
+            temperature=getattr(request, "temperature", None),
+            top_p=getattr(request, "top_p", None),
+            has_steering_override=self._has_steering_override(request),
+        ):
+            logger.info(
+                "batch_serialised", reason="cbm_active",
+                batch_size=len(conversations), request_id=completion_id,
+            )
+            return await self._serial_chat_fallback(
+                request, conversations, completion_id, created
+            )
+
+        prompts = [self._format_chat_messages(c) for c in conversations]
+        gen_config = GenerationConfig.from_request(request)
+
+        choices: list[ChatCompletionChoice] = []
+        total_prompt_tokens = 0
+        total_completion_tokens = 0
+
+        async with self._request_queue.acquire():
+            _saved_steering = None
+            if request.profile or request.steering_intensity is not None:
+                _saved_steering = await self._apply_request_steering(
+                    request.profile, request.steering_intensity,
+                    request_id=completion_id,
+                )
+
+            # Sensing is refused for a batch: hit positions are absolute within
+            # a row, and there is no way to attribute them back to a
+            # conversation once the rows are padded to a common width. It goes
+            # UNSENSED rather than mis-attributed — and it says so, because a
+            # sensing path that goes quietly dark while /api/sensing/status
+            # still reports armed is the failure this project has shipped
+            # before.
+            try:
+                from millm.services.sae_service import AttachedSAEState as _S
+
+                _armed = _S().attached_sae
+                if _armed is not None and _armed.is_sensing_armed:
+                    logger.info(
+                        "sensing_skipped", reason="batched_request",
+                        batch_size=len(prompts), request_id=completion_id,
+                    )
+            except Exception:  # pragma: no cover - never fail a request on this
+                logger.warning("sensing_skip_log_failed", exc_info=True)
+
+            try:
+                for chunk_start, chunk in self._chunk_batch_for_memory(
+                    prompts, gen_config.max_new_tokens
+                ):
+                    rows = await self._generate_batch_chunk(
+                        chunk, gen_config, completion_id, chunk_start
+                    )
+                    for offset, row in enumerate(rows):
+                        choices.append(
+                            ChatCompletionChoice(
+                                index=chunk_start + offset,
+                                message=ChatMessage(
+                                    role="assistant", content=row["text"]
+                                ),
+                                finish_reason=row["finish_reason"],
+                            )
+                        )
+                        total_prompt_tokens += row["prompt_tokens"]
+                        total_completion_tokens += row["completion_tokens"]
+            finally:
+                self._restore_request_profile(_saved_steering)
+
+        model_info = self.get_loaded_model_info()
+        model_name = model_info.name if model_info else "unknown"
+
+        return ChatCompletionResponse(
+            id=completion_id,
+            created=created,
+            model=model_name,
+            choices=choices,
+            usage=Usage(
+                prompt_tokens=total_prompt_tokens,
+                completion_tokens=total_completion_tokens,
+                total_tokens=total_prompt_tokens + total_completion_tokens,
+            ),
+        )
+
+    async def _serial_chat_fallback(
+        self,
+        request: ChatCompletionRequest,
+        conversations: list,
+        completion_id: str,
+        created: int,
+    ) -> ChatCompletionResponse:
+        """One conversation at a time, assembled into one batched-shaped response.
+
+        Used when a batch cannot be served as a batch (CBM active, or
+        speculative decoding attached — transformers rejects assisted generation
+        for batch_size > 1). The contract the caller sees is identical; only the
+        throughput differs.
+        """
+        choices: list[ChatCompletionChoice] = []
+        p_tokens = 0
+        c_tokens = 0
+        for i, conv in enumerate(conversations):
+            sub = request.model_copy(
+                update={"messages": conv, "extra_messages": None, "n": 1}
+            )
+            resp = await self.create_chat_completion(sub)
+            inner = resp.choices[0] if resp.choices else None
+            choices.append(
+                ChatCompletionChoice(
+                    index=i,
+                    message=(
+                        inner.message
+                        if inner
+                        else ChatMessage(role="assistant", content="")
+                    ),
+                    finish_reason=(inner.finish_reason if inner else "stop"),
+                )
+            )
+            if resp.usage:
+                p_tokens += resp.usage.prompt_tokens
+                c_tokens += resp.usage.completion_tokens
+
+        model_info = self.get_loaded_model_info()
+        return ChatCompletionResponse(
+            id=completion_id,
+            created=created,
+            model=model_info.name if model_info else "unknown",
+            choices=choices,
+            usage=Usage(
+                prompt_tokens=p_tokens,
+                completion_tokens=c_tokens,
+                total_tokens=p_tokens + c_tokens,
+            ),
+        )
+
     async def create_chat_completion(
         self, request: ChatCompletionRequest
     ) -> ChatCompletionResponse:
@@ -2195,6 +2564,12 @@ class InferenceService:
         Raises:
             RuntimeError: If no model is loaded
         """
+        # Batched extension: every conversation in ONE forward pass. Checked
+        # before the CBM delegation because that path has no batch support and
+        # would silently drop all but the first conversation.
+        if getattr(request, "extra_messages", None):
+            return await self._create_batched_chat_completion(request)
+
         # Delegate to CBM if active and sampling params are compatible
         if self._use_cbm_for_request(
             temperature=getattr(request, "temperature", None),

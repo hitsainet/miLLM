@@ -57,6 +57,31 @@ class ChatCompletionRequest(BaseModel):
     presence_penalty: float = Field(default=0.0, ge=-2.0, le=2.0)
     user: Optional[str] = None
 
+    # miLLM extension - BATCHED generation.
+    #
+    # A list of additional conversations to generate alongside `messages`, in
+    # ONE batched forward pass. The weights are read once and amortised across
+    # the batch: measured 5.59x aggregate throughput at batch 8 on
+    # gemma-4-12B-it (4.63 -> 25.90 tok/s), with GPU utilisation moving from
+    # 29.7% to 51.5% mean. N independent concurrent requests do NOT achieve
+    # this — each re-reads the full weights — which is why this is a batch
+    # field and not a higher concurrency limit.
+    #
+    # A batch is still ONE request holding ONE queue slot, so
+    # MAX_CONCURRENT_REQUESTS stays at 1 and the steering isolation it provides
+    # is untouched. Steering applies uniformly to every row, which is correct
+    # for a single request; sensing is refused for a batch (it cannot attribute
+    # positions to a row) and says so in the log.
+    #
+    # Response carries one choice per conversation, `index` in input order:
+    # index 0 is `messages`, index i is `extra_messages[i-1]`. Clients must
+    # demultiplex on `index`, never on wire order.
+    #
+    # IMPORTANT for clients: this schema is extra="ignore", so a server that
+    # predates this field ACCEPTS it and silently returns a single choice.
+    # Detect support via the X-miLLM-Batch response header before relying on it.
+    extra_messages: Optional[list[list[ChatMessage]]] = None
+
     # miLLM extension - steering profile override
     profile: Optional[str] = None
 

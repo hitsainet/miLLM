@@ -152,6 +152,16 @@ async def create_chat_completion(
         # FastAPI's injected Response lets us set custom headers on the
         # auto-serialised Pydantic response without wrapping it manually.
         response.headers["X-miLLM-Backend"] = backend
+
+        # X-miLLM-Batch advertises the batched-generation extension. Both
+        # request schemas are extra="ignore", so a server predating
+        # `extra_messages` ACCEPTS the field and silently returns a single
+        # choice — a client cannot tell that from a batch of one. This header
+        # is the capability probe that makes the difference observable; a
+        # client that does not see it must fall back to serial requests.
+        response.headers["X-miLLM-Batch"] = str(
+            len(request.extra_messages) + 1 if request.extra_messages else 1
+        )
         if echo_intensity is not None:
             response.headers["X-miLLM-Steering-Intensity"] = echo_intensity
         # F18 R3-01: generate FIRST, then decide whether the rung header is

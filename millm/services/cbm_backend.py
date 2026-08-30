@@ -121,7 +121,10 @@ class ContinuousBatchingBackend:
         eos_token_id = (
             (_declared[0] if len(_declared) == 1 else _declared) if _declared else tok_eos
         )
-        pad_token_id = tokenizer.pad_token_id or tok_eos
+        # `or` would discard a legitimate pad_token_id of 0 (falsy) —
+        # see the note in InferenceService._build_generate_kwargs.
+        _pad = tokenizer.pad_token_id
+        pad_token_id = _pad if _pad is not None else tok_eos
 
         hf_config = HFGenerationConfig(
             max_new_tokens=self._default_max_tokens,

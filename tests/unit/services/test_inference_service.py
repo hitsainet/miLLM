@@ -297,15 +297,30 @@ class TestBuildGenerateKwargs:
         assert result["pad_token_id"] == 1
         assert result["eos_token_id"] == 2
 
-    def test_falls_back_to_eos_when_pad_is_zero(self, service, mock_tokenizer):
-        """Uses eos_token_id when pad_token_id is 0 (falsy in Python or-expression)."""
+    def test_a_pad_token_id_of_zero_is_honoured(self, service, mock_tokenizer):
+        """A pad_token_id of 0 is a real id, not an absent one.
+
+        This assertion previously ran the other way, and its own docstring gave
+        the reason: "falsy in Python or-expression". It documented the language
+        mechanic rather than an intended behaviour — `pad_token_id or eos` threw
+        away a legitimate id 0 — and its sibling below already covers the case
+        that IS intended (pad_token_id is None).
+
+        gemma-4-12B-it is exactly this model: generation_config.json declares
+        pad_token_id 0 and eos_token_id [1, 106, 50]. The distinction is inert
+        while every request is one sequence, because nothing is ever padded. It
+        becomes real under batched generation, where transformers writes this id
+        into every finished row on every subsequent step.
+        """
         mock_tokenizer.pad_token_id = 0
         gen_config = GenerationConfig(max_new_tokens=100)
         inputs = {"input_ids": torch.tensor([[1, 2, 3]])}
         result = service._build_generate_kwargs(gen_config, inputs)
 
-        # 0 is falsy, so `0 or 2` evaluates to 2
-        assert result["pad_token_id"] == 2
+        assert result["pad_token_id"] == 0, (
+            "a declared pad_token_id of 0 was discarded in favour of eos; "
+            "batched generation would fill finished rows with the wrong token"
+        )
 
     def test_falls_back_to_eos_when_no_pad(self, service, mock_tokenizer):
         """Uses eos_token_id as pad_token_id when pad_token_id is None."""

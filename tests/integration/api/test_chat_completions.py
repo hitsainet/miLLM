@@ -435,3 +435,88 @@ class TestOpenAIValidationHandlerHardening:
         )
         assert response.status_code == 422
         assert "detail" in response.json()
+
+
+class TestBatchCapabilityHeader:
+    """X-miLLM-Batch is the probe that makes batch support observable.
+
+    Without it a client cannot distinguish this server from one that predates
+    `extra_messages`: both schemas are extra="ignore", so the older server
+    accepts the field and returns a single choice with no error.
+    """
+
+    BODY = {
+        "model": "gpt-4",
+        "messages": [{"role": "user", "content": "one"}],
+    }
+
+    def _app(self, choices):
+        from unittest.mock import AsyncMock, MagicMock
+
+        from millm.api.dependencies import get_inference_service, get_model_service
+        from millm.api.schemas.openai import (
+            ChatCompletionChoice,
+            ChatCompletionResponse,
+            ChatMessage,
+            Usage,
+        )
+        from millm.main import create_app
+
+        app = create_app()
+        inference = MagicMock()
+        info = MagicMock()
+        info.name = "gpt-4"
+        inference.get_loaded_model_info.return_value = info
+        inference.backend_name = "serial"
+        inference.resolve_request_intensity = AsyncMock(return_value=None)
+        inference.request_queue = MagicMock(pending_count=0, max_pending=5)
+        inference.create_chat_completion = AsyncMock(
+            return_value=ChatCompletionResponse(
+                id="chatcmpl-x",
+                created=0,
+                model="gpt-4",
+                choices=[
+                    ChatCompletionChoice(
+                        index=i,
+                        message=ChatMessage(role="assistant", content=f"r{i}"),
+                        finish_reason="stop",
+                    )
+                    for i in range(choices)
+                ],
+                usage=Usage(prompt_tokens=1, completion_tokens=1, total_tokens=2),
+            )
+        )
+        model_service = MagicMock()
+        model_service.find_model_by_name = AsyncMock(return_value=MagicMock())
+        app.dependency_overrides[get_inference_service] = lambda: inference
+        app.dependency_overrides[get_model_service] = lambda: model_service
+        return app
+
+    def test_header_reports_the_batch_size(self):
+        from fastapi.testclient import TestClient
+
+        with TestClient(self._app(3)) as tc:
+            r = tc.post(
+                "/v1/chat/completions",
+                json={
+                    **self.BODY,
+                    "extra_messages": [
+                        [{"role": "user", "content": "two"}],
+                        [{"role": "user", "content": "three"}],
+                    ],
+                },
+            )
+        assert r.status_code == 200
+        assert r.headers["X-miLLM-Batch"] == "3"
+        assert len(r.json()["choices"]) == 3
+
+    def test_header_is_present_for_an_unbatched_request(self):
+        """Presence is the capability signal; the value is just the size."""
+        from fastapi.testclient import TestClient
+
+        with TestClient(self._app(1)) as tc:
+            r = tc.post("/v1/chat/completions", json=self.BODY)
+        assert r.status_code == 200
+        assert r.headers["X-miLLM-Batch"] == "1", (
+            "a client cannot detect batch support without this header"
+        )

@@ -136,7 +136,24 @@ jobs:
       - name: Install the contract-guard dependencies
         # Only what the guard needs: pytest to run it, mcp to import the
         # sibling registry. Not the full ML stack.
-        run: pip install pytest mcp pydantic pydantic-settings
+        #
+        # The mcp constraint is READ FROM miStudio's own requirements.txt
+        # rather than written here. A second hand-maintained copy is exactly
+        # what broke this job: `pip install mcp` was unbounded, mcp 2.x renamed
+        # FastMCP to MCPServer, and miStudio's v1 server module stopped
+        # importing — so the guard reported "cannot run" on every push from
+        # 2026-08-19 onward while miStudio's own CI stayed green on 1.x.
+        # Deriving it means the guard installs what miStudio actually declares,
+        # and a future bump there needs no edit here.
+        run: |
+          spec=$(grep -oE '^mcp[<>=!,.0-9]+' miStudio/backend/requirements.txt | head -1)
+          if [ -z "$spec" ]; then
+            echo "::error::could not read the mcp constraint from miStudio's"
+            echo "::error::requirements.txt — refusing to guess a version."
+            exit 1
+          fi
+          echo "installing mcp as declared by miStudio: $spec"
+          pip install pytest "$spec" pydantic pydantic-settings
 
       - name: Run the cross-repo guard
         # If the sibling checkout failed (a fork PR without access), the guard

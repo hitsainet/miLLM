@@ -113,19 +113,22 @@ spec:
             # concurrency soak before it goes anywhere near production.
             - name: ENABLE_CONTINUOUS_BATCHING
               value: "false"
-            # Bring the served model back after a restart.
+            # AUTO_LOAD_MODEL is deliberately UNSET.
             #
-            # Without this the pod comes up serving NOTHING: main.py resets every
-            # 'loaded'/'loading' row to 'ready' on startup (the status is process
-            # state, not durable state), and only AUTO_LOAD_MODEL reloads one.
-            # Every deploy therefore silently took inference offline until a human
-            # noticed and re-loaded an 8B model by hand.
+            # It existed because the OpenAI endpoints refused any model that was
+            # not already loaded, so a restart left inference dead until someone
+            # loaded one by hand. Pinning a model here papered over that: the pod
+            # came back serving granite-4.1-8b regardless of what the operator
+            # actually wanted, and selecting anything else in a client did
+            # nothing.
             #
-            # The dtype is NOT pinned here: load_model() passes the model row's
-            # own `quantization`, so this reloads whatever was last configured
-            # (currently FP16) rather than overriding an operator's choice.
-            - name: AUTO_LOAD_MODEL
-              value: "granite-4.1-8b"
+            # The endpoints now load on demand (load_model_and_wait, which had
+            # been written for this and never called), so the first request
+            # brings up the model it names. That is strictly better than a fixed
+            # default: no wrong model resident, no 12 GB of VRAM held by
+            # something nobody asked for, and client-side model selection works.
+            #
+            # Set it only if you want a specific model warm before first request.
           volumeMounts:
             - name: millm-data
               mountPath: /data

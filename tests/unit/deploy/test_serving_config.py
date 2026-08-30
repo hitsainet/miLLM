@@ -48,11 +48,50 @@ def _backend_env():
 
 
 class TestTheModelComesBackAfterARestart:
-    def test_auto_load_model_is_configured(self):
-        env = _backend_env()
-        assert env.get("AUTO_LOAD_MODEL"), (
-            "AUTO_LOAD_MODEL is unset, so a restart leaves the pod Ready and "
-            "healthy while serving no model at all"
+    """A restart must not leave inference dead — but a PINNED model is not how.
+
+    This class used to require AUTO_LOAD_MODEL to be set, because the OpenAI
+    endpoints refused any model that was not already loaded and a restart
+    therefore served nothing until a human intervened. That assertion pinned the
+    WORKAROUND rather than the guarantee, and the workaround had costs: the pod
+    came back holding whatever model was named here regardless of what the
+    operator wanted, and selecting a different model in a client did nothing.
+
+    The guarantee is now provided at the source — the endpoints load the model
+    they are asked for — so the invariant worth testing is that they do.
+    """
+
+    ENDPOINTS = ("chat.py", "completions.py", "embeddings.py")
+
+    def _routes_dir(self):
+        return Path(__file__).resolve().parents[3] / "millm" / "api" / "routes" / "openai"
+
+    def test_every_openai_endpoint_loads_the_requested_model(self):
+        missing = [
+            name for name in self.ENDPOINTS
+            if "load_model_and_wait" not in (self._routes_dir() / name).read_text()
+        ]
+        assert not missing, (
+            f"{missing} do not load the requested model, so a restart serves "
+            "nothing until someone loads one by hand, and picking a model in a "
+            "client is a no-op"
+        )
+
+    def test_a_locked_model_is_still_refused_rather_than_swapped(self):
+        """Loading on demand must not become 'swap the weights during steering'."""
+        for name in self.ENDPOINTS:
+            src = (self._routes_dir() / name).read_text()
+            assert "ModelLockedError" in src, (
+                f"{name} loads on demand without handling ModelLockedError; a "
+                "request naming another model would swap the weights out from "
+                "under an attached SAE"
+            )
+
+    def test_auto_load_model_is_optional_now(self):
+        """Set it to pre-warm a model; nothing should REQUIRE it."""
+        value = _backend_env().get("AUTO_LOAD_MODEL")
+        assert value is None or value, (
+            "AUTO_LOAD_MODEL is present but empty; unset it or name a model"
         )
 
     def test_it_names_a_model_not_a_dtype_variant(self):
@@ -62,6 +101,8 @@ class TestTheModelComesBackAfterARestart:
         dtype here would either be ignored or fight the operator's choice.
         """
         value = _backend_env().get("AUTO_LOAD_MODEL", "")
+        if not value:
+            pytest.skip("AUTO_LOAD_MODEL is unset — nothing to validate")
         for token in ("fp16", "bf16", "q4", "q8", "int8", "4bit"):
             assert token not in value.lower(), (
                 f"AUTO_LOAD_MODEL={value!r} encodes a dtype; quantization comes "

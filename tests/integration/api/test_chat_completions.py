@@ -13,17 +13,41 @@ from fastapi.testclient import TestClient
 from millm.main import create_app
 
 
+
 @pytest.fixture
 def client():
-    """Create test client."""
+    """Client whose ModelService reports the requested model as UNKNOWN.
+
+    These tests post model "gpt-4", which this server does not have. Before
+    on-demand loading they asserted 503 "no model loaded", because the endpoint
+    rejected anything not already resident and never got as far as looking the
+    name up properly — the mocked DB session returned a truthy stub for
+    find_model_by_name, and nothing ever touched it.
+
+    Now the endpoints LOAD what they are asked for, so an unknown name is a
+    404 model_not_found and a known one would be loaded. Overriding the service
+    explicitly makes that distinction real instead of an artifact of how deeply
+    the session mock happened to be inspected.
+    """
+    from unittest.mock import AsyncMock, MagicMock
+
+    from millm.api.dependencies import get_model_service
+
+    svc = MagicMock()
+    svc.find_model_by_name = AsyncMock(return_value=None)
+    svc.get_locked_model = AsyncMock(return_value=None)
+    svc.get_available_models = AsyncMock(return_value=[])
+    svc.load_model_and_wait = AsyncMock()
+
     app = create_app()
+    app.dependency_overrides[get_model_service] = lambda: svc
     return TestClient(app)
 
 
 class TestChatCompletionsNoModel:
     """Tests when no model is loaded."""
 
-    def test_returns_503_when_no_model(self, client):
+    def test_returns_404_for_an_unknown_model(self, client):
         """POST /v1/chat/completions returns 503 when no model is loaded."""
         response = client.post(
             "/v1/chat/completions",
@@ -32,12 +56,12 @@ class TestChatCompletionsNoModel:
                 "messages": [{"role": "user", "content": "Hello"}],
             },
         )
-        assert response.status_code == 503
+        assert response.status_code == 404
         data = response.json()
         assert "error" in data
-        assert data["error"]["code"] == "model_not_loaded"
+        assert data["error"]["code"] == "model_not_found"
 
-    def test_streaming_returns_503_when_no_model(self, client):
+    def test_streaming_returns_404_for_an_unknown_model(self, client):
         """POST /v1/chat/completions with stream=true returns 503 when no model."""
         response = client.post(
             "/v1/chat/completions",
@@ -47,7 +71,7 @@ class TestChatCompletionsNoModel:
                 "stream": True,
             },
         )
-        assert response.status_code == 503
+        assert response.status_code == 404
 
 
 class TestChatCompletionsValidation:
@@ -151,7 +175,7 @@ class TestChatCompletionsWithValidParams:
             },
         )
         # Should be 503 (no model) not 422 (validation)
-        assert response.status_code == 503
+        assert response.status_code == 404
 
     def test_accepts_temperature_zero(self, client):
         """Temperature=0 (greedy decoding) is accepted."""
@@ -163,7 +187,7 @@ class TestChatCompletionsWithValidParams:
                 "temperature": 0.0,
             },
         )
-        assert response.status_code == 503
+        assert response.status_code == 404
 
     def test_accepts_stop_string(self, client):
         """Single stop sequence as string is accepted."""
@@ -175,7 +199,7 @@ class TestChatCompletionsWithValidParams:
                 "stop": "END",
             },
         )
-        assert response.status_code == 503
+        assert response.status_code == 404
 
     def test_accepts_stop_list(self, client):
         """Stop sequences as list is accepted."""
@@ -187,7 +211,7 @@ class TestChatCompletionsWithValidParams:
                 "stop": ["END", "STOP"],
             },
         )
-        assert response.status_code == 503
+        assert response.status_code == 404
 
     def test_extra_fields_ignored(self, client):
         """Unknown fields are ignored, not rejected."""
@@ -202,7 +226,7 @@ class TestChatCompletionsWithValidParams:
             },
         )
         # Should be 503 (no model) not 422 (validation)
-        assert response.status_code == 503
+        assert response.status_code == 404
 
 
 class TestChatCompletionsErrorFormat:
@@ -230,7 +254,7 @@ class TestChatCompletionsErrorFormat:
         # May have optional fields
         # param and code can be None or missing
 
-    def test_503_returns_server_error_type(self, client):
+    def test_unknown_model_returns_invalid_request_type(self, client):
         """503 status returns server_error type."""
         response = client.post(
             "/v1/chat/completions",
@@ -240,7 +264,7 @@ class TestChatCompletionsErrorFormat:
             },
         )
         data = response.json()
-        assert data["error"]["type"] == "server_error"
+        assert data["error"]["type"] == "invalid_request_error"
 
 
 class TestSteeringIntensityDial:
@@ -278,7 +302,7 @@ class TestSteeringIntensityDial:
                 "/v1/chat/completions",
                 json={**self.BODY, "steering_intensity": dial},
             )
-            assert response.status_code == 503, dial
+            assert response.status_code == 404, dial
 
     def test_echo_header_non_streaming(self):
         """X-miLLM-Steering-Intensity echoes the effective lambda."""
@@ -312,6 +336,10 @@ class TestSteeringIntensityDial:
         )
         model_service = MagicMock()
         model_service.find_model_by_name = AsyncMock(return_value=MagicMock())
+        # The endpoints load on demand now; without this the awaited call
+        # returns a bare MagicMock and the route raises TypeError.
+        model_service.load_model_and_wait = AsyncMock()
+        model_service.get_locked_model = AsyncMock(return_value=None)
         app.dependency_overrides[get_inference_service] = lambda: inference
         app.dependency_overrides[get_model_service] = lambda: model_service
 
@@ -343,6 +371,10 @@ class TestSteeringIntensityDial:
         inference.request_queue = MagicMock(pending_count=0, max_pending=5)
         model_service = MagicMock()
         model_service.find_model_by_name = AsyncMock(return_value=MagicMock())
+        # The endpoints load on demand now; without this the awaited call
+        # returns a bare MagicMock and the route raises TypeError.
+        model_service.load_model_and_wait = AsyncMock()
+        model_service.get_locked_model = AsyncMock(return_value=None)
         app.dependency_overrides[get_inference_service] = lambda: inference
         app.dependency_overrides[get_model_service] = lambda: model_service
 
@@ -367,11 +399,18 @@ class TestSteeringIntensityDial:
         inference.get_loaded_model_info.return_value = None
         model_service = MagicMock()
         model_service.find_model_by_name = AsyncMock(return_value=MagicMock())
+        # The endpoints load on demand now; without this the awaited call
+        # returns a bare MagicMock and the route raises TypeError.
+        model_service.load_model_and_wait = AsyncMock()
+        model_service.get_locked_model = AsyncMock(return_value=None)
         app.dependency_overrides[get_inference_service] = lambda: inference
         app.dependency_overrides[get_model_service] = lambda: model_service
 
         with TestClient(app) as tc:
             response = tc.post("/v1/chat/completions", json=self.BODY)
+        # The model IS found here, so the endpoint attempts a load; the stub
+        # load is a no-op, so nothing is resident afterwards and 503 is
+        # correct. (An UNKNOWN model is the 404 case, covered above.)
         assert response.status_code == 503
         assert "X-miLLM-Steering-Intensity" not in response.headers
 
@@ -394,6 +433,10 @@ class TestSteeringIntensityDial:
         )
         model_service = MagicMock()
         model_service.find_model_by_name = AsyncMock(return_value=MagicMock())
+        # The endpoints load on demand now; without this the awaited call
+        # returns a bare MagicMock and the route raises TypeError.
+        model_service.load_model_and_wait = AsyncMock()
+        model_service.get_locked_model = AsyncMock(return_value=None)
         app.dependency_overrides[get_inference_service] = lambda: inference
         app.dependency_overrides[get_model_service] = lambda: model_service
 
@@ -488,6 +531,10 @@ class TestBatchCapabilityHeader:
         )
         model_service = MagicMock()
         model_service.find_model_by_name = AsyncMock(return_value=MagicMock())
+        # The endpoints load on demand now; without this the awaited call
+        # returns a bare MagicMock and the route raises TypeError.
+        model_service.load_model_and_wait = AsyncMock()
+        model_service.get_locked_model = AsyncMock(return_value=None)
         app.dependency_overrides[get_inference_service] = lambda: inference
         app.dependency_overrides[get_model_service] = lambda: model_service
         return app

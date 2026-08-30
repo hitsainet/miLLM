@@ -7,6 +7,7 @@ Supports both streaming and non-streaming responses.
 Requires a model to already be loaded via the Management API.
 """
 
+import asyncio
 from typing import Union
 
 from fastapi import APIRouter, Depends, Response
@@ -14,13 +15,20 @@ from fastapi.responses import JSONResponse, StreamingResponse
 
 from millm.api.dependencies import ModelServiceDep, get_inference_service
 from millm.api.routes.openai.errors import (
+    model_locked_error,
     model_not_found_error,
     model_not_loaded_error,
+    server_error,
 )
 from millm.api.schemas.openai import (
     ChatCompletionRequest,
     ChatCompletionResponse,
     OpenAIErrorResponse,
+)
+from millm.core.errors import (
+    MiLLMError,
+    ModelBusyError,
+    ModelLockedError,
 )
 from millm.core.logging import get_logger
 from millm.services.inference_service import (
@@ -58,12 +66,51 @@ async def create_chat_completion(
     if not model:
         return model_not_found_error(request.model)
 
-    # Require model to already be loaded — no auto-load
+    # Load the requested model on demand.
+    #
+    # An OpenAI client — Open WebUI included — selects a model by naming it in
+    # the request body. Rejecting anything that is not already loaded makes
+    # model selection a no-op: the picker changes, the request 404s, and the
+    # user has to go and load the model by hand somewhere else.
+    #
+    # load_model_and_wait() was written for exactly this ("Used by the
+    # OpenAI-compatible endpoints for auto-load on demand") and had NO callers.
+    # It returns immediately when the model is already loaded, so the common
+    # path costs nothing.
+    #
+    # A model LOCKED for steering is the one case where the model must not
+    # change: swapping the weights out from under an attached SAE would leave
+    # the steering vectors pointing at a different model. load_model_and_wait
+    # raises ModelLockedError for that, and only that.
     model_info = inference.get_loaded_model_info()
-    if not model_info:
-        return model_not_loaded_error()
-    if model_info.name != request.model:
-        return model_not_found_error(request.model, model_info.name)
+    if not model_info or model_info.name != request.model:
+        try:
+            await service.load_model_and_wait(model.id)
+        except ModelLockedError as exc:
+            locked_name = (exc.details or {}).get("locked_model_name")
+            if not locked_name:
+                locked = await service.get_locked_model()
+                locked_name = locked.name if locked else "unknown"
+            return model_locked_error(request.model, locked_name)
+        except ModelBusyError:
+            return server_error(
+                f"Another model load is already in progress; "
+                f"retry once it finishes before requesting '{request.model}'."
+            )
+        except asyncio.TimeoutError:
+            return server_error(
+                f"Timed out loading '{request.model}'. The model may still be "
+                f"loading; retry shortly."
+            )
+        except MiLLMError as exc:
+            return server_error(f"Could not load '{request.model}': {exc}")
+
+        # Confirm the switch actually happened rather than assuming it did.
+        model_info = inference.get_loaded_model_info()
+        if not model_info:
+            return model_not_loaded_error()
+        if model_info.name != request.model:
+            return model_not_found_error(request.model, model_info.name)
 
     # Profile override (request.profile) is applied inside the inference service's
     # request-queue semaphore to prevent concurrent requests from racing on the

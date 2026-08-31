@@ -164,7 +164,12 @@ def _get_auto_model_class(config: Any) -> Any:
     Returns:
         The appropriate Auto model class.
     """
-    from transformers import AutoModel, AutoModelForCausalLM, AutoModelForSeq2SeqLM
+    from transformers import (
+        AutoModel,
+        AutoModelForCausalLM,
+        AutoModelForSeq2SeqLM,
+        AutoModelForSequenceClassification,
+    )
 
     # Check architectures field for seq2seq indicators
     architectures = getattr(config, "architectures", []) or []
@@ -186,6 +191,26 @@ def _get_auto_model_class(config: Any) -> Any:
     if model_type.lower() in seq2seq_model_types:
         logger.info("auto_model_class_seq2seq_by_type", model_type=model_type)
         return AutoModelForSeq2SeqLM
+
+    # Encoder classifiers: NLI, zero-shot, sentiment, any *ForSequenceClassification.
+    #
+    # Without this branch these fall through to AutoModelForCausalLM and the load
+    # dies with "Unrecognized configuration class ... for this kind of AutoModel:
+    # AutoModelForCausalLM", followed by a 200-line dump of every config
+    # transformers knows. Hit on p-christ/ModernBERT-large-nli, whose config says
+    # architectures=['ModernBertForSequenceClassification'], num_labels=3,
+    # id2label={0:'entailment',1:'neutral',2:'contradiction'}.
+    #
+    # These models DO NOT GENERATE. Loading them correctly is necessary but not
+    # sufficient — the generation endpoints refuse them separately, by
+    # architecture, so a chat request cannot reach a model with no lm_head.
+    classification_indicators = ("ForSequenceClassification",
+                                 "ForMultipleChoice",
+                                 "ForTokenClassification")
+    for arch in architectures:
+        if any(ind in arch for ind in classification_indicators):
+            logger.info("auto_model_class_sequence_classification", architecture=arch)
+            return AutoModelForSequenceClassification
 
     # Default: causal LM (GPT-style)
     return AutoModelForCausalLM

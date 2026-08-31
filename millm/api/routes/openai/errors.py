@@ -153,15 +153,27 @@ def model_not_found_error(model_id: str, available_model: Optional[str] = None) 
 # a request names: before that a fixed model was pinned and selecting anything
 # else in a client did nothing, so the failure could not be triggered.
 EMBEDDING_ARCHITECTURES = frozenset({
+    # Embedders — no language-model head at all.
     "sentence-similarity",
     "feature-extraction",
     "sentence-transformers",
     "text-embedding",
+    # Encoder CLASSIFIERS — they emit label logits, not tokens. NLI and
+    # zero-shot models (p-christ/ModernBERT-large-nli returns
+    # entailment/neutral/contradiction over 3 labels) are enormously useful for
+    # SCORING a label against a passage, and completely unable to write one.
+    "zero-shot-classification",
+    "text-classification",
+    "token-classification",
 })
 
 
 def is_embedding_only(architecture: Optional[str]) -> bool:
-    """True when this architecture cannot generate text."""
+    """True when this architecture cannot generate text.
+
+    Covers embedders AND encoder classifiers. Both produce numbers rather than
+    tokens; asking either to chat is a category error, not a capacity problem.
+    """
     return bool(architecture) and architecture.strip().lower() in EMBEDDING_ARCHITECTURES
 
 
@@ -174,9 +186,11 @@ def embedding_model_error(model_id: str, architecture: str) -> JSONResponse:
     """
     return create_openai_error(
         message=(
-            f"The model '{model_id}' is an embedding model (architecture: "
-            f"{architecture}) and cannot generate text. Use it with "
-            f"/v1/embeddings, or select a text-generation model for chat."
+            f"The model '{model_id}' is a non-generative model (architecture: "
+            f"{architecture}) and cannot produce text. Embedding models are "
+            f"served by /v1/embeddings; classification and NLI models score "
+            f"inputs rather than write them. Select a text-generation model "
+            f"for chat."
         ),
         error_type="invalid_request_error",
         code="model_not_generative",

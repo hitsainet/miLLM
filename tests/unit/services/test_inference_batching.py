@@ -107,6 +107,10 @@ def model():
     m.config.num_attention_heads = 4
     m.config.num_key_value_heads = 4
     m.config.head_dim = 16
+    # MUST be set explicitly. config is a MagicMock, so a bare getattr returns a
+    # truthy Mock rather than False, and the generation path would treat every
+    # mocked model as encoder-decoder and stop slicing off the prompt.
+    m.config.is_encoder_decoder = False
     m.device = "cpu"
 
     def _generate(**kwargs):

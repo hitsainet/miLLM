@@ -1647,6 +1647,27 @@ class InferenceService:
     # Generation Helpers
     # =========================================================================
 
+    def _slice_generated(self, sequence, prompt_len: int):
+        """Return only the newly generated tokens, for EITHER model family.
+
+        A decoder-only model returns [prompt..., generated...], so the prompt
+        must be sliced off. An ENCODER-DECODER model returns only the decoder
+        output — the prompt never appears in it — and slicing it discards the
+        answer.
+
+        Verified on Falconsai/text_summarization (T5-small, is_encoder_decoder
+        True): a 30-token prompt produced a 23-token summary, so
+        `outputs[0][30:]` returned an empty string. Every seq2seq request came
+        back HTTP 200 with content "" and no error anywhere — the failure was
+        completely silent.
+        """
+        try:
+            if bool(getattr(self._model.config, "is_encoder_decoder", False)):
+                return sequence
+        except Exception:
+            pass
+        return sequence[prompt_len:]
+
     def _build_generate_kwargs(
         self, gen_config: GenerationConfig, inputs: dict
     ) -> dict:
@@ -2254,7 +2275,7 @@ class InferenceService:
             else:
                 prompt_tokens = padded_width
 
-            generated_ids = outputs[row_idx][padded_width:]
+            generated_ids = self._slice_generated(outputs[row_idx], padded_width)
 
             # generate() runs until EVERY row finishes, filling rows that
             # stopped early with pad tokens. Without trimming here, a row that
@@ -2642,7 +2663,7 @@ class InferenceService:
                     self._notify_monitoring(request_id=completion_id)
 
                     # Decode output
-                    generated_ids = outputs[0][prompt_tokens:]
+                    generated_ids = self._slice_generated(outputs[0], prompt_tokens)
                     completion_text = self._tokenizer.decode(
                         generated_ids, skip_special_tokens=True
                     )
@@ -3125,7 +3146,7 @@ class InferenceService:
                     self._notify_monitoring(request_id=completion_id)
 
                     # Decode output
-                    generated_ids = outputs[0][prompt_tokens:]
+                    generated_ids = self._slice_generated(outputs[0], prompt_tokens)
                     completion_text = self._tokenizer.decode(
                         generated_ids, skip_special_tokens=True
                     )

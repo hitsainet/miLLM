@@ -41,6 +41,9 @@ def mock_model():
     model = MagicMock()
     model.config = MagicMock()
     model.config.max_position_embeddings = 2048
+    # Explicit: a MagicMock attribute is truthy, which would make the generation
+    # path treat this decoder-only stand-in as encoder-decoder.
+    model.config.is_encoder_decoder = False
     model.device = "cpu"
 
     # Default: generate returns a tensor with 5 prompt tokens + 3 generated tokens

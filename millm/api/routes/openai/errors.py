@@ -144,6 +144,47 @@ def model_not_found_error(model_id: str, available_model: Optional[str] = None) 
     )
 
 
+# Architectures that produce EMBEDDINGS, not text. A model tagged with one of
+# these has no usable language-model head, and asking it to generate returns
+# token soup — verified on Nemotron-3-Embed-8B-BF16, which answered a chat
+# prompt with several hundred tokens of multilingual fragments.
+#
+# This became reachable when the OpenAI endpoints started loading whatever model
+# a request names: before that a fixed model was pinned and selecting anything
+# else in a client did nothing, so the failure could not be triggered.
+EMBEDDING_ARCHITECTURES = frozenset({
+    "sentence-similarity",
+    "feature-extraction",
+    "sentence-transformers",
+    "text-embedding",
+})
+
+
+def is_embedding_only(architecture: Optional[str]) -> bool:
+    """True when this architecture cannot generate text."""
+    return bool(architecture) and architecture.strip().lower() in EMBEDDING_ARCHITECTURES
+
+
+def embedding_model_error(model_id: str, architecture: str) -> JSONResponse:
+    """Refuse a generation request aimed at an embedding model.
+
+    A clear refusal, not a 500 and emphatically not garbage output: a user who
+    picked the wrong entry in a model list needs to be told which entry it was
+    and what it is for.
+    """
+    return create_openai_error(
+        message=(
+            f"The model '{model_id}' is an embedding model (architecture: "
+            f"{architecture}) and cannot generate text. Use it with "
+            f"/v1/embeddings, or select a text-generation model for chat."
+        ),
+        error_type="invalid_request_error",
+        code="model_not_generative",
+        param="model",
+        status_code=400,
+    )
+
+
 def model_locked_error(model_id: str, locked_model: str) -> JSONResponse:
     """Create error response when model is locked for steering."""
     return create_openai_error(

@@ -15,6 +15,8 @@ from fastapi.responses import JSONResponse, StreamingResponse
 
 from millm.api.dependencies import ModelServiceDep, get_inference_service
 from millm.api.routes.openai.errors import (
+    embedding_model_error,
+    is_embedding_only,
     model_locked_error,
     model_not_found_error,
     model_not_loaded_error,
@@ -65,6 +67,14 @@ async def create_chat_completion(
     model = await service.find_model_by_name(request.model)
     if not model:
         return model_not_found_error(request.model)
+
+    # An embedding model cannot generate text. Refuse before loading it —
+    # loading takes time and VRAM to reach an answer that is guaranteed to be
+    # nonsense. Nemotron-3-Embed-8B-BF16 answered a chat prompt with hundreds of
+    # tokens of multilingual fragments rather than failing, which is worse than
+    # an error because it looks like output.
+    if is_embedding_only(getattr(model, "architecture", None)):
+        return embedding_model_error(request.model, model.architecture)
 
     # Load the requested model on demand.
     #

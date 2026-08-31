@@ -12,6 +12,8 @@ from fastapi.responses import JSONResponse
 
 from millm.api.dependencies import ModelServiceDep, get_inference_service
 from millm.api.routes.openai.errors import (
+    embedding_model_error,
+    is_embedding_only,
     model_locked_error,
     model_not_found_error,
     model_not_loaded_error,
@@ -60,6 +62,11 @@ async def create_completion(
     model = await service.find_model_by_name(request.model)
     if not model:
         return model_not_found_error(request.model)
+
+    # An embedding model cannot generate text. Refuse before loading it —
+    # loading costs time and VRAM to reach an answer guaranteed to be nonsense.
+    if is_embedding_only(getattr(model, "architecture", None)):
+        return embedding_model_error(request.model, model.architecture)
 
     # Load the requested model on demand.
     #

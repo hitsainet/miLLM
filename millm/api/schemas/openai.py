@@ -12,7 +12,7 @@ Key implementation notes:
 5. extra="ignore" allows unknown fields for forward compatibility
 """
 
-from typing import Literal, Optional, Union
+from typing import Any, Literal, Optional, Union
 
 from pydantic import BaseModel, Field, model_validator, field_validator
 
@@ -81,6 +81,34 @@ class ChatCompletionRequest(BaseModel):
     # predates this field ACCEPTS it and silently returns a single choice.
     # Detect support via the X-miLLM-Batch response header before relying on it.
     extra_messages: Optional[list[list[ChatMessage]]] = None
+
+    # miLLM extension - chat-template variables (the vLLM/SGLang convention).
+    #
+    # Forwarded verbatim as keyword arguments to
+    # `tokenizer.apply_chat_template(...)`, which exposes them as Jinja
+    # variables to the model's own template. This is the ONLY way to reach a
+    # control that lives in the template rather than in the generation config.
+    #
+    # The motivating case is reasoning. granite-4.2-8b's template sets
+    # `enable_thinking` to True when undefined, and its generation prompt then
+    # ends with an OPEN `<think>` tag, so the model resumes inside a reasoning
+    # block and emits paragraphs of deliberation before any answer. Because the
+    # opening tag is in the PROMPT and not the completion, a client stripping
+    # `<think>...</think>` from the response finds no opening tag and strips
+    # nothing — the reasoning arrives as ordinary untagged prose and lands in
+    # the caller's parsed output. Send {"enable_thinking": false} and the
+    # template emits `<think></think>` instead, so the model answers directly.
+    #
+    # Also honoured by that template: {"reasoning_effort": "low"} (equivalently
+    # {"low_effort": true}) for abbreviated reasoning.
+    #
+    # Unknown keys are harmless — Jinja ignores variables a template does not
+    # reference — but that cuts both ways: a model whose template has no
+    # `enable_thinking` will accept the flag and keep thinking. This field
+    # cannot promise an effect, only delivery. What it does guarantee is that a
+    # template which RAISES on these kwargs fails loudly instead of silently
+    # falling back to a generic format with the request ignored.
+    chat_template_kwargs: Optional[dict[str, Any]] = None
 
     # miLLM extension - steering profile override
     profile: Optional[str] = None

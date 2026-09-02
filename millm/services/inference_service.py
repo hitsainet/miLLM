@@ -2446,7 +2446,10 @@ class InferenceService:
                 request, conversations, completion_id, created
             )
 
-        prompts = [self._format_chat_messages(c) for c in conversations]
+        prompts = [
+            self._format_chat_messages(c, request.chat_template_kwargs)
+            for c in conversations
+        ]
         gen_config = GenerationConfig.from_request(request)
 
         choices: list[ChatCompletionChoice] = []
@@ -2603,7 +2606,9 @@ class InferenceService:
         created = int(datetime.now().timestamp())
 
         # Format messages to prompt
-        prompt = self._format_chat_messages(request.messages)
+        prompt = self._format_chat_messages(
+            request.messages, request.chat_template_kwargs
+        )
         n = getattr(request, "n", 1) or 1
 
         choices: list[ChatCompletionChoice] = []
@@ -2759,7 +2764,9 @@ class InferenceService:
         model_name = model_info.name if model_info else "unknown"
 
         # Format messages to prompt
-        prompt = self._format_chat_messages(request.messages)
+        prompt = self._format_chat_messages(
+            request.messages, request.chat_template_kwargs
+        )
 
         async with self._request_queue.acquire():
             # Per-request profile override (same logic as non-streaming path)
@@ -3299,7 +3306,9 @@ class InferenceService:
         completion_id = f"chatcmpl-{uuid.uuid4().hex[:24]}"
         created = int(datetime.now().timestamp())
 
-        prompt = self._format_chat_messages(request.messages)
+        prompt = self._format_chat_messages(
+            request.messages, request.chat_template_kwargs
+        )
         input_ids = self._tokenizer.encode(prompt, return_tensors="pt")[0].tolist()
         gen_config = GenerationConfig.from_request(request)
 
@@ -3347,7 +3356,9 @@ class InferenceService:
         model_info = self.get_loaded_model_info()
         model_name = model_info.name if model_info else "unknown"
 
-        prompt = self._format_chat_messages(request.messages)
+        prompt = self._format_chat_messages(
+            request.messages, request.chat_template_kwargs
+        )
         input_ids = self._tokenizer.encode(prompt, return_tensors="pt")[0].tolist()
         gen_config = GenerationConfig.from_request(request)
 
@@ -3512,7 +3523,11 @@ class InferenceService:
             if errors is not None:
                 errors.append(e)
 
-    def _format_chat_messages(self, messages: list[ChatMessage]) -> str:
+    def _format_chat_messages(
+        self,
+        messages: list[ChatMessage],
+        template_kwargs: Optional[dict] = None,
+    ) -> str:
         """
         Format chat messages into prompt string.
 
@@ -3534,6 +3549,8 @@ class InferenceService:
                 content_preview=m.content[:200] if m.content else "",
             )
 
+        template_kwargs = dict(template_kwargs or {})
+
         # Prefer model's built-in chat template
         if hasattr(self._tokenizer, "apply_chat_template"):
             try:
@@ -3543,17 +3560,41 @@ class InferenceService:
                         [{"role": m.role, "content": m.content} for m in messages],
                         tokenize=False,
                         add_generation_prompt=True,
+                        **template_kwargs,
                     )
                     logger.debug(
                         "formatted_prompt",
                         length=len(formatted),
                         preview=formatted[:500],
+                        template_kwargs=sorted(template_kwargs) or None,
                     )
                     return formatted
             except Exception as e:
+                # FAIL LOUDLY when the caller asked for something specific.
+                #
+                # The fallback below is a generic Gemma-style format. Reaching
+                # it after an explicit chat_template_kwargs request is doubly
+                # wrong: the model is formatted for the wrong family AND the
+                # request is discarded, and the caller still gets a 200. For
+                # enable_thinking=False that means reasoning stays on and the
+                # deliberation lands in their parsed output looking like an
+                # answer. A 500 they can see beats a wrong answer they cannot.
+                if template_kwargs:
+                    raise ValueError(
+                        "chat template rejected "
+                        f"{sorted(template_kwargs)}: {e}"
+                    ) from e
                 logger.warning(
                     "chat_template_failed_using_fallback", error=str(e)
                 )
+
+        if template_kwargs:
+            raise ValueError(
+                "chat_template_kwargs was requested "
+                f"({sorted(template_kwargs)}) but this model has no chat "
+                "template, so the generic fallback format would silently "
+                "ignore it"
+            )
 
         # Fallback: Gemma-style format with turn markers
         # This format works well with Gemma 2 and similar models

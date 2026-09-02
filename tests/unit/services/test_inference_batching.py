@@ -145,7 +145,12 @@ def service(model, tokenizer):
                                            __exit__=MagicMock())
         svc = InferenceService(model_service=None)
     svc._device = "cpu"
-    svc._format_chat_messages = lambda msgs: msgs[0].content
+    # Mirrors the real signature, which takes optional chat-template kwargs.
+    # A stub that silently accepts fewer arguments than production passes is
+    # how a signature change turns into 12 confusing failures.
+    svc._format_chat_messages = (
+        lambda msgs, template_kwargs=None: msgs[0].content
+    )
     svc._use_cbm_for_request = MagicMock(return_value=False)
     svc._get_draft_model = MagicMock(return_value=None)
     svc._notify_monitoring = MagicMock()

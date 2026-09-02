@@ -127,6 +127,58 @@ class ChatCompletionRequest(BaseModel):
     # request boundary - concurrent requests never see each other's dial.
     steering_intensity: Optional[Union[float, Literal["off", "min", "max"]]] = None
 
+    @field_validator("chat_template_kwargs", mode="before")
+    @classmethod
+    def _coerce_chat_template_kwargs(cls, v):
+        """Accept the shapes real clients send, not just the tidy one.
+
+        Open WebUI's "Add Custom Parameter" editor emits a JSON ARRAY wrapping
+        the object -- `[{"enable_thinking": false}]` -- and a strict
+        `dict[str, Any]` rejects it with "Input should be a valid dictionary",
+        which is useless to someone typing into a UI field that gave them no
+        choice about the shape. Some clients send it as a JSON string too.
+
+        Being liberal here costs nothing: every accepted form collapses to the
+        same dict before it reaches apply_chat_template. Genuinely wrong input
+        still fails, and says what it received.
+        """
+        import json as _json
+
+        if v is None or isinstance(v, dict):
+            return v
+
+        if isinstance(v, str):
+            text = v.strip()
+            if not text:
+                return None
+            try:
+                v = _json.loads(text)
+            except ValueError as exc:
+                raise ValueError(
+                    "chat_template_kwargs must be a JSON object such as "
+                    f'{{"enable_thinking": false}}; could not parse {v!r} ({exc})'
+                ) from exc
+            return cls._coerce_chat_template_kwargs(v)
+
+        if isinstance(v, (list, tuple)):
+            merged: dict = {}
+            for item in v:
+                if isinstance(item, str):
+                    item = cls._coerce_chat_template_kwargs(item)
+                if not isinstance(item, dict):
+                    raise ValueError(
+                        "chat_template_kwargs list entries must be JSON "
+                        f"objects; got {type(item).__name__}: {item!r}"
+                    )
+                # Later entries win, matching dict.update semantics.
+                merged.update(item)
+            return merged or None
+
+        raise ValueError(
+            "chat_template_kwargs must be a JSON object such as "
+            f'{{"enable_thinking": false}}; got {type(v).__name__}: {v!r}'
+        )
+
     @field_validator("steering_intensity", mode="before")
     @classmethod
     def _reject_bool_steering_intensity(cls, v):

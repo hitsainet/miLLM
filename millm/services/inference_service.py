@@ -46,6 +46,7 @@ from millm.services.request_queue import RequestQueue
 if TYPE_CHECKING:
     from millm.services.model_service import ModelService
     from millm.services.monitoring_service import MonitoringService
+from millm.services.async_iter import aiter_blocking
 from millm.services.reasoning_split import (
     OPEN as THINK_OPEN,
     StreamingReasoningSplitter,
@@ -2897,7 +2898,17 @@ class InferenceService:
                 stop_sequences = gen_config.stop_sequences
                 stopped_by_sequence = False
 
-                for token in streamer:
+                # TextIteratorStreamer.__next__ BLOCKS on a queue. Iterating
+                # it directly inside an async generator pins the event loop for
+                # the entire generation, so nothing already yielded can be
+                # flushed to the socket and the client receives the whole
+                # response in one burst at the end -- measured 2026-09-02:
+                # 16 chunks all arriving at 6.12s, spread 0.00s, including the
+                # role chunk that is yielded BEFORE generation starts. It also
+                # starves every other request on the loop, health checks
+                # included. Awaiting each token in a worker thread hands the
+                # loop back between tokens.
+                async for token in aiter_blocking(streamer):
                     if not token:
                         continue
 

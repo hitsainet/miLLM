@@ -46,6 +46,12 @@ from millm.services.request_queue import RequestQueue
 if TYPE_CHECKING:
     from millm.services.model_service import ModelService
     from millm.services.monitoring_service import MonitoringService
+from millm.services.reasoning_split import (
+    OPEN as THINK_OPEN,
+    StreamingReasoningSplitter,
+    split_reasoning,
+)
+
 
 logger = get_logger(__name__)
 
@@ -2494,8 +2500,8 @@ class InferenceService:
                         choices.append(
                             ChatCompletionChoice(
                                 index=chunk_start + offset,
-                                message=ChatMessage(
-                                    role="assistant", content=row["text"]
+                                message=self._assistant_message(
+                                    row["text"], chunk[offset]
                                 ),
                                 finish_reason=row["finish_reason"],
                             )
@@ -2698,7 +2704,9 @@ class InferenceService:
                     choices.append(
                         ChatCompletionChoice(
                             index=i,
-                            message=ChatMessage(role="assistant", content=completion_text),
+                            message=self._assistant_message(
+                                completion_text, prompt
+                            ),
                             finish_reason=finish_reason,
                         )
                     )
@@ -2766,6 +2774,12 @@ class InferenceService:
         # Format messages to prompt
         prompt = self._format_chat_messages(
             request.messages, request.chat_template_kwargs
+        )
+        # Routes tokens to reasoning_content until the think block closes.
+        # Seeded from the PROMPT because granite-style templates open the tag
+        # there, so the completion never contains an opening tag to detect.
+        _splitter = StreamingReasoningSplitter(
+            self._prompt_opened_think(prompt)
         )
 
         async with self._request_queue.acquire():
@@ -2924,6 +2938,11 @@ class InferenceService:
                             stop_event.set()
                             break
 
+                    _r, _c = _splitter.feed(token)
+                    if _r is None and _c is None:
+                        # Held back: a closing tag may be splitting across
+                        # tokens. Emitting now would leak `</th` to the client.
+                        continue
                     chunk = ChatCompletionChunk(
                         id=completion_id,
                         created=created,
@@ -2931,7 +2950,9 @@ class InferenceService:
                         choices=[
                             ChatCompletionChunkChoice(
                                 index=0,
-                                delta=ChatCompletionChunkDelta(content=token),
+                                delta=ChatCompletionChunkDelta(
+                                    content=_c, reasoning_content=_r
+                                ),
                                 finish_reason=None,
                             )
                         ],
@@ -2976,6 +2997,28 @@ class InferenceService:
 
                 # Send final chunk with finish_reason and token usage.
                 # Intermediate chunks omit `usage` (exclude_none=True strips it).
+                # Emit anything still withheld by the split-tag guard.
+                _fr, _fc = _splitter.flush()
+                if _fr is not None or _fc is not None:
+                    yield (
+                        "data: "
+                        + ChatCompletionChunk(
+                            id=completion_id,
+                            created=created,
+                            model=model_name,
+                            choices=[
+                                ChatCompletionChunkChoice(
+                                    index=0,
+                                    delta=ChatCompletionChunkDelta(
+                                        content=_fc, reasoning_content=_fr
+                                    ),
+                                    finish_reason=None,
+                                )
+                            ],
+                        ).model_dump_json(exclude_none=True)
+                        + "\n\n"
+                    )
+
                 final_chunk = ChatCompletionChunk(
                     id=completion_id,
                     created=created,
@@ -3335,7 +3378,7 @@ class InferenceService:
             choices=[
                 ChatCompletionChoice(
                     index=0,
-                    message=ChatMessage(role="assistant", content=text),
+                    message=self._assistant_message(text, prompt),
                     finish_reason=finish_reason,
                 )
             ],
@@ -3361,6 +3404,9 @@ class InferenceService:
         )
         input_ids = self._tokenizer.encode(prompt, return_tensors="pt")[0].tolist()
         gen_config = GenerationConfig.from_request(request)
+        _splitter = StreamingReasoningSplitter(
+            self._prompt_opened_think(prompt)
+        )
 
         # First chunk: role
         first_chunk = ChatCompletionChunk(
@@ -3387,6 +3433,9 @@ class InferenceService:
             text = self._tokenizer.decode(new_token_ids, skip_special_tokens=True)
             if text:
                 token_count += len(new_token_ids)
+                _r, _c = _splitter.feed(text)
+                if _r is None and _c is None:
+                    continue        # withheld: a closing tag may be splitting
                 chunk = ChatCompletionChunk(
                     id=completion_id,
                     created=created,
@@ -3394,12 +3443,35 @@ class InferenceService:
                     choices=[
                         ChatCompletionChunkChoice(
                             index=0,
-                            delta=ChatCompletionChunkDelta(content=text),
+                            delta=ChatCompletionChunkDelta(
+                                content=_c, reasoning_content=_r
+                            ),
                             finish_reason=None,
                         )
                     ],
                 )
                 yield f"data: {chunk.model_dump_json(exclude_none=True)}\n\n"
+
+        _fr, _fc = _splitter.flush()
+        if _fr is not None or _fc is not None:
+            yield (
+                "data: "
+                + ChatCompletionChunk(
+                    id=completion_id,
+                    created=created,
+                    model=model_name,
+                    choices=[
+                        ChatCompletionChunkChoice(
+                            index=0,
+                            delta=ChatCompletionChunkDelta(
+                                content=_fc, reasoning_content=_fr
+                            ),
+                            finish_reason=None,
+                        )
+                    ],
+                ).model_dump_json(exclude_none=True)
+                + "\n\n"
+            )
 
         self._notify_monitoring(request_id=completion_id)
 
@@ -3522,6 +3594,29 @@ class InferenceService:
             logger.error("generation_thread_error", error=str(e))
             if errors is not None:
                 errors.append(e)
+
+
+    @staticmethod
+    def _prompt_opened_think(prompt: Optional[str]) -> bool:
+        """Did the chat template leave a `<think>` block open?
+
+        Knowable exactly -- it is the string the template produced. This is the
+        positive evidence `split_reasoning` needs before it will treat a
+        completion as reasoning, which is what stops a non-reasoning model's
+        answer being moved into `reasoning_content`.
+        """
+        return bool(prompt) and prompt.rstrip().endswith(THINK_OPEN)
+
+    def _assistant_message(
+        self, text: Optional[str], prompt: Optional[str] = None
+    ) -> ChatMessage:
+        """Build the assistant message, splitting any reasoning trace out."""
+        reasoning, content = split_reasoning(
+            text, self._prompt_opened_think(prompt)
+        )
+        return ChatMessage(
+            role="assistant", content=content, reasoning_content=reasoning
+        )
 
     def _format_chat_messages(
         self,

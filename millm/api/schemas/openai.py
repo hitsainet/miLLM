@@ -28,6 +28,13 @@ class ChatMessage(BaseModel):
     role: Literal["system", "user", "assistant", "tool", "function"]
     content: Optional[str] = None
 
+    # Reasoning trace, separated from the answer. NOT an OpenAI field -- a
+    # de-facto convention from DeepSeek, adopted by vLLM/SGLang, and what
+    # Open WebUI renders as a collapsible "Thinking" section. Serialised only
+    # when present (responses use exclude_none), so non-reasoning models and
+    # older clients see exactly the payload they saw before.
+    reasoning_content: Optional[str] = None
+
     # Allow extra fields (OpenAI clients may send name, function_call, etc.)
     model_config = {"extra": "ignore"}
 
@@ -257,6 +264,7 @@ class ChatCompletionChunkDelta(BaseModel):
 
     role: Optional[Literal["assistant"]] = None
     content: Optional[str] = None
+    reasoning_content: Optional[str] = None
 
 
 class ChatCompletionChunkChoice(BaseModel):

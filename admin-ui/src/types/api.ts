@@ -53,11 +53,36 @@ export interface ModelDownloadRequest {
   device?: 'auto' | 'cuda' | 'cpu';
   trust_remote_code?: boolean;
   hf_token?: string;
+  revision?: string;
+  /** Every file of the ONE chosen quantization. Omit to download the whole repo. */
+  gguf_files?: string[];
+  /** The exact quantization (Q4_K_M), which the coarse `quantization` cannot express. */
+  gguf_label?: string;
 }
 
 export interface SizeEstimate {
   disk_mb: number;
   memory_mb: number;
+}
+
+export interface GGUFFileInfo {
+  path: string;
+  size_bytes: number;
+}
+
+/**
+ * One selectable GGUF quantization.
+ *
+ * The unit is a QUANTIZATION, not a file. On large models a quant is split
+ * across numbered parts, and downloading one part gives a model that cannot
+ * load — so `files` is a list and `total_size_bytes` covers all of them.
+ */
+export interface GGUFQuantInfo {
+  label: string;
+  files: GGUFFileInfo[];
+  total_size_bytes: number;
+  is_split: boolean;
+  quant_parsed: boolean;
 }
 
 export interface ModelPreviewResponse {
@@ -75,6 +100,12 @@ export interface ModelPreviewResponse {
   architectures: string[] | null;
   license: string | null;
   language: string | string[] | null;
+  revision: string | null;
+  /** Present and non-empty only for a GGUF repo. This is the branch signal. */
+  gguf_quants: GGUFQuantInfo[] | null;
+  gguf_architecture: string | null;
+  gguf_context_length: number | null;
+  gguf_total_params: number | null;
 }
 
 // SAE types

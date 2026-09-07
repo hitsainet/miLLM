@@ -107,6 +107,25 @@ class Model(Base):
         nullable=False,
     )
 
+    # GGUF selection.
+    #
+    # A GGUF repo holds many mutually exclusive quantizations, and the coarse
+    # `quantization` enum cannot tell Q4_K_M from Q4_K_S from Q4_0 — all three
+    # are "Q4". `gguf_label` is the exact quantization; `gguf_files` is every
+    # file it needs, which is more than one when the quant is split across
+    # numbered parts.
+    #
+    # EMPTY STRING, NOT NULL, for the label: it is part of the uniqueness
+    # constraint below, and Postgres treats NULLs as DISTINCT in a unique index
+    # — so a nullable column would stop deduplicating ordinary whole-repo
+    # downloads, silently allowing the duplicate rows the constraint exists to
+    # prevent.
+    gguf_label: Mapped[str] = mapped_column(
+        String(64), nullable=False, default="", server_default=""
+    )
+    gguf_files: Mapped[list | None] = mapped_column(JSONB, nullable=True)
+    revision: Mapped[str | None] = mapped_column(String(100), nullable=True)
+
     # Storage
     disk_size_mb: Mapped[int | None] = mapped_column(Integer, nullable=True)
     estimated_memory_mb: Mapped[int | None] = mapped_column(Integer, nullable=True)
@@ -148,7 +167,9 @@ class Model(Base):
 
     # Constraints
     __table_args__ = (
-        UniqueConstraint("repo_id", "quantization", name="uq_repo_quantization"),
+        UniqueConstraint(
+            "repo_id", "quantization", "gguf_label", name="uq_repo_quantization"
+        ),
         UniqueConstraint("local_path", name="uq_local_path"),
     )
 

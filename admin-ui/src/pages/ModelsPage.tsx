@@ -75,7 +75,11 @@ export function ModelsPage() {
     clearPreview();
   };
 
-  const handleDownloadFromPreview = async (quantization: string, trustRemoteCode: boolean) => {
+  const handleDownloadFromPreview = async (
+    quantization: string,
+    trustRemoteCode: boolean,
+    gguf?: { files?: string[]; label?: string; revision?: string },
+  ) => {
     if (!previewRepoId) return;
     await downloadModel({
       source: 'huggingface',
@@ -83,6 +87,12 @@ export function ModelsPage() {
       quantization: quantization as 'FP32' | 'FP16' | 'Q8' | 'Q4' | 'Q2',
       trust_remote_code: trustRemoteCode,
       hf_token: previewHfToken,
+      // Only sent for a GGUF selection. Absent means "the whole repository",
+      // which is correct for an ordinary safetensors model — an empty list
+      // would match nothing and download an empty directory.
+      ...(gguf?.files?.length ? { gguf_files: gguf.files } : {}),
+      ...(gguf?.label ? { gguf_label: gguf.label } : {}),
+      ...(gguf?.revision ? { revision: gguf.revision } : {}),
     });
     handleCloseModal();
   };

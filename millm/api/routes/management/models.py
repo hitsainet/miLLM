@@ -13,6 +13,8 @@ from millm.api.schemas.common import ApiResponse
 from millm.api.schemas.model import (
     ModelDownloadRequest,
     ModelPreviewRequest,
+    GGUFFileInfo,
+    GGUFQuantInfo,
     ModelPreviewResponse,
     ModelResponse,
     SizeEstimate,
@@ -289,6 +291,31 @@ async def preview_model(
         except (ValueError, TypeError):
             pass
 
+    # The GGUF catalogue, if this is a GGUF repo.
+    #
+    # MEASURED sizes replace the estimates above. The estimate multiplies a
+    # parameter count by bytes-per-parameter, which is meaningless for a
+    # mixed-precision quantization — and on a GGUF repo it usually does not even
+    # run, because `_extract_params` reads `info.safetensors`, which is None
+    # here, then falls back to scanning the repo id and returns "unknown".
+    quants = info.get("gguf_quants") or []
+    gguf_quants = (
+        [
+            GGUFQuantInfo(
+                label=q.label,
+                files=[GGUFFileInfo(path=f.path, size_bytes=f.size_bytes) for f in q.files],
+                total_size_bytes=q.total_size_bytes,
+                is_split=q.is_split,
+                quant_parsed=q.quant_parsed,
+            )
+            for q in quants
+        ]
+        if quants
+        else None
+    )
+    if gguf_quants:
+        estimated_sizes = None
+
     # Build preview response with all available metadata
     preview = ModelPreviewResponse(
         name=info.get("name", ""),
@@ -297,6 +324,11 @@ async def preview_model(
         is_gated=info.get("is_gated", False),
         requires_trust_remote_code=info.get("requires_trust_remote_code", False),
         estimated_sizes=estimated_sizes,
+        revision=info.get("revision"),
+        gguf_quants=gguf_quants,
+        gguf_architecture=info.get("gguf_architecture"),
+        gguf_context_length=info.get("gguf_context_length"),
+        gguf_total_params=info.get("gguf_total_params"),
         downloads=info.get("downloads", 0),
         likes=info.get("likes", 0),
         tags=info.get("tags"),

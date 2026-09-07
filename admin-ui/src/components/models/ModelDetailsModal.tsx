@@ -19,6 +19,18 @@ import {
 } from 'lucide-react';
 import { Modal, Button, Spinner, Badge } from '@components/common';
 import type { ModelInfo, ModelPreviewResponse } from '@/types';
+import { GGUFQuantPicker } from './GGUFQuantPicker';
+
+/**
+ * VRAM of the deployment card, for the fit hint only.
+ *
+ * A CONSTANT, and deliberately not dressed up as a measurement: this app has no
+ * endpoint reporting the GPU's capacity at preview time, and inventing one to
+ * fill a hint would be worse than a stated assumption. The hint is advisory —
+ * it never blocks a download — so being wrong on a different card costs a
+ * misleading word, not a failed action.
+ */
+const GPU_TOTAL_BYTES = 24 * 1024 ** 3;
 
 export interface ModelDetailsModalProps {
   /** The downloaded model to show details for */
@@ -36,7 +48,11 @@ export interface ModelDetailsModalProps {
   /** Callback to delete the model */
   onDelete?: (id: number) => void;
   /** Callback to download from preview with selected quantization */
-  onDownloadFromPreview?: (quantization: string, trustRemoteCode: boolean) => void;
+  onDownloadFromPreview?: (
+    quantization: string,
+    trustRemoteCode: boolean,
+    gguf?: { files?: string[]; label?: string; revision?: string },
+  ) => void;
   /** Callback to lock the model for steering */
   onLock?: (id: number) => void;
   /** Callback to unlock the model */
@@ -83,6 +99,11 @@ export function ModelDetailsModal({
 }: ModelDetailsModalProps) {
   const [selectedQuantization, setSelectedQuantization] = useState('Q4');
   const [trustRemoteCode, setTrustRemoteCode] = useState(false);
+  const [selectedGgufLabel, setSelectedGgufLabel] = useState<string | null>(null);
+
+  const ggufQuants = previewData?.gguf_quants ?? [];
+  const isGguf = ggufQuants.length > 0;
+  const selectedQuant = ggufQuants.find((q) => q.label === selectedGgufLabel) ?? null;
 
   // Determine if we're showing a downloaded model or preview data
   const isPreview = !model && !!previewData;
@@ -130,10 +151,15 @@ export function ModelDetailsModal({
   };
 
   const handleDownload = () => {
-    if (onDownloadFromPreview) {
-      onDownloadFromPreview(selectedQuantization, trustRemoteCode);
-      onClose();
-    }
+    if (!onDownloadFromPreview) return;
+    // EVERY file of the chosen quantization, never just the first. A split
+    // quant downloaded in part yields a model that cannot load.
+    onDownloadFromPreview(selectedQuantization, trustRemoteCode, {
+      files: selectedQuant?.files.map((f) => f.path),
+      label: selectedQuant?.label,
+      revision: previewData?.revision ?? undefined,
+    });
+    onClose();
   };
 
   // Build footer based on mode
@@ -208,11 +234,18 @@ export function ModelDetailsModal({
       {onDownloadFromPreview && (
         <button
           onClick={handleDownload}
-          disabled={previewData?.requires_trust_remote_code && !trustRemoteCode}
+          disabled={
+            (previewData?.requires_trust_remote_code && !trustRemoteCode) ||
+            (isGguf && !selectedQuant)
+          }
           className="px-4 py-2 bg-primary-600 hover:bg-primary-700 disabled:bg-slate-700 disabled:cursor-not-allowed rounded-lg transition-colors text-white font-medium text-sm flex items-center gap-2"
         >
           <Download className="w-4 h-4" />
-          {`Download with ${selectedQuantization}`}
+          {isGguf
+            ? selectedQuant
+              ? `Download ${selectedQuant.label}`
+              : 'Choose a quantization'
+            : `Download with ${selectedQuantization}`}
         </button>
       )}
     </div>
@@ -470,6 +503,15 @@ export function ModelDetailsModal({
         )}
 
         {/* Memory Requirements Table (preview) */}
+        {isPreview && isGguf && (
+          <GGUFQuantPicker
+            quants={ggufQuants}
+            selectedLabel={selectedGgufLabel}
+            onSelect={setSelectedGgufLabel}
+            gpuTotalBytes={GPU_TOTAL_BYTES}
+          />
+        )}
+
         {isPreview && previewData?.estimated_sizes && (
           <div>
             <div className="flex items-center gap-2 mb-3">

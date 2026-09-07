@@ -141,10 +141,24 @@ class TestModelServicePreviewModel:
 
         assert result["name"] == "gemma-2-2b"
         assert result["params"] == "2B"
+        # `revision` is part of the call now: preview and download must agree on
+        # the commit, or the sizes shown were measured against other content.
         mock_downloader.get_model_info.assert_called_once_with(
             repo_id="google/gemma-2-2b",
             token=None,
+            revision=None,
         )
+
+    @pytest.mark.asyncio
+    async def test_passes_the_requested_revision_through(self, service, mock_downloader):
+        """A pinned revision must reach the downloader, not be silently dropped."""
+        from millm.api.schemas.model import ModelPreviewRequest
+
+        request = ModelPreviewRequest(repo_id="google/gemma-2-2b", revision="abc123")
+
+        await service.preview_model(request)
+
+        assert mock_downloader.get_model_info.call_args.kwargs["revision"] == "abc123"
 
 
 class TestModelServiceDownloadModel:

@@ -248,10 +248,14 @@ export const modelApi = {
    * @param repo_id - HuggingFace repository ID (e.g., 'google/gemma-2-2b')
    * @returns Promise resolving to model preview information
    */
-  preview: (repo_id: string, hf_token?: string) =>
+  preview: (repo_id: string, hf_token?: string, revision?: string) =>
     request<ModelPreviewResponse>('/models/preview', {
       method: 'POST',
-      body: JSON.stringify({ repo_id, ...(hf_token ? { hf_token } : {}) }),
+      body: JSON.stringify({
+        repo_id,
+        ...(hf_token ? { hf_token } : {}),
+        ...(revision ? { revision } : {}),
+      }),
     }),
 
   /**

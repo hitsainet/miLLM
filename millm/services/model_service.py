@@ -34,7 +34,7 @@ from millm.core.errors import (
 from millm.db.models.model import Model, ModelSource, ModelStatus
 from millm.db.repositories.model_repository import ModelRepository
 from millm.ml.memory_utils import estimate_memory_mb
-from millm.ml.model_downloader import ModelDownloader
+from millm.ml.model_downloader import ModelDownloader, _safe_variant
 from millm.ml.model_loader import ModelLoader
 from millm.sockets.progress import ProgressEmitter
 
@@ -184,6 +184,7 @@ class ModelService:
         return self.downloader.get_model_info(
             repo_id=request.repo_id,
             token=request.hf_token,
+            revision=request.revision,
         )
 
     # =========================================================================
@@ -211,13 +212,16 @@ class ModelService:
             existing = await self.repository.find_by_repo_quantization(
                 repo_id=request.repo_id,
                 quantization=request.quantization,
+                gguf_label=request.gguf_label or "",
             )
             if existing:
+                described = request.gguf_label or request.quantization.value
                 raise ModelAlreadyExistsError(
-                    f"Model {request.repo_id} with {request.quantization.value} quantization already exists",
+                    f"Model {request.repo_id} with {described} quantization already exists",
                     details={
                         "repo_id": request.repo_id,
                         "quantization": request.quantization.value,
+                        "gguf_label": request.gguf_label or "",
                         "existing_model_id": existing.id,
                     },
                 )
@@ -241,6 +245,11 @@ class ModelService:
         cache_path = ""
         if request.source == ModelSource.HUGGINGFACE and request.repo_id:
             safe_name = request.repo_id.replace("/", "--") + f"--{request.quantization.value}"
+            # Must match ModelDownloader._get_local_dir, including the variant.
+            # Q4_K_M, Q4_K_S and Q4_0 are all "Q4"; without the suffix they share
+            # one directory and deleting any one destroys the others.
+            if request.gguf_label:
+                safe_name += f"--{_safe_variant(request.gguf_label)}"
             cache_path = f"huggingface/{safe_name}"
         elif request.source == ModelSource.LOCAL and request.local_path:
             # For local models, use the local path directly as cache_path
@@ -276,6 +285,11 @@ class ModelService:
             params=model_info.get("params") if model_info else None,
             architecture=model_info.get("architecture") if model_info else None,
             estimated_memory_mb=estimated_memory if estimated_memory > 0 else None,
+            # '' not None — the column is part of uq_repo_quantization, and
+            # Postgres treats NULLs as distinct, which would defeat it.
+            gguf_label=request.gguf_label or "",
+            gguf_files=list(request.gguf_files) if request.gguf_files else None,
+            revision=request.revision,
         )
 
         # For local models, mark as ready immediately (no download needed)
@@ -383,7 +397,9 @@ class ModelService:
                     # Check if cancelled before starting
                     if model_id in self._cancelled_downloads:
                         self._cancelled_downloads.discard(model_id)
-                        self._cleanup_partial_download(request.repo_id, request.quantization.value)
+                        self._cleanup_partial_download(
+                            request.repo_id, request.quantization.value, request.gguf_label
+                        )
                         raise DownloadCancelledError("Download was cancelled")
 
                     logger.info(
@@ -400,12 +416,19 @@ class ModelService:
                         progress_callback=on_progress,
                         token=request.hf_token,
                         trust_remote_code=request.trust_remote_code,
+                        file_paths=request.gguf_files,
+                        variant=request.gguf_label,
+                        revision=request.revision,
                     )
 
                     # Check if cancelled after download
                     if model_id in self._cancelled_downloads:
                         self._cancelled_downloads.discard(model_id)
-                        self._cleanup_partial_download(request.repo_id, request.quantization.value)
+                        self._cleanup_partial_download(
+                            request.repo_id,
+                            request.quantization.value,
+                            request.gguf_label,
+                        )
                         raise DownloadCancelledError("Download was cancelled")
 
                     # Mark progress as 100%
@@ -415,6 +438,7 @@ class ModelService:
                     disk_size_bytes = self.downloader.get_cache_size(
                         request.repo_id,
                         request.quantization.value,
+                        request.gguf_label,
                     )
                     disk_size_mb = disk_size_bytes // (1024 * 1024)
 
@@ -457,7 +481,9 @@ class ModelService:
                     # Check if cancelled while waiting to retry
                     if model_id in self._cancelled_downloads:
                         self._cancelled_downloads.discard(model_id)
-                        self._cleanup_partial_download(request.repo_id, request.quantization.value)
+                        self._cleanup_partial_download(
+                            request.repo_id, request.quantization.value, request.gguf_label
+                        )
                         raise DownloadCancelledError("Download was cancelled")
 
                     # Calculate backoff delay
@@ -474,10 +500,14 @@ class ModelService:
                         time.sleep(delay)
 
                         # Clean up partial download before retry
-                        self._cleanup_partial_download(request.repo_id, request.quantization.value)
+                        self._cleanup_partial_download(
+                            request.repo_id, request.quantization.value, request.gguf_label
+                        )
 
             # All retries exhausted - clean up and report failure
-            self._cleanup_partial_download(request.repo_id, request.quantization.value)
+            self._cleanup_partial_download(
+                request.repo_id, request.quantization.value, request.gguf_label
+            )
 
             if last_error:
                 logger.error(
@@ -538,20 +568,27 @@ class ModelService:
 
         return error_name in retryable_names or "timeout" in str(error).lower()
 
-    def _cleanup_partial_download(self, repo_id: str, quantization: str) -> None:
+    def _cleanup_partial_download(
+        self, repo_id: str, quantization: str, variant: Optional[str] = None
+    ) -> None:
         """
         Clean up partially downloaded files.
 
         Args:
             repo_id: HuggingFace repository ID
             quantization: Quantization type
+            variant: The quant label, when several downloads share a coarse
+                quantization. This must reach delete_cached_model: without it
+                a cancelled Q4_K_M download deletes whatever "Q4" resolves to,
+                which is a DIFFERENT, complete model.
         """
         try:
-            self.downloader.delete_cached_model(repo_id, quantization)
+            self.downloader.delete_cached_model(repo_id, quantization, variant)
             logger.info(
                 "partial_download_cleaned",
                 repo_id=repo_id,
                 quantization=quantization,
+                variant=variant,
             )
         except Exception as e:
             logger.warning(

@@ -46,6 +46,63 @@ class ModelDownloadRequest(BaseModel):
         max_length=100,
         description="Optional custom display name for the model",
     )
+    revision: str | None = Field(
+        default=None,
+        max_length=100,
+        description="Git revision (branch, tag, or commit hash) to download",
+    )
+    gguf_files: list[str] | None = Field(
+        default=None,
+        max_length=64,
+        description=(
+            "Exact repo-relative paths of the ONE quantization to download. "
+            "Omit for an ordinary model, which downloads the whole repo. Pass "
+            "EVERY file of a split quantization — a subset yields a directory "
+            "that looks complete and a model that cannot load."
+        ),
+        examples=[["Qwen2.5-7B-Instruct-Q4_K_M.gguf"]],
+    )
+    gguf_label: str | None = Field(
+        default=None,
+        max_length=64,
+        description=(
+            "The quantization's label (Q4_K_M, IQ4_XS). Distinguishes downloads "
+            "that share a coarse QuantizationType — Q4_K_M, Q4_K_S and Q4_0 are "
+            "all 'Q4' — which would otherwise collide on one cache directory."
+        ),
+    )
+
+    @field_validator("gguf_files")
+    @classmethod
+    def validate_gguf_files(cls, v: list[str] | None) -> list[str] | None:
+        """Reject traversal sequences and non-GGUF paths.
+
+        These become `allow_patterns` for snapshot_download. A '..' component
+        could widen the pattern to match files the caller never chose. Repo
+        files are remote, so this is input integrity rather than a local
+        filesystem risk — the same reasoning as the SAE download path, whose
+        validator this mirrors.
+
+        An EMPTY list is rejected rather than accepted: an empty allow list
+        matches nothing, and the download would report success over an empty
+        directory. Absent means "whole repo"; present means "these files".
+        """
+        if v is None:
+            return v
+        if not v:
+            raise ValueError(
+                "gguf_files may not be empty — omit it to download the whole repository"
+            )
+        from pathlib import PurePosixPath
+
+        for path in v:
+            if path.startswith("/") or ".." in PurePosixPath(path).parts:
+                raise ValueError(
+                    "gguf_files entries must be relative paths with no '..' components"
+                )
+            if not path.lower().endswith(".gguf"):
+                raise ValueError(f"gguf_files entries must be .gguf files, got: {path}")
+        return v
 
     @model_validator(mode="after")
     def validate_source_fields(self) -> "ModelDownloadRequest":
@@ -89,6 +146,11 @@ class ModelPreviewRequest(BaseModel):
         pattern=r"^[\w-]+/[\w.-]+$",
         description="HuggingFace repository ID",
     )
+    revision: str | None = Field(
+        default=None,
+        max_length=100,
+        description="Git revision (branch, tag, or commit hash) to inspect",
+    )
     hf_token: Annotated[str | None, Field(exclude=True)] = Field(
         default=None,
         description="HuggingFace access token for gated models",
@@ -100,6 +162,42 @@ class SizeEstimate(BaseModel):
 
     disk_mb: int = Field(..., description="Estimated disk size in MB")
     memory_mb: int = Field(..., description="Estimated VRAM requirement in MB")
+
+
+class GGUFFileInfo(BaseModel):
+    """One `.gguf` file within a quantization."""
+
+    path: str = Field(..., description="Repo-relative path")
+    size_bytes: int = Field(..., description="Exact size, from HuggingFace file metadata")
+
+
+class GGUFQuantInfo(BaseModel):
+    """One selectable GGUF quantization.
+
+    The unit here is a QUANTIZATION, not a file. On large models a quant is
+    split into numbered parts inside its own directory, and downloading one part
+    produces a directory that looks populated and a model that cannot load. Every
+    quant on a 7B repo happens to be a single file, which is why this distinction
+    is easy to miss and expensive to get wrong.
+
+    Sizes are MEASURED, never estimated from a parameter count — for a
+    mixed-precision quant a bytes-per-parameter figure means nothing.
+    """
+
+    label: str = Field(..., description="Quantization label, e.g. Q4_K_M, IQ4_XS, F16")
+    files: list[GGUFFileInfo] = Field(..., description="Every file this quant needs")
+    total_size_bytes: int = Field(..., description="Sum of the files' true sizes")
+    is_split: bool = Field(
+        default=False, description="Whether this quant is split across several files"
+    )
+    quant_parsed: bool = Field(
+        default=True,
+        description=(
+            "False when the label could not be read from the filename and is the "
+            "filename itself. The file is still selectable; it is just not named "
+            "by a recognised quantization token."
+        ),
+    )
 
 
 class ModelPreviewResponse(BaseModel):
@@ -130,6 +228,27 @@ class ModelPreviewResponse(BaseModel):
     )
     license: str | None = Field(default=None, description="Model license")
     language: str | list[str] | None = Field(default=None, description="Model language(s)")
+    revision: str | None = Field(
+        default=None,
+        description="Resolved commit the listing and sizes were measured against",
+    )
+    gguf_quants: list[GGUFQuantInfo] | None = Field(
+        default=None,
+        description=(
+            "GGUF quantizations offered by this repo, smallest first. None or "
+            "empty for an ordinary safetensors repo — which is the signal the UI "
+            "branches on."
+        ),
+    )
+    gguf_architecture: str | None = Field(
+        default=None, description="Architecture from HuggingFace's GGUF metadata, when indexed"
+    )
+    gguf_context_length: int | None = Field(
+        default=None, description="Context length from HuggingFace's GGUF metadata, when indexed"
+    )
+    gguf_total_params: int | None = Field(
+        default=None, description="Parameter count from HuggingFace's GGUF metadata, when indexed"
+    )
 
 
 class ModelResponse(BaseModel):

@@ -5,6 +5,7 @@ Handles downloading models from HuggingFace with progress tracking
 and error handling for common scenarios (gated models, missing repos).
 """
 
+import re
 import shutil
 import threading
 import time
@@ -28,11 +29,37 @@ from millm.core.errors import (
     RepoNotFoundError,
 )
 from millm.core.resilience import huggingface_circuit, CircuitOpenError
+from millm.ml.gguf_catalog import GGUF_SUFFIX, GGUFFile, group_gguf_files
 
 logger = structlog.get_logger()
 
 # Type alias for progress callback: (progress_pct, downloaded_bytes, total_bytes, speed_bps)
 ProgressCallback = Callable[[float, int, int, float], None]
+
+
+def _sibling_size(sibling: Any) -> int:
+    """The TRUE size of a repo file.
+
+    For an LFS file — which every multi-gigabyte GGUF is — the checked-in blob is
+    a pointer of a few hundred bytes and the real size lives under ``lfs``.
+    Reading ``size`` alone understates a 40 GB download as negligible, so prefer
+    ``lfs.size`` and fall back only when there is no LFS record.
+    """
+    lfs = getattr(sibling, "lfs", None)
+    lfs_size = getattr(lfs, "size", None) if lfs is not None else None
+    return int(lfs_size or getattr(sibling, "size", 0) or 0)
+
+
+def _safe_variant(variant: str) -> str:
+    """Reduce a quant label to something safe to put in a directory name.
+
+    The label reaches here from a repo filename, so it is remote input. Anything
+    that is not alphanumeric, dash or underscore becomes an underscore — which
+    also removes every path separator and `..`, so a crafted label cannot walk
+    out of the cache directory.
+    """
+    return re.sub(r"[^A-Za-z0-9_-]", "_", variant)[:64]
+
 
 # How often the filesystem-size poller samples on-disk progress. Module-level so
 # tests can shrink it; download() constructs the poller with the default.
@@ -158,6 +185,8 @@ class ModelDownloader:
         repo_id: str,
         local_dir: str,
         token: Optional[str],
+        allow_patterns: Optional[list[str]] = None,
+        revision: Optional[str] = None,
     ) -> None:
         """Download with circuit breaker protection.
 
@@ -165,6 +194,13 @@ class ModelDownloader:
         ``resume_download`` flag is intentionally not passed). Console progress
         bars are suppressed via ``_SilentTqdm`` because progress is tracked
         out-of-band by ``_DownloadSizePoller``.
+
+        ``allow_patterns`` restricts the pull to specific files. Without it a
+        GGUF repo downloads EVERY quantization — twenty-odd mutually exclusive
+        copies of the same model, hundreds of gigabytes — when the caller asked
+        for one. The patterns are exact paths, never a directory glob: a
+        single-file quant sits at the repo root, whose parent directory is the
+        whole repo.
         """
         snapshot_download(
             repo_id=repo_id,
@@ -172,12 +208,24 @@ class ModelDownloader:
             local_dir_use_symlinks=False,
             token=token,
             tqdm_class=_SilentTqdm,
+            allow_patterns=allow_patterns,
+            revision=revision,
         )
 
-    def _get_local_dir(self, repo_id: str, quantization: str) -> Path:
-        """Generate the local directory path for a model."""
-        # Format: huggingface/owner--repo--quantization
+    def _get_local_dir(
+        self, repo_id: str, quantization: str, variant: Optional[str] = None
+    ) -> Path:
+        """Generate the local directory path for a model.
+
+        ``variant`` separates two downloads that share a coarse quantization
+        label. ``Q4_K_M``, ``Q4_K_S`` and ``Q4_0`` are all "Q4" to the
+        ``QuantizationType`` enum, so without it they collide on one directory
+        and deleting either takes the others with it.
+        """
+        # Format: huggingface/owner--repo--quantization[--variant]
         safe_name = repo_id.replace("/", "--") + f"--{quantization}"
+        if variant:
+            safe_name += f"--{_safe_variant(variant)}"
         return self.cache_dir / "huggingface" / safe_name
 
     def exists(self, repo_id: str, quantization: str) -> bool:
@@ -213,6 +261,9 @@ class ModelDownloader:
         token: Optional[str] = None,
         trust_remote_code: bool = False,
         resume: bool = True,
+        file_paths: Optional[list[str]] = None,
+        variant: Optional[str] = None,
+        revision: Optional[str] = None,
     ) -> str:
         """
         Download model to cache directory.
@@ -226,6 +277,15 @@ class ModelDownloader:
             trust_remote_code: Whether model requires trust_remote_code
             resume: Accepted for backward compatibility. Resume is automatic in
                 huggingface_hub >= 1.x, so this flag is a no-op.
+            file_paths: Exact repo-relative paths to fetch. When given, ONLY
+                these files are downloaded. This is how a single GGUF
+                quantization is selected out of a repo holding twenty; omit it
+                and the whole repo comes down, which is the correct behaviour
+                for an ordinary safetensors model.
+            variant: Disambiguates the cache directory when several downloads
+                share one coarse quantization label (Q4_K_M vs Q4_0).
+            revision: Repo revision to pin. Preview and download must agree, or
+                the sizes shown were measured against different content.
 
         Returns:
             Path to downloaded model directory
@@ -236,12 +296,15 @@ class ModelDownloader:
             InvalidTokenError: Token is invalid
             DownloadFailedError: Download failed for other reasons
         """
-        local_dir = self._get_local_dir(repo_id, quantization)
+        local_dir = self._get_local_dir(repo_id, quantization, variant)
 
         logger.info(
             "download_started",
             repo_id=repo_id,
             quantization=quantization,
+            variant=variant,
+            revision=revision,
+            file_count=len(file_paths) if file_paths else None,
             local_dir=str(local_dir),
         )
 
@@ -250,7 +313,9 @@ class ModelDownloader:
         # guessed denominator; the numerator is read from disk while downloading.
         poller: Optional[_DownloadSizePoller] = None
         if progress_callback is not None:
-            expected_total = self.get_expected_download_size(repo_id, token=token)
+            expected_total = self.get_expected_download_size(
+                repo_id, token=token, file_paths=file_paths, revision=revision
+            )
             if expected_total <= 0:
                 logger.warning("expected_download_size_unavailable", repo_id=repo_id)
             poller = _DownloadSizePoller(
@@ -267,6 +332,11 @@ class ModelDownloader:
                 repo_id=repo_id,
                 local_dir=str(local_dir),
                 token=token or settings.HF_TOKEN,
+                # None, not [], when nothing was selected — an empty allow list
+                # matches nothing and would produce an empty directory reported
+                # as a successful download.
+                allow_patterns=list(file_paths) if file_paths else None,
+                revision=revision,
             )
 
             logger.info(
@@ -343,14 +413,24 @@ class ModelDownloader:
                 poller.stop()
 
     @huggingface_circuit
-    def _get_model_info_with_circuit(self, repo_id: str, token: Optional[str]) -> Any:
-        """Get model info with circuit breaker protection."""
-        return self.hf_api.model_info(repo_id, token=token)
+    def _get_model_info_with_circuit(
+        self, repo_id: str, token: Optional[str], revision: Optional[str] = None
+    ) -> Any:
+        """Get model info with circuit breaker protection.
+
+        ``files_metadata=True`` is what populates per-file sizes. Without it the
+        siblings come back with ``size=None`` and the listing is only good for
+        sniffing filenames — which is all this call was ever used for.
+        """
+        return self.hf_api.model_info(
+            repo_id, token=token, revision=revision, files_metadata=True
+        )
 
     def get_model_info(
         self,
         repo_id: str,
         token: Optional[str] = None,
+        revision: Optional[str] = None,
     ) -> dict:
         """
         Get model info without downloading.
@@ -358,16 +438,21 @@ class ModelDownloader:
         Args:
             repo_id: HuggingFace repo (e.g., "google/gemma-2-2b")
             token: HuggingFace access token for gated models
+            revision: Repo revision to inspect
 
         Returns:
-            Dict with model metadata
+            Dict with model metadata, including ``gguf_quants`` — the repo's
+            GGUF quantizations grouped into selectable units — and ``revision``,
+            the resolved commit the sizes were measured against.
 
         Raises:
             RepoNotFoundError: Repository doesn't exist
             GatedModelError: Model is gated and no valid token provided
         """
         try:
-            info = self._get_model_info_with_circuit(repo_id, token=token or settings.HF_TOKEN)
+            info = self._get_model_info_with_circuit(
+                repo_id, token=token or settings.HF_TOKEN, revision=revision
+            )
 
             # Extract config fields (model_type, architectures)
             config = getattr(info, "config", None) or {}
@@ -379,9 +464,33 @@ class ModelDownloader:
             if hasattr(card_data, "__dict__") and not isinstance(card_data, dict):
                 card_data = card_data.__dict__
 
+            # The GGUF catalogue. Built from the FILE LIST, never from the Hub's
+            # computed `gguf` metadata block: that block is derived by
+            # HuggingFace and can be absent on a repo that plainly holds .gguf
+            # files, and branching on it would render such a repo as an ordinary
+            # one — silently offering a whole-repo download of every quant.
+            siblings = list(getattr(info, "siblings", None) or [])
+            gguf_files = [
+                GGUFFile(path=s.rfilename, size_bytes=_sibling_size(s))
+                for s in siblings
+                if s.rfilename.lower().endswith(GGUF_SUFFIX)
+            ]
+            gguf_quants = group_gguf_files(gguf_files)
+
+            # Free enrichment: for an indexed GGUF repo the Hub already returns
+            # architecture, parameter count, context length and the chat
+            # template. Absent on plenty of repos, so every consumer treats it
+            # as optional.
+            gguf_meta = getattr(info, "gguf", None) or {}
+
             return {
                 "name": info.modelId.split("/")[-1] if info.modelId else repo_id.split("/")[-1],
                 "repo_id": info.modelId,
+                "revision": getattr(info, "sha", None),
+                "gguf_quants": gguf_quants,
+                "gguf_architecture": gguf_meta.get("architecture") if isinstance(gguf_meta, dict) else None,
+                "gguf_context_length": gguf_meta.get("context_length") if isinstance(gguf_meta, dict) else None,
+                "gguf_total_params": gguf_meta.get("total") if isinstance(gguf_meta, dict) else None,
                 "params": self._extract_params(info),
                 "architecture": getattr(info, "pipeline_tag", None) or "text-generation",
                 "is_gated": bool(info.gated),
@@ -466,18 +575,24 @@ class ModelDownloader:
 
         return False
 
-    def delete_cached_model(self, repo_id: str, quantization: str) -> bool:
+    def delete_cached_model(
+        self, repo_id: str, quantization: str, variant: Optional[str] = None
+    ) -> bool:
         """
         Delete a cached model from local storage.
 
         Args:
             repo_id: HuggingFace repo
             quantization: Q4, Q8, or FP16
+            variant: The quant label, when several downloads share a coarse
+                quantization. Omitting it here would delete whichever directory
+                the bare label resolves to — taking the caller's SIBLING
+                downloads with it.
 
         Returns:
             True if model was deleted, False if it didn't exist
         """
-        local_dir = self._get_local_dir(repo_id, quantization)
+        local_dir = self._get_local_dir(repo_id, quantization, variant)
 
         if not local_dir.exists():
             return False
@@ -492,18 +607,21 @@ class ModelDownloader:
         shutil.rmtree(local_dir)
         return True
 
-    def get_cache_size(self, repo_id: str, quantization: str) -> int:
+    def get_cache_size(
+        self, repo_id: str, quantization: str, variant: Optional[str] = None
+    ) -> int:
         """
         Get the size of a cached model in bytes.
 
         Args:
             repo_id: HuggingFace repo
             quantization: Q4, Q8, or FP16
+            variant: The quant label, matching the download.
 
         Returns:
             Size in bytes, or 0 if not cached
         """
-        local_dir = self._get_local_dir(repo_id, quantization)
+        local_dir = self._get_local_dir(repo_id, quantization, variant)
 
         if not local_dir.exists():
             return 0
@@ -519,6 +637,8 @@ class ModelDownloader:
         self,
         repo_id: str,
         token: Optional[str] = None,
+        file_paths: Optional[list[str]] = None,
+        revision: Optional[str] = None,
     ) -> int:
         """
         Get the expected total download size for a model repository.
@@ -526,18 +646,29 @@ class ModelDownloader:
         Args:
             repo_id: HuggingFace repo (e.g., "google/gemma-2-2b")
             token: HuggingFace access token for gated models
+            file_paths: When given, sum ONLY these files. This is the progress
+                denominator, and summing the whole repo while downloading one
+                quantization would peg the bar near zero for the entire pull.
+            revision: Revision to measure against, matching the download.
 
         Returns:
             Expected total size in bytes, or 0 if unable to determine
         """
         try:
-            info = self.hf_api.model_info(repo_id, token=token or settings.HF_TOKEN, files_metadata=True)
+            info = self.hf_api.model_info(
+                repo_id,
+                token=token or settings.HF_TOKEN,
+                files_metadata=True,
+                revision=revision,
+            )
 
+            wanted = set(file_paths) if file_paths else None
             total_size = 0
             if info.siblings:
                 for sibling in info.siblings:
-                    if hasattr(sibling, "size") and sibling.size:
-                        total_size += sibling.size
+                    if wanted is not None and sibling.rfilename not in wanted:
+                        continue
+                    total_size += _sibling_size(sibling)
 
             return total_size
 
@@ -549,15 +680,18 @@ class ModelDownloader:
             )
             return 0
 
-    def get_local_dir_path(self, repo_id: str, quantization: str) -> Path:
+    def get_local_dir_path(
+        self, repo_id: str, quantization: str, variant: Optional[str] = None
+    ) -> Path:
         """
         Get the local directory path for a model (public access).
 
         Args:
             repo_id: HuggingFace repo
             quantization: Q4, Q8, or FP16
+            variant: The quant label, matching the download.
 
         Returns:
             Path to local directory
         """
-        return self._get_local_dir(repo_id, quantization)
+        return self._get_local_dir(repo_id, quantization, variant)

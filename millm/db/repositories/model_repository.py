@@ -184,14 +184,19 @@ class ModelRepository:
         return list(result.scalars().all())
 
     async def find_by_repo_quantization(
-        self, repo_id: str, quantization: QuantizationType
+        self, repo_id: str, quantization: QuantizationType, gguf_label: str = ""
     ) -> Model | None:
         """
-        Find a model by repository ID and quantization level.
+        Find a model by repository ID, quantization level and GGUF label.
 
         Args:
             repo_id: The HuggingFace repository ID.
             quantization: The quantization level.
+            gguf_label: The exact GGUF quantization, '' for a whole-repo model.
+                This must be part of the lookup or it does not match the
+                uq_repo_quantization constraint: Q4_K_M and Q4_K_S are two
+                legitimate rows, and matching on the coarse level alone would
+                reject the second as a duplicate of the first.
 
         Returns:
             The Model instance or None if not found.
@@ -200,6 +205,7 @@ class ModelRepository:
             select(Model).where(
                 Model.repo_id == repo_id,
                 Model.quantization == quantization,
+                Model.gguf_label == (gguf_label or ""),
             )
         )
         return result.scalar_one_or_none()

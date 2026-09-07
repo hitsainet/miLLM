@@ -285,7 +285,21 @@ class ModelResponse(BaseModel):
     )
     quantization: QuantizationType = Field(
         ...,
-        description="Quantization level",
+        description="Quantization level (coarse bucket)",
+    )
+    gguf_label: str | None = Field(
+        default=None,
+        description=(
+            "The EXACT GGUF quantization (Q5_K_M, IQ4_XS), when this model is a "
+            "single GGUF file. '' or null for an ordinary model. Prefer this "
+            "over `quantization` for display: the coarse enum has five members "
+            "and cannot tell Q4_K_M from Q4_0, so a card showing only the bucket "
+            "reports a quantization that was never chosen."
+        ),
+    )
+    revision: str | None = Field(
+        default=None,
+        description="The pinned commit this model was downloaded from",
     )
     disk_size_mb: int | None = Field(
         default=None,

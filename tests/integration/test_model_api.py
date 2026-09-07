@@ -35,6 +35,12 @@ def mock_model():
     model.dtype = "float16"
     model.attn_implementation = "sdpa"
     model.quantization_method = "none"
+    # A MagicMock answers every attribute with another MagicMock, so a field
+    # added to ModelResponse silently becomes a mock object here and fails
+    # validation. These are the ordinary-model values: no GGUF selection.
+    model.gguf_label = ""
+    model.gguf_files = None
+    model.revision = None
     return model
 
 

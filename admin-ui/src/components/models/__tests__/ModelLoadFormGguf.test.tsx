@@ -13,7 +13,7 @@
  */
 
 import { describe, expect, it, vi } from 'vitest';
-import { render, screen } from '@testing-library/react';
+import { render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 
 import { ModelLoadForm } from '../ModelLoadForm';
@@ -46,6 +46,40 @@ async function typeRepo(repo: string) {
   await userEvent.clear(input);
   await userEvent.type(input, repo);
 }
+
+describe('the repo is looked up without a manual Preview', () => {
+  // Real timers: pairing vitest's fake timers with userEvent's internal delays
+  // deadlocks `type()`, and a leaked fake clock then hangs every later test in
+  // the file. 600ms of real waiting is the cheaper trade.
+  it('asks for the repo once typing settles, once — not per keystroke', async () => {
+    const onRepoIdSettled = vi.fn();
+    render(<ModelLoadForm onSubmit={vi.fn()} onRepoIdSettled={onRepoIdSettled} />);
+
+    await userEvent.type(
+      screen.getByLabelText(/Hugging Face Repository ID/i),
+      'owner/model-GGUF',
+    );
+
+    await waitFor(() => expect(onRepoIdSettled).toHaveBeenCalledTimes(1), {
+      timeout: 3000,
+    });
+    expect(onRepoIdSettled).toHaveBeenCalledWith('owner/model-GGUF', undefined);
+  });
+
+  it('does not look up something that is not a repo id', async () => {
+    const onRepoIdSettled = vi.fn();
+    render(<ModelLoadForm onSubmit={vi.fn()} onRepoIdSettled={onRepoIdSettled} />);
+
+    await userEvent.type(
+      screen.getByLabelText(/Hugging Face Repository ID/i),
+      'not-a-repo',
+    );
+    // Long enough for the debounce to have fired had it been going to.
+    await new Promise((r) => setTimeout(r, 900));
+
+    expect(onRepoIdSettled).not.toHaveBeenCalled();
+  });
+});
 
 describe('ModelLoadForm quantization dropdown', () => {
   it('shows the runtime levels when the repo is not GGUF', () => {

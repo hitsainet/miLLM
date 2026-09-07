@@ -1,11 +1,12 @@
 import { useState } from 'react';
+import { modelApi } from '@services/api';
 import { Server, Info, Play, Lock } from 'lucide-react';
 import { useModels } from '@hooks/useModels';
 import { useServerStore } from '@stores/serverStore';
 import { ModelLoadForm, LoadedModelCard, ModelDetailsModal } from '@components/models';
 import type { ModelLoadFormData } from '@components/models';
 import { Card, CardHeader, Spinner, EmptyState, Badge } from '@components/common';
-import type { ModelInfo } from '@/types';
+import type { GGUFQuantInfo, ModelInfo } from '@/types';
 
 export function ModelsPage() {
   const { loadedModel } = useServerStore();
@@ -59,6 +60,35 @@ export function ModelsPage() {
     await previewModel(repo_id, hf_token);
     setSelectedModel(null); // Clear any selected model
     setIsModalOpen(true);
+  };
+
+  /**
+   * Quantizations for whatever repo is currently in the form's box.
+   *
+   * DELIBERATELY SEPARATE from `previewData`, which drives the details modal.
+   * Sharing that state would mean the dropdown emptied whenever the modal was
+   * closed (`handleCloseModal` clears the preview), and — worse — that a
+   * background lookup opened the modal on every keystroke.
+   */
+  const [formPreview, setFormPreview] = useState<{
+    repoId: string;
+    quants: GGUFQuantInfo[] | null;
+  } | null>(null);
+
+  /**
+   * Look up a repo's quantizations without opening anything.
+   *
+   * Failures are swallowed on purpose: this fires while someone is still
+   * typing, so a half-written repo id 404s constantly and none of those are
+   * worth reporting. The dropdown simply stays on the runtime levels.
+   */
+  const handleRepoIdSettled = async (repo_id: string, hf_token?: string) => {
+    try {
+      const info = await modelApi.preview(repo_id, hf_token);
+      setFormPreview({ repoId: repo_id, quants: info.gguf_quants ?? null });
+    } catch {
+      setFormPreview({ repoId: repo_id, quants: null });
+    }
   };
 
   const handleUnload = async () => {
@@ -163,8 +193,9 @@ export function ModelsPage() {
           onPreview={handlePreview}
           isLoading={isDownloading || isLoadingModel}
           isPreviewLoading={isPreviewingModel}
-          ggufQuants={previewData?.gguf_quants ?? null}
-          previewedRepoId={previewRepoId}
+          ggufQuants={formPreview?.quants ?? null}
+          previewedRepoId={formPreview?.repoId ?? null}
+          onRepoIdSettled={handleRepoIdSettled}
         />
       )}
 

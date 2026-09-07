@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { Download, Play, HelpCircle } from 'lucide-react';
 import { Card, CardHeader, Button, Input, Select } from '@components/common';
 import type { GGUFQuantInfo } from '@/types';
@@ -23,6 +23,21 @@ interface ModelLoadFormProps {
   ggufQuants?: GGUFQuantInfo[] | null;
   /** WHICH repo those quantizations describe. See `ggufForCurrentRepo`. */
   previewedRepoId?: string | null;
+  /**
+   * Called once the typed repo id has stopped changing and looks like a repo.
+   *
+   * Separate from `onPreview`, which opens the details modal — this only fills
+   * the quantization dropdown, so it must not surface anything.
+   */
+  onRepoIdSettled?: (repo_id: string, hf_token?: string) => void;
+}
+
+/** How long the repo id must stay unchanged before it is looked up. */
+const REPO_SETTLE_MS = 600;
+
+/** The shape a HuggingFace repo id takes; also what the form validates. */
+function looksLikeRepoId(value: string): boolean {
+  return /^[\w-]+\/[\w.-]+$/.test(value.trim());
 }
 
 /**
@@ -59,6 +74,7 @@ export function ModelLoadForm({
   isPreviewLoading,
   ggufQuants,
   previewedRepoId,
+  onRepoIdSettled,
 }: ModelLoadFormProps) {
   const [formData, setFormData] = useState<ModelLoadFormData>({
     repo_id: '',
@@ -80,6 +96,32 @@ export function ModelLoadForm({
    * a current one. Comparing against the previewed id makes the list disappear
    * the moment it stops being true.
    */
+  // Look the repo up once typing settles, so the dropdown describes the repo
+  // in the box without requiring a manual Preview first. Debounced because this
+  // is a network call on a text field, and skipped until the id is well-formed.
+  const settleTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const lastLookedUp = useRef<string>('');
+  useEffect(() => {
+    const repo = formData.repo_id.trim();
+    if (!onRepoIdSettled || !looksLikeRepoId(repo) || repo === lastLookedUp.current) {
+      return;
+    }
+    if (settleTimer.current) clearTimeout(settleTimer.current);
+    settleTimer.current = setTimeout(() => {
+      lastLookedUp.current = repo;
+      onRepoIdSettled(repo, formData.hf_token || undefined);
+    }, REPO_SETTLE_MS);
+    return () => {
+      if (settleTimer.current) clearTimeout(settleTimer.current);
+    };
+  }, [formData.repo_id, formData.hf_token, onRepoIdSettled]);
+
+  // A chosen quantization belongs to the repo it came from. Clearing it when
+  // the box changes stops a stale label riding along to a different repo.
+  useEffect(() => {
+    setGgufLabel('');
+  }, [formData.repo_id]);
+
   const ggufForCurrentRepo =
     previewedRepoId && previewedRepoId.trim() === formData.repo_id.trim()
       ? ggufQuants ?? null

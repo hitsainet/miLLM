@@ -37,6 +37,10 @@ export interface ModelInfo {
   dtype?: string;
   architecture?: string;
   download_progress?: number;
+  /** The exact GGUF quantization (Q5_K_M), when this model is a GGUF file. */
+  gguf_label?: string | null;
+  /** The pinned commit this model was downloaded from. */
+  revision?: string | null;
 }
 
 export interface LoadModelRequest {

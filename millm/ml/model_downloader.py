@@ -541,20 +541,39 @@ class ModelDownloader:
                 details={"repo_id": repo_id, "error": str(e)},
             )
 
+    @staticmethod
+    def _format_params(total: int) -> str:
+        """Render a parameter count the way the UI shows it."""
+        if total >= 1e12:
+            return f"{total / 1e12:.1f}T"
+        if total >= 1e9:
+            return f"{total / 1e9:.1f}B"
+        if total >= 1e6:
+            return f"{total / 1e6:.0f}M"
+        return str(total)
+
     def _extract_params(self, info) -> str:
-        """Extract parameter count from model info."""
+        """Extract parameter count from model info.
+
+        A GGUF repo has NO `safetensors` block, so this used to fall through to
+        scanning the repo id for "7b"/"70b" and otherwise return "unknown" —
+        which is what every GGUF model card displayed. HuggingFace publishes the
+        real count in its `gguf` metadata for indexed repos, so that is
+        consulted before guessing from the name.
+        """
         # Try to get from safetensors metadata
         safetensors = getattr(info, "safetensors", None)
         if safetensors:
             total = getattr(safetensors, "total", None)
             if total:
-                if total >= 1e12:
-                    return f"{total / 1e12:.1f}T"
-                elif total >= 1e9:
-                    return f"{total / 1e9:.1f}B"
-                elif total >= 1e6:
-                    return f"{total / 1e6:.0f}M"
-                return str(total)
+                return self._format_params(total)
+
+        # A GGUF repo: the Hub carries the count in its own metadata block.
+        gguf_meta = getattr(info, "gguf", None)
+        if isinstance(gguf_meta, dict):
+            total = gguf_meta.get("total")
+            if total:
+                return self._format_params(int(total))
 
         # Try to extract from model name
         model_id = info.modelId or ""

@@ -1258,9 +1258,15 @@ class ModelService:
 
         # Delete cached files if from HuggingFace
         if model.source == ModelSource.HUGGINGFACE and model.repo_id:
+            # The variant MUST be passed. The cache directory is
+            # repo--quantization[--gguf_label], so resolving it without the
+            # label computes a path that does not exist: deleting a GGUF model
+            # would remove the row and leave the files — 5.4 GB in the case that
+            # found this — orphaned on disk with nothing left pointing at them.
             self.downloader.delete_cached_model(
                 model.repo_id,
                 model.quantization.value,
+                model.gguf_label or None,
             )
 
         # Delete from database

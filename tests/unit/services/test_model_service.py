@@ -75,6 +75,11 @@ def sample_model():
     model.quantization = QuantizationType.Q4
     model.status = ModelStatus.READY
     model.cache_path = "huggingface/google--gemma-2-2b--Q4"
+    # An ordinary model: no GGUF selection. Without this a MagicMock hands back
+    # a mock object, which reaches delete_cached_model as the directory suffix.
+    model.gguf_label = ""
+    model.gguf_files = None
+    model.revision = None
     model.created_at = datetime.utcnow()
     return model
 
@@ -159,6 +164,61 @@ class TestModelServicePreviewModel:
         await service.preview_model(request)
 
         assert mock_downloader.get_model_info.call_args.kwargs["revision"] == "abc123"
+
+
+class TestModelServiceDeleteRemovesTheRightDirectory:
+    """Deleting must resolve the directory the download actually wrote.
+
+    The cache path is repo--quantization[--gguf_label]. Resolving it without the
+    label computes a path that does not exist, so the row disappears and the
+    files stay — 5.4 GB orphaned with nothing pointing at them, and the disk
+    only gets worse with each delete.
+
+    MUTATION CONTROL: drop the variant argument in delete_model -> this fails.
+    """
+
+    @pytest.mark.asyncio
+    async def test_a_gguf_model_deletes_its_own_directory(
+        self, service, mock_repository, mock_downloader
+    ):
+        model = MagicMock()
+        model.id = 5
+        model.source = ModelSource.HUGGINGFACE
+        model.repo_id = "sovasoft/zora-v1.13-gguf"
+        model.quantization = QuantizationType.Q4
+        model.gguf_label = "Q5_K_M"
+        model.status = ModelStatus.READY
+        mock_repository.get_by_id.return_value = model
+        mock_repository.delete.return_value = True
+
+        await service.delete_model(5)
+
+        args = mock_downloader.delete_cached_model.call_args[0]
+        assert args[0] == "sovasoft/zora-v1.13-gguf"
+        assert args[1] == "Q4"
+        assert args[2] == "Q5_K_M", (
+            "without the label this resolves repo--Q4, which is not where the "
+            "files are; the row goes and the bytes stay"
+        )
+
+    @pytest.mark.asyncio
+    async def test_an_ordinary_model_passes_no_variant(
+        self, service, mock_repository, mock_downloader
+    ):
+        model = MagicMock()
+        model.id = 6
+        model.source = ModelSource.HUGGINGFACE
+        model.repo_id = "google/gemma-2-2b"
+        model.quantization = QuantizationType.Q4
+        model.gguf_label = ""
+        model.status = ModelStatus.READY
+        mock_repository.get_by_id.return_value = model
+        mock_repository.delete.return_value = True
+
+        await service.delete_model(6)
+
+        args = mock_downloader.delete_cached_model.call_args[0]
+        assert args[2] is None, "'' must not become a directory suffix"
 
 
 class TestModelServiceDownloadModel:
@@ -348,9 +408,13 @@ class TestModelServiceDeleteModel:
         result = await service.delete_model(1)
 
         assert result is True
+        # The variant is part of the call now: the cache directory is
+        # repo--quantization[--gguf_label], and resolving it without the label
+        # orphans a GGUF model's files on delete.
         mock_downloader.delete_cached_model.assert_called_once_with(
             "google/gemma-2-2b",
             "Q4",
+            None,
         )
         mock_repository.delete.assert_called_once_with(1)
 

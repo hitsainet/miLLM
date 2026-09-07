@@ -332,7 +332,18 @@ class TestLoadingAGGUFFile:
                 raise ValueError("Failed to create llama_context")
             return MagicMock()
 
-        with patch("millm.ml.model_loader.Llama", side_effect=_llama):
+        # The ceiling is PINNED here rather than inherited from the settings
+        # default. This test is about stepping down, not about what the default
+        # happens to be — it previously hardcoded 8192 because that WAS the
+        # default, and broke when the default became a ceiling of 32768.
+        # `declared_context` is stubbed for the same reason: the start is now
+        # min(declared, ceiling), and a real probe of a 1 KiB fake file returns
+        # nothing useful.
+        from millm.core.config import settings as _s
+
+        with patch("millm.ml.model_loader.Llama", side_effect=_llama), \
+             patch("millm.ml.model_loader.declared_context", return_value=8192), \
+             patch.object(_s, "GGUF_CONTEXT_LENGTH", 8192):
             loaded = load_gguf_model(13, "m", str(tmp_path), "m-Q4_K_M.gguf")
 
         assert attempts == [8192, 4096], "it must step down, not give up"

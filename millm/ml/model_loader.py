@@ -125,6 +125,15 @@ class LoadedModel:
     #: configuration says 8192 would truncate long prompts for reasons nothing
     #: on the system explains. 0 means "the model's full declared context".
     context_length: int = 0
+    #: Whether THIS instance can serve /v1/embeddings.
+    #:
+    #: Not a config switch — a fact about the load. llama.cpp takes
+    #: `embedding`/`pooling_type` at CONSTRUCTION only, and some architectures
+    #: refuse MEAN pooling outright, so the model is loaded without it rather
+    #: than not at all. A caller must be told which it got; discovering it from
+    #: a confusing runtime failure is how the capability looks broken instead of
+    #: absent.
+    supports_embeddings: bool = False
     #: WHICH runtime holds this model. Defaults to transformers so every
     #: existing construction site keeps its meaning. Consumers branch on this
     #: rather than sniffing the object, because a duck-typed check would quietly
@@ -887,6 +896,10 @@ class ModelLoadContext:
             dtype=dtype_str,
             attn_implementation=attn_impl,
             quantization_method=quant_method,
+            # The transformers path computes embeddings from hidden states at
+            # request time, so there is no construction-time flag to refuse and
+            # no architecture that can decline it.
+            supports_embeddings=True,
         )
 
 
@@ -899,6 +912,43 @@ GGUF_GPU_LAYERS = -1
 #: hold a real exchange, and failing is more useful than serving a window that
 #: truncates the first message.
 GGUF_MIN_CONTEXT = 2048
+
+
+def declared_context(path: str) -> int | None:
+    """The context the model was TRAINED for, read from the file itself.
+
+    Loading the model onto the CPU with mmap reads the hyper-parameters without
+    reading the weights and without touching VRAM: MEASURED at 1.2 s and 0 MiB
+    on a 7.8 GiB file. `vocab_only` is NOT usable here — it skips the hparams
+    and reports `n_ctx_train = 0`.
+
+    Why this exists: the ladder used to start from a global config default of
+    8192, so a model trained for 262144 was served an 8192 window and nothing
+    said so. The declared context is a property of the FILE and the only honest
+    place to start from; a config default is a guess about a model it has never
+    seen.
+
+    Returns None on any failure — this is an optimisation, not a gate, and a
+    model must never fail to load because its metadata could not be read.
+    """
+    if llama_cpp_module is None:
+        return None
+    try:
+        llama_cpp_module.llama_backend_init()
+        params = llama_cpp_module.llama_model_default_params()
+        params.n_gpu_layers = 0
+        params.use_mmap = True
+        model = llama_cpp_module.llama_model_load_from_file(str(path).encode(), params)
+        if not model:
+            return None
+        try:
+            trained = int(llama_cpp_module.llama_model_n_ctx_train(model))
+        finally:
+            llama_cpp_module.llama_model_free(model)
+        return trained if trained > 0 else None
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("gguf_declared_context_probe_failed", error=str(exc)[:200])
+        return None
 
 
 def _context_ladder(requested: int) -> list[int]:
@@ -991,10 +1041,41 @@ def load_gguf_model(
     try:
         from millm.core.config import settings as _settings
 
+        # START FROM WHAT THE MODEL DECLARES, capped by configuration.
+        #
+        # GGUF_CONTEXT_LENGTH is a CEILING, not a target. Starting the ladder at
+        # a fixed 8192 served an 8192 window to a model trained for 262144 and
+        # said nothing — MEASURED on ByteOtter/Qwen3.8-27B-TAK-Reasoning-GGUF,
+        # which declares 262144 and creates a context at 131072 on this 24 GiB
+        # card. The declared value is a property of the file; a config default
+        # is a guess about a model it has never seen.
+        #
+        # The cap is not timidity: llama.cpp allocates the whole KV cache at
+        # context creation, so an unbounded window reserves the card, and this
+        # GPU is shared with miStudio's extraction, training and steering work.
+        ceiling = _settings.GGUF_CONTEXT_LENGTH
+        declared = declared_context(str(path))
+        if ceiling <= 0:
+            # 0 is the documented "whatever the file declares" escape hatch, and
+            # llama.cpp reads n_ctx=0 that way itself. Stated explicitly rather
+            # than falling out of min(declared, 0), which is the same answer for
+            # the wrong reason and would not survive a refactor.
+            start_ctx = 0
+        elif declared:
+            start_ctx = min(declared, ceiling)
+        else:
+            start_ctx = ceiling
+        logger.info(
+            "gguf_context_target",
+            model_id=model_id,
+            declared=declared,
+            ceiling=ceiling,
+            starting_at=start_ctx,
+        )
         kwargs: dict[str, Any] = {
             "model_path": str(path),
             "n_gpu_layers": GGUF_GPU_LAYERS,
-            "n_ctx": _settings.GGUF_CONTEXT_LENGTH,
+            "n_ctx": start_ctx,
             "verbose": False,
         }
         if _settings.GGUF_ENABLE_EMBEDDINGS:
@@ -1025,26 +1106,83 @@ def load_gguf_model(
         llm = None
         attempted: list[int] = []
         requested = int(kwargs["n_ctx"])
-        for n_ctx in _context_ladder(requested):
-            attempted.append(n_ctx)
-            kwargs["n_ctx"] = n_ctx
-            try:
-                llm = Llama(**kwargs)
-                break
-            except Exception as attempt_error:  # noqa: BLE001
-                logger.warning(
-                    "gguf_context_too_large",
-                    model_id=model_id,
-                    n_ctx=n_ctx,
-                    error=str(attempt_error)[:200],
-                )
-                gc.collect()
+        embeddings_dropped = False
+
+        def _try_ladder() -> Any:
+            """Walk the context ladder with the CURRENT kwargs. None = all failed."""
+            for n_ctx in _context_ladder(requested):
+                attempted.append(n_ctx)
+                kwargs["n_ctx"] = n_ctx
+                try:
+                    return Llama(**kwargs)
+                except Exception as attempt_error:  # noqa: BLE001
+                    logger.warning(
+                        "gguf_context_attempt_failed",
+                        model_id=model_id,
+                        n_ctx=n_ctx,
+                        embeddings=bool(kwargs.get("embedding")),
+                        error=str(attempt_error)[:200],
+                    )
+                    gc.collect()
+            return None
+
+        llm = _try_ladder()
+
+        # EMBEDDINGS ARE OPTIONAL; SERVING THE MODEL IS NOT.
+        #
+        # `pooling_type=MEAN` is refused outright by some architectures —
+        # llama.cpp logs "model default pooling_type is [-1], but [1] was
+        # specified" and llama_context creation fails at EVERY context length,
+        # because the context size was never the problem. Measured on
+        # ByteOtter/Qwen3.8-27B-TAK-Reasoning-GGUF (7.8 GiB) on an otherwise
+        # EMPTY 24 GiB card: fails at 8192/4096/2048 with the flag, loads at
+        # 2048 without it.
+        #
+        # Before this, that model was unloadable and the operator was told "may
+        # not fit on this GPU at all — try a smaller quantization", which is
+        # advice that cannot work: the next quantization fails identically, and
+        # the card was 98% free the whole time.
+        #
+        # So drop the capability, not the model. Which one is available is
+        # recorded on the row rather than discovered by a caller getting a
+        # confusing failure from /v1/embeddings.
+        if llm is None and kwargs.get("embedding"):
+            logger.warning(
+                "gguf_retrying_without_embeddings",
+                model_id=model_id,
+                attempted=list(attempted),
+                detail=(
+                    "no context could be created with embeddings enabled; this "
+                    "architecture refuses the pooling type. Retrying WITHOUT "
+                    "embeddings — chat and completions will work, /v1/embeddings "
+                    "will not."
+                ),
+            )
+            kwargs.pop("embedding", None)
+            kwargs.pop("pooling_type", None)
+            attempted = []
+            llm = _try_ladder()
+            embeddings_dropped = llm is not None
+
         if llm is None:
             raise ModelLoadError(
                 "Could not create a llama.cpp context at any context length "
-                f"(tried {attempted}). The model may not fit on this GPU at "
-                "all — try a smaller quantization.",
+                f"(tried {attempted}), with embeddings disabled as a fallback. "
+                "Check the backend log for llama.cpp's own diagnostic on each "
+                "attempt — the cause is recorded there and is not always "
+                "memory.",
                 details={"model_id": model_id, "attempted": attempted},
+            )
+
+        if embeddings_dropped:
+            logger.warning(
+                "gguf_embeddings_unavailable",
+                model_id=model_id,
+                n_ctx=kwargs["n_ctx"],
+                detail=(
+                    "loaded WITHOUT embedding support: this architecture "
+                    "refuses MEAN pooling. Chat and completions are unaffected."
+                ),
             )
         if kwargs["n_ctx"] != requested:
             logger.warning(
@@ -1096,6 +1234,7 @@ def load_gguf_model(
         quantization_method=f"gguf:{quant_label_from_path(gguf_file) or 'unknown'}",
         engine=ENGINE_LLAMACPP,
         context_length=int(kwargs["n_ctx"]),
+        supports_embeddings=bool(kwargs.get("embedding")),
     )
 
 

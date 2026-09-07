@@ -172,21 +172,30 @@ class Settings(BaseSettings):
     # Turn it off to buy that 6.7% back on a deployment that never embeds.
     GGUF_ENABLE_EMBEDDINGS: bool = True
 
-    # Context window for GGUF models, in tokens. 0 means "whatever the file
-    # declares", which is a TRAP on a constrained card.
+    # CEILING on the context window for GGUF models, in tokens — NOT a target.
     #
-    # llama.cpp's own default is 512, which truncates almost any real
-    # conversation, so this was set to 0 to use the model's trained context.
-    # That overcorrected: gemma-4-31b-it declares 262144 tokens, and a KV cache
-    # for a quarter-million tokens on a 31B model is tens of gigabytes — after
-    # ~19.9 GiB of Q5_K_S weights on a 24 GiB card there is about 4 GiB left, so
-    # the load simply fails.
+    # The loader reads what the model itself declares (`n_ctx_train`, via a
+    # 1.2-second CPU probe that costs no VRAM) and starts the ladder at
+    # min(declared, this). It was previously the starting point outright, which
+    # served an 8192 window to a model trained for 262144 and said nothing:
+    # ByteOtter/Qwen3.8-27B-TAK-Reasoning-GGUF declares 262144 and creates a
+    # context at 131072 on this 24 GiB card, so the old default threw away 16x
+    # the window the hardware could actually hold.
     #
-    # 8192 is a working default rather than a principled one: large enough for
-    # real conversations and document chunks, small enough that the cache is
-    # ~1-2 GiB on a model this size. Raise it when the card has room; set 0 to
-    # ask for the model's full context and accept the consequences.
-    GGUF_CONTEXT_LENGTH: int = 8192
+    # A ceiling is still needed in BOTH directions. llama.cpp's own default is
+    # 512, which truncates almost any real conversation. Unbounded is the other
+    # trap: the whole KV cache is allocated at context creation, so a
+    # quarter-million-token window on a 31B model is tens of gigabytes — after
+    # ~19.9 GiB of Q5_K_S weights on a 24 GiB card the load simply fails, and
+    # even when it succeeds it reserves a GPU that miStudio's extraction,
+    # training and steering work shares.
+    #
+    # 32768 is chosen to clear the labeling prompt (~4700 tokens, which 8192
+    # cleared only in principle and 4096 did not clear at all) with room for
+    # long documents, while leaving the card usable. Raise it when the GPU is
+    # dedicated to serving; 0 means "whatever the file declares", bounded only
+    # by what fits.
+    GGUF_CONTEXT_LENGTH: int = 32768
     CBM_MAX_QUEUE_SIZE: int = 256
     # CBM fixes its sampling parameters at manager creation, and any request
     # whose temperature/top_p differ FALLS BACK TO THE SERIAL PATH

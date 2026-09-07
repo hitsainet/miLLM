@@ -157,7 +157,7 @@ export function ModelLoadForm({
                   }`,
                 })),
               ]}
-              helperText="From this repository, with measured sizes"
+              helper="From this repository, with measured sizes"
             />
           ) : (
             <Select

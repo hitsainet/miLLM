@@ -404,10 +404,12 @@ class InferenceService:
                     "engine",
                     "no PyTorch module tree, so SAE attachment, steering and "
                     "sensing are impossible rather than merely unimplemented",
-                    "a reasoning model whose chat template opens <think> shows "
-                    "its trace inline: llama.cpp applies the template "
-                    "internally, so the prompt that would reveal it is never "
-                    "visible to miLLM",
+                    "reasoning_content is not populated for a model whose "
+                    "chat template opens <think>: llama.cpp applies the "
+                    "template internally, so the prompt that would reveal it "
+                    "is never visible to miLLM. The trace is still delivered, "
+                    "inline in content, and a client that parses think tags "
+                    "itself (Open WebUI can) renders it correctly",
                 ],
             }
 
@@ -2955,11 +2957,17 @@ class InferenceService:
         # reasoning_split's contract is that this is "knowable exactly — it is
         # the string the template produced", which holds only because the
         # transformers path produces that string itself. llama.cpp applies the
-        # template INTERNALLY, so miLLM never sees it. The consequence is stated
-        # in the release note: a model whose template opens `<think>` shows its
-        # trace inline instead of in a collapsible section. That is
-        # reasoning_split's own safe default — a visible trace beats an answer
-        # moved into reasoning_content and looking like data loss.
+        # template INTERNALLY, so miLLM never sees it.
+        #
+        # Consequence, stated precisely: for a model whose template opens
+        # `<think>`, `reasoning_content` stays empty and the trace is delivered
+        # inline in `content`. NOTHING IS LOST — a client that parses think tags
+        # itself renders it correctly, and Open WebUI has a setting for exactly
+        # this. What is lost is the wire-level split, which a client relying on
+        # the `reasoning_content` convention would want.
+        #
+        # This is reasoning_split's own safe default: a visible trace beats an
+        # answer moved into reasoning_content and looking like data loss.
         splitter = StreamingReasoningSplitter(False)
 
         params = self._llamacpp_params(gen_config, request)

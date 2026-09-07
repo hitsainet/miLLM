@@ -6,41 +6,24 @@ import pytest
 from fastapi.testclient import TestClient
 
 from millm.db.models.model import ModelSource, ModelStatus, QuantizationType
+from tests.support.factories import make_model
 
 
 @pytest.fixture
 def mock_model():
-    """Create a mock model."""
-    model = MagicMock()
-    model.id = 1
-    model.name = "gemma-2-2b"
-    model.source = ModelSource.HUGGINGFACE
-    model.repo_id = "google/gemma-2-2b"
-    model.local_path = None
-    model.params = "2B"
-    model.architecture = "text-generation"
-    model.quantization = QuantizationType.Q4
-    model.disk_size_mb = 1500
-    model.estimated_memory_mb = 2000
-    model.cache_path = "huggingface/google--gemma-2-2b--Q4"
-    model.config_json = None
-    model.trust_remote_code = False
-    model.status = ModelStatus.READY
-    model.error_message = None
-    model.created_at = "2024-01-01T00:00:00"
-    model.updated_at = "2024-01-01T00:00:00"
-    model.loaded_at = None
-    # Required string fields in ModelResponse (previously defaulted to MagicMock)
+    """A real row, not a double — see tests/support/factories.py.
+
+    This fixture previously set 18 attributes on a MagicMock, and every field
+    added to ModelResponse afterwards silently came back as a mock object and
+    failed validation. A real Model has the fields or it does not.
+    """
+    model = make_model()
+    # Runtime properties the response injects for a LOADED model. These are not
+    # columns, so they are attached here rather than in the factory.
     model.device = "cpu"
     model.dtype = "float16"
     model.attn_implementation = "sdpa"
     model.quantization_method = "none"
-    # A MagicMock answers every attribute with another MagicMock, so a field
-    # added to ModelResponse silently becomes a mock object here and fails
-    # validation. These are the ordinary-model values: no GGUF selection.
-    model.gguf_label = ""
-    model.gguf_files = None
-    model.revision = None
     return model
 
 

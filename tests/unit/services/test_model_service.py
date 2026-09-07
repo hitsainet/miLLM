@@ -8,6 +8,7 @@ import pytest
 from millm.core.errors import ModelAlreadyExistsError, ModelNotFoundError
 from millm.db.models.model import Model, ModelSource, ModelStatus, QuantizationType
 from millm.services.model_service import ModelService
+from tests.support.factories import make_model
 
 
 @pytest.fixture
@@ -66,22 +67,8 @@ def service(mock_repository, mock_downloader, mock_emitter):
 
 @pytest.fixture
 def sample_model():
-    """Create a sample model for testing."""
-    model = MagicMock(spec=Model)
-    model.id = 1
-    model.name = "gemma-2-2b"
-    model.source = ModelSource.HUGGINGFACE
-    model.repo_id = "google/gemma-2-2b"
-    model.quantization = QuantizationType.Q4
-    model.status = ModelStatus.READY
-    model.cache_path = "huggingface/google--gemma-2-2b--Q4"
-    # An ordinary model: no GGUF selection. Without this a MagicMock hands back
-    # a mock object, which reaches delete_cached_model as the directory suffix.
-    model.gguf_label = ""
-    model.gguf_files = None
-    model.revision = None
-    model.created_at = datetime.utcnow()
-    return model
+    """A real row, not a double — see tests/support/factories.py."""
+    return make_model()
 
 
 class TestModelServiceListModels:
@@ -230,9 +217,7 @@ class TestModelServiceDownloadModel:
         from millm.api.schemas.model import ModelDownloadRequest
 
         # Mock create to return a model
-        created_model = MagicMock()
-        created_model.id = 1
-        mock_repository.create.return_value = created_model
+        mock_repository.create.return_value = make_model(id=1)
 
         request = ModelDownloadRequest(
             source=ModelSource.HUGGINGFACE,
@@ -264,9 +249,7 @@ class TestModelServiceDownloadModel:
         """
         from millm.api.schemas.model import ModelDownloadRequest
 
-        created = MagicMock()
-        created.id = 7
-        mock_repository.create.return_value = created
+        mock_repository.create.return_value = make_model(id=7)
 
         request = ModelDownloadRequest(
             source=ModelSource.HUGGINGFACE,
@@ -300,9 +283,7 @@ class TestModelServiceDownloadModel:
         """
         from millm.api.schemas.model import ModelDownloadRequest
 
-        created = MagicMock()
-        created.id = 8
-        mock_repository.create.return_value = created
+        mock_repository.create.return_value = make_model(id=8)
 
         request = ModelDownloadRequest(
             source=ModelSource.HUGGINGFACE,
@@ -327,9 +308,7 @@ class TestModelServiceDownloadModel:
         """Derivation must not touch a repo with no GGUF selection."""
         from millm.api.schemas.model import ModelDownloadRequest
 
-        created = MagicMock()
-        created.id = 9
-        mock_repository.create.return_value = created
+        mock_repository.create.return_value = make_model(id=9)
 
         request = ModelDownloadRequest(
             source=ModelSource.HUGGINGFACE,

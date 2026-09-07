@@ -38,7 +38,17 @@ jobs:
 
       - name: Install PyTorch (CPU)
         run: |
-          pip install torch==2.9.1 --index-url https://download.pytorch.org/whl/cpu
+          # MUST satisfy the floor in pyproject.toml (torch>=2.10.0,<3).
+          #
+          # This step exists to keep the multi-gigabyte CUDA build off the
+          # runner. It was pinned to 2.9.1 while pyproject required >=2.10.0, so
+          # the very next step found the constraint unsatisfied, uninstalled
+          # this CPU wheel, and pulled full CUDA torch plus the nvidia-* stack —
+          # exhausting the disk with "[Errno 28] No space left on device" before
+          # a single test ran. A pre-install pinned below the floor is not a
+          # smaller install, it is a wasted download followed by the big one.
+          pip install "torch>=2.10.0,<3" --index-url https://download.pytorch.org/whl/cpu
+          python -c "import torch; print('torch', torch.__version__)"
 
       - name: Install package with dev dependencies
         run: |

@@ -4,6 +4,7 @@ import { Server, Info, Play, Lock } from 'lucide-react';
 import { useModels } from '@hooks/useModels';
 import { useServerStore } from '@stores/serverStore';
 import { ModelLoadForm, LoadedModelCard, ModelDetailsModal } from '@components/models';
+import { displayQuantization } from '@components/models/displayQuantization';
 import type { ModelLoadFormData } from '@components/models';
 import { Card, CardHeader, Spinner, EmptyState, Badge } from '@components/common';
 import type { GGUFQuantInfo, ModelInfo } from '@/types';
@@ -241,7 +242,7 @@ export function ModelsPage() {
                     <p className="text-xs text-slate-500">
                       {model.repo_id}
                       {model.params && ` • ${model.params}`}
-                      {model.quantization && ` • ${model.quantization}`}
+                      {displayQuantization(model) && ` • ${displayQuantization(model)}`}
                     </p>
                   </div>
                 </div>

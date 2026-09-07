@@ -20,6 +20,7 @@ import {
 import { Modal, Button, Spinner, Badge } from '@components/common';
 import type { ModelInfo, ModelPreviewResponse } from '@/types';
 import { GGUFQuantPicker } from './GGUFQuantPicker';
+import { displayQuantization } from './displayQuantization';
 
 /**
  * VRAM of the deployment card, for the fit hint only.
@@ -397,11 +398,7 @@ export function ModelDetailsModal({
                 <span className="text-xs">Quantization</span>
               </div>
               <p className="text-lg font-semibold text-slate-200">
-                {/* The EXACT quantization when there is one. `quantization`
-                    is a five-member bucket that cannot tell Q5_K_M from Q4_0,
-                    so showing it alone reports a quantization the user never
-                    chose — this card read "Q4" for a Q5_K_M download. */}
-                {model.gguf_label || model.quantization || 'N/A'}
+                {displayQuantization(model) ?? 'N/A'}
               </p>
             </div>
             <div className="bg-slate-800/50 rounded-lg p-3">

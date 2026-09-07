@@ -138,6 +138,28 @@ STALE_STATE_RESETS: list[tuple[str, str, str]] = [
         "models",
     ),
     (
+        # A DOWNLOAD IS IN-MEMORY STATE TOO, and this block forgot it.
+        #
+        # `_DOWNLOAD_PROGRESS` in model_service carries a comment justifying its
+        # in-process design with "a restart ends it anyway — startup already
+        # resets any model left in DOWNLOADING". Nothing did. A model row was
+        # found stuck in `downloading` half an hour after the pod that was
+        # fetching it had been replaced, with 8 GB of a 17 GB file on disk, no
+        # thread behind it, and `download_progress: null` — indistinguishable in
+        # the UI from a download that is merely slow.
+        #
+        # 'error', not 'ready': the files are PARTIAL. Calling that ready would
+        # offer a model that cannot load. The message says it can be retried,
+        # and the partial directory is deliberately left in place so the retry
+        # resumes rather than starting again.
+        "reset_stale_model_download",
+        "UPDATE models SET status = 'error', "
+        "error_message = 'Download interrupted by a server restart. "
+        "Retry to resume it.' "
+        "WHERE status = 'downloading'",
+        "models",
+    ),
+    (
         # THE LOCK IS IN-MEMORY STATE TOO, and it was the one piece of
         # it this block forgot. A model is locked while an SAE is
         # attached to it for steering; the attachment lives in the

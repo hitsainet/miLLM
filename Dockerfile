@@ -45,6 +45,29 @@ RUN pip install --no-cache-dir . || pip install --no-cache-dir -e .
 RUN pip install --no-cache-dir causal-conv1d mamba-ssm --no-build-isolation || \
     echo "WARN: mamba-ssm not available as pre-built wheel, SSM models will use slow torch fallback"
 
+# llama-cpp-python, for serving GGUF files, from a PRE-BUILT CUDA wheel.
+#
+# Not built from source, deliberately. This image is python:3.11-slim: it has
+# gcc and libc6-dev (for triton's JIT) but no cmake, no ninja, no g++ and no
+# nvcc, and llama-cpp-python's scikit-build-core backend needs all of them plus
+# the CUDA dev headers to compile with -DGGML_CUDA=on. Adding that toolchain is
+# 2-3 GB of image and a 10-30 minute build. See the flash-attn note below: this
+# image already has one dependency that cannot be built here, and the lesson
+# recorded there is to prove the need before paying that cost.
+#
+# Failure is tolerated but LOUD, and stderr is not discarded — the same rule as
+# the line above, written after a flash-attn failure that could not be
+# diagnosed from the build log. Without the wheel, GGUF models refuse to load
+# with a clear message; everything else serves normally.
+# cu130 MATCHES this image's torch (2.13.0+cu130 — verified in the running
+# pod, not assumed). The index publishes py3-none / manylinux_2_35 wheels, so
+# they are Python-version agnostic; >=0.3.29 is the floor that carries a proper
+# manylinux tag, which pip will actually accept. glibc in this base (bookworm,
+# 2.36) satisfies manylinux_2_35.
+RUN pip install --no-cache-dir "llama-cpp-python>=0.3.29" \
+      --extra-index-url https://abetlen.github.io/llama-cpp-python/whl/cu130 || \
+    echo "WARN: llama-cpp-python not installed; GGUF models will refuse to load"
+
 # NOT installing the flash-attn package. Deliberate, and verified on the box.
 #
 # It was added on the premise that "SDPA is materially slower". That is FALSE

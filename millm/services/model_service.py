@@ -53,9 +53,11 @@ logger = structlog.get_logger()
 #: nothing, which is indistinguishable from a download that has died.
 #:
 #: In-process is sufficient and durable enough. The download runs in a thread of
-#: this same process, and a restart ends it anyway — startup already resets any
-#: model left in DOWNLOADING. Persisting to a column would add a write every
-#: poll interval to reconstruct state that cannot outlive the work it describes.
+#: this same process, and a restart ends it anyway — startup resets any model
+#: left in DOWNLOADING (STALE_STATE_RESETS in main.py; that claim was made here
+#: long before anything implemented it, and a row sat stuck for half an hour
+#: because of it). Persisting to a column would add a write every poll interval
+#: to reconstruct state that cannot outlive the work it describes.
 _DOWNLOAD_PROGRESS: dict[int, int] = {}
 
 
@@ -805,6 +807,9 @@ class ModelService:
             model.quantization.value,
             model.estimated_memory_mb or 0,
             model.trust_remote_code,
+            # The chosen GGUF file, when this row is one. Its presence is what
+            # routes the load to llama.cpp instead of transformers.
+            (model.gguf_files or [None])[0],
         )
 
         return model
@@ -817,6 +822,7 @@ class ModelService:
         quantization: str,
         estimated_memory_mb: int,
         trust_remote_code: bool,
+        gguf_file: Optional[str] = None,
     ) -> None:
         """
         Background worker for loading models.
@@ -867,6 +873,7 @@ class ModelService:
                 trust_remote_code=trust_remote_code,
                 torch_compile=torch_compile_resolved,
                 torch_compile_mode=settings.TORCH_COMPILE_MODE,
+                gguf_file=gguf_file,
             )
 
             # Update database (thread-safe async call)

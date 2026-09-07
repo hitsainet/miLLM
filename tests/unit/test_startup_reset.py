@@ -261,3 +261,46 @@ class TestF19R2ClaimsDegradationIsVISIBLE:
             "the release failure path does not flag claims as degraded, so "
             "/health stays green while activations are refused"
         )
+
+
+class TestAnInterruptedDownloadIsNotLeftRunningForever:
+    """A restart kills the download thread; the row must not claim otherwise.
+
+    `_DOWNLOAD_PROGRESS` justifies its in-process design with "startup already
+    resets any model left in DOWNLOADING". Nothing did, and a row sat stuck in
+    `downloading` for half an hour after its pod was replaced — 8 GB of a 17 GB
+    file on disk, no thread behind it, and `download_progress: null`, which the
+    UI renders identically to a slow download.
+
+    MUTATION CONTROLS:
+      * remove the reset entry      -> "there is a reset" fails
+      * change 'error' to 'ready'   -> "does not call a partial download ready" fails
+    """
+
+    def _download_reset(self):
+        matches = [r for r in STALE_STATE_RESETS if "download" in r[0]]
+        assert matches, "no startup reset covers an interrupted download"
+        return matches[0]
+
+    def test_there_is_a_reset_for_interrupted_downloads(self):
+        event, sql, table = self._download_reset()
+        assert table == "models"
+        assert "downloading" in sql
+
+    def test_it_does_not_call_a_partial_download_ready(self):
+        """The files are incomplete; 'ready' would offer a model that cannot load."""
+        _event, sql, _table = self._download_reset()
+        assert "'error'" in sql
+        assert "status = 'ready'" not in sql
+
+    def test_it_says_the_download_can_be_retried(self):
+        """A terminal row with no explanation is a dead end for the operator."""
+        _event, sql, _table = self._download_reset()
+        assert "error_message" in sql
+        assert "etry" in sql, "the message must tell the operator what to do next"
+
+    def test_it_only_touches_downloading_rows(self):
+        """A ready or loaded model must not be marked as an error."""
+        _event, sql, _table = self._download_reset()
+        assert "WHERE status = 'downloading'" in sql
+

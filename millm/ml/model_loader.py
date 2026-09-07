@@ -6,6 +6,7 @@ Handles loading and unloading models from GPU memory with quantization support.
 
 import gc
 import threading
+from pathlib import Path
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Any, Optional
@@ -29,10 +30,27 @@ except ImportError:
     AutoTokenizer = None  # type: ignore[assignment]
     BitsAndBytesConfig = None  # type: ignore[assignment]
 
+# Module-level so tests can @patch("millm.ml.model_loader.Llama"). Optional at
+# import time on purpose: llama-cpp-python is an EXTRA, and a deployment that
+# serves no GGUF must not fail to start because it is absent. The load path
+# raises a clear error instead.
+try:
+    from llama_cpp import Llama  # noqa: F401  (re-exported for patching)
+except ImportError:  # pragma: no cover - exercised by the absent-engine test
+    Llama = None  # type: ignore[assignment]
+
 from millm.core.errors import InsufficientMemoryError, ModelLoadError
 from millm.ml.memory_utils import get_available_cpu_memory_mb, get_available_memory_mb
 
 logger = structlog.get_logger()
+
+
+#: The transformers engine: a torch nn.Module tree, hookable, differentiable.
+ENGINE_TRANSFORMERS = "transformers"
+#: llama.cpp via llama-cpp-python: a ctypes handle onto a C++ graph. NO module
+#: tree, so no forward hooks — every interpretability feature is structurally
+#: impossible on it, not merely unimplemented.
+ENGINE_LLAMACPP = "llamacpp"
 
 
 @dataclass
@@ -41,8 +59,8 @@ class LoadedModel:
 
     model_id: int
     model_name: str  # Human-readable model name (e.g., "gemma-2-2b")
-    model: Any  # AutoModelForCausalLM
-    tokenizer: Any  # AutoTokenizer
+    model: Any  # AutoModelForCausalLM, or llama_cpp.Llama
+    tokenizer: Any  # AutoTokenizer, or None for llama.cpp (it tokenizes itself)
     loaded_at: datetime
     memory_used_mb: int = 0
     num_parameters: int = 0
@@ -50,6 +68,21 @@ class LoadedModel:
     dtype: str = "unknown"
     attn_implementation: str = "unknown"
     quantization_method: str = "unknown"  # "bitsandbytes", "gptq", "awq", "none"
+    #: WHICH runtime holds this model. Defaults to transformers so every
+    #: existing construction site keeps its meaning. Consumers branch on this
+    #: rather than sniffing the object, because a duck-typed check would quietly
+    #: pick the wrong path the day llama.cpp grows a `.config`.
+    engine: str = ENGINE_TRANSFORMERS
+
+    @property
+    def supports_hooks(self) -> bool:
+        """Whether SAE attachment, steering and sensing are possible at all.
+
+        Not a policy switch — a statement of fact about the runtime. llama.cpp
+        exposes no `nn.Module`, so `register_forward_hook` has nothing to attach
+        to and no per-layer residual tensor is reachable from Python.
+        """
+        return self.engine == ENGINE_TRANSFORMERS
 
 
 class LoadedModelState:
@@ -99,6 +132,21 @@ class LoadedModelState:
                     # Move model to CPU first to release GPU tensors before deleting.
                     # bitsandbytes models don't support .to("cpu"), so we skip on error.
                     if self._loaded.model is not None:
+                        # llama.cpp holds its weights in a C++ context that
+                        # Python's garbage collector cannot reach. It must be
+                        # CLOSED explicitly, and nothing below would do it:
+                        # `.to("cpu")` does not exist on a Llama (the except
+                        # swallows it), `del` drops only the handle, and
+                        # torch.cuda.empty_cache() knows nothing about an
+                        # allocation torch never made. On a single shared 24 GB
+                        # card a load/unload cycle that silently retains VRAM is
+                        # the failure that takes the node down.
+                        close = getattr(self._loaded.model, "close", None)
+                        if callable(close):
+                            try:
+                                close()
+                            except Exception as e:  # noqa: BLE001
+                                logger.warning("engine_close_failed", error=str(e))
                         try:
                             self._loaded.model.to("cpu")
                         except Exception:
@@ -785,6 +833,88 @@ class ModelLoadContext:
         )
 
 
+#: How many layers to offload to the GPU. -1 means "all of them". A GGUF file
+#: is already quantized on disk, so the whole point is that it fits; partial
+#: offload is a fallback we do not attempt to guess at.
+GGUF_GPU_LAYERS = -1
+
+#: Context window. llama.cpp defaults to 512, which silently truncates almost
+#: any real conversation; 0 asks it to use the value baked into the file.
+GGUF_CONTEXT_FROM_FILE = 0
+
+
+def load_gguf_model(
+    model_id: int,
+    model_name: str,
+    cache_path: str,
+    gguf_file: str,
+) -> LoadedModel:
+    """Load one GGUF quantization through llama.cpp.
+
+    Deliberately NOT part of ModelLoadContext: that context is a long sequence
+    of transformers-specific steps — attn-implementation probing,
+    BitsAndBytesConfig, dtype selection, device_map, torch.compile with a
+    three-pass soak — and a GGUF load shares none of it. Threading a branch
+    through all of that would leave every step reading as if it applied.
+
+    The returned `LoadedModel` carries `engine=ENGINE_LLAMACPP`, which is what
+    every consumer branches on. `tokenizer` is None: llama.cpp tokenizes
+    internally and exposes no HuggingFace-shaped tokenizer, and returning a
+    half-working stand-in would let code that needs a real one fail late and
+    obscurely instead of at the boundary.
+    """
+    if Llama is None:
+        raise ModelLoadError(
+            "llama-cpp-python is not installed, so GGUF models cannot be served. "
+            "Install the 'gguf' extra.",
+            details={"model_id": model_id, "gguf_file": gguf_file},
+        )
+
+    path = Path(cache_path) / gguf_file
+    if not path.is_file():
+        # A directory that looks populated but lacks the chosen file is exactly
+        # what a partial download of a SPLIT quantization leaves behind.
+        raise ModelLoadError(
+            f"GGUF file not found: {path}",
+            details={"model_id": model_id, "cache_path": cache_path, "gguf_file": gguf_file},
+        )
+
+    logger.info(
+        "gguf_load_started", model_id=model_id, model_name=model_name, path=str(path)
+    )
+    try:
+        llm = Llama(
+            model_path=str(path),
+            n_gpu_layers=GGUF_GPU_LAYERS,
+            n_ctx=GGUF_CONTEXT_FROM_FILE,
+            verbose=False,
+        )
+    except Exception as e:  # noqa: BLE001 - surfaced as a load failure
+        raise ModelLoadError(
+            f"Failed to load GGUF model: {e}",
+            details={"model_id": model_id, "path": str(path)},
+        ) from e
+
+    size_mb = int(path.stat().st_size / (1024 * 1024))
+    logger.info("gguf_load_complete", model_id=model_id, size_mb=size_mb)
+
+    return LoadedModel(
+        model_id=model_id,
+        model_name=model_name,
+        model=llm,
+        tokenizer=None,
+        loaded_at=datetime.utcnow(),
+        # The file's size on disk, not a torch measurement: llama.cpp allocates
+        # outside torch, so torch.cuda.mem_get_info would not attribute it here.
+        memory_used_mb=size_mb,
+        device="cuda" if GGUF_GPU_LAYERS != 0 else "cpu",
+        dtype="gguf",
+        attn_implementation="llama.cpp",
+        quantization_method=f"gguf:{Path(gguf_file).stem.rsplit('.', 1)[-1]}",
+        engine=ENGINE_LLAMACPP,
+    )
+
+
 class ModelLoader:
     """
     High-level model loading operations.
@@ -839,6 +969,7 @@ class ModelLoader:
         # broke this generate path in production (2026-07-27).
         torch_compile_mode: str = "default",
         is_pre_quantized: bool = False,
+        gguf_file: Optional[str] = None,
     ) -> LoadedModel:
         """
         Load a model into GPU memory.
@@ -856,6 +987,9 @@ class ModelLoader:
             torch_compile: Whether to apply torch.compile to model.forward
             torch_compile_mode: Compilation mode ("default", "reduce-overhead", "max-autotune")
             is_pre_quantized: Whether the model is already pre-quantized (GPTQ/AWQ/etc.)
+            gguf_file: Repo-relative filename of a GGUF quantization. When set,
+                the model is served by llama.cpp instead of transformers, and it
+                CANNOT carry SAE attachment, steering or sensing.
 
         Returns:
             LoadedModel instance
@@ -864,6 +998,20 @@ class ModelLoader:
             InsufficientMemoryError: If not enough GPU memory
             ModelLoadError: If loading fails
         """
+        # A GGUF model takes a different runtime entirely. Branch BEFORE the
+        # CUDA and memory checks below: those reason about torch allocations and
+        # bitsandbytes quantization levels, neither of which describes a
+        # llama.cpp context.
+        if gguf_file:
+            loaded = load_gguf_model(
+                model_id=model_id,
+                model_name=model_name,
+                cache_path=cache_path,
+                gguf_file=gguf_file,
+            )
+            self.state.set(loaded)
+            return loaded
+
         # Check if CUDA is available
         try:
             if not torch.cuda.is_available():

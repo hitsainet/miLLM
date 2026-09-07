@@ -1656,6 +1656,26 @@ class SAEService:
         errors: list[str] = []
         warnings: list[str] = []
 
+        # The engine, before anything else. This is not a policy choice: an SAE
+        # is attached with register_forward_hook on a resolved nn.Module, and a
+        # llama.cpp model is a ctypes handle onto a C++ graph with no module
+        # tree and no per-layer residual reachable from Python. Checked HERE
+        # because attach_sae, attach_set and GET /saes/{id}/compatibility all
+        # come through this one function — a guard at each call site would be
+        # three chances to forget one.
+        #
+        # Without it the failure is `_get_layer` exhausting six attribute paths
+        # and raising "Could not find layer N. Model architecture may not be
+        # supported" — a 500 that blames the architecture rather than naming the
+        # runtime that cannot do this at all.
+        if not model_state.current.supports_hooks:
+            errors.append(
+                f"The loaded model is served by {model_state.current.engine}, which "
+                "cannot host an SAE: it exposes no PyTorch module tree, so there is "
+                "nothing to attach a forward hook to. Load a transformers-served "
+                "model to use SAEs, steering or sensing."
+            )
+
         # Check SAE status
         if sae.status != SAEStatus.CACHED:
             errors.append(f"SAE is not ready (status: {sae.status.value})")

@@ -363,7 +363,19 @@ class InferenceService:
     @property
     def backend_name(self) -> str:
         """Active inference backend identifier for observability headers."""
+        if self._engine_is_llamacpp():
+            return "llamacpp"
         return "cbm" if self._use_cbm() else "serial"
+
+    def _engine_is_llamacpp(self) -> bool:
+        """Whether the resident model is served by llama.cpp.
+
+        Reads the engine recorded at load time rather than sniffing the object:
+        a duck-typed check ("does it have .config?") picks the wrong path the
+        day either runtime grows an attribute the other has.
+        """
+        current = self._model_state.current
+        return current is not None and not current.supports_hooks
 
     def get_backend_info(self) -> dict:
         """
@@ -523,6 +535,18 @@ class InferenceService:
     def on_model_loaded(self) -> None:
         """Called after model is loaded. Starts CBM if enabled."""
         if self._cbm_backend is not None and self._model_state.is_loaded:
+            # Continuous batching is transformers' ContinuousBatchingManager. It
+            # would be handed a llama.cpp ctypes handle and a None tokenizer.
+            # This is the highest-value early guard in the file: everything
+            # downstream routes on _use_cbm(), and a manager that started on the
+            # wrong object would fail deep inside generation instead of here.
+            if not self._model_state.current.supports_hooks:
+                logger.info(
+                    "cbm_skipped",
+                    reason="engine_has_no_module_tree",
+                    engine=self._model_state.current.engine,
+                )
+                return
             try:
                 model = self._model_state.current.model
                 tokenizer = self._model_state.current.tokenizer
@@ -2595,6 +2619,13 @@ class InferenceService:
         Raises:
             RuntimeError: If no model is loaded
         """
+        # llama.cpp first: everything below this point reaches through
+        # self._model as a torch object — tensors moved to a device, a
+        # `.config`, a HuggingFace tokenizer, GenerationConfig kwargs — and a
+        # GGUF model has none of it.
+        if self._engine_is_llamacpp():
+            return await self._llamacpp_chat_completion(request)
+
         # Batched extension: every conversation in ONE forward pass. Checked
         # before the CBM delegation because that path has no batch support and
         # would silently drop all but the first conversation.
@@ -2738,6 +2769,110 @@ class InferenceService:
             ),
         )
 
+    def _llamacpp_sync(self, messages: list[dict], params: dict) -> dict:
+        """Blocking llama.cpp call, for asyncio.to_thread.
+
+        `create_chat_completion` applies the chat template baked into the GGUF
+        file. We deliberately do NOT pre-format the prompt with
+        `_format_chat_messages` first: that would apply a template twice, once
+        from a HuggingFace tokenizer this model does not have and once inside
+        llama.cpp, producing doubled control tokens.
+        """
+        return self._model.create_chat_completion(messages=messages, **params)
+
+    async def _llamacpp_chat_completion(
+        self, request: ChatCompletionRequest
+    ) -> ChatCompletionResponse:
+        """Non-streaming chat through llama.cpp.
+
+        The first GGUF increment covers exactly this. Anything else REFUSES
+        rather than degrading quietly — a silently text-only answer, or an
+        embedding computed by a different method than the caller expects, is
+        worse than a clear error.
+        """
+        if getattr(request, "extra_messages", None):
+            raise MiLLMError(
+                "Batched conversations are not supported on the llama.cpp engine.",
+                code="ENGINE_UNSUPPORTED",
+                status_code=400,
+            )
+        if request.profile or request.steering_intensity is not None:
+            raise MiLLMError(
+                "Steering requires forward hooks on a PyTorch module tree, which "
+                "the llama.cpp engine does not have. Load a transformers-served "
+                "model to steer.",
+                code="ENGINE_UNSUPPORTED",
+                status_code=400,
+            )
+        if getattr(request, "chat_template_kwargs", None):
+            # No llama.cpp equivalent. Matching the existing fail-loud policy for
+            # a template that cannot honour what was asked.
+            raise MiLLMError(
+                "chat_template_kwargs is not supported on the llama.cpp engine: "
+                "the chat template is baked into the GGUF file.",
+                code="ENGINE_UNSUPPORTED",
+                status_code=400,
+            )
+
+        completion_id = f"chatcmpl-{uuid.uuid4().hex[:24]}"
+        created = int(datetime.now().timestamp())
+        gen_config = GenerationConfig.from_request(request)
+
+        params: dict[str, Any] = {
+            "max_tokens": gen_config.max_new_tokens,
+            "temperature": gen_config.temperature,
+            "top_p": gen_config.top_p,
+        }
+        if request.stop:
+            params["stop"] = (
+                [request.stop] if isinstance(request.stop, str) else list(request.stop)
+            )
+
+        messages = [
+            {"role": m.role, "content": m.content or ""} for m in request.messages
+        ]
+
+        async with self._request_queue.acquire():
+            raw = await asyncio.to_thread(self._llamacpp_sync, messages, params)
+
+        choice_raw = (raw.get("choices") or [{}])[0]
+        text = (choice_raw.get("message") or {}).get("content") or ""
+        usage_raw = raw.get("usage") or {}
+
+        return ChatCompletionResponse(
+            id=completion_id,
+            created=created,
+            model=self._model_state.current.model_name,
+            choices=[
+                ChatCompletionChoice(
+                    index=0,
+                    message=ChatMessage(role="assistant", content=text),
+                    # llama.cpp reports its own reason; fall back to "stop"
+                    # rather than inventing a length claim we did not observe.
+                    finish_reason=choice_raw.get("finish_reason") or "stop",
+                )
+            ],
+            usage=Usage(
+                prompt_tokens=int(usage_raw.get("prompt_tokens", 0)),
+                completion_tokens=int(usage_raw.get("completion_tokens", 0)),
+                total_tokens=int(usage_raw.get("total_tokens", 0)),
+            ),
+        )
+
+    async def _refuse_on_llamacpp(self, what: str) -> None:
+        """Refuse an operation the llama.cpp engine cannot perform.
+
+        Explicit refusal, never a quiet degradation. A streamed response that
+        silently arrives in one chunk, or an embedding computed by a different
+        method than the caller expects, is a wrong answer wearing a right
+        answer's shape.
+        """
+        raise MiLLMError(
+            f"{what} is not supported on the llama.cpp engine in this release.",
+            code="ENGINE_UNSUPPORTED",
+            status_code=400,
+        )
+
     async def stream_chat_completion(
         self, request: ChatCompletionRequest
     ) -> AsyncGenerator[str, None]:
@@ -2754,6 +2889,9 @@ class InferenceService:
         Yields:
             SSE-formatted strings for streaming
         """
+        if self._engine_is_llamacpp():
+            await self._refuse_on_llamacpp("Streaming")
+
         # Delegate to CBM if active and sampling params are compatible
         if self._use_cbm_for_request(
             temperature=getattr(request, "temperature", None),
@@ -3280,6 +3418,12 @@ class InferenceService:
         Returns:
             EmbeddingResponse with embeddings
         """
+        if self._engine_is_llamacpp():
+            # llama.cpp needs embedding=True at CONSTRUCTION and pools internally;
+            # there is no hidden_states[-1] to mean-pool, so parity here would
+            # mean quietly returning differently-computed vectors.
+            await self._refuse_on_llamacpp("Embeddings")
+
         import base64
         import struct
 

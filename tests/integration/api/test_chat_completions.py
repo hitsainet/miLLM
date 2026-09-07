@@ -8,6 +8,8 @@ Tests the full endpoint behavior including:
 """
 
 import pytest
+
+from tests.support.factories import make_model
 from fastapi.testclient import TestClient
 
 from millm.main import create_app
@@ -335,7 +337,10 @@ class TestSteeringIntensityDial:
             )
         )
         model_service = MagicMock()
-        model_service.find_model_by_name = AsyncMock(return_value=MagicMock())
+        # A REAL row. A MagicMock answers every attribute truthily, so a route
+        # that branches on a column — `gguf_files` gates the streaming refusal —
+        # takes the GGUF path for an ordinary model.
+        model_service.find_model_by_name = AsyncMock(return_value=make_model())
         # The endpoints load on demand now; without this the awaited call
         # returns a bare MagicMock and the route raises TypeError.
         model_service.load_model_and_wait = AsyncMock()
@@ -370,7 +375,10 @@ class TestSteeringIntensityDial:
         inference.stream_chat_completion = fake_stream
         inference.request_queue = MagicMock(pending_count=0, max_pending=5)
         model_service = MagicMock()
-        model_service.find_model_by_name = AsyncMock(return_value=MagicMock())
+        # A REAL row. A MagicMock answers every attribute truthily, so a route
+        # that branches on a column — `gguf_files` gates the streaming refusal —
+        # takes the GGUF path for an ordinary model.
+        model_service.find_model_by_name = AsyncMock(return_value=make_model())
         # The endpoints load on demand now; without this the awaited call
         # returns a bare MagicMock and the route raises TypeError.
         model_service.load_model_and_wait = AsyncMock()
@@ -398,7 +406,10 @@ class TestSteeringIntensityDial:
         inference = MagicMock()
         inference.get_loaded_model_info.return_value = None
         model_service = MagicMock()
-        model_service.find_model_by_name = AsyncMock(return_value=MagicMock())
+        # A REAL row. A MagicMock answers every attribute truthily, so a route
+        # that branches on a column — `gguf_files` gates the streaming refusal —
+        # takes the GGUF path for an ordinary model.
+        model_service.find_model_by_name = AsyncMock(return_value=make_model())
         # The endpoints load on demand now; without this the awaited call
         # returns a bare MagicMock and the route raises TypeError.
         model_service.load_model_and_wait = AsyncMock()
@@ -432,7 +443,10 @@ class TestSteeringIntensityDial:
             side_effect=ProfileNotFoundError("Profile 'ghost' not found")
         )
         model_service = MagicMock()
-        model_service.find_model_by_name = AsyncMock(return_value=MagicMock())
+        # A REAL row. A MagicMock answers every attribute truthily, so a route
+        # that branches on a column — `gguf_files` gates the streaming refusal —
+        # takes the GGUF path for an ordinary model.
+        model_service.find_model_by_name = AsyncMock(return_value=make_model())
         # The endpoints load on demand now; without this the awaited call
         # returns a bare MagicMock and the route raises TypeError.
         model_service.load_model_and_wait = AsyncMock()
@@ -530,7 +544,10 @@ class TestBatchCapabilityHeader:
             )
         )
         model_service = MagicMock()
-        model_service.find_model_by_name = AsyncMock(return_value=MagicMock())
+        # A REAL row. A MagicMock answers every attribute truthily, so a route
+        # that branches on a column — `gguf_files` gates the streaming refusal —
+        # takes the GGUF path for an ordinary model.
+        model_service.find_model_by_name = AsyncMock(return_value=make_model())
         # The endpoints load on demand now; without this the awaited call
         # returns a bare MagicMock and the route raises TypeError.
         model_service.load_model_and_wait = AsyncMock()

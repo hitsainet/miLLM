@@ -73,6 +73,15 @@ ERROR_STATUS_MAP: dict[str, tuple[int, str]] = {
     "INVALID_FEATURE_INDEX": (400, "invalid_request_error"),
     "CONTEXT_LENGTH_EXCEEDED": (400, "invalid_request_error"),
     "INVALID_PARAMETER": (400, "invalid_request_error"),
+    # The resident engine cannot do this at all (a GGUF file served by
+    # llama.cpp has no module tree). The caller must ask for something else, so
+    # it is invalid_request_error. Without this row the live handler
+    # (millm_error_handler) falls back to (exc.status_code, "server_error") —
+    # the right 400 wearing the wrong TYPE, which an OpenAI client reads as a
+    # server fault to retry rather than a request to change. Note the fallback
+    # in openai_exception_handler below is (500, "server_error"), but that
+    # handler is not the one registered in main.py.
+    "ENGINE_UNSUPPORTED": (400, "invalid_request_error"),
     # Resource errors
     "INSUFFICIENT_MEMORY": (503, "server_error"),
     "RATE_LIMIT_EXCEEDED": (429, "rate_limit_error"),

@@ -12,6 +12,7 @@ from fastapi.responses import JSONResponse
 
 from millm.api.dependencies import ModelServiceDep, get_inference_service
 from millm.api.routes.openai.errors import (
+    create_openai_error,
     embedding_model_error,
     is_embedding_only,
     model_locked_error,
@@ -68,6 +69,39 @@ async def create_completion(
     if is_embedding_only(getattr(model, "architecture", None)):
         return embedding_model_error(request.model, model.architecture)
 
+    # Streaming has never been implemented on /v1/completions at all, on any
+    # engine. Refused here rather than after the auto-load below: the answer
+    # depends only on `request.stream`, so loading a model first spends a full
+    # swap — evicting whatever is resident and any SAEs attached to it — to
+    # reach a 400 that was decided by the request body.
+    if request.stream:
+        return validation_error(
+            "Streaming is not supported for the /v1/completions endpoint. "
+            "Use /v1/chat/completions with stream=true instead.",
+            param="stream",
+        )
+
+    # /v1/completions is not implemented on the llama.cpp engine. Refuse HERE,
+    # BEFORE the auto-load below, for the same reason streaming is refused
+    # pre-load in chat.py: `gguf_files` on the row is set at download time, so
+    # the answer is already known without loading anything. Refusing inside the
+    # inference service instead would spend minutes and tens of GB swapping the
+    # RESIDENT model out for a GGUF one — evicting a working transformers model
+    # and any SAEs attached to it — only to return a 400 that could never have
+    # succeeded.
+    if getattr(model, "gguf_files", None):
+        return create_openai_error(
+            message=(
+                "Text completion (/v1/completions) is not supported on the "
+                "llama.cpp engine in this release. Use /v1/chat/completions "
+                "with stream=false, or a transformers-served model."
+            ),
+            error_type="invalid_request_error",
+            code="engine_unsupported",
+            param="model",
+            status_code=400,
+        )
+
     # Load the requested model on demand.
     #
     # An OpenAI client — Open WebUI included — selects a model by naming it in
@@ -119,13 +153,6 @@ async def create_completion(
         model=request.model,
         stream=request.stream,
     )
-
-    if request.stream:
-        return validation_error(
-            "Streaming is not supported for the /v1/completions endpoint. "
-            "Use /v1/chat/completions with stream=true instead.",
-            param="stream",
-        )
 
     response.headers["X-miLLM-Backend"] = inference.backend_name
     return await inference.create_text_completion(request)

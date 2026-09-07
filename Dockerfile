@@ -64,7 +64,14 @@ RUN pip install --no-cache-dir causal-conv1d mamba-ssm --no-build-isolation || \
 # they are Python-version agnostic; >=0.3.29 is the floor that carries a proper
 # manylinux tag, which pip will actually accept. glibc in this base (bookworm,
 # 2.36) satisfies manylinux_2_35.
-RUN pip install --no-cache-dir "llama-cpp-python>=0.3.29" \
+# --only-binary is load-bearing, not belt-and-braces. PyPI publishes this
+# project as an SDIST ONLY, and with --extra-index-url pip merges both indexes
+# and picks the HIGHEST version — wheel-vs-sdist only breaks ties within one
+# version. The moment PyPI is a release ahead of the CUDA index (it usually
+# is), pip chooses the sdist, tries to compile it without cmake or nvcc, fails,
+# and the `|| echo WARN` swallows it: an image that builds green and refuses
+# every GGUF model. --only-binary=:all: makes that resolution impossible.
+RUN pip install --no-cache-dir --only-binary=:all: "llama-cpp-python>=0.3.29" \
       --extra-index-url https://abetlen.github.io/llama-cpp-python/whl/cu130 || \
     echo "WARN: llama-cpp-python not installed; GGUF models will refuse to load"
 

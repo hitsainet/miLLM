@@ -37,7 +37,7 @@ from millm.api.schemas.openai import (
     TextCompletionResponse,
     Usage,
 )
-from millm.core.errors import MiLLMError
+from millm.core.errors import EngineUnsupportedError, MiLLMError
 from millm.core.logging import get_logger
 from millm.ml.generation_config import GenerationConfig
 from millm.ml.model_loader import LoadedModelState
@@ -384,6 +384,29 @@ class InferenceService:
         Used by the /api/inference/status endpoint so operators and clients
         can understand which path is serving requests and what its limitations are.
         """
+        if self._engine_is_llamacpp():
+            # Must come FIRST. The serial branch below would report
+            # `"streaming": True` for an engine whose streaming path raises
+            # ENGINE_UNSUPPORTED, so /api/inference/status would advertise a
+            # capability the very next request is refused for.
+            return {
+                "backend": "llamacpp",
+                "description": "llama.cpp (GGUF file served through llama-cpp-python)",
+                "capabilities": {
+                    "streaming": False,
+                    "per_request_sampling_params": True,
+                    "per_request_profile_override": False,
+                    "speculative_decoding": False,
+                },
+                "limitations": [
+                    "streaming, embeddings, text completions, batched "
+                    "conversations, n > 1 and chat_template_kwargs are not "
+                    "supported on this engine",
+                    "no PyTorch module tree, so SAE attachment, steering and "
+                    "sensing are impossible rather than merely unimplemented",
+                ],
+            }
+
         if self._use_cbm():
             backend: dict = {
                 "backend": "cbm",
@@ -2791,27 +2814,32 @@ class InferenceService:
         worse than a clear error.
         """
         if getattr(request, "extra_messages", None):
-            raise MiLLMError(
-                "Batched conversations are not supported on the llama.cpp engine.",
-                code="ENGINE_UNSUPPORTED",
-                status_code=400,
+            raise EngineUnsupportedError(
+                "Batched conversations are not supported on the llama.cpp engine."
             )
         if request.profile or request.steering_intensity is not None:
-            raise MiLLMError(
+            raise EngineUnsupportedError(
                 "Steering requires forward hooks on a PyTorch module tree, which "
                 "the llama.cpp engine does not have. Load a transformers-served "
-                "model to steer.",
-                code="ENGINE_UNSUPPORTED",
-                status_code=400,
+                "model to steer."
             )
         if getattr(request, "chat_template_kwargs", None):
             # No llama.cpp equivalent. Matching the existing fail-loud policy for
             # a template that cannot honour what was asked.
-            raise MiLLMError(
+            raise EngineUnsupportedError(
                 "chat_template_kwargs is not supported on the llama.cpp engine: "
-                "the chat template is baked into the GGUF file.",
-                code="ENGINE_UNSUPPORTED",
-                status_code=400,
+                "the chat template is baked into the GGUF file."
+            )
+        if (getattr(request, "n", 1) or 1) > 1:
+            # The transformers path documents and honours n > 1. This one builds
+            # exactly one choice, so an unguarded n=3 returned a single-choice
+            # response with no error — the quiet degradation every other branch
+            # here refuses. A client demultiplexing on `index` silently loses
+            # two thirds of what it asked for.
+            raise EngineUnsupportedError(
+                "n > 1 is not supported on the llama.cpp engine in this "
+                "release: it returns one completion per request. Send n "
+                "separate requests, or use a transformers-served model."
             )
 
         completion_id = f"chatcmpl-{uuid.uuid4().hex[:24]}"
@@ -2822,11 +2850,18 @@ class InferenceService:
             "max_tokens": gen_config.max_new_tokens,
             "temperature": gen_config.temperature,
             "top_p": gen_config.top_p,
+            # The transformers path HONOURS these (see _build_generate_kwargs),
+            # so dropping them here would make the same request sample
+            # differently depending on which engine happens to hold the model —
+            # a quiet degradation of exactly the kind this path refuses
+            # elsewhere. llama.cpp takes both under the same names.
+            "frequency_penalty": gen_config.frequency_penalty,
+            "presence_penalty": gen_config.presence_penalty,
         }
-        if request.stop:
-            params["stop"] = (
-                [request.stop] if isinstance(request.stop, str) else list(request.stop)
-            )
+        # gen_config already normalised str-or-list into a list; re-deriving it
+        # from request.stop was a second implementation of the same rule.
+        if gen_config.stop_sequences:
+            params["stop"] = list(gen_config.stop_sequences)
 
         messages = [
             {"role": m.role, "content": m.content or ""} for m in request.messages
@@ -2867,10 +2902,8 @@ class InferenceService:
         method than the caller expects, is a wrong answer wearing a right
         answer's shape.
         """
-        raise MiLLMError(
-            f"{what} is not supported on the llama.cpp engine in this release.",
-            code="ENGINE_UNSUPPORTED",
-            status_code=400,
+        raise EngineUnsupportedError(
+            f"{what} is not supported on the llama.cpp engine in this release."
         )
 
     async def stream_chat_completion(
@@ -3288,6 +3321,16 @@ class InferenceService:
         Returns:
             TextCompletionResponse with generated text
         """
+        # llama.cpp first, for the same reason as the chat path: everything
+        # below reaches through `self._tokenizer`, which is None on this engine.
+        # Unguarded, the first line of the loop is
+        # `None(prompt_text, return_tensors="pt")` -> "'NoneType' object is not
+        # callable" as a 500, deep inside generation instead of at the boundary.
+        if self._engine_is_llamacpp():
+            await self._refuse_on_llamacpp(
+                "Text completion (/v1/completions)"
+            )
+
         # Delegate to CBM if active and sampling params are compatible
         if self._use_cbm_for_request(
             temperature=getattr(request, "temperature", None),

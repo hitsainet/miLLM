@@ -1675,6 +1675,15 @@ class SAEService:
                 "nothing to attach a forward hook to. Load a transformers-served "
                 "model to use SAEs, steering or sensing."
             )
+            # RETURN, do not merely record. Every check below reaches into the
+            # model as a torch object, and `get_layer_count` ends in
+            # `model.named_modules()` — an AttributeError on a llama.cpp handle,
+            # which this function only catches as ValueError. Falling through
+            # would raise a 500 out of the very function that exists to answer
+            # "no, and here is why".
+            return CompatibilityResult(
+                compatible=False, errors=errors, warnings=warnings
+            )
 
         # Check SAE status
         if sae.status != SAEStatus.CACHED:

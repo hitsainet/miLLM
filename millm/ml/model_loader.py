@@ -14,6 +14,12 @@ from typing import Any, Optional
 import structlog
 import torch
 
+# Defined BEFORE the optional imports below, because their failure handler logs.
+# Without this the warning raises NameError inside an except block — turning a
+# degraded feature into a failed module import, which is the exact outcome the
+# handler exists to prevent.
+logger = structlog.get_logger()
+
 # Module-level imports allow @patch("millm.ml.model_loader.AutoTokenizer") etc.
 # in tests. The actual load path also imports these inside the function body
 # to preserve the informative ImportError message when transformers is absent.
@@ -36,13 +42,55 @@ except ImportError:
 # raises a clear error instead.
 try:
     from llama_cpp import Llama  # noqa: F401  (re-exported for patching)
-except ImportError:  # pragma: no cover - exercised by the absent-engine test
+except Exception as _llama_import_error:  # noqa: BLE001
+    # NOT `except ImportError`. llama-cpp-python raises RUNTIMEERROR when its
+    # bundled shared library will not load — verified in the running pod:
+    #
+    #   RuntimeError: Failed to load shared library '.../libllama.so':
+    #   libcudart.so.13: cannot open shared object file
+    #
+    # In this image it resolves only because `import torch` above happens first
+    # and pulls torch's bundled CUDA runtime into the process. That ordering is
+    # an accident, not a contract. With ImportError alone, any environment
+    # where it does not hold — a CPU-only container, a reordered import, a
+    # mismatched wheel — makes THIS MODULE fail to import, and model_loader is
+    # imported at startup, so the entire backend dies rather than one feature
+    # being unavailable.
     Llama = None  # type: ignore[assignment]
+    logger.warning(
+        "llama_cpp_unavailable",
+        error=str(_llama_import_error),
+        error_type=type(_llama_import_error).__name__,
+        detail="GGUF models will refuse to load; everything else serves normally",
+    )
+
+# Whether the installed llama.cpp WHEEL was built with GPU offload at all.
+# A SEPARATE try on purpose: folding it into the block above would make a
+# missing symbol set `Llama = None` and disable GGUF serving entirely, when the
+# only thing lost is the ability to say which device the weights landed on.
+try:
+    from llama_cpp import llama_supports_gpu_offload  # noqa: F401
+except Exception as _offload_probe_error:  # noqa: BLE001 - optional symbol
+    # WARNS, does not merely pass. Without the probe `_gguf_device()` falls
+    # back to `torch.cuda.is_available()` alone, which reports "cuda" on a
+    # CUDA box running a CPU-only wheel — precisely the wrong answer that
+    # function exists to prevent. A silent fallback there would have
+    # /api/models/status assert a placement that never happened with nothing
+    # anywhere saying the measurement was unavailable.
+    llama_supports_gpu_offload = None  # type: ignore[assignment]
+    logger.warning(
+        "llama_cpp_offload_probe_unavailable",
+        error=str(_offload_probe_error),
+        error_type=type(_offload_probe_error).__name__,
+        detail=(
+            "GGUF device reporting falls back to torch.cuda.is_available(), "
+            "which cannot see whether the llama.cpp build supports offload"
+        ),
+    )
 
 from millm.core.errors import InsufficientMemoryError, ModelLoadError
+from millm.ml.gguf_catalog import quant_label_from_path
 from millm.ml.memory_utils import get_available_cpu_memory_mb, get_available_memory_mb
-
-logger = structlog.get_logger()
 
 
 #: The transformers engine: a torch nn.Module tree, hookable, differentiable.
@@ -843,6 +891,24 @@ GGUF_GPU_LAYERS = -1
 GGUF_CONTEXT_FROM_FILE = 0
 
 
+def _gguf_device() -> str:
+    """Where the GGUF weights actually landed: "cuda" or "cpu".
+
+    Reported, not requested. Answering from `GGUF_GPU_LAYERS` alone would
+    assert a placement that never happened on a CPU-only wheel or a box with
+    no card.
+    """
+    if GGUF_GPU_LAYERS == 0 or not torch.cuda.is_available():
+        return "cpu"
+    if llama_supports_gpu_offload is not None:
+        try:
+            if not llama_supports_gpu_offload():
+                return "cpu"
+        except Exception:  # noqa: BLE001 - a probe must never fail a load
+            pass
+    return "cuda"
+
+
 def load_gguf_model(
     model_id: int,
     model_name: str,
@@ -907,10 +973,25 @@ def load_gguf_model(
         # The file's size on disk, not a torch measurement: llama.cpp allocates
         # outside torch, so torch.cuda.mem_get_info would not attribute it here.
         memory_used_mb=size_mb,
-        device="cuda" if GGUF_GPU_LAYERS != 0 else "cpu",
+        # What llama.cpp ACTUALLY used, not what we asked for: with
+        # n_gpu_layers=-1 on a CPU-only build (or a box with no card) the
+        # weights are in host RAM, and recording "cuda" there would make
+        # /api/models/status assert a placement that never happened.
+        #
+        # BOTH halves are needed. `torch.cuda.is_available()` answers "is there
+        # a card", which says nothing about the llama.cpp build: the wheel on
+        # PyPI is CPU-only, so a CUDA box that installed it offloads nothing
+        # while torch happily reports a GPU. `llama_supports_gpu_offload()` is
+        # the other half, and it is asked of the library that did the loading.
+        device=_gguf_device(),
         dtype="gguf",
         attn_implementation="llama.cpp",
-        quantization_method=f"gguf:{Path(gguf_file).stem.rsplit('.', 1)[-1]}",
+        # The label comes from the catalogue's parser, which reads the
+        # quantization token wherever it sits in the name. The previous
+        # `stem.rsplit(".")[-1]` assumed a dot before it: correct for
+        # "Model.Q4_K_M.gguf", but "qwen2.5-7b-instruct-q4_k_m.gguf" is a
+        # perfectly ordinary name and it yielded "5-7b-instruct-q4_k_m".
+        quantization_method=f"gguf:{quant_label_from_path(gguf_file) or 'unknown'}",
         engine=ENGINE_LLAMACPP,
     )
 

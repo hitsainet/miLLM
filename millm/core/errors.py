@@ -39,6 +39,23 @@ class SensingEventNotFoundError(MiLLMError):
     status_code = 404
 
 
+class EngineUnsupportedError(MiLLMError):
+    """The resident inference engine cannot perform the requested operation.
+
+    A LIMIT OF THE RUNTIME, not of the request: llama.cpp exposes no PyTorch
+    module tree, so streaming, embeddings, batched conversations, steering and
+    chat_template_kwargs are refused rather than quietly degraded.
+
+    Declared as a class, because `code` and `status_code` on MiLLMError are
+    CLASS attributes — `MiLLMError(msg, code=..., status_code=...)` is a
+    TypeError, and every refusal raised that way surfaced as a 500 instead of
+    the 400 it meant to be.
+    """
+
+    code = "ENGINE_UNSUPPORTED"
+    status_code = 400
+
+
 class ModelNotFoundError(MiLLMError):
     """Raised when a requested model does not exist."""
 

@@ -12,6 +12,7 @@ from fastapi.responses import JSONResponse
 
 from millm.api.dependencies import ModelServiceDep, get_inference_service
 from millm.api.routes.openai.errors import (
+    create_openai_error,
     model_locked_error,
     model_not_found_error,
     model_not_loaded_error,
@@ -57,6 +58,29 @@ async def create_embeddings(
     model = await service.find_model_by_name(request.model)
     if not model:
         return model_not_found_error(request.model)
+
+    # Embeddings are impossible on the llama.cpp engine, not merely
+    # unimplemented: llama.cpp needs embedding=True at CONSTRUCTION and pools
+    # internally, so there is no hidden_states[-1] to mean-pool.
+    # `InferenceService.create_embeddings` already refuses — but it refuses
+    # AFTER the auto-load below has evicted the resident transformers model and
+    # any SAEs attached to it, and spent minutes and tens of GB bringing up a
+    # model that could never have answered. `gguf_files` on the row is set at
+    # DOWNLOAD time, so the answer is knowable with nothing resident. Same
+    # signal and same reason as the streaming guard in chat.py and the text
+    # completion guard in completions.py.
+    if getattr(model, "gguf_files", None):
+        return create_openai_error(
+            message=(
+                "Embeddings are not supported on the llama.cpp engine: it "
+                "pools internally and exposes no hidden states to mean-pool. "
+                "Use a transformers-served embedding model."
+            ),
+            error_type="invalid_request_error",
+            code="engine_unsupported",
+            param="model",
+            status_code=400,
+        )
 
     # Load on demand, same as chat and completions. Open WebUI calls this for
     # RAG with its own embedding model selected, which is a DIFFERENT model from

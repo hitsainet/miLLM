@@ -914,6 +914,61 @@ GGUF_GPU_LAYERS = -1
 GGUF_MIN_CONTEXT = 2048
 
 
+#: KV-cache precision names -> ggml type constants, resolved defensively: the
+#: module may be absent (llama_cpp is an extra) and the constant names have
+#: moved between versions. Values are the stable ggml enum numbers.
+_KV_CACHE_TYPES: dict[str, int] = {
+    "f16": getattr(llama_cpp_module, "GGML_TYPE_F16", 1) if llama_cpp_module else 1,
+    "q8_0": getattr(llama_cpp_module, "GGML_TYPE_Q8_0", 8) if llama_cpp_module else 8,
+    "q4_0": getattr(llama_cpp_module, "GGML_TYPE_Q4_0", 2) if llama_cpp_module else 2,
+}
+
+
+def _kv_cache_kwargs(kv_type: str, flash_attention: bool) -> dict[str, Any]:
+    """llama.cpp kwargs for the KV cache, or {} for the plain F16 default.
+
+    FLASH ATTENTION IS A HARD DEPENDENCY OF A QUANTIZED CACHE, not a tuning
+    knob to pair with it. MEASURED on gemma-4-31b IQ4_XS: q8_0 WITHOUT flash
+    attention fails to create a context at 8192, the same length it reaches
+    12288 with it. Quantizing the cache while flash attention is off is
+    therefore strictly worse than not quantizing at all, so it is refused
+    rather than silently shipped.
+    """
+    name = (kv_type or "f16").strip().lower()
+    if name not in _KV_CACHE_TYPES:
+        logger.warning(
+            "gguf_unknown_kv_cache_type",
+            configured=kv_type,
+            known=sorted(_KV_CACHE_TYPES),
+            detail="falling back to f16, llama.cpp's own default",
+        )
+        name = "f16"
+
+    if name == "f16":
+        # Nothing to pass: this IS the default, and flash attention alone is
+        # not worth forcing on when nothing depends on it.
+        return {}
+
+    if not flash_attention:
+        logger.warning(
+            "gguf_kv_quantization_needs_flash_attention",
+            kv_cache_type=name,
+            detail=(
+                "GGUF_FLASH_ATTENTION is off, and a quantized KV cache without "
+                "it fails to create a context at lengths it otherwise reaches. "
+                "Using f16 instead — turn flash attention on to get the larger "
+                "window."
+            ),
+        )
+        return {}
+
+    return {
+        "flash_attn": True,
+        "type_k": _KV_CACHE_TYPES[name],
+        "type_v": _KV_CACHE_TYPES[name],
+    }
+
+
 def declared_context(path: str) -> int | None:
     """The context the model was TRAINED for, read from the file itself.
 
@@ -1072,11 +1127,15 @@ def load_gguf_model(
             ceiling=ceiling,
             starting_at=start_ctx,
         )
+        kv_kwargs = _kv_cache_kwargs(
+            _settings.GGUF_KV_CACHE_TYPE, _settings.GGUF_FLASH_ATTENTION
+        )
         kwargs: dict[str, Any] = {
             "model_path": str(path),
             "n_gpu_layers": GGUF_GPU_LAYERS,
             "n_ctx": start_ctx,
             "verbose": False,
+            **kv_kwargs,
         }
         if _settings.GGUF_ENABLE_EMBEDDINGS:
             # MEAN pooling, matching what the transformers path does —
@@ -1146,6 +1205,34 @@ def load_gguf_model(
         # So drop the capability, not the model. Which one is available is
         # recorded on the row rather than discovered by a caller getting a
         # confusing failure from /v1/embeddings.
+        # A QUANTIZED KV CACHE THE BUILD WILL NOT TAKE MUST NOT COST THE MODEL.
+        #
+        # `type_k`/`type_v` and `flash_attn` depend on how llama.cpp was
+        # compiled and on the architecture. When they are refused, the whole
+        # ladder fails for a reason that has nothing to do with context length
+        # — exactly the shape of the pooling_type defect below, which cost a
+        # working model and sent an operator to download a smaller one.
+        #
+        # Falling back to f16 costs context (gemma-4-31b drops from 12288 to
+        # 4096) and keeps the model servable, which is the right way round.
+        if llm is None and kv_kwargs:
+            logger.warning(
+                "gguf_retrying_with_f16_kv_cache",
+                model_id=model_id,
+                attempted=list(attempted),
+                kv_cache_type=_settings.GGUF_KV_CACHE_TYPE,
+                detail=(
+                    "no context could be created with a quantized KV cache; "
+                    "this build or architecture refuses it. Retrying at f16, "
+                    "which holds a SMALLER context for the same memory."
+                ),
+            )
+            for key in ("flash_attn", "type_k", "type_v"):
+                kwargs.pop(key, None)
+            kv_kwargs = {}
+            attempted = []
+            llm = _try_ladder()
+
         if llm is None and kwargs.get("embedding"):
             logger.warning(
                 "gguf_retrying_without_embeddings",

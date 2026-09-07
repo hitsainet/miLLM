@@ -218,3 +218,101 @@ class TestTheLadderStartsFromWhatTheModelDeclares:
             model_loader.load_gguf_model(1, "m", str(tmp_path), "m.gguf")
 
         assert calls == [0], "0 means 'let llama.cpp use the file's own context'"
+
+
+class TestTheKVCacheIsNotLeftAtF16:
+    """The KV cache is the biggest lever on context, and it sat at the default.
+
+    gemma-4-31b spends 630 KB PER TOKEN at f16 — 60 layers x 16 KV heads x 168
+    head_dim x 2 tensors x 2 bytes. At 4096 that is 2.6 GiB, more than a third
+    of the free VRAM on a 24 GiB card, to hold about three thousand words. The
+    context ladder searched for a length that fit while the cost of a token
+    went unquestioned.
+
+    MEASURED on gemma-4-31b IQ4_XS on the RTX 3090:
+        f16  + FA : 8192 FAILS      (4096 is the ceiling)
+        q8_0 + FA : 12288 LOADS     (3x, clears the ~4700-token labeling prompt)
+        q4_0 + FA : 16384 LOADS
+        q8_0, NO FA: 8192 FAILS     <- flash attention is a DEPENDENCY
+
+    MUTATION CONTROLS (each must turn this file red):
+      * return {} from _kv_cache_kwargs          -> "quantized by default" fails
+      * pair quantization with flash_attn=False  -> "refuses the pairing" fails
+      * drop the f16 retry in load_gguf_model    -> "falls back" fails
+    """
+
+    def test_the_default_is_a_quantized_cache_with_flash_attention(self):
+        from millm.core.config import settings
+        from millm.ml.model_loader import _kv_cache_kwargs
+
+        kwargs = _kv_cache_kwargs(
+            settings.GGUF_KV_CACHE_TYPE, settings.GGUF_FLASH_ATTENTION
+        )
+
+        assert kwargs.get("flash_attn") is True
+        assert kwargs["type_k"] == kwargs["type_v"], "K and V must match"
+        assert kwargs["type_k"] != _f16(), (
+            "shipping f16 wastes half the KV cache; gemma-4-31b drops from "
+            "12288 to 4096 tokens on the same card"
+        )
+
+    def test_quantization_without_flash_attention_is_REFUSED(self):
+        """Not a preference. q8_0 without FA fails at 8192, a length it reaches
+        12288 with it — so the pairing is strictly worse than plain f16."""
+        from millm.ml.model_loader import _kv_cache_kwargs
+
+        assert _kv_cache_kwargs("q8_0", False) == {}
+
+    def test_f16_passes_nothing_and_stays_the_documented_escape_hatch(self):
+        from millm.ml.model_loader import _kv_cache_kwargs
+
+        assert _kv_cache_kwargs("f16", True) == {}
+
+    def test_an_unknown_type_falls_back_rather_than_crashing(self):
+        """A typo in config must not make every GGUF model unloadable."""
+        from millm.ml.model_loader import _kv_cache_kwargs
+
+        assert _kv_cache_kwargs("q3_k_m_typo", True) == {}
+
+    def test_q4_is_available_but_is_not_the_default(self):
+        """It buys a third more window at a real accuracy cost, which is the
+        wrong trade for a judge whose whole job is discrimination."""
+        from millm.core.config import settings
+        from millm.ml.model_loader import _kv_cache_kwargs
+
+        assert _kv_cache_kwargs("q4_0", True)["type_k"] is not None
+        assert settings.GGUF_KV_CACHE_TYPE == "q8_0"
+
+    def test_a_build_that_refuses_the_quantized_cache_still_gets_a_model(
+        self, tmp_path
+    ):
+        """Same shape as the pooling defect: a kwarg the build rejects fails
+        every rung for a reason unrelated to context, and cost a working model."""
+        from millm.ml import model_loader
+
+        (tmp_path / "m.gguf").write_bytes(b"x" * 32)
+        calls: list[dict] = []
+
+        def _refuses_quantized_kv(**kwargs):
+            calls.append(dict(kwargs))
+            if "type_k" in kwargs:
+                raise ValueError("Failed to create llama_context")
+            return MagicMock()
+
+        with patch.object(model_loader, "Llama", _refuses_quantized_kv), \
+             patch.object(model_loader, "declared_context", return_value=8192), \
+             patch.object(config_settings, "GGUF_ENABLE_EMBEDDINGS", False), \
+             patch.object(config_settings, "GGUF_KV_CACHE_TYPE", "q8_0"), \
+             patch.object(config_settings, "GGUF_FLASH_ATTENTION", True), \
+             patch.object(config_settings, "GGUF_CONTEXT_LENGTH", 8192):
+            loaded = model_loader.load_gguf_model(1, "m", str(tmp_path), "m.gguf")
+
+        assert loaded is not None, "a refused cache type cost the whole model"
+        assert any("type_k" in c for c in calls), "quantization was never tried"
+        assert "type_k" not in calls[-1], "the successful call still quantized"
+
+
+def _f16():
+    from millm.ml.model_loader import _KV_CACHE_TYPES
+
+    return _KV_CACHE_TYPES["f16"]

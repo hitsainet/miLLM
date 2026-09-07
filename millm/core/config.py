@@ -196,6 +196,34 @@ class Settings(BaseSettings):
     # dedicated to serving; 0 means "whatever the file declares", bounded only
     # by what fits.
     GGUF_CONTEXT_LENGTH: int = 32768
+
+    # KV-CACHE PRECISION. This is the single biggest lever on how much context
+    # a GGUF model can hold, and it sat at llama.cpp's F16 default unexamined.
+    #
+    # gemma-4-31b spends 630 KB PER TOKEN on KV cache at F16 (60 layers x 16 KV
+    # heads x 168 head_dim x 2 tensors x 2 bytes). At 4096 tokens that is 2.6
+    # GiB — more than a third of the free VRAM on a 24 GiB card — to hold about
+    # three thousand words. The context ladder was searching for a context that
+    # fit while the cost of a token went unquestioned.
+    #
+    # MEASURED on gemma-4-31b IQ4_XS on the RTX 3090:
+    #   f16  + FA : 8192 FAILS, 4096 is the ceiling
+    #   q8_0 + FA : 12288 loads          <- 3x, and clears the ~4700-token
+    #                                       labeling prompt that f16 could not
+    #   q4_0 + FA : 16384 loads
+    #
+    # q8_0 is the default because it is near-lossless. q4_0 buys another third
+    # of a window at a real accuracy cost, which is the wrong trade for a
+    # judge — discrimination is the job. Set it only when a long window matters
+    # more than precision.
+    #
+    # "f16" restores the previous behaviour exactly.
+    GGUF_KV_CACHE_TYPE: str = "q8_0"
+
+    # REQUIRED by quantized KV cache, not merely an optimisation: MEASURED,
+    # q8_0 without flash attention fails at 8192 where q8_0 with it reaches
+    # 12288. The loader refuses to pair a quantized cache with this off.
+    GGUF_FLASH_ATTENTION: bool = True
     CBM_MAX_QUEUE_SIZE: int = 256
     # CBM fixes its sampling parameters at manager creation, and any request
     # whose temperature/top_p differ FALLS BACK TO THE SERIAL PATH

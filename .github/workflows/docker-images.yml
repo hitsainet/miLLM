@@ -87,9 +87,75 @@ jobs:
             echo "images=$JSON" >> "$GITHUB_OUTPUT"; echo "building: $JSON"
           fi
 
-  build:
+  # ── Test gate ────────────────────────────────────────────────────────────
+  # DO NOT PUBLISH A BACKEND IMAGE OVER A RED SUITE.
+  #
+  # This workflow used to build and push on any commit to main, independent of
+  # `Backend Tests`. On 2026-09-07 three commits shipped and deployed while the
+  # suite was failing — the images built happily beside a red X, and ArgoCD
+  # rolled them out. Nothing in the pipeline connected the two.
+  #
+  # Scoped to the BACKEND image on purpose. `backend-tests.yml` carries path
+  # filters (`millm/**`, `tests/**`, `pyproject.toml`), so an admin-ui-only push
+  # produces no Backend Tests run at all — gating every image on it would
+  # deadlock the UI image forever, waiting for a check that will never appear.
+  gate:
     needs: detect
-    if: (github.repository == 'hitsainet/millm' || github.repository == 'hitsainet/miLLM') && needs.detect.outputs.images != '[]' && needs.detect.outputs.images != ''
+    if: >-
+      (github.repository == 'hitsainet/millm' || github.repository == 'hitsainet/miLLM')
+      && contains(needs.detect.outputs.images, 'backend')
+    runs-on: ubuntu-latest
+    permissions:
+      actions: read
+    steps:
+      - name: Require Backend Tests to have passed for this commit
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          # Poll rather than read once: the two workflows start together, so the
+          # suite is usually still running when this begins.
+          for attempt in $(seq 1 60); do
+            RUN="$(gh api \
+              "repos/${GITHUB_REPOSITORY}/actions/runs?head_sha=${SHA}&per_page=100" \
+              --jq '[.workflow_runs[] | select(.name=="Backend Tests")]
+                    | sort_by(.created_at) | last
+                    | "\(.status) \(.conclusion)"' 2>/dev/null || echo "")"
+
+            case "$RUN" in
+              "completed success")
+                echo "Backend Tests passed for ${SHA} — publishing."; exit 0 ;;
+              "completed "*)
+                echo "::error::Backend Tests did not pass for ${SHA} (${RUN}). \
+          Refusing to publish a backend image over a red suite."; exit 1 ;;
+              "")
+                # No run yet. Early on that means it has not been created; late
+                # it means it never will be, and publishing untested is exactly
+                # what this job exists to prevent.
+                if [ "$attempt" -ge 20 ]; then
+                  echo "::error::No Backend Tests run found for ${SHA} after \
+          10 minutes. Refusing to publish untested — this workflow's path \
+          filters should have produced one for a backend change."; exit 1
+                fi ;;
+            esac
+            echo "waiting for Backend Tests (${attempt}/60): ${RUN:-not started}"
+            sleep 30
+          done
+          echo "::error::Timed out waiting for Backend Tests on ${SHA}."; exit 1
+
+  build:
+    needs: [detect, gate]
+    # `always()` because `gate` is SKIPPED for an admin-ui-only build, and a
+    # skipped dependency would otherwise skip this job too. Skipped is allowed;
+    # failed and cancelled are not.
+    if: >-
+      always()
+      && (github.repository == 'hitsainet/millm' || github.repository == 'hitsainet/miLLM')
+      && needs.detect.result == 'success'
+      && needs.detect.outputs.images != '[]' && needs.detect.outputs.images != ''
+      && needs.gate.result != 'failure'
+      && needs.gate.result != 'cancelled'
     runs-on: ubuntu-latest
 
     permissions:

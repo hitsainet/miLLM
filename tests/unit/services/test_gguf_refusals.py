@@ -970,18 +970,50 @@ class TestAnOversizedPromptIsAClientError:
 class TestTheContextAdviceNamesAReachablePath:
     """The refusal tells the caller where to read the real context length.
 
-    It named `/api/inference/status` for as long as the message has existed.
-    That path 404s — the route is `GET /api/health/inference`, because the
-    health router carries a `/api/health` prefix. A user who hits a context
-    overflow follows this sentence, gets a 404, and concludes the capability is
-    missing rather than that the message is wrong. It cost exactly that.
+    It named `/api/inference/status` for as long as the message existed. That
+    path 404s — the route is `GET /api/health/inference`, because the health
+    router carries a `/api/health` prefix. A user who hits a context overflow
+    follows this sentence, gets a 404, and concludes the capability is missing
+    rather than that the message is wrong. It cost exactly that.
 
-    Asserting the path exists IN THE LIVE ROUTE TABLE, not that the string
-    looks plausible — the previous string looked entirely plausible.
+    Resolved against `register_routes()` on a FRESH app rather than
+    `create_app()`. The claim is "this path is a mounted route", and
+    `register_routes` is what mounts them; `create_app` additionally builds
+    middleware, exception handlers, CORS and settings, none of which the claim
+    needs. Coupling to all of it made this test fail in CI — and ONLY in CI —
+    for a reason that had nothing to do with the path: `create_app()` returns
+    an app with only FastAPI's four default routes late in a CI run, while the
+    same call at 5% and 16% of the same run serves `/v1` requests fine. That is
+    module-state pollution, it does not reproduce outside CI, and it is written
+    up in the project's dev-internal known-issues log. A guard that reports a
+    path bug when the path is correct is worse than no guard — it names the
+    wrong defect convincingly.
     """
 
+    def _mounted_paths(self) -> set[str]:
+        from fastapi import FastAPI
+
+        from millm.api.routes import register_routes
+
+        app = FastAPI()
+        register_routes(app)
+        paths = {r.path for r in app.routes if hasattr(r, "path")}
+
+        # NEGATIVE CONTROL. An assertion over an empty or near-empty set passes
+        # for anything, and that is exactly how this test misreported once
+        # already: it saw four routes, concluded the path was wrong, and named
+        # the wrong defect. If the collection breaks, say THAT.
+        api_paths = {p for p in paths if p.startswith("/api/")}
+        assert len(api_paths) > 20, (
+            f"only {len(api_paths)} /api routes were collected — route "
+            f"registration itself is broken, which is not what this test is "
+            f"about. Collected: {sorted(paths)[:8]}"
+        )
+        return paths
+
     def test_the_path_the_message_names_is_a_real_route(self):
-        from millm.main import create_app
+        import re
+
         from millm.services.inference_service import InferenceService
 
         message = str(
@@ -990,15 +1022,26 @@ class TestTheContextAdviceNamesAReachablePath:
             )
         )
 
-        import re
-
         paths = re.findall(r"/api/[\w/{}-]+", message)
         assert paths, f"the advice must name a path to read: {message}"
 
-        live = {r.path for r in create_app().routes if hasattr(r, "path")}
+        mounted = self._mounted_paths()
         for path in paths:
-            assert path in live, (
-                f"the refusal sends the caller to {path}, which is not a route. "
-                f"Live paths starting /api/health: "
-                f"{sorted(p for p in live if p.startswith('/api/health'))}"
+            assert path in mounted, (
+                f"the refusal sends the caller to {path}, which is not a "
+                f"mounted route. Live paths under /api/health: "
+                f"{sorted(p for p in mounted if p.startswith('/api/health'))}"
             )
+
+    def test_the_guard_would_notice_a_wrong_path(self):
+        """The control for the control: prove the check can FAIL.
+
+        Without this, a regex that silently matches nothing, or a `mounted` set
+        that accidentally contains everything, would leave the test above
+        passing over a broken message forever.
+        """
+        mounted = self._mounted_paths()
+        assert "/api/inference/status" not in mounted, (
+            "the path this message used to name must still be absent, or this "
+            "guard proves nothing"
+        )

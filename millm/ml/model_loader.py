@@ -1027,6 +1027,93 @@ def declared_context(path: str) -> int | None:
         return None
 
 
+#: Bytes per element of a KV cache entry, by cache type. q8_0 and q4_0 carry a
+#: scale per 32-element block, which the fractions include.
+_KV_BYTES_PER_ELEMENT = {"f16": 2.0, "q8_0": 1.0 + 2 / 32, "q4_0": 0.5 + 2 / 32}
+
+#: Everything on the card that is neither weights nor KV cache: the CUDA
+#: context, llama.cpp's compute buffers, and cuBLAS workspaces. MEASURED at
+#: ~2.0 GiB for gemma-4-31b on an RTX 3090 (20608 MiB in use with 16081 MiB of
+#: weights and 2520 MiB of KV at 8192). It is not a constant of nature, but it
+#: is stable enough to plan with, and the ladder verifies whatever it predicts.
+_GGUF_RUNTIME_OVERHEAD_MB = 2048
+
+#: Fraction of the card to plan against. The last few percent go to
+#: fragmentation and to whatever else holds the device; planning to 100% picks
+#: a context that computes as fitting and then fails to allocate.
+_VRAM_PLANNING_FRACTION = 0.94
+
+
+def predicted_max_context(
+    path: str, kv_cache_type: str, free_vram_mb: int, weights_mb: int
+) -> int | None:
+    """The largest context the arithmetic says will fit. None if unknowable.
+
+    A KV cache has an exact size — there is no reason to discover it by loading
+    the model repeatedly:
+
+        bytes/token = 2 (K and V) x n_layer x n_head_kv x head_dim x bytes/element
+
+    Every term comes from metadata the declared-context probe already reads.
+    For gemma-4-31b that is 2 x 60 x 16 x 168 = 630 KB/token at f16, halved at
+    q8_0 — which is why quantizing the cache doubled the usable window.
+
+    VALIDATED against every measurement taken on the RTX 3090, all four
+    predicted correctly:
+
+        f16  @ 4096  -> 20.6 GiB   loaded (20608 MiB measured)
+        f16  @ 8192  -> 23.1 GiB   failed
+        q8_0 @ 12288 -> 21.9 GiB   loaded
+        q8_0 @ 16384 -> 23.1 GiB   failed
+
+    This SEEDS the ladder; it does not replace it. The overhead term is
+    empirical and the compute buffer grows with batch size, so the number is a
+    good starting point and not a guarantee — the load attempt is still what
+    decides. Returning None simply means starting from the configured ceiling,
+    as before.
+    """
+    if llama_cpp_module is None:
+        return None
+    try:
+        llama_cpp_module.llama_backend_init()
+        params = llama_cpp_module.llama_model_default_params()
+        params.n_gpu_layers = 0
+        params.use_mmap = True
+        model = llama_cpp_module.llama_model_load_from_file(str(path).encode(), params)
+        if not model:
+            return None
+        try:
+            n_layer = int(llama_cpp_module.llama_model_n_layer(model))
+            n_head_kv = int(llama_cpp_module.llama_model_n_head_kv(model))
+            n_embd = int(llama_cpp_module.llama_model_n_embd(model))
+            n_head = int(llama_cpp_module.llama_model_n_head(model))
+        finally:
+            llama_cpp_module.llama_model_free(model)
+
+        if min(n_layer, n_head_kv, n_embd, n_head) <= 0:
+            return None
+        head_dim = n_embd // n_head
+        per_element = _KV_BYTES_PER_ELEMENT.get(
+            (kv_cache_type or "f16").strip().lower(), 2.0
+        )
+        bytes_per_token = 2 * n_layer * n_head_kv * head_dim * per_element
+
+        budget_mb = (
+            free_vram_mb * _VRAM_PLANNING_FRACTION
+            - weights_mb
+            - _GGUF_RUNTIME_OVERHEAD_MB
+        )
+        if budget_mb <= 0:
+            return None
+        tokens = int(budget_mb * 1024 * 1024 / bytes_per_token)
+        # Down to a 1024 boundary: the precision is not real, and a round
+        # number is easier to reason about in a log line.
+        return max(0, (tokens // 1024) * 1024) or None
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("gguf_context_prediction_failed", error=str(exc)[:200])
+        return None
+
+
 def _context_ladder(requested: int) -> list[int]:
     """Context lengths to try, largest first.
 
@@ -1131,21 +1218,50 @@ def load_gguf_model(
         # GPU is shared with miStudio's extraction, training and steering work.
         ceiling = _settings.GGUF_CONTEXT_LENGTH
         declared = declared_context(str(path))
+
+        # WHAT WILL ACTUALLY FIT, computed rather than discovered.
+        #
+        # The ladder halving down from a configured ceiling costs one full model
+        # load per rung — six of them to find a number the arithmetic gives in
+        # milliseconds. A KV cache has an exact size, and every term is in the
+        # metadata already read above.
+        predicted = None
+        try:
+            from millm.ml.memory_utils import get_available_memory_mb
+
+            free_mb = get_available_memory_mb()
+            if free_mb > 0:
+                predicted = predicted_max_context(
+                    str(path),
+                    _settings.GGUF_KV_CACHE_TYPE,
+                    free_mb,
+                    int(path.stat().st_size / (1024 * 1024)),
+                )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("gguf_context_prediction_skipped", error=str(exc)[:200])
+
         if ceiling <= 0:
             # 0 is the documented "whatever the file declares" escape hatch, and
             # llama.cpp reads n_ctx=0 that way itself. Stated explicitly rather
             # than falling out of min(declared, 0), which is the same answer for
             # the wrong reason and would not survive a refactor.
             start_ctx = 0
-        elif declared:
-            start_ctx = min(declared, ceiling)
         else:
-            start_ctx = ceiling
+            # The smallest of: what the model was trained for, what policy
+            # allows, and what the card can hold. Each is a real bound and the
+            # tightest one governs.
+            bounds = [ceiling]
+            if declared:
+                bounds.append(declared)
+            if predicted:
+                bounds.append(predicted)
+            start_ctx = min(bounds)
         logger.info(
             "gguf_context_target",
             model_id=model_id,
             declared=declared,
             ceiling=ceiling,
+            predicted_fit=predicted,
             starting_at=start_ctx,
         )
         kv_kwargs = _kv_cache_kwargs(

@@ -476,3 +476,147 @@ class TestTheReportedContextIsTheOneThatLoaded:
             f"actually constructed was {max(loaded_at)}"
         )
         assert loaded.context_length == 4096
+
+
+class TestTheContextIsPredictedNotDiscovered:
+    """A KV cache has an exact size; loading the model six times to find it is
+    a waste of half a minute.
+
+        bytes/token = 2 (K,V) x n_layer x n_head_kv x head_dim x bytes/element
+
+    For gemma-4-31b: 2 x 60 x 16 x 168 = 630 KB/token at f16, halved at q8_0 —
+    which is precisely why quantizing the cache doubled the usable window.
+
+    VALIDATED against every RTX 3090 measurement, all four predicted correctly:
+        f16  @ 4096  -> 20.6 GiB  loaded (20608 MiB measured)
+        f16  @ 8192  -> 23.1 GiB  failed
+        q8_0 @ 12288 -> 21.9 GiB  loaded
+        q8_0 @ 16384 -> 23.1 GiB  failed
+
+    MUTATION CONTROLS:
+      * ignore `predicted` when choosing the start -> "seeds the ladder" fails
+      * drop the q8_0 entry from the byte table    -> "halving the cache" fails
+    """
+
+    def test_the_prediction_seeds_the_ladder(self, tmp_path):
+        """REACHABILITY. The first version of this called a helper that does
+        not exist; the try/except swallowed the ImportError and the prediction
+        silently never ran. A number computed and then ignored is worse than
+        none — it reads as working."""
+        from millm.ml import model_loader
+
+        (tmp_path / "m.gguf").write_bytes(b"x" * 32)
+        calls: list[int] = []
+
+        with patch.object(model_loader, "Llama", lambda **k: (calls.append(k["n_ctx"]), MagicMock(close=MagicMock()))[1]), \
+             patch.object(model_loader, "declared_context", return_value=262144), \
+             patch.object(model_loader, "predicted_max_context", return_value=6144), \
+             patch("millm.ml.memory_utils.get_available_memory_mb", return_value=24000), \
+             patch.object(config_settings, "GGUF_ENABLE_EMBEDDINGS", False), \
+             patch.object(config_settings, "GGUF_CONTEXT_LENGTH", 32768):
+            loaded = model_loader.load_gguf_model(1, "m", str(tmp_path), "m.gguf")
+
+        assert calls[0] == 6144, (
+            f"started at {calls[0]} — the VRAM prediction was computed and then "
+            "ignored, so the ladder still walks down from the ceiling"
+        )
+        assert loaded.context_length == 6144
+
+    def test_the_tightest_bound_governs(self, tmp_path):
+        """Trained-for, policy, and what fits are three real bounds."""
+        from millm.ml import model_loader
+
+        (tmp_path / "m.gguf").write_bytes(b"x" * 32)
+        calls: list[int] = []
+
+        with patch.object(model_loader, "Llama", lambda **k: (calls.append(k["n_ctx"]), MagicMock(close=MagicMock()))[1]), \
+             patch.object(model_loader, "declared_context", return_value=4096), \
+             patch.object(model_loader, "predicted_max_context", return_value=60000), \
+             patch("millm.ml.memory_utils.get_available_memory_mb", return_value=24000), \
+             patch.object(config_settings, "GGUF_ENABLE_EMBEDDINGS", False), \
+             patch.object(config_settings, "GGUF_CONTEXT_LENGTH", 32768):
+            model_loader.load_gguf_model(1, "m", str(tmp_path), "m.gguf")
+
+        assert calls[0] == 4096, "a model cannot be given more than it was trained for"
+
+    def test_quantizing_the_cache_predicts_a_larger_window(self):
+        """The arithmetic behind the whole KV change, asserted directly."""
+        from millm.ml.model_loader import _KV_BYTES_PER_ELEMENT
+
+        assert _KV_BYTES_PER_ELEMENT["q8_0"] < _KV_BYTES_PER_ELEMENT["f16"]
+        ratio = _KV_BYTES_PER_ELEMENT["f16"] / _KV_BYTES_PER_ELEMENT["q8_0"]
+        assert 1.8 < ratio < 2.0, f"q8_0 should roughly halve the cache, got {ratio:.2f}x"
+
+    def test_a_prediction_that_cannot_be_made_falls_back(self, tmp_path):
+        """It is an optimisation, never a gate."""
+        from millm.ml import model_loader
+
+        (tmp_path / "m.gguf").write_bytes(b"x" * 32)
+        calls: list[int] = []
+
+        with patch.object(model_loader, "Llama", lambda **k: (calls.append(k["n_ctx"]), MagicMock(close=MagicMock()))[1]), \
+             patch.object(model_loader, "declared_context", return_value=None), \
+             patch.object(model_loader, "predicted_max_context", return_value=None), \
+             patch.object(config_settings, "GGUF_ENABLE_EMBEDDINGS", False), \
+             patch.object(config_settings, "GGUF_CONTEXT_LENGTH", 8192):
+            model_loader.load_gguf_model(1, "m", str(tmp_path), "m.gguf")
+
+        assert calls[0] == 8192
+
+
+class TestThePredictorMatchesTheHardware:
+    """Pinned to REAL numbers from the RTX 3090, not to the formula's own output.
+
+    A predictor validated against itself proves nothing. These four points were
+    measured by loading gemma-4-31b IQ4_XS (16081 MiB of weights, 24576 MiB
+    card, 60 layers, 16 KV heads, head_dim 168) at each setting and recording
+    whether llama.cpp could create the context:
+
+        f16  @ 4096  loaded   (20608 MiB in use, measured)
+        f16  @ 8192  FAILED
+        q8_0 @ 12288 loaded
+        q8_0 @ 16384 FAILED
+
+    If the overhead constant or the planning fraction drifts, this catches it
+    against hardware rather than against arithmetic.
+    """
+
+    CARD_MB, WEIGHTS_MB = 24576, 16081
+    N_LAYER, N_HEAD_KV, HEAD_DIM = 60, 16, 168
+
+    def _predict(self, kv_type):
+        from millm.ml.model_loader import (
+            _GGUF_RUNTIME_OVERHEAD_MB,
+            _KV_BYTES_PER_ELEMENT,
+            _VRAM_PLANNING_FRACTION,
+        )
+
+        per_tok = (
+            2 * self.N_LAYER * self.N_HEAD_KV * self.HEAD_DIM
+            * _KV_BYTES_PER_ELEMENT[kv_type]
+        )
+        budget = (
+            self.CARD_MB * _VRAM_PLANNING_FRACTION
+            - self.WEIGHTS_MB
+            - _GGUF_RUNTIME_OVERHEAD_MB
+        )
+        return int(budget * 1024 * 1024 / per_tok) // 1024 * 1024
+
+    @pytest.mark.parametrize(
+        "kv_type,loaded,failed",
+        [("f16", 4096, 8192), ("q8_0", 12288, 16384)],
+    )
+    def test_it_brackets_what_the_card_actually_did(self, kv_type, loaded, failed):
+        predicted = self._predict(kv_type)
+
+        assert predicted >= loaded, (
+            f"{kv_type}: predicted {predicted} but {loaded} demonstrably loads — "
+            "the estimate is too pessimistic and throws away real capacity"
+        )
+        assert predicted < failed, (
+            f"{kv_type}: predicted {predicted} but {failed} demonstrably FAILS — "
+            "the estimate is too optimistic and the load will not fit"
+        )
+
+    def test_quantizing_predicts_roughly_double(self):
+        assert 1.8 < self._predict("q8_0") / self._predict("f16") < 2.3

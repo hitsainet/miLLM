@@ -118,6 +118,13 @@ class LoadedModel:
     dtype: str = "unknown"
     attn_implementation: str = "unknown"
     quantization_method: str = "unknown"  # "bitsandbytes", "gptq", "awq", "none"
+    #: The context window this model was ACTUALLY loaded with.
+    #:
+    #: Recorded because it is not always the one that was asked for: a context
+    #: that does not fit is retried smaller, and serving a 2048 window while the
+    #: configuration says 8192 would truncate long prompts for reasons nothing
+    #: on the system explains. 0 means "the model's full declared context".
+    context_length: int = 0
     #: WHICH runtime holds this model. Defaults to transformers so every
     #: existing construction site keeps its meaning. Consumers branch on this
     #: rather than sniffing the object, because a duck-typed check would quietly
@@ -888,6 +895,31 @@ class ModelLoadContext:
 #: offload is a fallback we do not attempt to guess at.
 GGUF_GPU_LAYERS = -1
 
+#: The smallest context worth loading at. Below this a model is too cramped to
+#: hold a real exchange, and failing is more useful than serving a window that
+#: truncates the first message.
+GGUF_MIN_CONTEXT = 2048
+
+
+def _context_ladder(requested: int) -> list[int]:
+    """Context lengths to try, largest first.
+
+    Halving rather than a fixed list: the gap between "fits" and "does not" is
+    model- and card-specific, and a ladder derived from what was asked for
+    lands close to the largest that works.
+    """
+    if requested <= 0:
+        # 0 means "the model's full declared context" — one attempt, no ladder,
+        # because there is no meaningful halving of "whatever the file says".
+        return [0]
+    ladder = []
+    n = int(requested)
+    while n >= GGUF_MIN_CONTEXT:
+        ladder.append(n)
+        n //= 2
+    return ladder or [GGUF_MIN_CONTEXT]
+
+
 #: Context window fallback. See settings.GGUF_CONTEXT_LENGTH for why this is
 #: not 0: asking for the model's full declared context OOMs on a large-context
 #: model, and llama.cpp's own default of 512 truncates real conversations.
@@ -977,7 +1009,54 @@ def load_gguf_model(
             # marked as outputs -> overriding" and adapts.
             kwargs["embedding"] = True
             kwargs["pooling_type"] = _POOLING_MEAN
-        llm = Llama(**kwargs)
+        # Try the configured context, then progressively smaller ones.
+        #
+        # A context that does not fit is not a failure worth propagating: the
+        # model loads perfectly at a smaller one, and refusing leaves the
+        # operator with "Failed to create llama_context" and no indication that
+        # a single number stands between them and a working model. MEASURED on
+        # gemma-4-31b Q4_K_M (17.4 GiB) on a 24 GiB card: 8192 fails — with or
+        # without flash attention — 4096 loads with 1.5 GiB free, 2048 loads
+        # with 3.3 GiB. There is no universal default; there is only what fits.
+        #
+        # The context actually obtained is RECORDED and logged. Serving a 2048
+        # window while the configuration says 8192 would truncate long prompts
+        # for reasons nothing on the system explains.
+        llm = None
+        attempted: list[int] = []
+        requested = int(kwargs["n_ctx"])
+        for n_ctx in _context_ladder(requested):
+            attempted.append(n_ctx)
+            kwargs["n_ctx"] = n_ctx
+            try:
+                llm = Llama(**kwargs)
+                break
+            except Exception as attempt_error:  # noqa: BLE001
+                logger.warning(
+                    "gguf_context_too_large",
+                    model_id=model_id,
+                    n_ctx=n_ctx,
+                    error=str(attempt_error)[:200],
+                )
+                gc.collect()
+        if llm is None:
+            raise ModelLoadError(
+                "Could not create a llama.cpp context at any context length "
+                f"(tried {attempted}). The model may not fit on this GPU at "
+                "all — try a smaller quantization.",
+                details={"model_id": model_id, "attempted": attempted},
+            )
+        if kwargs["n_ctx"] != requested:
+            logger.warning(
+                "gguf_context_reduced",
+                model_id=model_id,
+                requested=requested,
+                actual=kwargs["n_ctx"],
+                detail=(
+                    "the configured context did not fit; long prompts will be "
+                    "truncated at the smaller window"
+                ),
+            )
     except Exception as e:  # noqa: BLE001 - surfaced as a load failure
         raise ModelLoadError(
             f"Failed to load GGUF model: {e}",
@@ -1016,6 +1095,7 @@ def load_gguf_model(
         # perfectly ordinary name and it yielded "5-7b-instruct-q4_k_m".
         quantization_method=f"gguf:{quant_label_from_path(gguf_file) or 'unknown'}",
         engine=ENGINE_LLAMACPP,
+        context_length=int(kwargs["n_ctx"]),
     )
 
 

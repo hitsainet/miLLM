@@ -310,6 +310,49 @@ class TestLoadingAGGUFFile:
             "the model that found this and does not fit"
         )
 
+    def test_a_context_that_does_not_fit_is_retried_smaller(self, tmp_path):
+        """A model that fits at 4096 must not fail because 8192 was asked for.
+
+        MEASURED on gemma-4-31b Q4_K_M (17.4 GiB) on a 24 GiB card: 8192 fails
+        — with or without flash attention — 4096 loads with 1.5 GiB free. There
+        is no universal default; there is only what fits, and refusing leaves
+        the operator with "Failed to create llama_context" and no hint that one
+        number stands between them and a working model.
+
+        MUTATION CONTROL: load once with no ladder -> this fails.
+        """
+        gguf = tmp_path / "m-Q4_K_M.gguf"
+        gguf.write_bytes(b"\x00" * 1024)
+
+        attempts = []
+
+        def _llama(**kwargs):
+            attempts.append(kwargs["n_ctx"])
+            if kwargs["n_ctx"] > 4096:
+                raise ValueError("Failed to create llama_context")
+            return MagicMock()
+
+        with patch("millm.ml.model_loader.Llama", side_effect=_llama):
+            loaded = load_gguf_model(13, "m", str(tmp_path), "m-Q4_K_M.gguf")
+
+        assert attempts == [8192, 4096], "it must step down, not give up"
+        assert loaded.context_length == 4096, (
+            "the context actually obtained must be recorded — serving 4096 "
+            "while the config says 8192 truncates prompts unexplainably"
+        )
+
+    def test_a_model_that_fits_at_no_context_still_fails_loudly(self, tmp_path):
+        """Adapting is not the same as pretending. If nothing fits, say so."""
+        gguf = tmp_path / "m-Q4_K_M.gguf"
+        gguf.write_bytes(b"\x00" * 1024)
+
+        with patch(
+            "millm.ml.model_loader.Llama",
+            side_effect=ValueError("Failed to create llama_context"),
+        ):
+            with pytest.raises(ModelLoadError, match="any context length"):
+                load_gguf_model(14, "m", str(tmp_path), "m-Q4_K_M.gguf")
+
     def test_the_context_can_be_raised_or_taken_from_the_file(self, tmp_path):
         """A card with room should not be held to the conservative default."""
         from millm.core.config import settings

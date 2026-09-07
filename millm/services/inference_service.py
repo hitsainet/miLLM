@@ -398,6 +398,9 @@ class InferenceService:
                     "per_request_profile_override": False,
                     "speculative_decoding": False,
                 },
+                "context_length": getattr(
+                    self._model_state.current, "context_length", 0
+                ),
                 "limitations": [
                     "batched conversations and n > 1 are not supported on "
                     "this engine",

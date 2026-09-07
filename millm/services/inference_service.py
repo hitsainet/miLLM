@@ -399,8 +399,8 @@ class InferenceService:
                     "speculative_decoding": False,
                 },
                 "limitations": [
-                    "embeddings, batched conversations and n > 1 are not "
-                    "supported on this engine",
+                    "batched conversations and n > 1 are not supported on "
+                    "this engine",
                     "chat_template_kwargs is accepted but IGNORED: llama.cpp "
                     "applies the template baked into the GGUF file and exposes "
                     "no way to pass variables into it",
@@ -3770,10 +3770,7 @@ class InferenceService:
             EmbeddingResponse with embeddings
         """
         if self._engine_is_llamacpp():
-            # llama.cpp needs embedding=True at CONSTRUCTION and pools internally;
-            # there is no hidden_states[-1] to mean-pool, so parity here would
-            # mean quietly returning differently-computed vectors.
-            await self._refuse_on_llamacpp("Embeddings")
+            return await self._llamacpp_embeddings(request)
 
         import base64
         import struct
@@ -3837,6 +3834,82 @@ class InferenceService:
         return EmbeddingResponse(
             data=embeddings_data,
             model=model_name,
+            usage=Usage(
+                prompt_tokens=total_tokens,
+                completion_tokens=0,
+                total_tokens=total_tokens,
+            ),
+        )
+
+    async def _llamacpp_embeddings(self, request: Any) -> Any:
+        """Embeddings from a GGUF model.
+
+        Refused in the first increment on the reasoning that llama.cpp needs
+        `embedding=True` at CONSTRUCTION and pools internally, so parity would
+        mean quietly returning differently-computed vectors. Both halves of that
+        turned out to be wrong, and measuring settled it:
+
+          * one instance serves BOTH. Loaded with `embedding=True` and MEAN
+            pooling, the same handle answered create_embedding AND
+            create_chat_completion on the RTX 3090.
+          * the pooling is not different. The transformers path mean-pools the
+            last hidden layer; LLAMA_POOLING_TYPE_MEAN is the same strategy, so
+            the vectors are comparable in METHOD rather than merely both being
+            called embeddings.
+
+        The load-time flag is `settings.GGUF_ENABLE_EMBEDDINGS` (default on;
+        measured cost 6.7% of generation throughput). When it is off the model
+        was built without embedding support and llama.cpp raises — surfaced here
+        as a clear refusal naming the setting, rather than the library's error.
+        """
+        import base64
+        import struct
+
+        from millm.api.schemas.openai import EmbeddingData, EmbeddingResponse
+        from millm.core.config import settings as _settings
+
+        inputs = request.input if isinstance(request.input, list) else [request.input]
+        encoding_format = getattr(request, "encoding_format", "float") or "float"
+
+        embeddings_data: list[Any] = []
+        total_tokens = 0
+
+        def _embed(text: str) -> tuple[list[float], int]:
+            raw = self._model.create_embedding(text)
+            vector = raw["data"][0]["embedding"]
+            # With pooling enabled this is a flat vector; with pooling NONE it
+            # would be per-token. Flatten defensively rather than emit a nested
+            # list that a client would read as a batch.
+            if vector and isinstance(vector[0], list):
+                vector = [sum(col) / len(col) for col in zip(*vector)]
+            used = int((raw.get("usage") or {}).get("prompt_tokens", 0))
+            return vector, used
+
+        async with self._request_queue.acquire():
+            for index, text in enumerate(inputs):
+                try:
+                    vector, used = await asyncio.to_thread(_embed, text)
+                except Exception as exc:  # noqa: BLE001
+                    if not _settings.GGUF_ENABLE_EMBEDDINGS:
+                        raise EngineUnsupportedError(
+                            "This GGUF model was loaded without embedding "
+                            "support. Set GGUF_ENABLE_EMBEDDINGS=true and "
+                            "reload the model: llama.cpp can only enable it at "
+                            "construction."
+                        ) from exc
+                    raise
+
+                total_tokens += used
+                payload: Any = vector
+                if encoding_format == "base64":
+                    packed = struct.pack(f"<{len(vector)}f", *vector)
+                    payload = base64.b64encode(packed).decode("ascii")
+                embeddings_data.append(EmbeddingData(index=index, embedding=payload))
+
+        model_info = self.get_loaded_model_info()
+        return EmbeddingResponse(
+            data=embeddings_data,
+            model=model_info.name if model_info else "unknown",
             usage=Usage(
                 prompt_tokens=total_tokens,
                 completion_tokens=0,

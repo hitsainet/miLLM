@@ -159,6 +159,18 @@ class Settings(BaseSettings):
 
     # Performance: Continuous Batching
     ENABLE_CONTINUOUS_BATCHING: bool = False  # Opt-in, starts CBM on model load
+
+    # Load GGUF models with embedding output enabled, so /v1/embeddings works
+    # on them without a second load.
+    #
+    # ON by default because the alternative is a server that cannot embed the
+    # model it is serving, and the cost is small: MEASURED on the RTX 3090 with
+    # zora-v1.13 Q5_K_M, generation went 113.5 -> 105.9 tok/s, a 6.7% loss, with
+    # no change in VRAM. llama.cpp needs this at CONSTRUCTION — there is no way
+    # to turn it on later — so the choice is made here or not at all.
+    #
+    # Turn it off to buy that 6.7% back on a deployment that never embeds.
+    GGUF_ENABLE_EMBEDDINGS: bool = True
     CBM_MAX_QUEUE_SIZE: int = 256
     # CBM fixes its sampling parameters at manager creation, and any request
     # whose temperature/top_p differ FALLS BACK TO THE SERIAL PATH

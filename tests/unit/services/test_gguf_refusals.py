@@ -758,3 +758,126 @@ class TestLlamaCppStreaming:
         )
 
         assert out[-1] == "data: [DONE]\n\n", "the request must be SERVED"
+
+
+class TestGGUFEmbeddings:
+    """A GGUF model embeds, and by the SAME method the transformers path uses.
+
+    The first increment refused this, reasoning that llama.cpp needs
+    embedding=True at CONSTRUCTION and pools internally, so parity would mean
+    quietly returning differently-computed vectors. Measuring refuted both
+    halves: one instance served embeddings AND chat, and MEAN pooling is the
+    same strategy as `hidden_states[-1].mean(dim=1)`.
+
+    MUTATION CONTROLS (each must turn this class red):
+      * restore _refuse_on_llamacpp("Embeddings") in create_embeddings -> all fail
+      * drop the nested-vector flattening                              -> "flat vector" fails
+      * drop the GGUF_ENABLE_EMBEDDINGS hint on failure                -> "names the setting" fails
+    """
+
+    def _service(self, embed_return=None, *, raises=None):
+        from millm.services.inference_service import InferenceService
+
+        svc = InferenceService.__new__(InferenceService)
+        state = MagicMock()
+        state.is_loaded = True
+        state.current = _loaded(ENGINE_LLAMACPP)
+        state.current.model_name = "zora-v1.13-gguf"
+        svc._model_state = state
+        svc._request_queue = _NullQueue()
+        # `name` is reserved on MagicMock's constructor, so it must be set as
+        # an attribute afterwards rather than passed in.
+        info = MagicMock()
+        info.name = "zora-v1.13-gguf"
+        svc.get_loaded_model_info = lambda: info
+        handle = state.current.model
+        if raises is not None:
+            handle.create_embedding = MagicMock(side_effect=raises)
+        else:
+            handle.create_embedding = MagicMock(return_value=embed_return)
+        return svc
+
+    @staticmethod
+    def _request(text="hello", **kw):
+        from millm.api.schemas.openai import EmbeddingRequest
+
+        return EmbeddingRequest(model="zora-v1.13-gguf", input=text, **kw)
+
+    @pytest.mark.asyncio
+    async def test_an_embedding_is_returned(self):
+        svc = self._service(
+            {"data": [{"embedding": [0.1, 0.2, 0.3]}], "usage": {"prompt_tokens": 4}}
+        )
+
+        result = await svc.create_embeddings(self._request())
+
+        assert result.data[0].embedding == [0.1, 0.2, 0.3]
+        assert result.usage.prompt_tokens == 4
+
+    @pytest.mark.asyncio
+    async def test_a_batch_embeds_each_input(self):
+        svc = self._service(
+            {"data": [{"embedding": [0.5]}], "usage": {"prompt_tokens": 2}}
+        )
+
+        result = await svc.create_embeddings(self._request(["a", "b", "c"]))
+
+        assert [d.index for d in result.data] == [0, 1, 2]
+        assert result.usage.prompt_tokens == 6, "usage must sum across the batch"
+
+    @pytest.mark.asyncio
+    async def test_a_per_token_result_is_pooled_to_a_flat_vector(self):
+        """With pooling NONE llama.cpp returns per-token rows.
+
+        Emitting that nested list would be read by a client as a BATCH of
+        embeddings for a single input — silently wrong rather than an error.
+        """
+        svc = self._service(
+            {"data": [{"embedding": [[1.0, 3.0], [3.0, 5.0]]}], "usage": {}}
+        )
+
+        result = await svc.create_embeddings(self._request())
+
+        assert result.data[0].embedding == [2.0, 4.0], "mean over tokens, per dimension"
+
+    @pytest.mark.asyncio
+    async def test_base64_encoding_is_honoured(self):
+        import base64
+        import struct
+
+        svc = self._service({"data": [{"embedding": [1.0, 2.0]}], "usage": {}})
+
+        result = await svc.create_embeddings(self._request(encoding_format="base64"))
+
+        assert result.data[0].embedding == base64.b64encode(
+            struct.pack("<2f", 1.0, 2.0)
+        ).decode("ascii")
+
+    @pytest.mark.asyncio
+    async def test_a_model_loaded_without_embeddings_names_the_setting(self):
+        """llama.cpp can only enable it at construction, so the fix is a reload.
+
+        Surfacing the library's raw error would leave the operator guessing at
+        a setting they cannot discover from it.
+        """
+        from millm.core.errors import EngineUnsupportedError
+        from millm.core.config import settings
+
+        svc = self._service(raises=RuntimeError("llama_get_embeddings returned NULL"))
+        original = settings.GGUF_ENABLE_EMBEDDINGS
+        settings.GGUF_ENABLE_EMBEDDINGS = False
+        try:
+            with pytest.raises(EngineUnsupportedError) as exc:
+                await svc.create_embeddings(self._request())
+        finally:
+            settings.GGUF_ENABLE_EMBEDDINGS = original
+
+        assert "GGUF_ENABLE_EMBEDDINGS" in str(exc.value)
+
+    @pytest.mark.asyncio
+    async def test_an_unrelated_failure_is_not_dressed_up_as_a_config_problem(self):
+        """With the setting ON, a genuine error must surface as itself."""
+        svc = self._service(raises=RuntimeError("CUDA out of memory"))
+
+        with pytest.raises(RuntimeError, match="CUDA out of memory"):
+            await svc.create_embeddings(self._request())

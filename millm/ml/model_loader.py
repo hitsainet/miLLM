@@ -41,6 +41,7 @@ except ImportError:
 # serves no GGUF must not fail to start because it is absent. The load path
 # raises a clear error instead.
 try:
+    import llama_cpp as llama_cpp_module  # noqa: F401  (for pooling constants)
     from llama_cpp import Llama  # noqa: F401  (re-exported for patching)
 except Exception as _llama_import_error:  # noqa: BLE001
     # NOT `except ImportError`. llama-cpp-python raises RUNTIMEERROR when its
@@ -57,6 +58,7 @@ except Exception as _llama_import_error:  # noqa: BLE001
     # imported at startup, so the entire backend dies rather than one feature
     # being unavailable.
     Llama = None  # type: ignore[assignment]
+    llama_cpp_module = None  # type: ignore[assignment]
     logger.warning(
         "llama_cpp_unavailable",
         error=str(_llama_import_error),
@@ -890,6 +892,11 @@ GGUF_GPU_LAYERS = -1
 #: any real conversation; 0 asks it to use the value baked into the file.
 GGUF_CONTEXT_FROM_FILE = 0
 
+#: llama.cpp's MEAN pooling constant, resolved defensively: the module may be
+#: absent (it is an extra), and the constant's name has moved between versions.
+#: 1 is LLAMA_POOLING_TYPE_MEAN.
+_POOLING_MEAN = getattr(llama_cpp_module, "LLAMA_POOLING_TYPE_MEAN", 1) if llama_cpp_module else 1
+
 
 def _gguf_device() -> str:
     """Where the GGUF weights actually landed: "cuda" or "cpu".
@@ -949,12 +956,27 @@ def load_gguf_model(
         "gguf_load_started", model_id=model_id, model_name=model_name, path=str(path)
     )
     try:
-        llm = Llama(
-            model_path=str(path),
-            n_gpu_layers=GGUF_GPU_LAYERS,
-            n_ctx=GGUF_CONTEXT_FROM_FILE,
-            verbose=False,
-        )
+        kwargs: dict[str, Any] = {
+            "model_path": str(path),
+            "n_gpu_layers": GGUF_GPU_LAYERS,
+            "n_ctx": GGUF_CONTEXT_FROM_FILE,
+            "verbose": False,
+        }
+        from millm.core.config import settings as _settings
+
+        if _settings.GGUF_ENABLE_EMBEDDINGS:
+            # MEAN pooling, matching what the transformers path does —
+            # `hidden_states[-1].mean(dim=1)` in create_embeddings. Choosing the
+            # same pooling strategy is what makes the two engines' vectors
+            # comparable in method rather than merely both being "embeddings".
+            #
+            # VERIFIED on the RTX 3090 rather than assumed: one instance with
+            # this set serves BOTH create_embedding and create_chat_completion.
+            # llama.cpp logs "embeddings required but some input tokens were not
+            # marked as outputs -> overriding" and adapts.
+            kwargs["embedding"] = True
+            kwargs["pooling_type"] = _POOLING_MEAN
+        llm = Llama(**kwargs)
     except Exception as e:  # noqa: BLE001 - surfaced as a load failure
         raise ModelLoadError(
             f"Failed to load GGUF model: {e}",

@@ -69,19 +69,7 @@ async def create_embeddings(
     # DOWNLOAD time, so the answer is knowable with nothing resident. Same
     # signal and same reason as the GGUF guard in completions.py and the text
     # completion guard in completions.py.
-    if getattr(model, "gguf_files", None):
-        return create_openai_error(
-            message=(
-                "Embeddings are not supported on the llama.cpp engine: it "
-                "pools internally and exposes no hidden states to mean-pool. "
-                "Use a transformers-served embedding model."
-            ),
-            error_type="invalid_request_error",
-            code="engine_unsupported",
-            param="model",
-            status_code=400,
-        )
-
+ 
     # Load on demand, same as chat and completions. Open WebUI calls this for
     # RAG with its own embedding model selected, which is a DIFFERENT model from
     # the chat one — so refusing anything not already loaded broke retrieval

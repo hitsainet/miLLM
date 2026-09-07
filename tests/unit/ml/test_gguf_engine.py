@@ -283,6 +283,47 @@ class TestLoadingAGGUFFile:
             with pytest.raises(ModelLoadError, match="GGUF file not found"):
                 load_gguf_model(1, "x", str(tmp_path), "absent.gguf")
 
+    def test_embedding_output_is_enabled_at_construction(self, tmp_path):
+        """The load-time flag is what makes /v1/embeddings possible at all.
+
+        llama.cpp can only enable embeddings when the context is CREATED, so a
+        model loaded without it cannot embed no matter what the service does —
+        the fix is a reload. Nothing else in the suite pins this, so removing
+        it left every embedding test green while the capability was gone.
+
+        MEAN pooling specifically: the transformers path mean-pools the last
+        hidden layer, so choosing the same strategy is what makes the two
+        engines' vectors comparable in method.
+        """
+        gguf = tmp_path / "m-Q4_K_M.gguf"
+        gguf.write_bytes(b"\x00" * 1024)
+        fake = MagicMock()
+
+        with patch("millm.ml.model_loader.Llama", fake):
+            load_gguf_model(9, "m", str(tmp_path), "m-Q4_K_M.gguf")
+
+        kwargs = fake.call_args.kwargs
+        assert kwargs.get("embedding") is True
+        assert kwargs.get("pooling_type") == 1, "1 is LLAMA_POOLING_TYPE_MEAN"
+
+    def test_the_embedding_flag_can_be_turned_off(self, tmp_path):
+        """It costs 6.7% of generation throughput, so it must be optional."""
+        from millm.core.config import settings
+
+        gguf = tmp_path / "m-Q4_K_M.gguf"
+        gguf.write_bytes(b"\x00" * 1024)
+        fake = MagicMock()
+
+        original = settings.GGUF_ENABLE_EMBEDDINGS
+        settings.GGUF_ENABLE_EMBEDDINGS = False
+        try:
+            with patch("millm.ml.model_loader.Llama", fake):
+                load_gguf_model(10, "m", str(tmp_path), "m-Q4_K_M.gguf")
+        finally:
+            settings.GGUF_ENABLE_EMBEDDINGS = original
+
+        assert "embedding" not in fake.call_args.kwargs
+
     def test_records_the_engine_and_offloads_to_gpu(self, tmp_path):
         gguf = tmp_path / "zora-Q5_K_M.gguf"
         gguf.write_bytes(b"\x00" * 2048)

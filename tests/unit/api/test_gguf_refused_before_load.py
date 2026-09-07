@@ -119,39 +119,55 @@ class TestAGGUFTextCompletionIsServed:
         assert svc.load_model_and_wait.called
 
 
-class TestEmbeddingsRefuseAGGUFModelWithoutLoadingIt:
-    """`create_embeddings` already refuses the llama.cpp engine — but only
-    after the route has auto-loaded it. llama.cpp pools internally and exposes
-    no hidden states to mean-pool, so the answer was never reachable, and
-    `gguf_files` on the row says so at DOWNLOAD time. Refusing post-load
-    evicts a working transformers model and any SAEs attached to it, and spends
-    minutes and tens of gigabytes, to reach a guaranteed 400.
+class TestGGUFEmbeddingsAreServed:
+    """A GGUF model can embed, so /v1/embeddings no longer turns it away.
+
+    The original refusal reasoned that llama.cpp needs embedding=True at
+    CONSTRUCTION and pools internally, so parity would mean quietly returning
+    differently-computed vectors. Measuring on the RTX 3090 refuted both halves:
+    one instance loaded with embedding=True and MEAN pooling served BOTH
+    embeddings and chat, and MEAN pooling is the same strategy the transformers
+    path uses (hidden_states[-1].mean(dim=1)).
+
+    MUTATION CONTROL: reinstate the `gguf_files` refusal in embeddings.py ->
+    both tests fail.
     """
 
-    BODY = {"model": "qwen2.5-7b-gguf", "input": "hello"}
+    @staticmethod
+    def _real_response():
+        from millm.api.schemas.openai import EmbeddingData, EmbeddingResponse, Usage
 
-    def test_refused_with_a_client_error(self):
-        client, _svc, _inf = _client(_model(["qwen2.5-7b-instruct-q4_k_m.gguf"]))
-        response = client.post("/v1/embeddings", json=self.BODY)
+        return EmbeddingResponse(
+            data=[EmbeddingData(index=0, embedding=[0.1, 0.2, 0.3])],
+            model="qwen2.5-7b-gguf",
+            usage=Usage(prompt_tokens=3, completion_tokens=0, total_tokens=3),
+        )
 
-        assert response.status_code == 400
-        body = response.json()["error"]
-        assert body["type"] == "invalid_request_error"
-        assert body["code"] == "engine_unsupported"
+    def test_an_embedding_request_reaches_the_engine(self):
+        client, _svc, inference = _client(_model(["m-q4_k_m.gguf"]))
+        loaded = MagicMock()
+        loaded.name = "qwen2.5-7b-gguf"
+        inference.get_loaded_model_info = lambda: loaded
+        inference.create_embeddings = AsyncMock(return_value=self._real_response())
 
-    def test_nothing_is_loaded_and_nothing_embeds(self):
-        client, svc, inference = _client(_model(["qwen2.5-7b-instruct-q4_k_m.gguf"]))
-        client.post("/v1/embeddings", json=self.BODY)
+        response = client.post(
+            "/v1/embeddings", json={"model": "qwen2.5-7b-gguf", "input": "hello"}
+        )
 
-        svc.load_model_and_wait.assert_not_called()
-        inference.create_embeddings.assert_not_called()
+        assert response.status_code == 200, response.text
+        assert inference.create_embeddings.called
 
-    def test_a_transformers_model_still_embeds(self):
-        """The guard must bite on GGUF rows ONLY."""
-        client, svc, _inf = _client(_model(None))
-        client.post("/v1/embeddings", json=self.BODY)
+    def test_the_model_is_loaded_for_it(self):
+        client, svc, inference = _client(_model(["m-q4_k_m.gguf"]))
+        other, wanted = MagicMock(), MagicMock()
+        other.name, wanted.name = "some-other-model", "qwen2.5-7b-gguf"
+        reports = iter([other, wanted, wanted, wanted])
+        inference.get_loaded_model_info = lambda: next(reports, wanted)
+        inference.create_embeddings = AsyncMock(return_value=self._real_response())
 
-        svc.load_model_and_wait.assert_called_once()
+        client.post("/v1/embeddings", json={"model": "qwen2.5-7b-gguf", "input": "hi"})
+
+        assert svc.load_model_and_wait.called
 
 
 class TestStreamingCompletionsAreRefusedWithoutLoading:

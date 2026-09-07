@@ -385,7 +385,8 @@ class InferenceService:
         """
         Return a description of the active inference backend and its capabilities.
 
-        Used by the /api/inference/status endpoint so operators and clients
+        Used by the GET /api/health/inference endpoint so operators and
+        clients
         can understand which path is serving requests and what its limitations are.
         """
         if self._engine_is_llamacpp():
@@ -2822,8 +2823,9 @@ class InferenceService:
             return ContextLengthExceededError(
                 f"{text}. The model is serving a smaller context than its file "
                 "declares because the larger one did not fit in VRAM — see the "
-                "context_length in /api/inference/status. Shorten the prompt, "
-                "raise GGUF_CONTEXT_LENGTH, or use a smaller quantization."
+                "context_length in GET /api/health/inference. Shorten the "
+                "prompt, raise GGUF_CONTEXT_LENGTH, or use a smaller "
+                "quantization."
             )
         return exc
 

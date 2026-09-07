@@ -295,7 +295,7 @@ class TestTextCompletionIsServed:
 
 
 class TestTheBackendInfoIsHonest:
-    """/api/inference/status must describe what this engine can actually do.
+    """GET /api/health/inference must describe what this engine can do.
 
     Streaming now works, so `streaming: True` is the honest answer and the old
     assertion inverts. The MUTATION CONTROL had to be RE-ANCHORED rather than
@@ -964,4 +964,41 @@ class TestAnOversizedPromptIsAClientError:
                 ChatCompletionRequest(
                     model="m", messages=[{"role": "user", "content": "x"}]
                 )
+            )
+
+
+class TestTheContextAdviceNamesAReachablePath:
+    """The refusal tells the caller where to read the real context length.
+
+    It named `/api/inference/status` for as long as the message has existed.
+    That path 404s — the route is `GET /api/health/inference`, because the
+    health router carries a `/api/health` prefix. A user who hits a context
+    overflow follows this sentence, gets a 404, and concludes the capability is
+    missing rather than that the message is wrong. It cost exactly that.
+
+    Asserting the path exists IN THE LIVE ROUTE TABLE, not that the string
+    looks plausible — the previous string looked entirely plausible.
+    """
+
+    def test_the_path_the_message_names_is_a_real_route(self):
+        from millm.main import create_app
+        from millm.services.inference_service import InferenceService
+
+        message = str(
+            InferenceService._translate_llamacpp_error(
+                ValueError("Requested tokens exceed context window of 4096")
+            )
+        )
+
+        import re
+
+        paths = re.findall(r"/api/[\w/{}-]+", message)
+        assert paths, f"the advice must name a path to read: {message}"
+
+        live = {r.path for r in create_app().routes if hasattr(r, "path")}
+        for path in paths:
+            assert path in live, (
+                f"the refusal sends the caller to {path}, which is not a route. "
+                f"Live paths starting /api/health: "
+                f"{sorted(p for p in live if p.startswith('/api/health'))}"
             )

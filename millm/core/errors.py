@@ -73,6 +73,19 @@ class ContextLengthExceededError(MiLLMError):
     status_code = 400
 
 
+class AmbiguousModelNameError(MiLLMError):
+    """A bare repo name matches several quantizations.
+
+    Since a repository's quantizations can coexist, `foo-GGUF` may be any of
+    `foo-GGUF:Q4_K_M`, `foo-GGUF:IQ4_XS`… Picking one silently would make the
+    served model depend on insertion order, and nothing on the wire would say
+    which answered. The caller is told which tags exist instead.
+    """
+
+    code = "AMBIGUOUS_MODEL_NAME"
+    status_code = 400
+
+
 class ModelNotFoundError(MiLLMError):
     """Raised when a requested model does not exist."""
 

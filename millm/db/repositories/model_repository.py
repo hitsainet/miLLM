@@ -10,6 +10,7 @@ from typing import Any
 from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from millm.core.errors import AmbiguousModelNameError
 from millm.db.models.model import Model, ModelStatus, QuantizationType
 
 
@@ -101,16 +102,54 @@ class ModelRepository:
         """
         Find a model by its display name.
 
+        EXACT MATCH FIRST, then a bare repo name when exactly one row carries
+        it. A GGUF model is named `repo:QUANT` (see ModelService.download_model)
+        because several quantizations of one repository can now coexist —
+        `…-GGUF:Q4_K_M` and `…-GGUF:IQ4_XS` are different models with different
+        sizes and different quality.
+
+        Before this, `scalar_one_or_none()` on a bare name raised "Multiple rows
+        were found when one or none was required" the moment a second quant was
+        downloaded, and every OpenAI request naming that model returned 500. The
+        model was loaded and serving; it was simply unreachable by name.
+
+        AMBIGUITY RAISES rather than picking one. Choosing silently would make
+        the served model depend on insertion order — the same request answered
+        by a 4-bit or a 5-bit model depending on which was downloaded first, with
+        nothing on the wire to say which.
+
         Args:
-            name: The model's display name.
+            name: The model's display name, with or without the `:QUANT` tag.
 
         Returns:
             The Model instance or None if not found.
+
+        Raises:
+            AmbiguousModelNameError: The bare name matches several quantizations.
         """
-        result = await self.session.execute(
+        exact = await self.session.execute(
             select(Model).where(Model.name == name)
         )
-        return result.scalar_one_or_none()
+        row = exact.scalars().first()
+        if row is not None:
+            return row
+
+        # A bare repo name: unambiguous while only one quantization exists, which
+        # keeps every existing caller and saved Open WebUI selection working.
+        tagged = await self.session.execute(
+            select(Model).where(Model.name.like(f"{name}:%"))
+        )
+        candidates = list(tagged.scalars().all())
+        if not candidates:
+            return None
+        if len(candidates) == 1:
+            return candidates[0]
+
+        raise AmbiguousModelNameError(
+            f"'{name}' matches {len(candidates)} quantizations: "
+            + ", ".join(sorted(c.name for c in candidates))
+            + ". Name one of them exactly."
+        )
 
     async def get_locked_model(self) -> Model | None:
         """

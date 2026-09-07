@@ -527,3 +527,102 @@ class TestTorchCompileAutoDetect:
         with patch("torch.cuda.is_available", return_value=True):
             call_args = self._call_load_worker(svc, "FP16", torch_compile_setting=False)
         assert call_args.kwargs["torch_compile"] is False
+
+
+class TestTwoQuantsOfOneRepoGetDistinctNames:
+    """The name must carry the quantization, or the two rows collide.
+
+    Stage 1 widened uniqueness to (repo_id, quantization, gguf_label) so several
+    quants could coexist — the entire point of the GGUF picker — while `name`
+    stayed `repo_id.split("/")[-1]`. The second download of the same repo then
+    produced two rows with one name, `find_by_name`'s `scalar_one_or_none()`
+    raised, and every OpenAI request naming that model returned 500 while the
+    model sat loaded and serving. Observed live on rows 43 and 44.
+
+    This runs the REAL naming path. An earlier version of this test inserted two
+    pre-named rows and asserted the names differed — which is true by
+    construction of the fixture and would survive deleting the naming code
+    entirely.
+
+    MUTATION CONTROL: drop the `if request.gguf_label: name = f"{name}:{...}"`
+    branch in download_model -> both tests here fail.
+    """
+
+    @staticmethod
+    def _request(label):
+        from millm.api.schemas.model import ModelDownloadRequest
+
+        return ModelDownloadRequest(
+            source=ModelSource.HUGGINGFACE,
+            repo_id="mradermacher/gemma-4-31b-it-abliterated-GGUF",
+            quantization=QuantizationType.Q4,
+            gguf_files=[f"gemma-4-31b-it-abliterated.{label}.gguf"],
+            gguf_label=label,
+        )
+
+    @pytest.mark.asyncio
+    async def test_the_quantization_is_part_of_the_name(
+        self, service, mock_repository, mock_downloader
+    ):
+        mock_repository.create.return_value = make_model(id=43)
+
+        await service.download_model(self._request("Q4_K_M"))
+
+        assert mock_repository.create.call_args[1]["name"] == (
+            "gemma-4-31b-it-abliterated-GGUF:Q4_K_M"
+        )
+
+    @pytest.mark.asyncio
+    async def test_two_quants_of_one_repo_do_not_collide(
+        self, service, mock_repository, mock_downloader
+    ):
+        """The actual defect: two downloads, two names."""
+        names = []
+        for label in ("Q4_K_M", "IQ4_XS"):
+            mock_repository.create.return_value = make_model(id=len(names) + 43)
+            await service.download_model(self._request(label))
+            names.append(mock_repository.create.call_args[1]["name"])
+
+        assert len(set(names)) == 2, f"both downloads produced {names}"
+
+    @pytest.mark.asyncio
+    async def test_a_non_gguf_model_keeps_its_bare_name(
+        self, service, mock_repository, mock_downloader
+    ):
+        """No tag where there is no quantization file — every existing row,
+        every saved client selection and every label job keeps working."""
+        from millm.api.schemas.model import ModelDownloadRequest
+
+        mock_repository.create.return_value = make_model(id=1)
+
+        await service.download_model(
+            ModelDownloadRequest(
+                source=ModelSource.HUGGINGFACE,
+                repo_id="google/gemma-2-2b",
+                quantization=QuantizationType.Q4,
+            )
+        )
+
+        assert mock_repository.create.call_args[1]["name"] == "gemma-2-2b"
+
+    @pytest.mark.asyncio
+    async def test_a_custom_name_is_still_honoured(
+        self, service, mock_repository, mock_downloader
+    ):
+        """An explicit name is the user's choice; tagging it would override
+        what they typed."""
+        from millm.api.schemas.model import ModelDownloadRequest
+
+        mock_repository.create.return_value = make_model(id=1)
+
+        await service.download_model(
+            ModelDownloadRequest(
+                source=ModelSource.HUGGINGFACE,
+                repo_id="some/repo-GGUF",
+                quantization=QuantizationType.Q4,
+                gguf_label="Q4_K_M",
+                custom_name="my-judge",
+            )
+        )
+
+        assert mock_repository.create.call_args[1]["name"] == "my-judge"

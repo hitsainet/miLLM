@@ -279,6 +279,19 @@ class ModelService:
             name = request.custom_name
         elif request.repo_id:
             name = request.repo_id.split("/")[-1]
+            # `repo:QUANT`, the convention Ollama already taught everyone.
+            #
+            # Several quantizations of one repository can coexist since the
+            # uniqueness constraint was widened, and they are DIFFERENT MODELS —
+            # different sizes, different quality. Leaving them to share a name
+            # made `find_by_name` raise "Multiple rows were found" and every
+            # OpenAI request naming that model return 500, with the model
+            # loaded and serving perfectly the whole time.
+            #
+            # It also makes both quantizations separately selectable in an
+            # OpenAI client: previously one shadowed the other in /v1/models.
+            if request.gguf_label:
+                name = f"{name}:{request.gguf_label}"
         elif request.local_path:
             name = request.local_path.rstrip("/").split("/")[-1]
 

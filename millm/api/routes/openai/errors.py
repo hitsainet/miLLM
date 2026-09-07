@@ -72,6 +72,7 @@ ERROR_STATUS_MAP: dict[str, tuple[int, str]] = {
     "PROFILE_NOT_FOUND": (404, "invalid_request_error"),
     "INVALID_FEATURE_INDEX": (400, "invalid_request_error"),
     "CONTEXT_LENGTH_EXCEEDED": (400, "invalid_request_error"),
+    "AMBIGUOUS_MODEL_NAME": (400, "invalid_request_error"),
     "INVALID_PARAMETER": (400, "invalid_request_error"),
     # The resident engine cannot do this at all (a GGUF file served by
     # llama.cpp has no module tree). The caller must ask for something else, so

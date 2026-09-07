@@ -924,6 +924,27 @@ _KV_CACHE_TYPES: dict[str, int] = {
 }
 
 
+def _is_context_related(exc: Exception) -> bool:
+    """Whether shrinking the context, or dropping a capability, could help.
+
+    The ladder and the two capability fallbacks all exist for ONE failure:
+    llama.cpp declining to create a *context*. They were applied to every
+    exception, which turned a single unrelated error into fifteen attempts and
+    three wrong diagnoses. Observed on 2026-09-07: a model whose WEIGHTS failed
+    to load ("Failed to load model from file") was retried at five context
+    lengths, then blamed on the KV cache type, then on the pooling type, over
+    36 seconds — and the final message said no context could be created, which
+    was true and beside the point.
+
+    Matched on llama.cpp's own wording, positively: anything unrecognised is
+    treated as NOT context-related and raised at once. Failing fast on an
+    unknown error is the safe direction — the cost is one honest error surfacing
+    immediately instead of after a pointless retry storm.
+    """
+    text = str(exc).lower()
+    return "llama_context" in text or "context" in text and "create" in text
+
+
 def _kv_cache_kwargs(kv_type: str, flash_attention: bool) -> dict[str, Any]:
     """llama.cpp kwargs for the KV cache, or {} for the plain F16 default.
 
@@ -1168,13 +1189,30 @@ def load_gguf_model(
         embeddings_dropped = False
 
         def _try_ladder() -> Any:
-            """Walk the context ladder with the CURRENT kwargs. None = all failed."""
+            """Walk the context ladder with the CURRENT kwargs. None = all failed.
+
+            Raises immediately on a failure that the ladder cannot help with —
+            see `_is_context_related`. Retrying those turns one honest error
+            into fifteen misleading ones.
+            """
             for n_ctx in _context_ladder(requested):
                 attempted.append(n_ctx)
                 kwargs["n_ctx"] = n_ctx
                 try:
                     return Llama(**kwargs)
                 except Exception as attempt_error:  # noqa: BLE001
+                    if not _is_context_related(attempt_error):
+                        logger.error(
+                            "gguf_load_failed_not_a_context_problem",
+                            model_id=model_id,
+                            n_ctx=n_ctx,
+                            error=str(attempt_error)[:300],
+                            detail=(
+                                "the model itself did not load; smaller "
+                                "contexts and capability fallbacks cannot help"
+                            ),
+                        )
+                        raise
                     logger.warning(
                         "gguf_context_attempt_failed",
                         model_id=model_id,
@@ -1186,6 +1224,67 @@ def load_gguf_model(
             return None
 
         llm = _try_ladder()
+
+        def _bisect_upward(low: int, high: int) -> Any:
+            """Recover the window halving steps over.
+
+            The ladder divides by two, so the answer is only ever within a
+            FACTOR OF TWO of the true ceiling. MEASURED on gemma-4-31b IQ4_XS:
+            the ladder settles at 8192 while 12288 loads on the same card —
+            half the usable window thrown away for the sake of a tidy sequence.
+
+            Bisects the gap between the last failure and the first success.
+            Bounded to three probes: each is a real model load, and the
+            remaining gain halves every time while the cost does not.
+            """
+            best = None
+            for _ in range(3):
+                mid = ((low + high) // 2 // 1024) * 1024
+                if mid <= low or mid >= high:
+                    break
+                kwargs["n_ctx"] = mid
+                attempted.append(mid)
+                try:
+                    candidate = Llama(**kwargs)
+                except Exception as exc:  # noqa: BLE001
+                    if not _is_context_related(exc):
+                        raise
+                    high = mid
+                    gc.collect()
+                    continue
+                if best is not None:
+                    best.close()
+                best = candidate
+                low = mid
+            return best, low
+
+        # The ladder found `low` works and the rung above it does not; the true
+        # ceiling is between them. Only worth probing when that gap is wide
+        # enough to matter — a 1024-token gain does not justify a model load.
+        if llm is not None and len(attempted) > 1:
+            settled = int(kwargs["n_ctx"])
+            failed_above = attempted[attempted.index(settled) - 1]
+            if failed_above - settled > 2048:
+                better, reached = _bisect_upward(settled, failed_above)
+                if better is not None and reached > settled:
+                    llm.close()
+                    llm = better
+                    logger.info(
+                        "gguf_context_bisected_upward",
+                        model_id=model_id,
+                        ladder_settled_at=settled,
+                        actually_reached=reached,
+                        detail="halving alone would have served the smaller window",
+                    )
+                else:
+                    reached = settled
+                # RESTORE UNCONDITIONALLY. `_bisect_upward` assigns
+                # kwargs["n_ctx"] before each probe and a failed probe leaves it
+                # there, so the recorded context would be a length that DID NOT
+                # LOAD — 5120 reported for a model actually serving 4096. That
+                # is the same class of lie the ladder itself exists to prevent,
+                # and the pre-existing ladder test caught it.
+                kwargs["n_ctx"] = reached
 
         # EMBEDDINGS ARE OPTIONAL; SERVING THE MODEL IS NOT.
         #

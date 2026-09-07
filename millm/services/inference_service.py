@@ -184,6 +184,93 @@ def _make_id_capture_criteria():
     return _IdCapture()
 
 
+
+def _render_chat_template(
+    template: str, messages: list[dict], *, bos: str, eos: str
+) -> str:
+    """Render a GGUF chat template with the generation prompt OPEN.
+
+    `add_generation_prompt=True` is the whole point: it emits the header that
+    starts the assistant's turn and stops, so the caller can append a partial
+    answer and have the model resume it.
+
+    The globals mirror what real templates reach for — `raise_exception` is used
+    by most HuggingFace-derived templates to reject unsupported role orders, and
+    a missing one turns a clear template error into an obscure UndefinedError.
+    """
+    import jinja2
+
+    # LENIENT undefined, deliberately. Real templates reference variables that
+    # only a tool-calling request supplies — the gemma-4-31b template fails
+    # outright on `tools` under StrictUndefined. A chat template is arbitrary
+    # third-party code shipped inside a model file; the standard variables are
+    # passed explicitly below, and anything else it reaches for renders empty
+    # rather than costing the caller their continuation.
+    env = jinja2.Environment(
+        loader=jinja2.BaseLoader(), trim_blocks=True, lstrip_blocks=True
+    )
+
+    def _raise_exception(message: str):
+        raise ValueError(message)
+
+    env.globals["raise_exception"] = _raise_exception
+    env.globals["strftime_now"] = lambda fmt: __import__("datetime").datetime.now().strftime(fmt)
+
+    return env.from_string(template).render(
+        messages=messages,
+        add_generation_prompt=True,
+        bos_token=bos,
+        eos_token=eos,
+        # The tool-calling variables templates branch on. Absent, gemma-4-31b
+        # raises before emitting anything.
+        tools=None,
+        tool_choice=None,
+        documents=None,
+    )
+
+
+def _completion_as_chat(raw: dict) -> dict:
+    """Reshape a raw completion into the chat-completion envelope.
+
+    The continuation path calls `create_completion`, which returns
+    `choices[].text`; every consumer downstream reads `choices[].message.content`.
+    Translating here keeps that difference inside the one function that causes
+    it, rather than teaching each caller about two shapes.
+    """
+    choices = []
+    for choice in raw.get("choices") or []:
+        choices.append(
+            {
+                "index": choice.get("index", 0),
+                "message": {
+                    "role": "assistant",
+                    "content": choice.get("text") or "",
+                },
+                "finish_reason": choice.get("finish_reason"),
+            }
+        )
+    out = dict(raw)
+    out["choices"] = choices
+    return out
+
+
+def _completion_chunks_as_chat(stream):
+    """The streaming counterpart: `text` deltas become `delta.content` deltas."""
+    for chunk in stream:
+        choices = []
+        for choice in chunk.get("choices") or []:
+            choices.append(
+                {
+                    "index": choice.get("index", 0),
+                    "delta": {"content": choice.get("text") or ""},
+                    "finish_reason": choice.get("finish_reason"),
+                }
+            )
+        out = dict(chunk)
+        out["choices"] = choices
+        yield out
+
+
 class InferenceService:
     """
     Handles inference for OpenAI-compatible endpoints.
@@ -2829,6 +2916,77 @@ class InferenceService:
             )
         return exc
 
+    def _llamacpp_continuation_prompt(self, messages: list[dict]) -> Optional[str]:
+        """A prompt that CONTINUES a partial assistant turn, or None.
+
+        THE BUG THIS FIXES. An OpenAI client that offers "continue" — Open WebUI
+        does — resends the conversation with the truncated answer as a trailing
+        assistant message. `create_chat_completion` applies the GGUF's baked-in
+        template to that list, and every such template CLOSES the last turn:
+
+            no trailing assistant : ...<|turn>model\n<|channel>thought\n<channel|>
+            trailing assistant    : ...<|turn>model\nPARTIAL<turn|>\n
+
+        Sealed with `<turn|>`, the model cannot do anything but start a new
+        answer. Observed on both GGUF models here: gemma restated its whole
+        explanation from the top ("It looks like your previous message had a
+        technical glitch... Let's start fresh"), and the Qwen reasoning model
+        re-opened and restarted its <think> block three times, because the
+        template re-opens the thought channel on every fresh turn.
+
+        The fix is the same one HuggingFace calls `continue_final_message`:
+        render the prompt for everything BEFORE the partial with a generation
+        prompt, then append the partial text raw. The turn stays open and the
+        model resumes mid-sentence.
+
+        Returns None whenever continuation does not apply or cannot be done
+        safely — an ordinary request, an empty partial, or a model whose
+        template is unreadable. The caller then takes the normal path, so a
+        failure here costs the continuation feature and never the request.
+        """
+        if not messages or messages[-1].get("role") != "assistant":
+            return None
+        partial = messages[-1].get("content") or ""
+        if not partial.strip():
+            # An empty trailing assistant turn is how some clients ask for a
+            # FRESH answer. Continuing it would append to nothing.
+            return None
+
+        try:
+            model = self._model
+            template = (getattr(model, "metadata", None) or {}).get(
+                "tokenizer.chat_template"
+            )
+            if not template:
+                return None
+
+            # Token TEXT, not ids: the template interpolates the strings.
+            inner = model._model
+            eos = inner.token_get_text(model.token_eos())
+            bos = inner.token_get_text(model.token_bos())
+
+            # Rendered with jinja2 DIRECTLY rather than through
+            # llama_cpp.llama_chat_format.Jinja2ChatFormatter. That class does
+            # the same thing, but importing it ties this behaviour to
+            # llama-cpp-python internals that have moved between versions, and
+            # makes the whole feature untestable anywhere the wheel is not
+            # installed — which is every developer machine here, though not CI.
+            # A capability that can only be exercised in CI is one nobody can
+            # iterate on.
+            return _render_chat_template(
+                template, list(messages[:-1]), bos=bos, eos=eos
+            ) + partial
+        except Exception as exc:  # noqa: BLE001
+            # Never let this break a request. A model whose template does not
+            # render is served the ordinary way — it restarts, which is the old
+            # behaviour, rather than failing outright.
+            logger.warning(
+                "llamacpp_continuation_prompt_failed",
+                error=str(exc)[:200],
+                detail="serving as a fresh turn; the answer will not continue",
+            )
+            return None
+
     def _llamacpp_sync(self, messages: list[dict], params: dict) -> dict:
         """Blocking llama.cpp call, for asyncio.to_thread.
 
@@ -2838,6 +2996,12 @@ class InferenceService:
         from a HuggingFace tokenizer this model does not have and once inside
         llama.cpp, producing doubled control tokens.
         """
+        prompt = self._llamacpp_continuation_prompt(messages)
+        if prompt is not None:
+            # RAW completion, deliberately. create_chat_completion would
+            # re-template and re-seal the turn we are trying to keep open.
+            raw = self._model.create_completion(prompt=prompt, **params)
+            return _completion_as_chat(raw)
         return self._model.create_chat_completion(messages=messages, **params)
 
     def _refuse_unsupported_llamacpp_request(
@@ -3031,6 +3195,17 @@ class InferenceService:
         messages = self._llamacpp_messages(request)
 
         def _open_stream():
+            # SAME continuation branch as the non-streaming path. Open WebUI
+            # streams, so a fix applied only to the blocking path would leave
+            # the actual user-facing case broken — which is exactly how the
+            # llama.cpp guards diverged once before.
+            prompt = self._llamacpp_continuation_prompt(messages)
+            if prompt is not None:
+                return _completion_chunks_as_chat(
+                    self._model.create_completion(
+                        prompt=prompt, stream=True, **params
+                    )
+                )
             return self._model.create_chat_completion(
                 messages=messages, stream=True, **params
             )

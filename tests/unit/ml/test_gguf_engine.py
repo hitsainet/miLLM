@@ -346,7 +346,11 @@ class TestLoadingAGGUFFile:
              patch.object(_s, "GGUF_CONTEXT_LENGTH", 8192):
             loaded = load_gguf_model(13, "m", str(tmp_path), "m-Q4_K_M.gguf")
 
-        assert attempts == [8192, 4096], "it must step down, not give up"
+        # The DESCENT is what this test is about. Attempts after the first
+        # success are the upward bisection probing for a window between the
+        # last failure and the first success — here there is none, because the
+        # fixture's ceiling is exactly 4096.
+        assert attempts[:2] == [8192, 4096], "it must step down, not give up"
         assert loaded.context_length == 4096, (
             "the context actually obtained must be recorded — serving 4096 "
             "while the config says 8192 truncates prompts unexplainably"

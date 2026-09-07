@@ -316,3 +316,163 @@ def _f16():
     from millm.ml.model_loader import _KV_CACHE_TYPES
 
     return _KV_CACHE_TYPES["f16"]
+
+
+class TestTheLadderRecoversWhatHalvingSkips:
+    """Halving lands within a FACTOR OF TWO of the true ceiling, not on it.
+
+    MEASURED on gemma-4-31b IQ4_XS: the ladder settles at 8192 while 12288
+    loads on the same card. Half the usable window discarded for the sake of a
+    tidy sequence — and 8192 vs 12288 is the difference between one labeling
+    prompt fitting and several.
+
+    MUTATION CONTROLS:
+      * delete the bisection block          -> "reaches the true ceiling" fails
+      * bisect on a gap of any size         -> "does not probe a narrow gap" fails
+      * keep probing without the 3-cap      -> "is bounded" fails
+    """
+
+    @staticmethod
+    def _ceiling_at(limit, calls):
+        def _factory(**kwargs):
+            calls.append(kwargs["n_ctx"])
+            if kwargs["n_ctx"] > limit:
+                raise ValueError("Failed to create llama_context")
+            return MagicMock(close=MagicMock())
+
+        return _factory
+
+    def test_it_reaches_a_ceiling_the_ladder_steps_over(self, tmp_path):
+        from millm.ml import model_loader
+
+        (tmp_path / "m.gguf").write_bytes(b"x" * 32)
+        calls: list[int] = []
+
+        # True ceiling 12288: the ladder sees 32768 and 16384 fail, 8192 work.
+        with patch.object(model_loader, "Llama", self._ceiling_at(12288, calls)), \
+             patch.object(model_loader, "declared_context", return_value=32768), \
+             patch.object(config_settings, "GGUF_ENABLE_EMBEDDINGS", False), \
+             patch.object(config_settings, "GGUF_CONTEXT_LENGTH", 32768):
+            loaded = model_loader.load_gguf_model(1, "m", str(tmp_path), "m.gguf")
+
+        assert loaded.context_length > 8192, (
+            f"halving settled at {loaded.context_length}; a window up to 12288 "
+            "fits and was never tried"
+        )
+        assert loaded.context_length <= 12288, "it must not claim more than fits"
+
+    def test_it_is_bounded_and_does_not_probe_forever(self, tmp_path):
+        """Each probe is a real model load. The gain halves every time; the
+        cost does not."""
+        from millm.ml import model_loader
+
+        (tmp_path / "m.gguf").write_bytes(b"x" * 32)
+        calls: list[int] = []
+
+        with patch.object(model_loader, "Llama", self._ceiling_at(12288, calls)), \
+             patch.object(model_loader, "declared_context", return_value=32768), \
+             patch.object(config_settings, "GGUF_ENABLE_EMBEDDINGS", False), \
+             patch.object(config_settings, "GGUF_CONTEXT_LENGTH", 32768):
+            model_loader.load_gguf_model(1, "m", str(tmp_path), "m.gguf")
+
+        # 3 descending rungs + at most 3 bisection probes.
+        assert len(calls) <= 6, f"{len(calls)} model loads is too many: {calls}"
+
+    def test_it_does_not_probe_a_gap_too_narrow_to_matter(self, tmp_path):
+        """A model load to win 1024 tokens is not worth the seconds."""
+        from millm.ml import model_loader
+
+        (tmp_path / "m.gguf").write_bytes(b"x" * 32)
+        calls: list[int] = []
+
+        with patch.object(model_loader, "Llama", self._ceiling_at(2048, calls)), \
+             patch.object(model_loader, "declared_context", return_value=4096), \
+             patch.object(config_settings, "GGUF_ENABLE_EMBEDDINGS", False), \
+             patch.object(config_settings, "GGUF_CONTEXT_LENGTH", 4096):
+            model_loader.load_gguf_model(1, "m", str(tmp_path), "m.gguf")
+
+        assert calls == [4096, 2048], f"it probed a 2048-token gap: {calls}"
+
+
+class TestAFailureTheLadderCannotHelpWithStopsAtOnce:
+    """A model whose WEIGHTS fail to load was retried fifteen times.
+
+    Observed live on 2026-09-07: "Failed to load model from file" was retried at
+    five context lengths, then blamed on the KV cache type, then on the pooling
+    type — 36 seconds and three wrong diagnoses for one honest error. The
+    ladder and both capability fallbacks exist for ONE failure: llama.cpp
+    declining to create a context.
+
+    MUTATION CONTROL: make _is_context_related always return True -> both fail.
+    """
+
+    def test_a_weights_failure_is_not_retried(self, tmp_path):
+        from millm.ml import model_loader
+
+        (tmp_path / "m.gguf").write_bytes(b"x" * 32)
+        calls: list[int] = []
+
+        def _weights_fail(**kwargs):
+            calls.append(kwargs["n_ctx"])
+            raise ValueError("Failed to load model from file: /data/m.gguf")
+
+        with patch.object(model_loader, "Llama", _weights_fail), \
+             patch.object(model_loader, "declared_context", return_value=32768), \
+             patch.object(config_settings, "GGUF_ENABLE_EMBEDDINGS", True), \
+             patch.object(config_settings, "GGUF_CONTEXT_LENGTH", 32768):
+            with pytest.raises(Exception):
+                model_loader.load_gguf_model(1, "m", str(tmp_path), "m.gguf")
+
+        assert len(calls) == 1, (
+            f"one unrelated error became {len(calls)} load attempts: {calls}"
+        )
+
+    def test_a_real_context_failure_still_walks_the_ladder(self):
+        """Specificity: the discriminator must not reject the case the ladder
+        exists for."""
+        from millm.ml.model_loader import _is_context_related
+
+        assert _is_context_related(ValueError("Failed to create llama_context"))
+        assert not _is_context_related(ValueError("Failed to load model from file"))
+
+
+class TestTheReportedContextIsTheOneThatLoaded:
+    """A failed bisection probe must not become the reported window.
+
+    `_bisect_upward` assigns kwargs["n_ctx"] before each probe. A probe that
+    FAILS left it there, so a model actually serving 4096 reported 5120 — a
+    length that had just been rejected. Every consumer trusts this number:
+    /api/health/inference publishes it, millm_list_models shows it, and a
+    prompt sized against it would overflow.
+
+    Caught by the pre-existing ladder test, which is the only reason it is not
+    in production.
+
+    MUTATION CONTROL: delete the unconditional `kwargs["n_ctx"] = reached`
+    restore -> this fails with 5120 != 4096.
+    """
+
+    def test_a_failed_probe_does_not_inflate_the_reported_context(self, tmp_path):
+        from millm.ml import model_loader
+
+        (tmp_path / "m.gguf").write_bytes(b"x" * 32)
+        loaded_at: list[int] = []
+
+        def _ceiling_4096(**kwargs):
+            n = kwargs["n_ctx"]
+            if n > 4096:
+                raise ValueError("Failed to create llama_context")
+            loaded_at.append(n)
+            return MagicMock(close=MagicMock())
+
+        with patch.object(model_loader, "Llama", _ceiling_4096), \
+             patch.object(model_loader, "declared_context", return_value=8192), \
+             patch.object(config_settings, "GGUF_ENABLE_EMBEDDINGS", False), \
+             patch.object(config_settings, "GGUF_CONTEXT_LENGTH", 8192):
+            loaded = model_loader.load_gguf_model(1, "m", str(tmp_path), "m.gguf")
+
+        assert loaded.context_length == max(loaded_at), (
+            f"reported {loaded.context_length} but the largest context that "
+            f"actually constructed was {max(loaded_at)}"
+        )
+        assert loaded.context_length == 4096

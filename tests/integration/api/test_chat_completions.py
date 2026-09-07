@@ -338,7 +338,7 @@ class TestSteeringIntensityDial:
         )
         model_service = MagicMock()
         # A REAL row. A MagicMock answers every attribute truthily, so a route
-        # that branches on a column — `gguf_files` gates the streaming refusal —
+        # that branches on a column — `gguf_files` selects the llama.cpp engine —
         # takes the GGUF path for an ordinary model.
         model_service.find_model_by_name = AsyncMock(return_value=make_model())
         # The endpoints load on demand now; without this the awaited call
@@ -376,7 +376,7 @@ class TestSteeringIntensityDial:
         inference.request_queue = MagicMock(pending_count=0, max_pending=5)
         model_service = MagicMock()
         # A REAL row. A MagicMock answers every attribute truthily, so a route
-        # that branches on a column — `gguf_files` gates the streaming refusal —
+        # that branches on a column — `gguf_files` selects the llama.cpp engine —
         # takes the GGUF path for an ordinary model.
         model_service.find_model_by_name = AsyncMock(return_value=make_model())
         # The endpoints load on demand now; without this the awaited call
@@ -407,7 +407,7 @@ class TestSteeringIntensityDial:
         inference.get_loaded_model_info.return_value = None
         model_service = MagicMock()
         # A REAL row. A MagicMock answers every attribute truthily, so a route
-        # that branches on a column — `gguf_files` gates the streaming refusal —
+        # that branches on a column — `gguf_files` selects the llama.cpp engine —
         # takes the GGUF path for an ordinary model.
         model_service.find_model_by_name = AsyncMock(return_value=make_model())
         # The endpoints load on demand now; without this the awaited call
@@ -444,7 +444,7 @@ class TestSteeringIntensityDial:
         )
         model_service = MagicMock()
         # A REAL row. A MagicMock answers every attribute truthily, so a route
-        # that branches on a column — `gguf_files` gates the streaming refusal —
+        # that branches on a column — `gguf_files` selects the llama.cpp engine —
         # takes the GGUF path for an ordinary model.
         model_service.find_model_by_name = AsyncMock(return_value=make_model())
         # The endpoints load on demand now; without this the awaited call
@@ -545,7 +545,7 @@ class TestBatchCapabilityHeader:
         )
         model_service = MagicMock()
         # A REAL row. A MagicMock answers every attribute truthily, so a route
-        # that branches on a column — `gguf_files` gates the streaming refusal —
+        # that branches on a column — `gguf_files` selects the llama.cpp engine —
         # takes the GGUF path for an ordinary model.
         model_service.find_model_by_name = AsyncMock(return_value=make_model())
         # The endpoints load on demand now; without this the awaited call

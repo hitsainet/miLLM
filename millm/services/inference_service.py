@@ -385,25 +385,29 @@ class InferenceService:
         can understand which path is serving requests and what its limitations are.
         """
         if self._engine_is_llamacpp():
-            # Must come FIRST. The serial branch below would report
-            # `"streaming": True` for an engine whose streaming path raises
-            # ENGINE_UNSUPPORTED, so /api/inference/status would advertise a
-            # capability the very next request is refused for.
+            # Must still come FIRST, though no longer because of `streaming`:
+            # this branch differs from serial on `per_request_profile_override`
+            # and on `limitations`, and reporting the serial defaults would
+            # advertise steering that the very next request is refused for.
             return {
                 "backend": "llamacpp",
                 "description": "llama.cpp (GGUF file served through llama-cpp-python)",
                 "capabilities": {
-                    "streaming": False,
+                    "streaming": True,
                     "per_request_sampling_params": True,
                     "per_request_profile_override": False,
                     "speculative_decoding": False,
                 },
                 "limitations": [
-                    "streaming, embeddings, text completions, batched "
-                    "conversations, n > 1 and chat_template_kwargs are not "
-                    "supported on this engine",
+                    "embeddings, text completions, batched conversations, "
+                    "n > 1 and chat_template_kwargs are not supported on this "
+                    "engine",
                     "no PyTorch module tree, so SAE attachment, steering and "
                     "sensing are impossible rather than merely unimplemented",
+                    "a reasoning model whose chat template opens <think> shows "
+                    "its trace inline: llama.cpp applies the template "
+                    "internally, so the prompt that would reveal it is never "
+                    "visible to miLLM",
                 ],
             }
 
@@ -2803,15 +2807,20 @@ class InferenceService:
         """
         return self._model.create_chat_completion(messages=messages, **params)
 
-    async def _llamacpp_chat_completion(
+    def _refuse_unsupported_llamacpp_request(
         self, request: ChatCompletionRequest
-    ) -> ChatCompletionResponse:
-        """Non-streaming chat through llama.cpp.
+    ) -> None:
+        """Refuse the chat features this engine cannot honour.
 
-        The first GGUF increment covers exactly this. Anything else REFUSES
-        rather than degrading quietly — a silently text-only answer, or an
-        embedding computed by a different method than the caller expects, is
-        worse than a clear error.
+        SHARED BY BOTH the streaming and non-streaming paths, and that sharing is
+        the point. These guards lived inside `_llamacpp_chat_completion` alone,
+        so adding a streaming generator beside it bypassed every one of them —
+        and each bypass is SILENT. A steered streaming request would have served
+        unsteered output rather than refusing, which is the exact failure this
+        codebase has recorded twice.
+
+        Raising rather than degrading: a quietly unsteered answer, or a response
+        carrying one choice where three were asked for, looks like success.
         """
         if getattr(request, "extra_messages", None):
             raise EngineUnsupportedError(
@@ -2842,10 +2851,11 @@ class InferenceService:
                 "separate requests, or use a transformers-served model."
             )
 
-        completion_id = f"chatcmpl-{uuid.uuid4().hex[:24]}"
-        created = int(datetime.now().timestamp())
-        gen_config = GenerationConfig.from_request(request)
+    def _llamacpp_params(self, gen_config: Any, request: ChatCompletionRequest) -> dict:
+        """Map a request onto create_chat_completion's keyword arguments.
 
+        Shared so the two paths cannot sample differently for the same request.
+        """
         params: dict[str, Any] = {
             "max_tokens": gen_config.max_new_tokens,
             "temperature": gen_config.temperature,
@@ -2862,10 +2872,33 @@ class InferenceService:
         # from request.stop was a second implementation of the same rule.
         if gen_config.stop_sequences:
             params["stop"] = list(gen_config.stop_sequences)
+        return params
 
-        messages = [
-            {"role": m.role, "content": m.content or ""} for m in request.messages
-        ]
+    def _llamacpp_messages(self, request: ChatCompletionRequest) -> list[dict]:
+        """The message list llama.cpp templates internally."""
+        return [{"role": m.role, "content": m.content or ""} for m in request.messages]
+
+    async def _llamacpp_chat_completion(
+        self, request: ChatCompletionRequest
+    ) -> ChatCompletionResponse:
+        """Non-streaming chat through llama.cpp.
+
+        The streaming counterpart is `_llamacpp_stream_chat_completion`; both
+        share the guards and the parameter mapping so one request cannot be
+        refused on one path and quietly served on the other.
+
+        Anything this engine cannot honour REFUSES rather than degrading quietly
+        — a silently unsteered answer, or an embedding computed by a different
+        method than the caller expects, is worse than a clear error.
+        """
+        self._refuse_unsupported_llamacpp_request(request)
+
+        completion_id = f"chatcmpl-{uuid.uuid4().hex[:24]}"
+        created = int(datetime.now().timestamp())
+        gen_config = GenerationConfig.from_request(request)
+
+        params = self._llamacpp_params(gen_config, request)
+        messages = self._llamacpp_messages(request)
 
         async with self._request_queue.acquire():
             raw = await asyncio.to_thread(self._llamacpp_sync, messages, params)
@@ -2893,6 +2926,191 @@ class InferenceService:
                 total_tokens=int(usage_raw.get("total_tokens", 0)),
             ),
         )
+
+    async def _llamacpp_stream_chat_completion(
+        self, request: ChatCompletionRequest
+    ) -> AsyncGenerator[str, None]:
+        """Streaming chat through llama.cpp, as SSE strings.
+
+        Yields the SAME framed strings as the transformers path — role-only
+        first chunk, content chunks, a final chunk carrying finish_reason and
+        usage, then `data: [DONE]`. The route does no framing of its own, so
+        matching that sequence exactly is the whole contract.
+
+        MUCH THINNER than the transformers path, and deliberately so. llama.cpp
+        already yields OpenAI-shaped `chat.completion.chunk` dicts, so there is
+        no token reassembly; and its generator is PULL-based, so there is no
+        producer thread, no `stop_event`, no `StoppingCriteria` and no
+        five-second join. Copying that machinery would be theatre around a
+        mechanism that does not exist here.
+        """
+        self._refuse_unsupported_llamacpp_request(request)
+
+        completion_id = f"chatcmpl-{uuid.uuid4().hex[:24]}"
+        created = int(datetime.now().timestamp())
+        model_name = self._model_state.current.model_name
+        gen_config = GenerationConfig.from_request(request)
+
+        # `prompt_opened_think=False`, and it cannot be otherwise here.
+        # reasoning_split's contract is that this is "knowable exactly — it is
+        # the string the template produced", which holds only because the
+        # transformers path produces that string itself. llama.cpp applies the
+        # template INTERNALLY, so miLLM never sees it. The consequence is stated
+        # in the release note: a model whose template opens `<think>` shows its
+        # trace inline instead of in a collapsible section. That is
+        # reasoning_split's own safe default — a visible trace beats an answer
+        # moved into reasoning_content and looking like data loss.
+        splitter = StreamingReasoningSplitter(False)
+
+        params = self._llamacpp_params(gen_config, request)
+        messages = self._llamacpp_messages(request)
+
+        def _open_stream():
+            return self._model.create_chat_completion(
+                messages=messages, stream=True, **params
+            )
+
+        # HELD FOR THE WHOLE GENERATOR, not just the first chunk. `Llama` is not
+        # thread-safe and owns a single C++ context; releasing between chunks
+        # would let a second request interleave into it.
+        async with self._request_queue.acquire():
+            stream = None
+            token_count = 0
+            finish_reason = "stop"
+            try:
+                stream = await asyncio.to_thread(_open_stream)
+
+                yield self._sse(
+                    ChatCompletionChunk(
+                        id=completion_id,
+                        created=created,
+                        model=model_name,
+                        choices=[
+                            ChatCompletionChunkChoice(
+                                index=0,
+                                delta=ChatCompletionChunkDelta(role="assistant"),
+                                finish_reason=None,
+                            )
+                        ],
+                    )
+                )
+
+                async for raw in aiter_blocking(stream):
+                    choice = (raw.get("choices") or [{}])[0]
+                    if choice.get("finish_reason"):
+                        finish_reason = choice["finish_reason"]
+                    piece = (choice.get("delta") or {}).get("content")
+                    if not piece:
+                        continue
+                    token_count += 1
+
+                    reasoning, content = splitter.feed(piece)
+                    if reasoning is None and content is None:
+                        # Withheld: a `</think>` may be splitting across chunks.
+                        continue
+                    yield self._sse(
+                        ChatCompletionChunk(
+                            id=completion_id,
+                            created=created,
+                            model=model_name,
+                            choices=[
+                                ChatCompletionChunkChoice(
+                                    index=0,
+                                    delta=ChatCompletionChunkDelta(
+                                        content=content, reasoning_content=reasoning
+                                    ),
+                                    finish_reason=None,
+                                )
+                            ],
+                        )
+                    )
+
+                flushed_reasoning, flushed_content = splitter.flush()
+                if flushed_reasoning is not None or flushed_content is not None:
+                    yield self._sse(
+                        ChatCompletionChunk(
+                            id=completion_id,
+                            created=created,
+                            model=model_name,
+                            choices=[
+                                ChatCompletionChunkChoice(
+                                    index=0,
+                                    delta=ChatCompletionChunkDelta(
+                                        content=flushed_content,
+                                        reasoning_content=flushed_reasoning,
+                                    ),
+                                    finish_reason=None,
+                                )
+                            ],
+                        )
+                    )
+
+                yield self._sse(
+                    ChatCompletionChunk(
+                        id=completion_id,
+                        created=created,
+                        model=model_name,
+                        choices=[
+                            ChatCompletionChunkChoice(
+                                index=0,
+                                delta=ChatCompletionChunkDelta(),
+                                finish_reason=finish_reason,
+                            )
+                        ],
+                        usage=Usage(
+                            prompt_tokens=self._llamacpp_prompt_tokens(messages),
+                            completion_tokens=token_count,
+                        ),
+                    )
+                )
+                yield "data: [DONE]\n\n"
+
+            except Exception as e:  # noqa: BLE001
+                # The status and headers are long since committed, so this
+                # cannot become an HTTP error: it has to go out as an SSE event
+                # and still close the stream, exactly as the transformers path
+                # does for a crashed generation thread.
+                logger.exception("llamacpp_streaming_error")
+                yield (
+                    'data: {"error":{"message":"An internal server error '
+                    'occurred during streaming","type":"server_error",'
+                    '"code":"streaming_error"}}\n\n'
+                )
+                yield "data: [DONE]\n\n"
+            finally:
+                # THIS is the abort. There is no flag to set and no thread to
+                # join: llama.cpp's generator is pull-based, so closing it is
+                # what actually stops sampling. On a client disconnect Starlette
+                # closes this async generator, GeneratorExit lands at a yield,
+                # and without this the C++ decode loop would keep running on a
+                # stream nobody is reading.
+                if stream is not None:
+                    close = getattr(stream, "close", None)
+                    if callable(close):
+                        try:
+                            close()
+                        except Exception:  # noqa: BLE001
+                            logger.warning("llamacpp_stream_close_failed")
+
+    def _llamacpp_prompt_tokens(self, messages: list[dict]) -> int:
+        """Best-effort prompt token count for the final chunk's usage.
+
+        llama.cpp never puts `usage` on a stream chunk, so this is measured
+        here rather than reported. It tokenizes the concatenated message text,
+        which is close but NOT the templated prompt llama.cpp actually consumed
+        — the template adds control tokens this cannot see. Approximate and
+        honest beats absent; zero would be a false measurement.
+        """
+        try:
+            text = "\n".join(m.get("content") or "" for m in messages)
+            return len(self._model.tokenize(text.encode("utf-8")))
+        except Exception:  # noqa: BLE001 - usage must never fail a stream
+            return 0
+
+    @staticmethod
+    def _sse(chunk: Any) -> str:
+        """Frame a chunk as an SSE `data:` line, matching the transformers path."""
+        return f"data: {chunk.model_dump_json(exclude_none=True)}\n\n"
 
     async def _refuse_on_llamacpp(self, what: str) -> None:
         """Refuse an operation the llama.cpp engine cannot perform.
@@ -2923,7 +3141,11 @@ class InferenceService:
             SSE-formatted strings for streaming
         """
         if self._engine_is_llamacpp():
-            await self._refuse_on_llamacpp("Streaming")
+            # Same shape as the CBM delegation below: a second engine's
+            # streaming generator yielding the same SSE strings.
+            async for chunk in self._llamacpp_stream_chat_completion(request):
+                yield chunk
+            return
 
         # Delegate to CBM if active and sampling params are compatible
         if self._use_cbm_for_request(

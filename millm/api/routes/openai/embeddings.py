@@ -67,7 +67,7 @@ async def create_embeddings(
     # any SAEs attached to it, and spent minutes and tens of GB bringing up a
     # model that could never have answered. `gguf_files` on the row is set at
     # DOWNLOAD time, so the answer is knowable with nothing resident. Same
-    # signal and same reason as the streaming guard in chat.py and the text
+    # signal and same reason as the GGUF guard in completions.py and the text
     # completion guard in completions.py.
     if getattr(model, "gguf_files", None):
         return create_openai_error(

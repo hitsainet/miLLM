@@ -15,7 +15,6 @@ from fastapi.responses import JSONResponse, StreamingResponse
 
 from millm.api.dependencies import ModelServiceDep, get_inference_service
 from millm.api.routes.openai.errors import (
-    create_openai_error,
     embedding_model_error,
     is_embedding_only,
     model_locked_error,
@@ -76,24 +75,6 @@ async def create_chat_completion(
     # an error because it looks like output.
     if is_embedding_only(getattr(model, "architecture", None)):
         return embedding_model_error(request.model, model.architecture)
-
-    # Streaming is not implemented on the llama.cpp engine yet. Refuse HERE, for
-    # the same reason as above: the row already says this is a GGUF model, so
-    # loading 20 GB to reach a guaranteed error spends VRAM to learn nothing.
-    # `gguf_files` on the row is the pre-load signal — it is set at download
-    # time, before anything is resident.
-    if request.stream and getattr(model, "gguf_files", None):
-        return create_openai_error(
-            message=(
-                "Streaming is not supported on the llama.cpp engine in this "
-                "release. Retry with stream=false, or use a transformers-served "
-                "model."
-            ),
-            error_type="invalid_request_error",
-            code="engine_unsupported",
-            param="stream",
-            status_code=400,
-        )
 
     # Load the requested model on demand.
     #

@@ -15,6 +15,7 @@ MUTATION CONTROLS (each must turn this file red):
   * drop the llamacpp branch in create_chat_completion -> "routes to llama.cpp" fails
 """
 
+import json
 from datetime import datetime
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -32,6 +33,38 @@ def _loaded(engine: str) -> LoadedModel:
         loaded_at=datetime.utcnow(),
         engine=engine,
     )
+
+
+class _NullQueue:
+    """The request queue reduced to its contract: an async context manager.
+
+    The real RequestQueue serialises access to a single non-thread-safe C++
+    context. These tests are about the wire format, so the lock is stubbed —
+    but it is stubbed as a CONTEXT MANAGER, not removed, so a generator that
+    forgot to hold it would still fail here.
+    """
+
+    def acquire(self):
+        return self
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *exc):
+        return False
+
+
+def _stream_request(**overrides):
+    """A minimal streaming ChatCompletionRequest."""
+    from millm.api.schemas.openai import ChatCompletionRequest
+
+    payload = {
+        "model": "zora-v1.13-gguf",
+        "messages": [{"role": "user", "content": "hi"}],
+        "stream": True,
+    }
+    payload.update(overrides)
+    return ChatCompletionRequest(**payload)
 
 
 class TestSAEAttachmentIsRefused:
@@ -224,14 +257,22 @@ class TestTextCompletionIsRefused:
 
 
 class TestTheBackendInfoIsHonest:
-    """/api/inference/status must not advertise streaming for an engine whose
-    streaming path raises ENGINE_UNSUPPORTED.
+    """/api/inference/status must describe what this engine can actually do.
+
+    Streaming now works, so `streaming: True` is the honest answer and the old
+    assertion inverts. The MUTATION CONTROL had to be RE-ANCHORED rather than
+    left alone: it used to key on `streaming`, and with both branches now
+    reporting True it could no longer tell the llamacpp branch from the serial
+    one — it would have passed against a deleted branch. It keys on
+    `per_request_profile_override` and the limitations instead, which still
+    differ.
 
     MUTATION CONTROL: remove the llamacpp branch from get_backend_info ->
-    this test sees backend "serial" and streaming True.
+    backend reads "serial", per_request_profile_override flips to True, and the
+    engine's limitations disappear.
     """
 
-    def test_streaming_is_not_advertised(self):
+    def _info(self):
         from millm.services.inference_service import InferenceService
 
         svc = InferenceService.__new__(InferenceService)
@@ -240,11 +281,28 @@ class TestTheBackendInfoIsHonest:
         state.is_loaded = True
         state.current = _loaded(ENGINE_LLAMACPP)
         svc._model_state = state
+        return svc.get_backend_info()
 
-        info = svc.get_backend_info()
+    def test_streaming_is_advertised_now_that_it_works(self):
+        info = self._info()
 
         assert info["backend"] == "llamacpp"
-        assert info["capabilities"]["streaming"] is False
+        assert info["capabilities"]["streaming"] is True
+
+    def test_steering_is_still_not_advertised(self):
+        """The re-anchored control: this is what now distinguishes the branch."""
+        info = self._info()
+
+        assert info["capabilities"]["per_request_profile_override"] is False
+        joined = " ".join(info["limitations"])
+        assert "SAE attachment, steering and sensing are impossible" in joined
+
+    def test_streaming_is_no_longer_listed_as_a_limitation(self):
+        """A stale limitation is as misleading as a stale capability."""
+        joined = " ".join(info_limits := self._info()["limitations"])
+        assert "streaming" not in joined.split("shows")[0], (
+            f"streaming still named as unsupported: {info_limits}"
+        )
 
 
 class TestSamplingPenaltiesReachTheEngine:
@@ -360,8 +418,12 @@ class TestTheRefusalReachesTheClientAsARefusal:
             with pytest.raises(EngineUnsupportedError):
                 await svc._llamacpp_chat_completion(request)
 
+        # Retargeted, not deleted: streaming is supported now, but
+        # _refuse_on_llamacpp still backs text completions and embeddings, and
+        # this asserts the error it raises is constructible at all — the defect
+        # that made every refusal a 500 was exactly an unconstructible error.
         with pytest.raises(EngineUnsupportedError):
-            await svc._refuse_on_llamacpp("Streaming")
+            await svc._refuse_on_llamacpp("Embeddings")
 
 
 class TestNIsRefusedRatherThanSilentlyTruncated:
@@ -435,3 +497,203 @@ class TestNIsRefusedRatherThanSilentlyTruncated:
         )
         assert result.choices[0].message.content == "hi"
 
+
+
+class TestLlamaCppStreaming:
+    """Streaming through llama.cpp must look identical on the wire.
+
+    The route does no framing and emits no `[DONE]` — every byte comes from the
+    generator — so a second engine's stream is only correct if it yields the
+    same SSE strings in the same order as the transformers path.
+
+    Structure copied from TestCBMStreamChatCompletion, which is this repo's
+    established shape for "a second engine's streaming generator".
+
+    MUTATION CONTROLS (each must turn this class red):
+      * delete the llamacpp delegation in stream_chat_completion -> all fail
+      * drop the final [DONE]                                    -> "closes with" fails
+      * omit usage from the final chunk                          -> "reports usage" fails
+      * skip stream.close() in the finally                       -> "closes the generator" fails
+    """
+
+    def _service(self, chunks, *, raises=None):
+        """A service whose llama.cpp handle yields `chunks` when streamed."""
+        from millm.services.inference_service import InferenceService
+
+        svc = InferenceService.__new__(InferenceService)
+        svc._cbm_backend = None
+        state = MagicMock()
+        state.is_loaded = True
+        state.current = _loaded(ENGINE_LLAMACPP)
+        state.current.model_name = "zora-v1.13-gguf"
+        svc._model_state = state
+
+        stream = MagicMock()
+        stream.__iter__ = lambda self_: iter(chunks)
+        stream.closed = False
+
+        def _close():
+            stream.closed = True
+
+        stream.close = MagicMock(side_effect=_close)
+
+        handle = state.current.model
+        if raises is not None:
+            handle.create_chat_completion = MagicMock(side_effect=raises)
+        else:
+            handle.create_chat_completion = MagicMock(return_value=stream)
+        # The prompt-token probe; a real Llama tokenizes bytes.
+        handle.tokenize = MagicMock(return_value=[1, 2, 3, 4])
+
+        svc._request_queue = _NullQueue()
+        return svc, stream
+
+    @staticmethod
+    def _chunk(content=None, finish_reason=None, role=None):
+        delta = {}
+        if role:
+            delta["role"] = role
+        if content is not None:
+            delta["content"] = content
+        return {
+            "id": "x",
+            "model": "m",
+            "object": "chat.completion.chunk",
+            "created": 0,
+            "choices": [{"index": 0, "delta": delta, "finish_reason": finish_reason}],
+        }
+
+    async def _collect(self, svc, request):
+        return [c async for c in svc._llamacpp_stream_chat_completion(request)]
+
+    @pytest.mark.asyncio
+    async def test_yields_sse_framed_chunks(self, chat_request=None):
+        svc, _ = self._service(
+            [self._chunk(role="assistant"), self._chunk("Hello"), self._chunk(finish_reason="stop")]
+        )
+        out = await self._collect(svc, _stream_request())
+
+        assert out, "the generator produced nothing at all"
+        for chunk in out:
+            assert chunk.startswith("data: ")
+            assert chunk.endswith("\n\n")
+
+    @pytest.mark.asyncio
+    async def test_first_chunk_carries_the_assistant_role(self):
+        svc, _ = self._service([self._chunk("Hi"), self._chunk(finish_reason="stop")])
+        out = await self._collect(svc, _stream_request())
+
+        first = json.loads(out[0].removeprefix("data: ").strip())
+        assert first["choices"][0]["delta"]["role"] == "assistant"
+
+    @pytest.mark.asyncio
+    async def test_closes_with_DONE(self):
+        svc, _ = self._service([self._chunk("Hi"), self._chunk(finish_reason="stop")])
+        out = await self._collect(svc, _stream_request())
+
+        assert out[-1] == "data: [DONE]\n\n"
+
+    @pytest.mark.asyncio
+    async def test_content_reaches_the_wire(self):
+        svc, _ = self._service(
+            [self._chunk("Hello"), self._chunk(" world"), self._chunk(finish_reason="stop")]
+        )
+        out = await self._collect(svc, _stream_request())
+
+        text = "".join(
+            json.loads(c.removeprefix("data: ").strip())["choices"][0]["delta"].get("content") or ""
+            for c in out
+            if c != "data: [DONE]\n\n"
+        )
+        assert text == "Hello world"
+
+    @pytest.mark.asyncio
+    async def test_final_chunk_carries_finish_reason_and_usage(self):
+        """llama.cpp never puts usage on a stream chunk, so we measure it."""
+        svc, _ = self._service(
+            [self._chunk("a"), self._chunk("b"), self._chunk(finish_reason="length")]
+        )
+        out = await self._collect(svc, _stream_request())
+
+        final = json.loads(out[-2].removeprefix("data: ").strip())
+        assert final["choices"][0]["finish_reason"] == "length", (
+            "the reason llama.cpp reported must survive, not be replaced by a "
+            "default we did not observe"
+        )
+        assert final["usage"]["completion_tokens"] == 2
+        assert final["usage"]["prompt_tokens"] == 4
+
+    @pytest.mark.asyncio
+    async def test_closes_the_llama_generator(self):
+        """The only abort mechanism: llama.cpp's generator is pull-based."""
+        svc, stream = self._service([self._chunk("a"), self._chunk(finish_reason="stop")])
+        await self._collect(svc, _stream_request())
+
+        assert stream.close.called, (
+            "without closing it the C++ decode loop keeps running on a stream "
+            "nobody is reading"
+        )
+
+    @pytest.mark.asyncio
+    async def test_closes_the_generator_even_when_abandoned(self):
+        """A client disconnect closes the async generator mid-stream."""
+        svc, stream = self._service(
+            [self._chunk("a"), self._chunk("b"), self._chunk(finish_reason="stop")]
+        )
+        gen = svc._llamacpp_stream_chat_completion(_stream_request())
+        await gen.__anext__()
+        await gen.aclose()
+
+        assert stream.close.called
+
+    @pytest.mark.asyncio
+    async def test_a_mid_stream_failure_still_closes_the_stream(self):
+        """Status and headers are committed; this cannot become an HTTP error."""
+        svc, _ = self._service([], raises=RuntimeError("CUDA out of memory"))
+        out = await self._collect(svc, _stream_request())
+
+        assert out[-1] == "data: [DONE]\n\n"
+        payload = json.loads(out[-2].removeprefix("data: ").strip())
+        assert payload["error"]["type"] == "server_error"
+
+    @pytest.mark.asyncio
+    async def test_the_PUBLIC_entry_point_routes_here(self):
+        """Reachability: a correct generator nothing calls is not shipped.
+
+        Every other test in this class calls
+        `_llamacpp_stream_chat_completion` directly, so deleting the delegation
+        inside `stream_chat_completion` left them all green — the capability was
+        written, not wired. This drives the PUBLIC entry point the route
+        actually calls.
+        """
+        svc, _ = self._service([self._chunk("Hi"), self._chunk(finish_reason="stop")])
+        # Belongs to the transformers branch; reaching it means the delegation
+        # is gone and this test should fail rather than silently pass.
+        svc._use_cbm_for_request = MagicMock(return_value=False)
+        svc._has_steering_override = MagicMock(return_value=False)
+
+        out = [c async for c in svc.stream_chat_completion(_stream_request())]
+
+        assert out[-1] == "data: [DONE]\n\n"
+        first = json.loads(out[0].removeprefix("data: ").strip())
+        assert first["choices"][0]["delta"]["role"] == "assistant"
+
+    @pytest.mark.asyncio
+    async def test_the_shared_guards_apply_to_STREAMING_too(self):
+        """The hole this increment was most at risk of opening.
+
+        These guards lived only inside the non-streaming path. A streaming
+        generator that bypassed them would serve UNSTEERED output for a steered
+        request — a wrong answer wearing a right answer's shape.
+        """
+        from millm.core.errors import EngineUnsupportedError
+
+        svc, _ = self._service([self._chunk(finish_reason="stop")])
+        for req in (
+            _stream_request(profile="humour"),
+            _stream_request(steering_intensity=0.5),
+            _stream_request(n=3),
+            _stream_request(chat_template_kwargs={"enable_thinking": False}),
+        ):
+            with pytest.raises(EngineUnsupportedError):
+                await self._collect(svc, req)

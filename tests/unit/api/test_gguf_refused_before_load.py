@@ -145,3 +145,109 @@ class TestStreamingCompletionsAreRefusedWithoutLoading:
         assert response.status_code == 400
         svc.load_model_and_wait.assert_not_called()
         inference.create_text_completion.assert_not_called()
+
+
+class TestStreamingAGGUFModelIsNOTRefused:
+    """The counterpart: chat streaming on GGUF must now be ALLOWED through.
+
+    chat.py used to refuse `stream: true` on the `gguf_files` signal. That guard
+    was never covered by a test — grep for `engine_unsupported` in tests/ finds
+    only completions and embeddings — so deleting it left the suite green. That
+    cuts both ways: nothing would have caught a mistake in its replacement
+    either, which is why this positive test exists rather than an inverted one.
+
+    MUTATION CONTROL: reinstate the `request.stream and model.gguf_files`
+    refusal in chat.py -> both tests here fail.
+    """
+
+    def _chat_client(self):
+        from millm.api.dependencies import get_inference_service, get_model_service
+
+        model = _model(["zora-v1.13-q5_k_m.gguf"])
+        model.name = "zora-v1.13-gguf"
+
+        svc = MagicMock()
+        svc.find_model_by_name = AsyncMock(return_value=model)
+        svc.get_locked_model = AsyncMock(return_value=None)
+        svc.load_model_and_wait = AsyncMock()
+
+        async def _fake_stream(_request):
+            yield 'data: {"choices":[{"delta":{"role":"assistant"}}]}\n\n'
+            yield "data: [DONE]\n\n"
+
+        inference = MagicMock()
+        inference.backend_name = "llamacpp"
+        # The route checks a model is resident after the auto-load; None here
+        # short-circuits into "no model is currently loaded" and the test would
+        # assert nothing about streaming.
+        # An OBJECT with `.name`, not a dict — the route compares
+        # `model_info.name` against the requested model. Returning None would
+        # short-circuit into "no model is currently loaded" and assert nothing
+        # about streaming; a dict raises AttributeError inside the route.
+        loaded_info = MagicMock()
+        loaded_info.name = "zora-v1.13-gguf"
+        inference.get_loaded_model_info = lambda: loaded_info
+        inference.ensure_profile_exists = AsyncMock(return_value=True)
+        # Real numbers: the route compares pending against capacity, and two
+        # MagicMocks raise TypeError on `>=`. The queue has to be modelled, not
+        # merely present.
+        inference.request_queue = MagicMock(pending_count=0, max_pending=10)
+        inference.stream_chat_completion = _fake_stream
+
+        app = create_app()
+        app.dependency_overrides[get_model_service] = lambda: svc
+        app.dependency_overrides[get_inference_service] = lambda: inference
+        return TestClient(app), svc
+
+    def test_a_streaming_chat_request_reaches_the_engine(self):
+        client, svc = self._chat_client()
+
+        response = client.post(
+            "/v1/chat/completions",
+            json={
+                "model": "zora-v1.13-gguf",
+                "messages": [{"role": "user", "content": "hi"}],
+                "stream": True,
+            },
+        )
+
+        assert response.status_code == 200, response.text
+        assert "text/event-stream" in response.headers["content-type"]
+        assert response.text.rstrip().endswith("data: [DONE]")
+
+    def test_the_model_is_actually_loaded_for_it(self):
+        """The refusal used to short-circuit BEFORE the auto-load.
+
+        Modelled with a DIFFERENT model resident, because the route correctly
+        skips the load when the requested one is already there — asserting the
+        call with a matching name would have failed for the right reason and
+        told us nothing about the refusal.
+
+        `get_loaded_model_info` returns the other model first and the requested
+        one afterwards, which is what a real successful load looks like: the
+        route re-reads it to "confirm the switch actually happened rather than
+        assuming it did".
+        """
+        client, svc = self._chat_client()
+        from millm.api.dependencies import get_inference_service
+
+        inference = client.app.dependency_overrides[get_inference_service]()
+        other, wanted = MagicMock(), MagicMock()
+        other.name, wanted.name = "some-other-model", "zora-v1.13-gguf"
+        reports = iter([other, wanted, wanted, wanted])
+        inference.get_loaded_model_info = lambda: next(reports, wanted)
+
+        response = client.post(
+            "/v1/chat/completions",
+            json={
+                "model": "zora-v1.13-gguf",
+                "messages": [{"role": "user", "content": "hi"}],
+                "stream": True,
+            },
+        )
+
+        assert response.status_code == 200, response.text
+        assert svc.load_model_and_wait.called, (
+            "a GGUF streaming request must now load the model rather than "
+            "being turned away at the door"
+        )

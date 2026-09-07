@@ -63,37 +63,60 @@ def _model(gguf_files):
 BODY = {"model": "qwen2.5-7b-gguf", "prompt": "hello"}
 
 
-class TestAGGUFModelIsRefusedWithoutBeingLoaded:
-    def test_refused_with_a_client_error(self):
-        client, _svc, _inf = _client(
-            _model(["qwen2.5-7b-instruct-q4_k_m.gguf"])
+class TestAGGUFTextCompletionIsServed:
+    """/v1/completions no longer turns a GGUF model away at the door.
+
+    It used to refuse pre-load on `gguf_files`. That guard was correct while the
+    service had no implementation — spending minutes and tens of GB to reach a
+    guaranteed 400 is worse than refusing early — but the implementation exists
+    now, so the guard was the only thing standing between a GGUF model and a
+    capability Ollama has always had.
+
+    MUTATION CONTROL: reinstate the `gguf_files` refusal in completions.py ->
+    both tests fail.
+    """
+
+    @staticmethod
+    def _real_response():
+        """A REAL response object: FastAPI validates against response_model,
+        and an AsyncMock's attributes fail that with three type errors."""
+        from millm.api.schemas.openai import (
+            TextCompletionChoice,
+            TextCompletionResponse,
+            Usage,
         )
+
+        return TextCompletionResponse(
+            id="cmpl-" + "0" * 24,
+            created=0,
+            model="qwen2.5-7b-gguf",
+            choices=[TextCompletionChoice(index=0, text=" hi", finish_reason="stop")],
+            usage=Usage(prompt_tokens=1, completion_tokens=1, total_tokens=2),
+        )
+
+    def test_a_text_completion_request_reaches_the_engine(self):
+        client, svc, inference = _client(_model(["m-q4_k_m.gguf"]))
+        loaded = MagicMock()
+        loaded.name = "qwen2.5-7b-gguf"
+        inference.get_loaded_model_info = lambda: loaded
+        inference.create_text_completion = AsyncMock(return_value=self._real_response())
+
         response = client.post("/v1/completions", json=BODY)
 
-        assert response.status_code == 400
-        body = response.json()["error"]
-        assert body["type"] == "invalid_request_error", (
-            "server_error tells the caller to retry something that can never "
-            "succeed on this model"
-        )
-        assert body["code"] == "engine_unsupported"
+        assert response.status_code == 200, response.text
+        assert inference.create_text_completion.called
 
-    def test_nothing_is_loaded_and_nothing_generates(self):
-        """The point of the guard: no VRAM spent, no resident model evicted."""
-        client, svc, inference = _client(
-            _model(["qwen2.5-7b-instruct-q4_k_m.gguf"])
-        )
+    def test_the_model_is_loaded_for_it(self):
+        client, svc, inference = _client(_model(["m-q4_k_m.gguf"]))
+        other, wanted = MagicMock(), MagicMock()
+        other.name, wanted.name = "some-other-model", "qwen2.5-7b-gguf"
+        reports = iter([other, wanted, wanted, wanted])
+        inference.get_loaded_model_info = lambda: next(reports, wanted)
+        inference.create_text_completion = AsyncMock(return_value=self._real_response())
+
         client.post("/v1/completions", json=BODY)
 
-        svc.load_model_and_wait.assert_not_called()
-        inference.create_text_completion.assert_not_called()
-
-    def test_a_transformers_model_still_completes(self):
-        """The guard must bite on GGUF rows ONLY."""
-        client, svc, inference = _client(_model(None))
-        client.post("/v1/completions", json=BODY)
-
-        svc.load_model_and_wait.assert_called_once()
+        assert svc.load_model_and_wait.called
 
 
 class TestEmbeddingsRefuseAGGUFModelWithoutLoadingIt:

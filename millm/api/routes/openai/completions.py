@@ -81,27 +81,6 @@ async def create_completion(
             param="stream",
         )
 
-    # /v1/completions is not implemented on the llama.cpp engine. Refuse HERE,
-    # BEFORE the auto-load below, for the same reason streaming is refused
-    # pre-load in chat.py: `gguf_files` on the row is set at download time, so
-    # the answer is already known without loading anything. Refusing inside the
-    # inference service instead would spend minutes and tens of GB swapping the
-    # RESIDENT model out for a GGUF one — evicting a working transformers model
-    # and any SAEs attached to it — only to return a 400 that could never have
-    # succeeded.
-    if getattr(model, "gguf_files", None):
-        return create_openai_error(
-            message=(
-                "Text completion (/v1/completions) is not supported on the "
-                "llama.cpp engine in this release. Use /v1/chat/completions "
-                "with stream=false, or a transformers-served model."
-            ),
-            error_type="invalid_request_error",
-            code="engine_unsupported",
-            param="model",
-            status_code=400,
-        )
-
     # Load the requested model on demand.
     #
     # An OpenAI client — Open WebUI included — selects a model by naming it in

@@ -228,32 +228,70 @@ class TestTheRefusalDoesNotItselfCrash:
         )
 
 
-class TestTextCompletionIsRefused:
-    """/v1/completions is a public OpenAI route and reaches the transformers
-    path directly. `self._tokenizer` is None on this engine, so the first line
-    of its loop is `None(prompt, return_tensors="pt")` — a 500 deep inside
-    generation instead of a 400 at the boundary.
+class TestTextCompletionIsServed:
+    """/v1/completions works on GGUF — Ollama serves it, so miLLM must.
 
-    MUTATION CONTROL: drop the `_engine_is_llamacpp` guard at the top of
-    `create_text_completion` -> this test fails with TypeError, not MiLLMError.
+    It was refused because the transformers path reaches through
+    `self._tokenizer`, which is None on this engine. That was a real crash to
+    prevent, but the fix is `Llama.create_completion`, not a 400: refusing made
+    miLLM strictly less capable as a general-purpose offline server for a reason
+    no caller could act on.
+
+    MUTATION CONTROL: restore the _refuse_on_llamacpp call in
+    create_text_completion -> these fail.
     """
 
     @pytest.mark.asyncio
-    async def test_create_text_completion_refuses(self):
-        from millm.core.errors import MiLLMError
+    async def test_a_text_completion_is_generated(self):
         from millm.services.inference_service import InferenceService
 
         svc = InferenceService.__new__(InferenceService)
-        svc._cbm_backend = None
         state = MagicMock()
         state.is_loaded = True
         state.current = _loaded(ENGINE_LLAMACPP)
+        state.current.model_name = "zora-v1.13-gguf"
         svc._model_state = state
+        svc._request_queue = _NullQueue()
+        state.current.model.create_completion = MagicMock(
+            return_value={
+                "choices": [{"text": " a haiku", "finish_reason": "stop"}],
+                "usage": {"prompt_tokens": 5, "completion_tokens": 3},
+            }
+        )
 
-        with pytest.raises(MiLLMError) as exc:
-            await svc.create_text_completion(MagicMock())
+        from millm.api.schemas.openai import TextCompletionRequest
 
-        assert exc.value.code == "ENGINE_UNSUPPORTED"
+        result = await svc.create_text_completion(
+            TextCompletionRequest(model="zora-v1.13-gguf", prompt="write")
+        )
+
+        assert result.choices[0].text == " a haiku"
+        assert result.choices[0].finish_reason == "stop"
+        assert result.usage.prompt_tokens == 5
+
+    @pytest.mark.asyncio
+    async def test_it_does_not_touch_the_absent_tokenizer(self):
+        """The original crash: `self._tokenizer` is None on this engine."""
+        from millm.services.inference_service import InferenceService
+
+        svc = InferenceService.__new__(InferenceService)
+        state = MagicMock()
+        state.is_loaded = True
+        state.current = _loaded(ENGINE_LLAMACPP)
+        state.current.model_name = "m"
+        assert state.current.tokenizer is None
+        svc._model_state = state
+        svc._request_queue = _NullQueue()
+        state.current.model.create_completion = MagicMock(
+            return_value={"choices": [{"text": "x", "finish_reason": "stop"}], "usage": {}}
+        )
+
+        from millm.api.schemas.openai import TextCompletionRequest
+
+        # Would raise "'NoneType' object is not callable" on the shared path.
+        await svc.create_text_completion(
+            TextCompletionRequest(model="m", prompt="hi")
+        )
 
 
 class TestTheBackendInfoIsHonest:
@@ -412,7 +450,11 @@ class TestTheRefusalReachesTheClientAsARefusal:
         cases = [
             ChatCompletionRequest(**base, extra_messages=[[{"role": "user", "content": "y"}]]),
             ChatCompletionRequest(**base, profile="p"),
-            ChatCompletionRequest(**base, chat_template_kwargs={"enable_thinking": False}),
+            ChatCompletionRequest(**base, n=3),
+            # chat_template_kwargs is deliberately NOT here any more: it is
+            # ignored-and-logged rather than refused, because miStudio sends it
+            # on every labeling request. See
+            # TestLlamaCppStreaming.test_chat_template_kwargs_is_ignored_...
         ]
         for request in cases:
             with pytest.raises(EngineUnsupportedError):
@@ -693,7 +735,26 @@ class TestLlamaCppStreaming:
             _stream_request(profile="humour"),
             _stream_request(steering_intensity=0.5),
             _stream_request(n=3),
-            _stream_request(chat_template_kwargs={"enable_thinking": False}),
         ):
             with pytest.raises(EngineUnsupportedError):
                 await self._collect(svc, req)
+
+    @pytest.mark.asyncio
+    async def test_chat_template_kwargs_is_ignored_rather_than_refused(self):
+        """The one instruction this engine drops instead of rejecting.
+
+        miStudio's labeling service sends {"enable_thinking": False} on EVERY
+        request, so refusing made "labeling with a GGUF judge" a 400 on every
+        call. Nothing downstream is silently wrong: the reasoning arrives in the
+        completion, where miStudio's own _strip_think already handles the
+        closing-tag-only shape a template-opened GGUF produces.
+
+        MUTATION CONTROL: restore the raise -> this test fails.
+        """
+        svc, _ = self._service([self._chunk("ok"), self._chunk(finish_reason="stop")])
+
+        out = await self._collect(
+            svc, _stream_request(chat_template_kwargs={"enable_thinking": False})
+        )
+
+        assert out[-1] == "data: [DONE]\n\n", "the request must be SERVED"

@@ -399,9 +399,11 @@ class InferenceService:
                     "speculative_decoding": False,
                 },
                 "limitations": [
-                    "embeddings, text completions, batched conversations, "
-                    "n > 1 and chat_template_kwargs are not supported on this "
-                    "engine",
+                    "embeddings, batched conversations and n > 1 are not "
+                    "supported on this engine",
+                    "chat_template_kwargs is accepted but IGNORED: llama.cpp "
+                    "applies the template baked into the GGUF file and exposes "
+                    "no way to pass variables into it",
                     "no PyTorch module tree, so SAE attachment, steering and "
                     "sensing are impossible rather than merely unimplemented",
                     "reasoning_content is not populated for a model whose "
@@ -2834,12 +2836,35 @@ class InferenceService:
                 "the llama.cpp engine does not have. Load a transformers-served "
                 "model to steer."
             )
+        # chat_template_kwargs is IGNORED here, not refused, and the difference
+        # matters more than the principle it bends.
+        #
+        # miStudio's labeling service sends {"enable_thinking": False} on EVERY
+        # request (openai_labeling_service.py:270), on the documented premise
+        # that "a template that does not reference the variable ignores it".
+        # That premise held for every transformers-served model and is false for
+        # this engine, so refusing turned "labeling with a GGUF judge" into a
+        # 400 on every call — not a degraded result, a total failure.
+        #
+        # Ignoring is defensible here in a way it would not be for steering,
+        # because nothing downstream is silently wrong: the caller asked to
+        # suppress a reasoning block, we cannot, and the reasoning arrives in
+        # the completion where miStudio's own _strip_think already handles the
+        # exact shape a template-opened GGUF produces (its case (c),
+        # openai_labeling_service.py:1287 — reasoning with a CLOSING tag only).
+        # Steering ignored would serve unsteered text that looks steered; this
+        # is visible in the output and already handled.
+        #
+        # Logged, never silent, so an unhonoured instruction is discoverable.
         if getattr(request, "chat_template_kwargs", None):
-            # No llama.cpp equivalent. Matching the existing fail-loud policy for
-            # a template that cannot honour what was asked.
-            raise EngineUnsupportedError(
-                "chat_template_kwargs is not supported on the llama.cpp engine: "
-                "the chat template is baked into the GGUF file."
+            logger.info(
+                "chat_template_kwargs_ignored",
+                engine="llamacpp",
+                keys=sorted(request.chat_template_kwargs),
+                detail=(
+                    "llama.cpp applies the template baked into the GGUF file "
+                    "and exposes no way to pass variables into it"
+                ),
             )
         if (getattr(request, "n", 1) or 1) > 1:
             # The transformers path documents and honours n > 1. This one builds
@@ -3119,6 +3144,61 @@ class InferenceService:
     def _sse(chunk: Any) -> str:
         """Frame a chunk as an SSE `data:` line, matching the transformers path."""
         return f"data: {chunk.model_dump_json(exclude_none=True)}\n\n"
+
+    async def _llamacpp_text_completion(self, request: Any) -> Any:
+        """Plain text completion through llama.cpp.
+
+        Ollama serves `/v1/completions` from a GGUF file, so refusing it here
+        made miLLM strictly less capable as a general-purpose offline server for
+        no reason a caller could act on — `Llama.create_completion` is right
+        there. The only genuine gap was that the transformers path reaches
+        through `self._tokenizer`, which is None on this engine.
+        """
+        from millm.api.schemas.openai import (
+            TextCompletionChoice,
+            TextCompletionResponse,
+        )
+
+        prompts = request.prompt if isinstance(request.prompt, list) else [request.prompt]
+        gen_config = GenerationConfig.from_request(request)
+        params = self._llamacpp_params(gen_config, request)
+
+        completion_id = f"cmpl-{uuid.uuid4().hex[:24]}"
+        created = int(datetime.now().timestamp())
+        choices: list[Any] = []
+        total_prompt_tokens = 0
+        total_completion_tokens = 0
+
+        def _complete(text: str) -> dict:
+            return self._model.create_completion(prompt=text, **params)
+
+        async with self._request_queue.acquire():
+            for index, prompt_text in enumerate(prompts):
+                raw = await asyncio.to_thread(_complete, prompt_text)
+                choice_raw = (raw.get("choices") or [{}])[0]
+                usage_raw = raw.get("usage") or {}
+                total_prompt_tokens += int(usage_raw.get("prompt_tokens", 0))
+                total_completion_tokens += int(usage_raw.get("completion_tokens", 0))
+                choices.append(
+                    TextCompletionChoice(
+                        index=index,
+                        text=choice_raw.get("text") or "",
+                        # llama.cpp's own reason, not a default we did not observe.
+                        finish_reason=choice_raw.get("finish_reason") or "stop",
+                    )
+                )
+
+        return TextCompletionResponse(
+            id=completion_id,
+            created=created,
+            model=self._model_state.current.model_name,
+            choices=choices,
+            usage=Usage(
+                prompt_tokens=total_prompt_tokens,
+                completion_tokens=total_completion_tokens,
+                total_tokens=total_prompt_tokens + total_completion_tokens,
+            ),
+        )
 
     async def _refuse_on_llamacpp(self, what: str) -> None:
         """Refuse an operation the llama.cpp engine cannot perform.
@@ -3557,9 +3637,7 @@ class InferenceService:
         # `None(prompt_text, return_tensors="pt")` -> "'NoneType' object is not
         # callable" as a 500, deep inside generation instead of at the boundary.
         if self._engine_is_llamacpp():
-            await self._refuse_on_llamacpp(
-                "Text completion (/v1/completions)"
-            )
+            return await self._llamacpp_text_completion(request)
 
         # Delegate to CBM if active and sampling params are compatible
         if self._use_cbm_for_request(

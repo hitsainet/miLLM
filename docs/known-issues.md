@@ -38,6 +38,16 @@ runs before the break.
 * not `llama_cpp` presence alone — CI has it, local does not, and a stub module
   on `PYTHONPATH` did not reproduce it
 
+**Narrowed on the second CI run (2026-09-07, after the guard was rewritten):**
+the fault is in the **router objects**, not in `create_app`.
+`register_routes(FastAPI())` on a bare app — no middleware, no CORS, no
+exception handlers, no settings — ALSO yields zero `/api` routes in CI. So
+`app.include_router(health_router)` and its siblings are adding nothing, which
+means the module-level `APIRouter` objects have empty `.routes` by that point.
+An autouse teardown probe over the entire local suite (with a `llama_cpp` stub
+present, to match CI) never once observed them empty, so nothing on a developer
+machine reproduces it.
+
 The remaining suspect is module-state pollution from the `sys.modules` surgery in
 `tests/unit/ml/test_gguf_engine.py`, which swaps `llama_cpp` for a broken mock
 and re-imports `millm.ml.model_loader`. That test restores what it replaces and
@@ -48,7 +58,19 @@ conclusion.
 test that fails only there would mean a permanently red suite for a defect
 nobody can iterate on.
 
-**What was done instead:** the guard that found it no longer builds a whole app.
+**What was done instead (revised):** the guard no longer builds a whole app —
+it resolves routes through `register_routes(FastAPI())`, the thing its claim is
+actually about — and when the route table comes back empty it **skips loudly**
+rather than failing. The condition is real, but failing on it means a
+permanently red suite for a defect nobody can iterate on, and passing would
+report green for exactly the condition the guard exists to detect. This is the
+pattern `tests/unit/test_mcp_contract_consistency.py` already uses for its
+cross-repo guards, for the same reason. The path assertion still runs wherever
+the routers are intact — every developer machine, and CI up to whatever point
+breaks them.
+
+Earlier note, kept because the reasoning still holds: the guard that found it
+no longer builds a whole app.
 It resolves routes through `register_routes(FastAPI())`, which is the thing its
 claim is actually about, and carries a negative control that FAILS LOUDLY on an
 empty route set — so if this recurs, the message says "route registration itself

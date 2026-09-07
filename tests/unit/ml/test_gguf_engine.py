@@ -283,6 +283,51 @@ class TestLoadingAGGUFFile:
             with pytest.raises(ModelLoadError, match="GGUF file not found"):
                 load_gguf_model(1, "x", str(tmp_path), "absent.gguf")
 
+    def test_the_context_is_bounded_rather_than_taken_from_the_file(self, tmp_path):
+        """n_ctx=0 asks for the model's full declared context, which OOMs.
+
+        gemma-4-31b-it declares 262144 tokens. A KV cache that size on a 31B
+        model is tens of gigabytes, and after ~19.9 GiB of Q5_K_S weights on a
+        24 GiB card there is about 4 GiB left — the load simply fails. The
+        original 0 was itself a correction of llama.cpp's 512 default, which
+        truncates real conversations; this is the middle.
+
+        MUTATION CONTROL: pass 0 (or GGUF_CONTEXT_FROM_FILE) again -> fails.
+        """
+        from millm.core.config import settings
+
+        gguf = tmp_path / "m-Q4_K_M.gguf"
+        gguf.write_bytes(b"\x00" * 1024)
+        fake = MagicMock()
+
+        with patch("millm.ml.model_loader.Llama", fake):
+            load_gguf_model(11, "m", str(tmp_path), "m-Q4_K_M.gguf")
+
+        n_ctx = fake.call_args.kwargs["n_ctx"]
+        assert n_ctx == settings.GGUF_CONTEXT_LENGTH
+        assert n_ctx > 0, (
+            "0 means 'the model's full declared context', which is 262144 on "
+            "the model that found this and does not fit"
+        )
+
+    def test_the_context_can_be_raised_or_taken_from_the_file(self, tmp_path):
+        """A card with room should not be held to the conservative default."""
+        from millm.core.config import settings
+
+        gguf = tmp_path / "m-Q4_K_M.gguf"
+        gguf.write_bytes(b"\x00" * 1024)
+        fake = MagicMock()
+
+        original = settings.GGUF_CONTEXT_LENGTH
+        settings.GGUF_CONTEXT_LENGTH = 32768
+        try:
+            with patch("millm.ml.model_loader.Llama", fake):
+                load_gguf_model(12, "m", str(tmp_path), "m-Q4_K_M.gguf")
+        finally:
+            settings.GGUF_CONTEXT_LENGTH = original
+
+        assert fake.call_args.kwargs["n_ctx"] == 32768
+
     def test_embedding_output_is_enabled_at_construction(self, tmp_path):
         """The load-time flag is what makes /v1/embeddings possible at all.
 

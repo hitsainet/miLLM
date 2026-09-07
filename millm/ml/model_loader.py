@@ -888,8 +888,9 @@ class ModelLoadContext:
 #: offload is a fallback we do not attempt to guess at.
 GGUF_GPU_LAYERS = -1
 
-#: Context window. llama.cpp defaults to 512, which silently truncates almost
-#: any real conversation; 0 asks it to use the value baked into the file.
+#: Context window fallback. See settings.GGUF_CONTEXT_LENGTH for why this is
+#: not 0: asking for the model's full declared context OOMs on a large-context
+#: model, and llama.cpp's own default of 512 truncates real conversations.
 GGUF_CONTEXT_FROM_FILE = 0
 
 #: llama.cpp's MEAN pooling constant, resolved defensively: the module may be
@@ -956,14 +957,14 @@ def load_gguf_model(
         "gguf_load_started", model_id=model_id, model_name=model_name, path=str(path)
     )
     try:
+        from millm.core.config import settings as _settings
+
         kwargs: dict[str, Any] = {
             "model_path": str(path),
             "n_gpu_layers": GGUF_GPU_LAYERS,
-            "n_ctx": GGUF_CONTEXT_FROM_FILE,
+            "n_ctx": _settings.GGUF_CONTEXT_LENGTH,
             "verbose": False,
         }
-        from millm.core.config import settings as _settings
-
         if _settings.GGUF_ENABLE_EMBEDDINGS:
             # MEAN pooling, matching what the transformers path does —
             # `hidden_states[-1].mean(dim=1)` in create_embeddings. Choosing the

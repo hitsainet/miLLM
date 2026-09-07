@@ -171,6 +171,22 @@ class Settings(BaseSettings):
     #
     # Turn it off to buy that 6.7% back on a deployment that never embeds.
     GGUF_ENABLE_EMBEDDINGS: bool = True
+
+    # Context window for GGUF models, in tokens. 0 means "whatever the file
+    # declares", which is a TRAP on a constrained card.
+    #
+    # llama.cpp's own default is 512, which truncates almost any real
+    # conversation, so this was set to 0 to use the model's trained context.
+    # That overcorrected: gemma-4-31b-it declares 262144 tokens, and a KV cache
+    # for a quarter-million tokens on a 31B model is tens of gigabytes — after
+    # ~19.9 GiB of Q5_K_S weights on a 24 GiB card there is about 4 GiB left, so
+    # the load simply fails.
+    #
+    # 8192 is a working default rather than a principled one: large enough for
+    # real conversations and document chunks, small enough that the cache is
+    # ~1-2 GiB on a model this size. Raise it when the card has room; set 0 to
+    # ask for the model's full context and accept the consequences.
+    GGUF_CONTEXT_LENGTH: int = 8192
     CBM_MAX_QUEUE_SIZE: int = 256
     # CBM fixes its sampling parameters at manager creation, and any request
     # whose temperature/top_p differ FALLS BACK TO THE SERIAL PATH

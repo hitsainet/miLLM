@@ -56,6 +56,29 @@ _SHARD_SUFFIX = re.compile(r"-\d{5}-of-\d{5}$")
 
 GGUF_SUFFIX = ".gguf"
 
+# Sidecar files that are `.gguf` but are NOT a model you can serve.
+#
+# `mmproj` is the multimodal projector — the vision tower a VLM needs ALONGSIDE
+# its language model. Repos ship it at several precisions, so the filenames
+# carry quantization tokens and read exactly like quantizations:
+#
+#     gemma-4-31b-it-abliterated.Q8_0.gguf          32.64 GB   the model
+#     gemma-4-31b-it-abliterated.mmproj-Q8_0.gguf    0.81 GB   the projector
+#     gemma-4-31b-it-abliterated.mmproj-f16.gguf     1.20 GB   the projector
+#
+# Treating those as quantizations does two harmful things at once: it offers a
+# 1.2 GB "F16" of a 31B model, which cannot be a model and which the size column
+# makes look like a bargain; and it merges the projector into the real Q8_0,
+# reporting 33.45 GB across "2 parts" — indistinguishable in the UI from a
+# genuinely split quantization.
+_COMPANION_MARKERS = ("mmproj",)
+
+
+def is_companion(path: str) -> bool:
+    """Whether this `.gguf` is a sidecar rather than a servable model."""
+    name = path.rsplit("/", 1)[-1].lower()
+    return any(marker in name for marker in _COMPANION_MARKERS)
+
 
 @dataclass(frozen=True)
 class GGUFFile:
@@ -149,6 +172,11 @@ def group_gguf_files(files: Iterable[GGUFFile]) -> list[GGUFQuant]:
     for f in files:
         if not f.path.lower().endswith(GGUF_SUFFIX):
             continue
+        # Sidecars are not choices. See _COMPANION_MARKERS: a projector's
+        # filename carries a quantization token, so leaving it in both invents a
+        # phantom quantization and corrupts the real one it collides with.
+        if is_companion(f.path):
+            continue
         buckets.setdefault(_group_key(f.path), []).append(f)
 
     quants: list[GGUFQuant] = []
@@ -169,6 +197,53 @@ def group_gguf_files(files: Iterable[GGUFFile]) -> list[GGUFQuant]:
         )
 
     return sorted(quants, key=lambda q: (q.total_size_bytes, q.label))
+
+
+def coarse_quantization(label: str) -> str:
+    """Map a GGUF label onto the coarse ``QuantizationType`` the DB stores.
+
+    The coarse level is a FUNCTION of the label, not an independent choice, so
+    it is derived here rather than taken from whatever the quantization dropdown
+    happened to be showing. Without this every GGUF download records the
+    dropdown's default — a Q6_K filed as "Q4".
+
+    It stays approximate on purpose: the enum has five members and GGUF has
+    dozens, so this is a bucket for display and rough memory estimation. The
+    exact quantization lives in ``gguf_label``, which is what the cache
+    directory and the uniqueness constraint use.
+    """
+    upper = (label or "").upper()
+    if upper in {"F32", "FP32"}:
+        return "FP32"
+    if upper in {"F16", "FP16", "BF16"}:
+        return "FP16"
+    match = re.match(r"I?Q(\d+)", upper)
+    if not match:
+        # Unrecognised: FP16 is the least wrong default — it neither claims a
+        # quantization that was not applied nor understates memory the way Q2
+        # would.
+        return "FP16"
+    bits = int(match.group(1))
+    if bits <= 2:
+        return "Q2"
+    if bits <= 4:
+        return "Q4"
+    return "Q8"
+
+
+def companion_files(files: Iterable[GGUFFile]) -> list[GGUFFile]:
+    """The sidecar `.gguf` files, ordered by path.
+
+    Surfaced rather than discarded: a multimodal model needs its projector to
+    see images, and a caller that never hears about it downloads a quantization
+    and gets a silently text-only model. Choosing WHICH projector precision to
+    pair with a given quant is a serving decision, so this reports what exists
+    and leaves the choice to the engine that will load it.
+    """
+    return sorted(
+        (f for f in files if f.path.lower().endswith(GGUF_SUFFIX) and is_companion(f.path)),
+        key=lambda f: f.path,
+    )
 
 
 def has_gguf(paths: Iterable[str]) -> bool:

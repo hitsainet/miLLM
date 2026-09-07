@@ -193,6 +193,98 @@ class TestModelServiceDownloadModel:
         assert call_kwargs["status"] == ModelStatus.DOWNLOADING
 
     @pytest.mark.asyncio
+    async def test_a_gguf_download_persists_its_exact_quantization(
+        self, service, mock_repository, mock_downloader
+    ):
+        """The label, the file list and the revision must reach the row.
+
+        Without them the row cannot say WHICH quantization it holds, and the
+        cache directory — which is built from the label — collides with every
+        other Q4 variant from the same repo.
+        """
+        from millm.api.schemas.model import ModelDownloadRequest
+
+        created = MagicMock()
+        created.id = 7
+        mock_repository.create.return_value = created
+
+        request = ModelDownloadRequest(
+            source=ModelSource.HUGGINGFACE,
+            repo_id="bartowski/Qwen2.5-7B-Instruct-GGUF",
+            quantization=QuantizationType.Q4,
+            gguf_files=["Qwen2.5-7B-Instruct-Q6_K.gguf"],
+            gguf_label="Q6_K",
+            revision="abc123",
+        )
+
+        await service.download_model(request)
+
+        kwargs = mock_repository.create.call_args[1]
+        assert kwargs["gguf_label"] == "Q6_K"
+        assert kwargs["gguf_files"] == ["Qwen2.5-7B-Instruct-Q6_K.gguf"]
+        assert kwargs["revision"] == "abc123"
+        assert kwargs["cache_path"].endswith("--Q6_K"), (
+            "the cache path must carry the label, or Q6_K and Q8_0 — both "
+            "coarse 'Q8' — share one directory"
+        )
+
+    @pytest.mark.asyncio
+    async def test_the_coarse_level_is_DERIVED_from_the_gguf_label(
+        self, service, mock_repository, mock_downloader
+    ):
+        """The bucket is a function of the label, not an independent choice.
+
+        The form's quantization dropdown defaults to Q4. Taking that at face
+        value files a 25 GB Q6_K as a 4-bit model — wrong in the listing, wrong
+        in the memory estimate, and wrong in the cache path.
+        """
+        from millm.api.schemas.model import ModelDownloadRequest
+
+        created = MagicMock()
+        created.id = 8
+        mock_repository.create.return_value = created
+
+        request = ModelDownloadRequest(
+            source=ModelSource.HUGGINGFACE,
+            repo_id="r/x-GGUF",
+            quantization=QuantizationType.Q4,   # what the dropdown happened to say
+            gguf_files=["x-Q6_K.gguf"],
+            gguf_label="Q6_K",                  # what was actually chosen
+        )
+
+        await service.download_model(request)
+
+        kwargs = mock_repository.create.call_args[1]
+        assert kwargs["quantization"] == QuantizationType.Q8, (
+            "Q6_K is a 6-bit quantization and must not be filed as Q4 just "
+            "because the coarse dropdown defaulted there"
+        )
+
+    @pytest.mark.asyncio
+    async def test_an_ordinary_download_keeps_the_requested_level(
+        self, service, mock_repository, mock_downloader
+    ):
+        """Derivation must not touch a repo with no GGUF selection."""
+        from millm.api.schemas.model import ModelDownloadRequest
+
+        created = MagicMock()
+        created.id = 9
+        mock_repository.create.return_value = created
+
+        request = ModelDownloadRequest(
+            source=ModelSource.HUGGINGFACE,
+            repo_id="google/gemma-2-2b",
+            quantization=QuantizationType.FP16,
+        )
+
+        await service.download_model(request)
+
+        kwargs = mock_repository.create.call_args[1]
+        assert kwargs["quantization"] == QuantizationType.FP16
+        assert kwargs["gguf_label"] == ""
+        assert kwargs["gguf_files"] is None
+
+    @pytest.mark.asyncio
     async def test_raises_already_exists(self, service, mock_repository, sample_model):
         """Test that download_model raises error for duplicate models."""
         from millm.api.schemas.model import ModelDownloadRequest

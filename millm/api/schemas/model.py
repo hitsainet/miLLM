@@ -240,6 +240,16 @@ class ModelPreviewResponse(BaseModel):
             "branches on."
         ),
     )
+    gguf_companions: list[GGUFFileInfo] | None = Field(
+        default=None,
+        description=(
+            "Sidecar .gguf files that are NOT servable models — chiefly the "
+            "multimodal projector (mmproj) a VLM needs to see images. Reported "
+            "so the information is not lost: a quantization downloaded without "
+            "its projector loads as a silently text-only model. Which projector "
+            "precision to pair with a given quant is a serving decision."
+        ),
+    )
     gguf_architecture: str | None = Field(
         default=None, description="Architecture from HuggingFace's GGUF metadata, when indexed"
     )

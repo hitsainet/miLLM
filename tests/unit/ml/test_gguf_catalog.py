@@ -17,8 +17,11 @@ MUTATION CONTROLS (each must turn this file red):
 
 from millm.ml.gguf_catalog import (
     GGUFFile,
+    coarse_quantization,
+    companion_files,
     group_gguf_files,
     has_gguf,
+    is_companion,
     is_shard,
     quant_label_from_path,
 )
@@ -100,6 +103,74 @@ class TestGroupingIntoChoices:
     def test_cheapest_first(self):
         labels = [q.label for q in group_gguf_files(SPLIT_LISTING)]
         assert labels == ["Q4_K_M", "Q6_K"]
+
+
+# From mradermacher/gemma-4-31b-it-3MPER0RR-abliterated-GGUF, a VLM repo. The
+# projector ships at two precisions, so its filenames carry quantization tokens
+# and read exactly like quantizations.
+MULTIMODAL_LISTING = [
+    GGUFFile("m.Q8_0.gguf", 32_640_000_000),
+    GGUFFile("m.mmproj-Q8_0.gguf", 810_000_000),
+    GGUFFile("m.mmproj-f16.gguf", 1_200_000_000),
+    GGUFFile("m.Q4_K_M.gguf", 18_690_000_000),
+]
+
+
+class TestCompanionFilesAreNotQuantizations:
+    """A projector is not a model. Offering one is offering a broken download."""
+
+    def test_a_projector_is_not_offered_as_a_quantization(self):
+        labels = {q.label for q in group_gguf_files(MULTIMODAL_LISTING)}
+
+        assert labels == {"Q8_0", "Q4_K_M"}
+        assert "F16" not in labels, (
+            "mmproj-f16.gguf is a 1.2 GB vision projector; offering it as the "
+            "F16 of a 31B model presents something that cannot serve, at a size "
+            "that reads like a bargain"
+        )
+
+    def test_a_projector_does_not_corrupt_the_quantization_it_shadows(self):
+        """The nastier half: mmproj-Q8_0 parses to the SAME label as the model."""
+        q8 = next(q for q in group_gguf_files(MULTIMODAL_LISTING) if q.label == "Q8_0")
+
+        assert len(q8.files) == 1, "the projector must not be merged into the model"
+        assert q8.total_size_bytes == 32_640_000_000, "size must be the model's alone"
+        assert q8.is_split is False, (
+            "a merged projector made this read as a 2-part split — "
+            "indistinguishable in the UI from a genuinely sharded quantization"
+        )
+
+    def test_companions_are_reported_not_discarded(self):
+        """A quant downloaded without its projector is silently text-only."""
+        companions = [c.path for c in companion_files(MULTIMODAL_LISTING)]
+
+        assert companions == ["m.mmproj-Q8_0.gguf", "m.mmproj-f16.gguf"]
+
+    def test_an_ordinary_repo_has_no_companions(self):
+        assert companion_files(SPLIT_LISTING) == []
+
+    def test_is_companion_is_case_insensitive(self):
+        assert is_companion("M.MMPROJ-F16.GGUF") is True
+        assert is_companion("m.Q8_0.gguf") is False
+
+
+class TestCoarseQuantization:
+    """The DB bucket is a FUNCTION of the label, not an independent choice."""
+
+    def test_maps_each_family_to_its_bucket(self):
+        assert coarse_quantization("Q2_K") == "Q2"
+        assert coarse_quantization("IQ2_XXS") == "Q2"
+        assert coarse_quantization("Q4_K_M") == "Q4"
+        assert coarse_quantization("Q3_K_M") == "Q4"
+        assert coarse_quantization("Q6_K") == "Q8"
+        assert coarse_quantization("Q8_0") == "Q8"
+        assert coarse_quantization("F16") == "FP16"
+        assert coarse_quantization("F32") == "FP32"
+
+    def test_an_unknown_label_does_not_claim_a_quantization(self):
+        """FP16 is the least wrong default; Q2 would understate memory badly."""
+        assert coarse_quantization("mystery.gguf") == "FP16"
+        assert coarse_quantization("") == "FP16"
 
 
 class TestDetectingAGGUFRepo:

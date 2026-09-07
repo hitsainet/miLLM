@@ -29,7 +29,12 @@ from millm.core.errors import (
     RepoNotFoundError,
 )
 from millm.core.resilience import huggingface_circuit, CircuitOpenError
-from millm.ml.gguf_catalog import GGUF_SUFFIX, GGUFFile, group_gguf_files
+from millm.ml.gguf_catalog import (
+    GGUF_SUFFIX,
+    GGUFFile,
+    companion_files,
+    group_gguf_files,
+)
 
 logger = structlog.get_logger()
 
@@ -476,6 +481,7 @@ class ModelDownloader:
                 if s.rfilename.lower().endswith(GGUF_SUFFIX)
             ]
             gguf_quants = group_gguf_files(gguf_files)
+            gguf_companions = companion_files(gguf_files)
 
             # Free enrichment: for an indexed GGUF repo the Hub already returns
             # architecture, parameter count, context length and the chat
@@ -488,6 +494,7 @@ class ModelDownloader:
                 "repo_id": info.modelId,
                 "revision": getattr(info, "sha", None),
                 "gguf_quants": gguf_quants,
+                "gguf_companions": gguf_companions,
                 "gguf_architecture": gguf_meta.get("architecture") if isinstance(gguf_meta, dict) else None,
                 "gguf_context_length": gguf_meta.get("context_length") if isinstance(gguf_meta, dict) else None,
                 "gguf_total_params": gguf_meta.get("total") if isinstance(gguf_meta, dict) else None,

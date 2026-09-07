@@ -1,6 +1,7 @@
 import { useState } from 'react';
 import { Download, Play, HelpCircle } from 'lucide-react';
 import { Card, CardHeader, Button, Input, Select } from '@components/common';
+import type { GGUFQuantInfo } from '@/types';
 
 export interface ModelLoadFormData {
   repo_id: string;
@@ -8,6 +9,9 @@ export interface ModelLoadFormData {
   device: 'auto' | 'cuda' | 'cpu';
   trust_remote_code: boolean;
   hf_token?: string;
+  /** Set only when a GGUF quantization was chosen. */
+  gguf_files?: string[];
+  gguf_label?: string;
 }
 
 interface ModelLoadFormProps {
@@ -15,8 +19,21 @@ interface ModelLoadFormProps {
   onPreview?: (repo_id: string, hf_token?: string) => void;
   isLoading?: boolean;
   isPreviewLoading?: boolean;
+  /** Quantizations from the most recent preview, if that repo was GGUF. */
+  ggufQuants?: GGUFQuantInfo[] | null;
+  /** WHICH repo those quantizations describe. See `ggufForCurrentRepo`. */
+  previewedRepoId?: string | null;
 }
 
+/**
+ * Runtime quantization levels, for an ordinary safetensors model.
+ *
+ * FIXED ON PURPOSE. These are bitsandbytes levels applied at load time, so they
+ * are a property of the runtime and identical for every such repo — there is
+ * nothing to look up. A GGUF repo is the opposite: the quantizations are files
+ * that were baked ahead of time and differ per repo, so the list below is
+ * replaced by the repo's own.
+ */
 const quantizationOptions = [
   { value: 'Q4', label: 'Q4 - 4-bit (Recommended)' },
   { value: 'Q8', label: 'Q8 - 8-bit' },
@@ -24,6 +41,10 @@ const quantizationOptions = [
   { value: 'FP32', label: 'FP32 - Full Precision' },
   { value: 'Q2', label: 'Q2 - 2-bit' },
 ];
+
+function formatGB(bytes: number): string {
+  return `${(bytes / 1024 ** 3).toFixed(2)} GB`;
+}
 
 const deviceOptions = [
   { value: 'auto', label: 'Auto' },
@@ -36,6 +57,8 @@ export function ModelLoadForm({
   onPreview,
   isLoading,
   isPreviewLoading,
+  ggufQuants,
+  previewedRepoId,
 }: ModelLoadFormProps) {
   const [formData, setFormData] = useState<ModelLoadFormData>({
     repo_id: '',
@@ -45,6 +68,24 @@ export function ModelLoadForm({
     hf_token: '',
   });
   const [errors, setErrors] = useState<Record<string, string>>({});
+  const [ggufLabel, setGgufLabel] = useState<string>('');
+
+  /**
+   * The previewed quantizations, but ONLY while they still describe the repo in
+   * the box.
+   *
+   * A preview is true of one repository. Editing the repo id after previewing
+   * leaves the old repo's quantizations on screen, and choosing one would send
+   * file paths that do not exist in the new repo — a stale verdict presented as
+   * a current one. Comparing against the previewed id makes the list disappear
+   * the moment it stops being true.
+   */
+  const ggufForCurrentRepo =
+    previewedRepoId && previewedRepoId.trim() === formData.repo_id.trim()
+      ? ggufQuants ?? null
+      : null;
+  const isGguf = !!ggufForCurrentRepo?.length;
+  const selectedQuant = ggufForCurrentRepo?.find((q) => q.label === ggufLabel) ?? null;
 
   const validateForm = (): boolean => {
     const newErrors: Record<string, string> = {};
@@ -65,6 +106,15 @@ export function ModelLoadForm({
       onSubmit({
         ...formData,
         hf_token: formData.hf_token || undefined,
+        // EVERY file of the chosen quantization. The coarse `quantization`
+        // above is ignored by the backend when a label is present — it derives
+        // the bucket from the label so the two cannot disagree.
+        ...(selectedQuant
+          ? {
+              gguf_files: selectedQuant.files.map((f) => f.path),
+              gguf_label: selectedQuant.label,
+            }
+          : {}),
       });
     }
   };
@@ -93,12 +143,30 @@ export function ModelLoadForm({
         />
 
         <div className="grid grid-cols-2 gap-4">
-          <Select
-            label="Quantization"
-            value={formData.quantization}
-            onChange={(e) => setFormData({ ...formData, quantization: e.target.value as ModelLoadFormData['quantization'] })}
-            options={quantizationOptions}
-          />
+          {isGguf ? (
+            <Select
+              label="Quantization"
+              value={ggufLabel}
+              onChange={(e) => setGgufLabel(e.target.value)}
+              options={[
+                { value: '', label: `Choose one of ${ggufForCurrentRepo!.length}…` },
+                ...ggufForCurrentRepo!.map((q) => ({
+                  value: q.label,
+                  label: `${q.label} — ${formatGB(q.total_size_bytes)}${
+                    q.is_split ? ` (${q.files.length} parts)` : ''
+                  }`,
+                })),
+              ]}
+              helperText="From this repository, with measured sizes"
+            />
+          ) : (
+            <Select
+              label="Quantization"
+              value={formData.quantization}
+              onChange={(e) => setFormData({ ...formData, quantization: e.target.value as ModelLoadFormData['quantization'] })}
+              options={quantizationOptions}
+            />
+          )}
           <Select
             label="Device"
             value={formData.device}

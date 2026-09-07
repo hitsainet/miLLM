@@ -44,6 +44,12 @@ export function ModelsPage() {
       device: data.device,
       trust_remote_code: data.trust_remote_code,
       hf_token: data.hf_token,
+      // Present only when a GGUF quantization was chosen. Without these the
+      // form would download the ENTIRE repository — every quantization — which
+      // is what this path did before the picker existed.
+      ...(data.gguf_files?.length ? { gguf_files: data.gguf_files } : {}),
+      ...(data.gguf_label ? { gguf_label: data.gguf_label } : {}),
+      ...(previewData?.revision ? { revision: previewData.revision } : {}),
     });
   };
 
@@ -157,6 +163,8 @@ export function ModelsPage() {
           onPreview={handlePreview}
           isLoading={isDownloading || isLoadingModel}
           isPreviewLoading={isPreviewingModel}
+          ggufQuants={previewData?.gguf_quants ?? null}
+          previewedRepoId={previewRepoId}
         />
       )}
 

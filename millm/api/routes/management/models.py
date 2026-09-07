@@ -316,6 +316,13 @@ async def preview_model(
     if gguf_quants:
         estimated_sizes = None
 
+    companions = info.get("gguf_companions") or []
+    gguf_companions = (
+        [GGUFFileInfo(path=c.path, size_bytes=c.size_bytes) for c in companions]
+        if companions
+        else None
+    )
+
     # Build preview response with all available metadata
     preview = ModelPreviewResponse(
         name=info.get("name", ""),
@@ -326,6 +333,7 @@ async def preview_model(
         estimated_sizes=estimated_sizes,
         revision=info.get("revision"),
         gguf_quants=gguf_quants,
+        gguf_companions=gguf_companions,
         gguf_architecture=info.get("gguf_architecture"),
         gguf_context_length=info.get("gguf_context_length"),
         gguf_total_params=info.get("gguf_total_params"),

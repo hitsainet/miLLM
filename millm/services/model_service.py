@@ -31,9 +31,10 @@ from millm.core.errors import (
     ModelNotFoundError,
     ModelNotLoadedError,
 )
-from millm.db.models.model import Model, ModelSource, ModelStatus
+from millm.db.models.model import Model, ModelSource, ModelStatus, QuantizationType
 from millm.db.repositories.model_repository import ModelRepository
 from millm.ml.memory_utils import estimate_memory_mb
+from millm.ml.gguf_catalog import coarse_quantization
 from millm.ml.model_downloader import ModelDownloader, _safe_variant
 from millm.ml.model_loader import ModelLoader
 from millm.sockets.progress import ProgressEmitter
@@ -207,6 +208,21 @@ class ModelService:
         Raises:
             ModelAlreadyExistsError: If model with same repo_id/quantization exists
         """
+        # The coarse level is DERIVED from the GGUF label, never taken from the
+        # request. It is a function of the label, so letting a caller send both
+        # lets them disagree — and every GGUF download would otherwise be filed
+        # under whatever the quantization dropdown defaulted to.
+        if request.gguf_label:
+            derived = QuantizationType(coarse_quantization(request.gguf_label))
+            if derived != request.quantization:
+                logger.info(
+                    "gguf_quantization_derived",
+                    gguf_label=request.gguf_label,
+                    requested=request.quantization.value,
+                    derived=derived.value,
+                )
+            request = request.model_copy(update={"quantization": derived})
+
         # Check for existing model with same repo_id and quantization
         if request.source == ModelSource.HUGGINGFACE and request.repo_id:
             existing = await self.repository.find_by_repo_quantization(

@@ -56,6 +56,23 @@ class EngineUnsupportedError(MiLLMError):
     status_code = 400
 
 
+class ContextLengthExceededError(MiLLMError):
+    """The request does not fit in the model's context window.
+
+    A LIMIT OF THE REQUEST, not a server fault, and the distinction is not
+    cosmetic: llama.cpp raises a bare ValueError for this, which reached the
+    client as a 500 "An internal server error occurred". A 500 means "try
+    again" — miStudio's labeling run duly retried each oversized prompt three
+    times, burning a model call each time on a request that could never
+    succeed, and reported nothing an operator could act on.
+
+    OpenAI returns 400 `context_length_exceeded` here, and clients know it.
+    """
+
+    code = "CONTEXT_LENGTH_EXCEEDED"
+    status_code = 400
+
+
 class ModelNotFoundError(MiLLMError):
     """Raised when a requested model does not exist."""
 

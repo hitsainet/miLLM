@@ -37,7 +37,11 @@ from millm.api.schemas.openai import (
     TextCompletionResponse,
     Usage,
 )
-from millm.core.errors import EngineUnsupportedError, MiLLMError
+from millm.core.errors import (
+    ContextLengthExceededError,
+    EngineUnsupportedError,
+    MiLLMError,
+)
 from millm.core.logging import get_logger
 from millm.ml.generation_config import GenerationConfig
 from millm.ml.model_loader import LoadedModelState
@@ -2803,6 +2807,26 @@ class InferenceService:
             ),
         )
 
+    @staticmethod
+    def _translate_llamacpp_error(exc: Exception) -> Exception:
+        """Turn llama.cpp's bare ValueErrors into errors that mean something.
+
+        It signals an oversized prompt as `ValueError: Requested tokens (4703)
+        exceed context window of 4096`, which propagates as an unhandled
+        exception and reaches the client as a 500. That is the wrong answer in
+        the way that matters: a 500 invites a retry, and an oversized prompt
+        will fail identically every time.
+        """
+        text = str(exc)
+        if "exceed context window" in text or "exceeds context window" in text:
+            return ContextLengthExceededError(
+                f"{text}. The model is serving a smaller context than its file "
+                "declares because the larger one did not fit in VRAM — see the "
+                "context_length in /api/inference/status. Shorten the prompt, "
+                "raise GGUF_CONTEXT_LENGTH, or use a smaller quantization."
+            )
+        return exc
+
     def _llamacpp_sync(self, messages: list[dict], params: dict) -> dict:
         """Blocking llama.cpp call, for asyncio.to_thread.
 
@@ -2931,7 +2955,10 @@ class InferenceService:
         messages = self._llamacpp_messages(request)
 
         async with self._request_queue.acquire():
-            raw = await asyncio.to_thread(self._llamacpp_sync, messages, params)
+            try:
+                raw = await asyncio.to_thread(self._llamacpp_sync, messages, params)
+            except Exception as exc:  # noqa: BLE001
+                raise self._translate_llamacpp_error(exc) from exc
 
         choice_raw = (raw.get("choices") or [{}])[0]
         text = (choice_raw.get("message") or {}).get("content") or ""
@@ -3014,7 +3041,10 @@ class InferenceService:
             token_count = 0
             finish_reason = "stop"
             try:
-                stream = await asyncio.to_thread(_open_stream)
+                try:
+                    stream = await asyncio.to_thread(_open_stream)
+                except Exception as exc:  # noqa: BLE001
+                    raise self._translate_llamacpp_error(exc) from exc
 
                 yield self._sse(
                     ChatCompletionChunk(

@@ -881,3 +881,87 @@ class TestGGUFEmbeddings:
 
         with pytest.raises(RuntimeError, match="CUDA out of memory"):
             await svc.create_embeddings(self._request())
+
+
+class TestAnOversizedPromptIsAClientError:
+    """A prompt that does not fit is a 400, not a 500.
+
+    llama.cpp raises a bare `ValueError: Requested tokens (4703) exceed context
+    window of 4096`, which propagated as an unhandled exception and reached the
+    client as 500 "An internal server error occurred". A 500 means "try again",
+    so miStudio's labeling run retried each oversized prompt three times —
+    burning a model call each time on a request that could never succeed, and
+    reporting nothing an operator could act on. OpenAI returns 400
+    `context_length_exceeded` here and clients know it.
+
+    MUTATION CONTROLS:
+      * drop the try/except around the llama.cpp call -> ValueError escapes
+      * match only "exceeds" and not "exceed"          -> the real message misses
+    """
+
+    def _service(self, raises):
+        from millm.services.inference_service import InferenceService
+
+        svc = InferenceService.__new__(InferenceService)
+        state = MagicMock()
+        state.is_loaded = True
+        state.current = _loaded(ENGINE_LLAMACPP)
+        state.current.model_name = "m"
+        svc._model_state = state
+        svc._request_queue = _NullQueue()
+        state.current.model.create_chat_completion = MagicMock(side_effect=raises)
+        return svc
+
+    @pytest.mark.asyncio
+    async def test_a_too_long_prompt_is_400_not_500(self):
+        from millm.core.errors import ContextLengthExceededError
+        from millm.api.schemas.openai import ChatCompletionRequest
+
+        svc = self._service(
+            ValueError("Requested tokens (4703) exceed context window of 4096")
+        )
+
+        with pytest.raises(ContextLengthExceededError) as exc:
+            await svc._llamacpp_chat_completion(
+                ChatCompletionRequest(
+                    model="m", messages=[{"role": "user", "content": "x"}]
+                )
+            )
+
+        assert exc.value.status_code == 400
+        assert "4703" in str(exc.value), "the real numbers must survive"
+
+    @pytest.mark.asyncio
+    async def test_it_says_what_to_do_about_it(self):
+        """The window is smaller than the file declares; say why and how."""
+        from millm.core.errors import ContextLengthExceededError
+        from millm.api.schemas.openai import ChatCompletionRequest
+
+        svc = self._service(
+            ValueError("Requested tokens (4703) exceed context window of 4096")
+        )
+
+        with pytest.raises(ContextLengthExceededError) as exc:
+            await svc._llamacpp_chat_completion(
+                ChatCompletionRequest(
+                    model="m", messages=[{"role": "user", "content": "x"}]
+                )
+            )
+
+        message = str(exc.value)
+        assert "GGUF_CONTEXT_LENGTH" in message
+        assert "did not fit in VRAM" in message
+
+    @pytest.mark.asyncio
+    async def test_an_unrelated_failure_is_not_relabelled(self):
+        """Only the context case is translated; everything else stays itself."""
+        from millm.api.schemas.openai import ChatCompletionRequest
+
+        svc = self._service(RuntimeError("CUDA out of memory"))
+
+        with pytest.raises(RuntimeError, match="CUDA out of memory"):
+            await svc._llamacpp_chat_completion(
+                ChatCompletionRequest(
+                    model="m", messages=[{"role": "user", "content": "x"}]
+                )
+            )

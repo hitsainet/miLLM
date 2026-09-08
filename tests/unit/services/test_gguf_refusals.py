@@ -976,88 +976,40 @@ class TestTheContextAdviceNamesAReachablePath:
     follows this sentence, gets a 404, and concludes the capability is missing
     rather than that the message is wrong. It cost exactly that.
 
-    Resolved against `register_routes()` on a FRESH app rather than
-    `create_app()`. The claim is "this path is a mounted route", and
-    `register_routes` is what mounts them; `create_app` additionally builds
-    middleware, exception handlers, CORS and settings, none of which the claim
-    needs. Coupling to all of it made this test fail in CI — and ONLY in CI —
-    for a reason that had nothing to do with the path: `create_app()` returns
-    an app with only FastAPI's four default routes late in a CI run, while the
-    same call at 5% and 16% of the same run serves `/v1` requests fine. That is
-    module-state pollution, it does not reproduce outside CI, and it is written
-    up in the project's dev-internal known-issues log. A guard that reports a
-    path bug when the path is correct is worse than no guard — it names the
-    wrong defect convincingly.
+    READ FROM THE SERVED OPENAPI SCHEMA, never from `app.routes`. Since FastAPI
+    0.141 / Starlette 1.6, `include_router` no longer flattens routes into
+    `app.routes`: it appends a single lazy `fastapi.routing._IncludedRouter`
+    with no `.path`, and the real routes live behind it. Introspecting
+    `app.routes` therefore returns the four framework defaults and nothing else,
+    on an app that routes every request perfectly.
+
+    That cost hours. This guard reported "route registration is broken", a
+    known-issues entry was written about module-state pollution that does not
+    exist, and the whole thing was CI-only for the mundane reason that CI
+    installs into a clean environment (fastapi 0.141.1 / starlette 1.6.0) while
+    a long-lived local venv sat on 0.128.0 / 0.50.0. Every `TestClient` test
+    passed throughout, because routing was never broken.
+
+    The sibling repo had already learned this and written it down —
+    `test_body_limit.py`, `test_mcp_tools_call_real_routes.py` and
+    `test_cancel_registry_completeness.py` in miStudio all say "read the served
+    schema, not app.routes". Looking there first would have cost minutes.
     """
 
-    def _mounted_paths(self) -> set[str]:
-        from fastapi import FastAPI
+    def _served_paths(self) -> set[str]:
+        from millm.main import create_app
 
-        from millm.api.routes import register_routes
+        paths = set(create_app().openapi().get("paths", {}))
 
-        app = FastAPI()
-        register_routes(app)
-        paths = {r.path for r in app.routes if hasattr(r, "path")}
-
-        # NEGATIVE CONTROL, and it has already earned its keep twice: it caught
-        # this test misreporting a correct path as wrong, and then proved the
-        # fault is in the ROUTERS rather than in `create_app` — `register_routes`
-        # on a bare app also yields nothing under CI.
-        #
-        # SKIP, not fail, and not pass. The condition is real and CI-only: no
-        # local run reproduces it after matching CI's pytest 9.1.1, pytest-mock,
-        # exact command, env and a llama_cpp stub, and an autouse probe over the
-        # whole suite never once saw the routers empty. Failing here means a
-        # permanently red suite for a defect nobody can iterate on; passing
-        # would report green for exactly the condition this guard exists to
-        # detect. This is the pattern the cross-repo guards in
-        # tests/unit/test_mcp_contract_consistency.py already use, for the same
-        # reason.
-        #
-        # The path assertion below still runs everywhere the routers are intact,
-        # which is every developer machine and CI up to whatever point breaks
-        # them. See the dev-internal known-issues log.
+        # NEGATIVE CONTROL. An assertion over an empty set passes for anything,
+        # and a near-empty one is how this guard misreported twice: first as a
+        # phantom wrong path, then as a phantom pollution bug.
         api_paths = {p for p in paths if p.startswith("/api/")}
-        if len(api_paths) <= 20:
-            # DIAGNOSE AT THE POINT OF FAILURE. Two teardown probes reported
-            # nothing while this kept skipping, because by teardown the state
-            # is healthy again — so whatever is wrong exists only while the
-            # test runs. Captured here rather than inferred from outside.
-            import sys
-
-            from millm.api.routes import register_routes as _rr
-
-            pkg = sys.modules.get("millm.api.routes")
-            health = sys.modules.get("millm.api.routes.system.health")
-            diag = {
-                "register_routes": f"{type(_rr).__name__} from {getattr(_rr, '__module__', '?')}",
-                "pkg_in_sys_modules": pkg is not None,
-                "pkg_file": getattr(pkg, "__file__", None),
-                "health_in_sys_modules": health is not None,
-                "health_router_routes": len(
-                    getattr(getattr(health, "router", None), "routes", []) or []
-                ),
-                "pkg_health_router_routes": len(
-                    getattr(getattr(pkg, "health_router", None), "routes", []) or []
-                ),
-                "same_router": getattr(pkg, "health_router", None)
-                is getattr(health, "router", None),
-                "fastapi_app_type": type(app).__name__,
-                "mocked_millm": [
-                    k
-                    for k, m in list(sys.modules.items())
-                    if k.startswith("millm") and type(m).__name__ in {"MagicMock", "Mock"}
-                ][:8],
-            }
-            pytest.skip(
-                f"route registration is broken in this session — only "
-                f"{len(api_paths)} /api routes exist after register_routes() on "
-                f"a fresh app (collected: {sorted(paths)[:6]}). That is a known "
-                f"CI-only module-state defect, NOT a wrong path in the message, "
-                f"and this guard cannot say anything about the path until it is "
-                f"fixed. Skipping loudly rather than reporting a phantom path "
-                f"bug or a vacuous pass. DIAGNOSTICS: {diag}"
-            )
+        assert len(api_paths) > 20, (
+            f"only {len(api_paths)} /api paths in the served schema — the "
+            f"collection is broken, which is not what this test is about. "
+            f"Sample: {sorted(paths)[:8]}"
+        )
         return paths
 
     def test_the_path_the_message_names_is_a_real_route(self):
@@ -1071,26 +1023,47 @@ class TestTheContextAdviceNamesAReachablePath:
             )
         )
 
-        paths = re.findall(r"/api/[\w/{}-]+", message)
-        assert paths, f"the advice must name a path to read: {message}"
+        named = re.findall(r"/api/[\w/{}-]+", message)
+        assert named, f"the advice must name a path to read: {message}"
 
-        mounted = self._mounted_paths()
-        for path in paths:
-            assert path in mounted, (
-                f"the refusal sends the caller to {path}, which is not a "
-                f"mounted route. Live paths under /api/health: "
-                f"{sorted(p for p in mounted if p.startswith('/api/health'))}"
+        served = self._served_paths()
+        for path in named:
+            assert path in served, (
+                f"the refusal sends the caller to {path}, which the server does "
+                f"not serve. Live paths under /api/health: "
+                f"{sorted(p for p in served if p.startswith('/api/health'))}"
             )
 
     def test_the_guard_would_notice_a_wrong_path(self):
-        """The control for the control: prove the check can FAIL.
+        """The control for the control: prove the check can FAIL."""
+        assert "/api/inference/status" not in self._served_paths()
 
-        Without this, a regex that silently matches nothing, or a `mounted` set
-        that accidentally contains everything, would leave the test above
-        passing over a broken message forever.
+    def test_app_routes_introspection_is_NOT_viable_here(self):
+        """Pins the trap, so the next person meets a test instead of a mystery.
+
+        This asserts the WRONG technique gives the WRONG answer on this
+        FastAPI. If a future version restores flattening, this fails and the
+        comment above can be relaxed deliberately — rather than someone
+        "simplifying" the served-schema read back into an `app.routes` walk and
+        rediscovering a phantom pollution bug.
         """
-        mounted = self._mounted_paths()
-        assert "/api/inference/status" not in mounted, (
-            "the path this message used to name must still be absent, or this "
-            "guard proves nothing"
+        from fastapi import FastAPI
+
+        from millm.api.routes import register_routes
+
+        app = FastAPI()
+        register_routes(app)
+        introspected = {
+            r.path
+            for r in app.routes
+            if hasattr(r, "path") and r.path.startswith("/api/")
+        }
+
+        assert introspected == set(), (
+            "app.routes now exposes included routes again; the served-schema "
+            "reads in this file can be reconsidered, deliberately"
+        )
+        assert len({p for p in self._served_paths() if p.startswith("/api/")}) > 20, (
+            "the served schema is the technique that works — if it stopped, "
+            "everything in this class is unverified"
         )

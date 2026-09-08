@@ -5,78 +5,50 @@ the next person meets a note instead of a mystery.
 
 ---
 
-## `create_app()` returns an unrouted app late in a CI run
+*(No open entries.)*
 
-**Status:** open, CI-only, not reproduced locally.
-**Found:** 2026-09-07, by a route-path guard added the same day.
+## RESOLVED 2026-09-08 — "create_app returns an unrouted app late in a CI run"
 
-In GitHub Actions, `millm.main.create_app()` returns a FastAPI app carrying only
-the four framework defaults — `/openapi.json`, `/docs`, `/docs/oauth2-redirect`,
-`/redoc` — with **no `/api` or `/v1` routes at all**. `register_routes(app)` is
-called unconditionally at the end of `create_app`, so something has left the
-process in a state where `include_router` adds nothing.
+Kept because the wrong diagnosis is the useful part.
 
-**It is position-dependent, which is the whole finding.** In the same CI run:
+**What it looked like:** in CI only, `create_app()` appeared to return an app
+with just the four framework defaults, and a route guard reported "route
+registration itself is broken". A whole entry was written here about
+module-state pollution, with a suspect (a `sys.modules` swap in
+`test_gguf_engine.py`) and a plan to diff module identities across the run.
 
-| position | test | result |
-|---|---|---|
-| 5%  | `test_gguf_refused_before_load.py` — `create_app()` + `TestClient`, POSTs `/v1/completions` | PASSED |
-| 16% | `test_model_name_disambiguation.py` — `create_app()`, POSTs `/v1/chat/completions` | PASSED |
-| 70% | a guard reading `create_app().routes` directly | saw 4 routes |
+**What it actually was:** nothing was broken. Since **FastAPI 0.141 /
+Starlette 1.6**, `include_router` no longer flattens routes into `app.routes`.
+It appends one lazy `fastapi.routing._IncludedRouter` with no `.path`, and the
+real routes live behind it:
 
-So routes register correctly early and are gone later. Nothing else in the suite
-notices, because every other consumer reaches routes through `TestClient` and
-runs before the break.
+    starlette.routing.Route          path='/openapi.json'
+    starlette.routing.Route          path='/docs'
+    ...
+    fastapi.routing._IncludedRouter  path=None      <- all real routes in here
 
-**What was ruled out** (each measured, not assumed):
+So `{r.path for r in app.routes if hasattr(r, "path")}` returns the defaults and
+nothing else, on an app that routes every request correctly. Reproduced exactly
+in a throwaway venv at CI's versions.
 
-* not the environment — CI's `SECRET_KEY`/`DATA_DIR` reproduced locally: 89 routes
-* not the pytest version — local upgraded to CI's 9.1.1: still green
-* not `pytest-mock` — installed locally to match: still green
-* not the CI command — its exact `--ignore` set run locally: 1731 passed
-* not a mocked `register_routes` — nothing in `tests/` patches it
-* not `llama_cpp` presence alone — CI has it, local does not, and a stub module
-  on `PYTHONPATH` did not reproduce it
+**Why it looked CI-only and position-dependent:** CI installs into a clean
+environment and resolved fastapi 0.141.1 / starlette 1.6.0; a long-lived local
+venv sat on 0.128.0 / 0.50.0, where the old flattening behaviour still applies.
+And the tests that "passed at 5% and 16%" use `TestClient` — they make real
+requests, which always worked. Only the introspecting guard at 70% looked at
+`app.routes`. There was never a transition partway through the run; there were
+two different techniques, one valid and one not.
 
-**Narrowed on the second CI run (2026-09-07, after the guard was rewritten):**
-the fault is in the **router objects**, not in `create_app`.
-`register_routes(FastAPI())` on a bare app — no middleware, no CORS, no
-exception handlers, no settings — ALSO yields zero `/api` routes in CI. So
-`app.include_router(health_router)` and its siblings are adding nothing, which
-means the module-level `APIRouter` objects have empty `.routes` by that point.
-An autouse teardown probe over the entire local suite (with a `llama_cpp` stub
-present, to match CI) never once observed them empty, so nothing on a developer
-machine reproduces it.
+**The fix:** read the SERVED OpenAPI schema — `app.openapi()["paths"]` — never
+`app.routes`.
 
-The remaining suspect is module-state pollution from the `sys.modules` surgery in
-`tests/unit/ml/test_gguf_engine.py`, which swaps `llama_cpp` for a broken mock
-and re-imports `millm.ml.model_loader`. That test restores what it replaces and
-asserts it did, and it runs at 34% — before the break. It is a suspect, not a
-conclusion.
+**The part worth remembering:** miStudio had already hit this and written it
+down. `test_body_limit.py`, `test_mcp_tools_call_real_routes.py` and
+`test_cancel_registry_completeness.py` all carry a comment saying to read the
+served schema because included routers are wrapped with no `.path`. Checking
+the sibling repo would have cost minutes instead of hours, and no fictional
+defect would have been documented here in the meantime.
 
-**Why it is not simply fixed:** it does not reproduce outside CI, and shipping a
-test that fails only there would mean a permanently red suite for a defect
-nobody can iterate on.
-
-**What was done instead (revised):** the guard no longer builds a whole app —
-it resolves routes through `register_routes(FastAPI())`, the thing its claim is
-actually about — and when the route table comes back empty it **skips loudly**
-rather than failing. The condition is real, but failing on it means a
-permanently red suite for a defect nobody can iterate on, and passing would
-report green for exactly the condition the guard exists to detect. This is the
-pattern `tests/unit/test_mcp_contract_consistency.py` already uses for its
-cross-repo guards, for the same reason. The path assertion still runs wherever
-the routers are intact — every developer machine, and CI up to whatever point
-breaks them.
-
-Earlier note, kept because the reasoning still holds: the guard that found it
-no longer builds a whole app.
-It resolves routes through `register_routes(FastAPI())`, which is the thing its
-claim is actually about, and carries a negative control that FAILS LOUDLY on an
-empty route set — so if this recurs, the message says "route registration itself
-is broken" rather than misreporting a correct path as wrong. That misreport is
-what cost the investigation: it named the wrong defect convincingly.
-
-**If you pick this up:** the cheap next step is a CI-only diagnostic that dumps
-`sys.modules` keys for `millm.*` and the identity of `millm.api.routes` at both
-5% and 70% of the run. The divergence between those two points is the answer.
+**Second lesson:** a local environment that has drifted from CI does not just
+cause false greens — it invents phantom bugs. The same drift produced three
+"1955 passed" reports against a red CI earlier the same day.

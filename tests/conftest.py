@@ -88,8 +88,26 @@ def pytest_runtest_teardown(item, nextitem):  # noqa: D103
 
         health_mod = sys.modules.get("millm.api.routes.system.health")
         routes_pkg = sys.modules.get("millm.api.routes")
+
+        # ABSENCE IS A FINDING, not a reason to stay quiet. The first version of
+        # this probe returned here, and CI printed nothing at all while the
+        # guard still skipped — so the modules being GONE from sys.modules is
+        # very likely the whole story, and the probe hid it.
         if health_mod is None or routes_pkg is None:
-            return  # not imported yet; nothing to say
+            _ROUTE_PROBE_FIRED.append(item.nodeid)
+            present = sorted(
+                k for k in sys.modules if k.startswith("millm.api")
+            )
+            print(
+                "\n\n===== ROUTE PROBE: a routes module is MISSING from sys.modules =====\n"
+                f"  after test        : {item.nodeid}\n"
+                f"  millm.api.routes  : {'present' if routes_pkg else 'ABSENT'}\n"
+                f"  ...system.health  : {'present' if health_mod else 'ABSENT'}\n"
+                f"  millm.api.* keys  : {present[:14]}\n"
+                "====================================================================\n",
+                flush=True,
+            )
+            return
 
         bound = getattr(routes_pkg, "health_router", None)
         live = getattr(health_mod, "router", None)

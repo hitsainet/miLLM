@@ -1019,6 +1019,36 @@ class TestTheContextAdviceNamesAReachablePath:
         # them. See the dev-internal known-issues log.
         api_paths = {p for p in paths if p.startswith("/api/")}
         if len(api_paths) <= 20:
+            # DIAGNOSE AT THE POINT OF FAILURE. Two teardown probes reported
+            # nothing while this kept skipping, because by teardown the state
+            # is healthy again — so whatever is wrong exists only while the
+            # test runs. Captured here rather than inferred from outside.
+            import sys
+
+            from millm.api.routes import register_routes as _rr
+
+            pkg = sys.modules.get("millm.api.routes")
+            health = sys.modules.get("millm.api.routes.system.health")
+            diag = {
+                "register_routes": f"{type(_rr).__name__} from {getattr(_rr, '__module__', '?')}",
+                "pkg_in_sys_modules": pkg is not None,
+                "pkg_file": getattr(pkg, "__file__", None),
+                "health_in_sys_modules": health is not None,
+                "health_router_routes": len(
+                    getattr(getattr(health, "router", None), "routes", []) or []
+                ),
+                "pkg_health_router_routes": len(
+                    getattr(getattr(pkg, "health_router", None), "routes", []) or []
+                ),
+                "same_router": getattr(pkg, "health_router", None)
+                is getattr(health, "router", None),
+                "fastapi_app_type": type(app).__name__,
+                "mocked_millm": [
+                    k
+                    for k, m in list(sys.modules.items())
+                    if k.startswith("millm") and type(m).__name__ in {"MagicMock", "Mock"}
+                ][:8],
+            }
             pytest.skip(
                 f"route registration is broken in this session — only "
                 f"{len(api_paths)} /api routes exist after register_routes() on "
@@ -1026,7 +1056,7 @@ class TestTheContextAdviceNamesAReachablePath:
                 f"CI-only module-state defect, NOT a wrong path in the message, "
                 f"and this guard cannot say anything about the path until it is "
                 f"fixed. Skipping loudly rather than reporting a phantom path "
-                f"bug or a vacuous pass."
+                f"bug or a vacuous pass. DIAGNOSTICS: {diag}"
             )
         return paths
 

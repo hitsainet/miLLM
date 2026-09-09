@@ -716,7 +716,7 @@ Only the currently loaded model appears in this list.
 | Multiple simultaneous downloads | Complexity; single download sufficient for v1.0 |
 | Download queue management | Out of scope; single download at a time |
 | Model format conversion | Use HuggingFace formats only |
-| GGUF format support | Requires different inference engine |
+| ~~GGUF format support~~ | ~~Requires different inference engine~~ — **DELIVERED** as Feature 23. It needs a different LOADER (llama.cpp) behind the same model-management surface, not a different engine for the product. See `023_FPRD|GGUF_Serving.md` |
 | Model fine-tuning | Delegated to external tools |
 | Automatic model updates | Manual re-download if needed |
 | Model version management | Single version per repo+quantization |
@@ -726,7 +726,7 @@ Only the currently loaded model appears in this list.
 
 - Multiple concurrent downloads with queue
 - Pause/resume large downloads
-- GGUF and other format support
+- ~~GGUF~~ (delivered, Feature 23) and other format support
 - Automatic model updates/version checking
 - Model comparison tools
 - Download scheduling

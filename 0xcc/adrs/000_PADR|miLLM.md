@@ -1131,6 +1131,33 @@ SAE_CACHE_DIR=./data/saes
 
 ### Major Trade-offs
 
+#### GGUF serving (Feature 23, 2026-09-08)
+
+#### llama.cpp behind the existing loader vs a second server
+**Decision:** A GGUF loader path inside miLLM, behind the same model-management and OpenAI surfaces
+**Trade-off:** One process carrying two very different runtimes vs two deployments to operate
+**Rationale:** The v1.0 scope note called GGUF "a different inference engine" and put it out of scope on that basis. It needs a different *loader*; everything above it — model rows, download flow, `/v1/*`, locking, graceful unload — is shared unchanged. Splitting would have duplicated all of that to avoid one branch at load time. SAE attachment is the real boundary and stays transformers-only: llama.cpp does not expose the hook points steering needs.
+
+#### `repo:QUANT` naming vs one row per repository
+**Decision:** Name a GGUF model `repo:QUANT`; resolve a bare name only while it is unambiguous, and raise naming the alternatives when it is not
+**Trade-off:** Longer model names, and a name that changes shape when a second quantization arrives, vs a name that can silently mean two things
+**Rationale:** Widening the uniqueness constraint to admit several quantizations without widening the NAME produced two rows called the same thing, and every OpenAI request for that model returned 500 while the model sat loaded and serving. Picking one silently would make the answer depend on insertion order with nothing on the wire to say which replied. The tagged form is also what Ollama already taught users to expect.
+
+#### Compute the context window vs search for it
+**Decision:** Predict from `2 × n_layer × n_head_kv × head_dim × bytes_per_element` against free VRAM, and let the load attempt confirm
+**Trade-off:** Two empirical constants (~2 GiB of CUDA context/compute buffers, planning against 94% of the card) vs six model loads and ~30 seconds per cold start
+**Rationale:** Every term comes from metadata the loader already probes. Validated against four measurements on the RTX 3090 — all four predicted correctly. It SEEDS the ladder rather than replacing it: a prediction that cannot be made falls back to the configured ceiling, and the load still decides.
+
+#### `q8_0` KV cache as the default
+**Decision:** Quantize the KV cache to `q8_0`, with flash attention required
+**Trade-off:** A quantized cache and a hard dependency on flash attention vs the largest possible window
+**Rationale:** Measured on gemma-4-31b IQ4_XS: `f16` tops out at 4,096 tokens, `q8_0` reaches 12,288, `q4_0` reaches 16,384. `q8_0` is near-lossless and triples the window — enough to clear the ~4,700-token labeling prompt that `f16` could not. `q4_0` buys another third at a real accuracy cost, which is the wrong trade when the model is acting as a judge.
+
+#### Degrade optional capabilities rather than refuse to serve
+**Decision:** On a load failure caused by embedding support, retry without it and record `supports_embeddings=false`
+**Trade-off:** A model that serves but cannot embed vs a clear, uniform capability set
+**Rationale:** `pooling_type=MEAN` is refused outright by some architectures, and the failure presents as context creation failing at *every* length — which produced advice ("try a smaller quantization") that could not possibly work, on a card that was 300 MiB used of 24 GiB. Embeddings are optional; serving the model is not.
+
 #### Cluster Runtime increment (v1.1, 2026-07-16)
 
 #### Extend `profiles` vs new `cluster_profiles` table

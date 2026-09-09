@@ -210,7 +210,7 @@ Discovery → Installation → Model Setup → SAE Configuration → Steering Ex
 |------|-----------|---------------------|
 | Multi-user authentication | Assumes trusted local network (like Ollama) | v1.1+ |
 | Multiple concurrent SAEs | Architectural complexity | v2.0 |
-| GGUF model format | Focus on Transformers ecosystem | v1.1+ |
+| ~~GGUF model format~~ | ~~Focus on Transformers ecosystem~~ — **DELIVERED 2026-09-08 as Feature 23.** The premise was wrong: GGUF needs a different *loader*, not a different product, and it shares the whole OpenAI-compatible surface. See BRD-MILLM-GGUF-001 | Delivered |
 | Kubernetes deployment | Docker sufficient for target users | v1.1+ |
 | Feature discovery/analysis tools | Delegated to miStudio | N/A |
 | Neuronpedia API integration | Nice-to-have, not core | v1.1+ |
@@ -218,7 +218,7 @@ Discovery → Installation → Model Setup → SAE Configuration → Steering Ex
 
 ### Future Roadmap Considerations
 - Multi-layer SAE support with coordinated feature adjustment
-- Additional model format support (GGUF, etc.)
+- ~~Additional model format support (GGUF, etc.)~~ — GGUF delivered as Feature 23; other formats remain open
 - API key authentication for non-local deployments
 - Multi-user request management
 - Neuronpedia integration for feature browsing
@@ -814,6 +814,36 @@ Structural consolidation of the shipped circuit runtime plus the agent surface i
 **User Value:** Enable secure access for team environments and non-local deployments.
 
 **Priority:** v1.1+
+
+---
+
+#### Feature 23: GGUF Serving
+
+**User Value:** Run the models the local-inference ecosystem actually
+distributes — including large models that only fit on one card once quantized —
+through the same OpenAI-compatible API as everything else.
+
+**Priority:** Delivered 2026-09-08 (was listed out-of-scope for v1.0; the
+premise did not survive contact with the goal — see BRD-MILLM-GGUF-001)
+
+**Requirements Covered:** FR-23.1 through FR-23.8
+
+**Key Capabilities:**
+- Serve `.gguf` files through `/v1/chat/completions`, `/v1/completions`,
+  `/v1/embeddings` and `/v1/models`, with no separate client path
+- Several quantizations of one repository coexist, named `repo:QUANT`; a bare
+  name that has become ambiguous returns 400 naming the alternatives rather than
+  picking one
+- The context window is **computed** from what the file declares and what free
+  VRAM can hold, then confirmed by the load — not searched for by trial
+- KV-cache quantization as a first-class VRAM lever: `q8_0` roughly triples the
+  usable window over `f16` at near-lossless quality (measured)
+- Embeddings on by default, with a graceful fall-back to serving without them
+  for architectures that refuse the required pooling mode
+- An oversized prompt is a 400, and a truncated answer can be continued
+
+**Not included:** SAE attachment and steering. llama.cpp does not expose the
+hook points those need, so interpretability work remains transformers-only.
 
 ---
 

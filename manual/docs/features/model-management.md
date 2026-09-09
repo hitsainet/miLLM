@@ -33,6 +33,42 @@ Quantization happens **at download time** — miLLM saves the quantized weights 
 Prefer **FP16** for a model that fits: quantized (bitsandbytes) models cannot use `torch.compile`, so FP16 decodes faster on capable GPUs despite the extra memory. See [Hardware Requirements](/getting-started/hardware) for sizing tables.
 :::
 
+## GGUF models and quantization
+
+miLLM serves **GGUF** files the way Ollama does, alongside HuggingFace checkpoints. A GGUF repository usually publishes several quantizations of the same weights, and **Preview** lists each one with its file size so you can pick before downloading.
+
+The distinction that matters against the table above: bitsandbytes quantization happens *at download time* from a full-precision checkpoint, while a GGUF file was quantized ahead of time by whoever published it. What you choose is a file, not a mode — `IQ4_XS`, `Q4_K_M`, `Q5_K_M` and so on.
+
+### Several quantizations of one repository can coexist
+
+They are different models with different sizes and different quality, so miLLM keeps them apart by naming a GGUF model **`repo:QUANT`** — the convention Ollama already established:
+
+```
+gemma-4-31b-it-3MPER0RR-abliterated-GGUF:IQ4_XS
+gemma-4-31b-it-3MPER0RR-abliterated-GGUF:Q4_K_M
+```
+
+Both appear separately in `/v1/models` instead of one shadowing the other. A **custom name** you supply is left alone — that is your choice, not a derived one.
+
+A **bare** repository name still resolves while exactly one quantization of it exists, so existing scripts and saved client selections keep working. Once a second is downloaded the bare name becomes ambiguous, and miLLM returns a **400** naming the tags that exist rather than picking one:
+
+```json
+{ "error": { "code": "AMBIGUOUS_MODEL_NAME",
+             "message": "'…-GGUF' matches 2 quantizations: …:IQ4_XS, …:Q4_K_M. Name one of them exactly." } }
+```
+
+Choosing silently would make the served model depend on which was downloaded first, with nothing on the wire to say which answered.
+
+### Context window
+
+A GGUF model's context is **derived, not configured**: miLLM reads what the file declares, predicts what free VRAM can hold, and loads at the largest window that fits under the [`GGUF_CONTEXT_LENGTH`](/reference/configuration#gguf-models) ceiling. See [Hardware Requirements](/getting-started/hardware#gguf-context-windows-are-derived-not-guessed) for the arithmetic and the KV-cache lever that triples it.
+
+### Embeddings
+
+GGUF models are loaded with embedding output enabled so `/v1/embeddings` works without a second load, at a measured ~6.7% generation cost (113.5 → 105.9 tok/s on `zora-v1.13 Q5_K_M`). Set [`GGUF_ENABLE_EMBEDDINGS=false`](/reference/configuration#gguf-models) to buy that back on a deployment that never embeds.
+
+Some architectures **refuse** the pooling mode embeddings require, and fail context creation at every length rather than reporting anything useful. When that happens miLLM retries the load without embeddings and records `supports_embeddings: false` on the model, so a caller is told up front instead of discovering it from a confusing failure at `/v1/embeddings`. Serving the model matters more than embedding it.
+
 ## Loading & Unloading
 
 One model is resident on the GPU at a time. Clicking **Load** on another ready model unloads the current one first. Before loading, miLLM estimates the memory requirement and warns if it exceeds free VRAM.

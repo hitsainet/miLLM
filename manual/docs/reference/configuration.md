@@ -62,6 +62,21 @@ High-throughput batched inference via HuggingFace `ContinuousBatchingManager`. T
 | `CBM_DEFAULT_MAX_TOKENS` | `512` | Default generation length |
 | `CBM_FORCE_SERIAL_MONITORING` | `false` | Route monitored requests to the serial path for exact per-request activation attribution (trades throughput for fidelity) |
 
+## GGUF models
+
+Settings that apply only when the loaded model is a GGUF file. See [Hardware Requirements](/getting-started/hardware#kv-cache) for the measurements behind the defaults.
+
+| Variable | Default | Notes |
+|---|---|---|
+| `GGUF_CONTEXT_LENGTH` | `32768` | **A ceiling, not a target.** miLLM reads what the file declares and loads the largest window that fits under this. `0` means "whatever the file declares", bounded only by what fits. |
+| `GGUF_KV_CACHE_TYPE` | `q8_0` | KV-cache precision — the biggest lever on how much context fits. `q8_0` is near-lossless and roughly triples the window over `f16`. `q4_0` buys another third at a real accuracy cost. `f16` restores llama.cpp's default behaviour. |
+| `GGUF_FLASH_ATTENTION` | `true` | **Required** by a quantized KV cache, not merely an optimisation. The loader refuses to pair the two with this off. |
+| `GGUF_ENABLE_EMBEDDINGS` | `true` | Loads with embedding output so `/v1/embeddings` works without a second load. Costs ~6.7% generation throughput, measured. Must be decided at load time — it cannot be switched on later. |
+
+:::tip Why the ceiling is needed in both directions
+llama.cpp's own default is 512 tokens, which truncates almost any real conversation. Unbounded is the opposite trap: a model declaring 262,144 tokens needs tens of gigabytes of KV cache, which either fails the load outright or reserves a GPU that other work shares.
+:::
+
 ## Example configurations
 
 ```bash title=".env — single-GPU research box"

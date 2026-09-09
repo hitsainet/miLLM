@@ -53,6 +53,17 @@ Sizing guidance: [Hardware Requirements](/getting-started/hardware).
 | First request after load is very slow (~20 s) | One-time `torch.compile` warmup | Expected; subsequent requests are fast. Also occurs once after SAE attach/detach. Disable with `TORCH_COMPILE=false` if warmup matters more than throughput |
 | Download stuck | Network or HF rate limiting | Cancel (`POST /api/models/{id}/cancel`) and retry; check `GET /api/health/circuits` for a tripped HuggingFace breaker |
 
+### GGUF-specific
+
+| Symptom | Cause | Fix |
+|---------|-------|-----|
+| `Could not create a llama.cpp context at any context length (tried …)` | Usually **not** the context size. Some architectures refuse the pooling mode embeddings require and fail at *every* length | miLLM already retries without embeddings and records `supports_embeddings: false`. If it still fails at every rung with the card nearly empty, the file itself is the problem, not the window |
+| `400 AMBIGUOUS_MODEL_NAME` | A bare repository name now matches two or more downloaded quantizations | Name the tag exactly, e.g. `…-GGUF:IQ4_XS`. The error lists the tags that exist |
+| `400 context_length_exceeded` on a prompt that used to work | The window shrank — usually `GGUF_KV_CACHE_TYPE` set back to `f16`, or `GGUF_FLASH_ATTENTION` turned off | Restore `q8_0` + flash attention, which roughly triples the window. See [Hardware](/getting-started/hardware#kv-cache) |
+| Context window smaller than expected | `GGUF_CONTEXT_LENGTH` is a ceiling, and the loader also stops at what VRAM can hold | Check the load log for the predicted and achieved window; free VRAM, or lower the KV-cache precision |
+| `/v1/embeddings` returns an error for one GGUF model | That model loaded without embedding support | Check `supports_embeddings` on the model record; use a different model for embeddings |
+| A **Continue** action restarts the answer from the beginning | Fixed — GGUF chat templates seal the final turn, and miLLM now completes a trailing assistant message instead | Update miLLM; no client change needed. See [OpenAI-compatible API](/api/openai-compatible#continuing-a-truncated-answer) |
+
 ## SAE attachment
 
 | Symptom | Cause | Fix |

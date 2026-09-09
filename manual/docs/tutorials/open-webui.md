@@ -28,6 +28,14 @@ Pick the miLLM model in a new chat and talk to it. Streaming, stop sequences, te
 If you loaded the **base** `gemma-2-2b` for SAE work, expect completions-style behavior rather than crisp assistant answers — base models aren't instruction-tuned. For chat-quality output use `gemma-2-2b-it`, accepting that GemmaScope features degrade somewhat off their training distribution; for clean steering experiments, prefer short factual prompts on the base model.
 :::
 
+:::info GGUF models appear with a quantization tag
+A GGUF model is listed as `repo:QUANT` — e.g. `gemma-4-31b-…-GGUF:IQ4_XS` — because several quantizations of one repository can be served side by side. Pick the tag you want; each is a separate entry.
+:::
+
+:::tip Continue resumes mid-sentence
+Open WebUI's **Continue** action resends the truncated answer as a trailing assistant message. GGUF chat templates close that turn, which used to leave the model no option but to start again — sometimes announcing it, and reasoning models re-opened their thought block each time. miLLM now completes the partial instead. Nothing to configure.
+:::
+
 ## Step 3 — Steer mid-conversation
 
 Leave the chat open, and in the miLLM Admin UI set a strong steering value (e.g. an *ocean* feature at 60). Ask the same question again in Open WebUI. The reply shifts topic-ward — no Open WebUI configuration changed, because steering lives server-side and applies to every request.

@@ -172,6 +172,22 @@ curl http://localhost:8000/v1/models
 
 By default `/v1/models` lists **all available models** (READY, LOADED, LOADING). When a model is **locked for steering**, only that locked model is listed — so a steering-locked server presents a single stable model id to OpenAI clients. Use the [Management API](/api/models) to see everything on disk (including states not surfaced here).
 
+## Serving GGUF models
+
+GGUF models answer the same OpenAI-compatible surface as HuggingFace checkpoints, with three behaviours worth knowing.
+
+**Model names carry a quantization tag.** A GGUF model is `repo:QUANT` — several quantizations of one repository can be served side by side. A bare repository name works while only one exists, and otherwise returns 400 `AMBIGUOUS_MODEL_NAME` naming the tags. See [Models API](/api/models#gguf-model-names).
+
+**An oversized prompt is a 400, not a 500.** llama.cpp signals this as a bare error that would otherwise surface as an internal server error — which tells a client to *retry*, and a prompt that exceeds the window can never succeed. miLLM returns `context_length_exceeded` with the requested and available token counts, the same shape OpenAI uses, so a client shortens the prompt instead of burning three attempts on it.
+
+**`chat_template_kwargs` is accepted and ignored.** A GGUF file's baked-in template cannot take arbitrary variables, so keys like `enable_thinking` are logged and dropped rather than refused. Refusing turned an entire class of client — anything that always sends the field — into a 400 on every call, which is a total failure rather than a degraded result.
+
+### Continuing a truncated answer
+
+Clients that offer a **Continue** action resend the conversation with the truncated answer as a trailing assistant message. A GGUF file's chat template *closes* that final turn, so the model can only begin a new answer — which is why continuing used to restart the response from the beginning, sometimes saying so out loud, and why reasoning models re-opened their thought block each time.
+
+miLLM detects a trailing assistant message and completes it instead: everything before the partial is rendered with a generation prompt, the partial is appended raw, and generation continues from there. Nothing is required of the client; **Continue** in Open WebUI now resumes mid-sentence.
+
 ## Errors & backpressure
 
 `/v1` errors use OpenAI's format so SDK exception handling works unchanged. Notable cases:

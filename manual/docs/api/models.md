@@ -72,6 +72,7 @@ curl -X POST http://localhost:8000/api/models \
 | `quantization` | `FP16`, `Q8`, `Q4`, `Q2` — applied at download time, weights saved quantized |
 | `trust_remote_code` | Explicit opt-in per download |
 | `hf_token` | Never logged or persisted |
+| `gguf_label` | The exact GGUF quantization to fetch, e.g. `IQ4_XS`. Names the model `repo:LABEL` so several quantizations of one repository can coexist — see [Model Management](/features/model-management#gguf-models-and-quantization). |
 
 Returns `202` with the created model record; progress streams via [`model:download:progress`](/api/websockets) WebSocket events. Cancel with `POST /api/models/{id}/cancel`.
 
@@ -103,6 +104,12 @@ curl -X DELETE http://localhost:8000/api/models/1
 ```
 
 Hard delete: removes weights from disk and the registry entry. Refused while loaded or locked.
+
+## GGUF model names
+
+A downloaded GGUF model is named `repo:QUANT`, and each quantization appears separately in `/v1/models`. A **bare** repository name resolves while exactly one quantization exists; once a second is downloaded the bare name returns **400 `AMBIGUOUS_MODEL_NAME`**, listing the tags that exist. Requests should name the tag exactly.
+
+Model records also carry `supports_embeddings`. It is `false` when the architecture refused the pooling mode embeddings require and miLLM loaded the model without them — serving the model matters more than embedding it, and the flag says so up front rather than leaving a caller to discover it at `/v1/embeddings`.
 
 ## Common errors
 

@@ -16,6 +16,7 @@ from millm.api.schemas.model import (
     ModelPreviewRequest,
     GGUFFileInfo,
     GGUFQuantInfo,
+    ModelPlacement,
     ModelPreviewResponse,
     ModelResponse,
     SizeEstimate,
@@ -55,13 +56,7 @@ async def list_models(
         if progress is not None:
             response.download_progress = progress
         # Inject runtime properties for loaded model
-        if loaded_info and loaded_info["model_id"] == m.id:
-            response.num_parameters = loaded_info["num_parameters"]
-            response.memory_footprint = loaded_info["memory_footprint"]
-            response.device = loaded_info["device"]
-            response.dtype = loaded_info["dtype"]
-            response.placement = loaded_info.get("placement")
-        responses.append(response)
+        responses.append(_with_runtime(response, loaded_info))
     return ApiResponse.ok(responses)
 
 
@@ -88,6 +83,27 @@ async def download_model(
     return ApiResponse.ok(ModelResponse.from_model(model))
 
 
+def _with_runtime(response: ModelResponse, loaded_info: dict | None) -> ModelResponse:
+    """Add the loaded model's runtime properties, placement included.
+
+    ONE copy for the list and the single-model route. The single route had
+    none, so GET /api/models/{id} reported `placement: null` for the model
+    that was loaded while the list reported its card (found on the node,
+    2026-09-13).
+    """
+    if loaded_info and loaded_info["model_id"] == response.id:
+        response.num_parameters = loaded_info["num_parameters"]
+        response.memory_footprint = loaded_info["memory_footprint"]
+        response.device = loaded_info["device"]
+        response.dtype = loaded_info["dtype"]
+        # Validated into the schema's type: assigning the raw dict serialised
+        # correctly but logged PydanticSerializationUnexpectedValue on every
+        # model listing (seen on the node, 2026-09-13).
+        placement = loaded_info.get("placement")
+        response.placement = ModelPlacement.model_validate(placement) if placement else None
+    return response
+
+
 @router.get(
     "/{model_id}",
     response_model=ApiResponse[ModelResponse],
@@ -110,7 +126,7 @@ async def get_model(
     progress = service.get_download_progress(model_id)
     if progress is not None:
         response.download_progress = progress
-    return ApiResponse.ok(response)
+    return ApiResponse.ok(_with_runtime(response, service.get_loaded_model_info()))
 
 
 @router.delete(

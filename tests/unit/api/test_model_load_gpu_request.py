@@ -10,6 +10,8 @@ MUTATION CONTROLS (each must turn this file red):
   * load_model drops `wanted` from the executor args      -> executor test fails
   * remove the find_gpu pre-check                         -> unknown-card test fails
   * list_models stops injecting placement                 -> status test fails
+  * get_model returns without _with_runtime (2026-09-13)  -> single-route test fails
+  * _with_runtime assigns the raw placement dict           -> no-warning test fails
 """
 
 from concurrent.futures import Future
@@ -132,6 +134,46 @@ class TestStatusReportsPlacement:
         assert model["placement"]["devices"] == ["cuda:1"]
         assert model["placement"]["gpu_indices"] == [1]
         assert model["placement"]["memory_by_device_mb"] == {"cuda:1": 9_000}
+
+    def _single(self, loaded_model_id):
+        svc = MagicMock()
+        svc.get_model = AsyncMock(return_value=make_model(id=3, status=ModelStatus.LOADED))
+        svc.get_download_progress = MagicMock(return_value=None)
+        svc.get_loaded_model_info = MagicMock(return_value={
+            "model_id": loaded_model_id,
+            "num_parameters": 1,
+            "memory_footprint": 9_000 * 1024 * 1024,
+            "device": "cuda:1",
+            "dtype": "bfloat16",
+            "placement": PLACEMENT,
+        })
+        response = _client(svc).get("/api/models/3")
+        assert response.status_code == 200, response.text
+        return response.json()["data"]
+
+    def test_the_single_model_route_reports_the_same_placement(self):
+        """Found on the node (2026-09-13): the list said cuda:1 while
+        GET /api/models/{id} said placement null for the same loaded model."""
+        model = self._single(loaded_model_id=3)
+        assert model["device"] == "cuda:1"
+        assert model["placement"]["devices"] == ["cuda:1"]
+        assert model["placement"]["memory_by_device_mb"] == {"cuda:1": 9_000}
+
+    def test_placement_serialises_without_a_pydantic_warning(self):
+        """Assigning the raw dict to the typed field serialised correctly but
+        logged PydanticSerializationUnexpectedValue on every listing (node log,
+        2026-09-13). The field must hold a ModelPlacement."""
+        import warnings
+
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            model = self._single(loaded_model_id=3)
+        assert model["placement"]["gpu_indices"] == [1]
+        assert not [w for w in caught if "PydanticSerializationUnexpectedValue" in str(w.message)]
+
+    def test_a_model_that_is_not_the_loaded_one_has_no_placement(self):
+        model = self._single(loaded_model_id=99)
+        assert model["placement"] is None
 
     def test_service_loaded_info_includes_placement(self):
         from millm.ml.model_loader import LoadedModel

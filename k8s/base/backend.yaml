@@ -10,8 +10,7 @@ metadata:
   namespace: millm
 spec:
   replicas: 1
-  # Recreate: only one GPU — the old pod must release VRAM before the new one
-  # loads the model.
+  # Recreate: the old pod must release VRAM before the new one loads the model.
   strategy:
     type: Recreate
   selector:
@@ -114,6 +113,21 @@ spec:
             # concurrency soak before it goes anywhere near production.
             - name: ENABLE_CONTINUOUS_BATCHING
               value: "false"
+            # EVERY GPU ON THE NODE, NOT ONE.
+            #
+            # This container used to request `nvidia.com/gpu: 1`, which makes the
+            # device plugin hand it exactly one card by UUID. When mcs-lnxhost02
+            # gained a second GPU (RTX 3080 Ti beside the 3090, 2026-09-13) miLLM
+            # saw only the 3080 Ti. Visibility now comes from the node's default
+            # nvidia runtime; the nodeSelector keeps the pod on the GPU node.
+            - name: NVIDIA_VISIBLE_DEVICES
+              value: all
+            - name: NVIDIA_DRIVER_CAPABILITIES
+              value: compute,utility
+            # cuda:N must be the card nvidia-smi calls N. CUDA's default order is
+            # FASTEST_FIRST, which can disagree with NVML's PCI-bus numbering.
+            - name: CUDA_DEVICE_ORDER
+              value: PCI_BUS_ID
             # AUTO_LOAD_MODEL is deliberately UNSET.
             #
             # It existed because the OpenAI endpoints refused any model that was
@@ -133,9 +147,6 @@ spec:
           volumeMounts:
             - name: millm-data
               mountPath: /data
-          resources:
-            limits:
-              nvidia.com/gpu: 1
       volumes:
         - name: millm-data
           hostPath:

@@ -6,12 +6,14 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from millm.core.errors import InsufficientMemoryError, ModelLoadError
+from millm.ml.gpu_placement import MODE_SINGLE, GpuInfo, Placement
 from millm.ml.model_loader import (
     LoadedModel,
     LoadedModelState,
     ModelLoadContext,
     ModelLoader,
 )
+from tests.support.fake_gpus import fake_gpus
 
 
 @pytest.fixture
@@ -147,11 +149,24 @@ class TestModelLoadContext:
         mock_model = MagicMock()
         mock_auto_model.from_pretrained.return_value = mock_model
 
+        # The placement comes from ModelLoader.load in production. Given here
+        # explicitly: without one the context resolves its own from the live
+        # inventory, and this test's mocked torch reports CUDA with no cards.
+        placement = Placement(
+            mode=MODE_SINGLE,
+            reason="requested_card",
+            required_mb=0,
+            gpus=(GpuInfo(1, "card", None, 24_576, 20_000),),
+            index=1,
+        )
         with ModelLoadContext(model_id=1, model_name="test-model") as ctx:
             loaded = ctx.load(
                 cache_path="/data/models/test",
                 quantization="FP16",
+                placement=placement,
             )
+
+        assert mock_auto_model.from_pretrained.call_args.kwargs["device_map"] == {"": "cuda:1"}
 
         assert loaded.model_id == 1
         assert loaded.model is mock_model
@@ -173,14 +188,19 @@ class TestModelLoader:
         assert loader.is_loaded is False
         assert loader.loaded_model_id is None
 
-    @patch("millm.ml.model_loader.get_available_memory_mb")
     @patch("millm.ml.model_loader.torch")
-    def test_load_checks_memory(self, mock_torch, mock_get_memory, loader):
-        """Test that load checks memory availability."""
-        mock_torch.cuda.is_available.return_value = True
-        mock_get_memory.return_value = 4000  # 4 GB available
+    def test_load_checks_memory(self, mock_torch, loader):
+        """Test that load checks memory availability.
 
-        with pytest.raises(InsufficientMemoryError) as exc_info:
+        Was already failing before multi-GPU Phase 1: it patched
+        model_loader.get_available_memory_mb, which Phase 0 stopped using for
+        this check. Now: no single card holds 8 GB and the cards together have
+        4 GB free, so the all-cards fallback refuses with the summed figure.
+        """
+        mock_torch.cuda.is_available.return_value = True
+
+        with fake_gpus(("card0", 1_500, 12_288), ("card1", 2_500, 24_576)), \
+                pytest.raises(InsufficientMemoryError) as exc_info:
             loader.load(
                 model_id=1,
                 model_name="test-model",

@@ -1346,10 +1346,28 @@ def plan_gguf_placement(
         if wanted is not None:
             # A named card on a box (or build) that offloads nothing cannot be
             # honoured; running on the CPU instead is a silent substitution.
-            return choose_gpu(
+            #
+            # choose_gpu still runs first, so an unknown card is GpuNotFoundError
+            # and a full one is refused with its figures. But a card that EXISTS
+            # and HAS ROOM must be refused too: this used to return choose_gpu's
+            # single-card placement, the load then ran with n_gpu_layers=0 or a
+            # CPU-only wheel, and the model served from the CPU under a
+            # placement that said "requested_card".
+            choose_gpu(
                 _gguf_required_mb(weights_mb, bytes_per_token, GGUF_MIN_CONTEXT),
                 requested=wanted,
                 gpus=(list_gpus() if torch.cuda.is_available() else []) if gpus is None else gpus,
+            )
+            raise InsufficientMemoryError(
+                f"GPU {wanted!r} was requested, but llama.cpp here offloads no layers "
+                f"(GGUF_GPU_LAYERS={GGUF_GPU_LAYERS}, or a CPU-only build), so the model "
+                "would run on the CPU. The requested card is not swapped for the CPU; "
+                "choose Auto to run on the CPU, or enable GPU offload.",
+                details={
+                    "requested": wanted,
+                    "gguf_gpu_layers": GGUF_GPU_LAYERS,
+                    "gpu_offload": False,
+                },
             )
         return cpu_placement(REASON_NO_GPU)
 

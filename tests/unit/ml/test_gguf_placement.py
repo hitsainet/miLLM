@@ -19,7 +19,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from millm.core.config import settings
-from millm.core.errors import InsufficientMemoryError
+from millm.core.errors import GpuNotFoundError, InsufficientMemoryError
 from millm.ml import model_loader
 from millm.ml.gpu_placement import MODE_ALL, MODE_CPU, MODE_SINGLE
 from tests.support.fake_gpus import RTX_3090, TI_3080, fake_gpus
@@ -79,6 +79,41 @@ class TestPlan:
         with fake_gpus(), patch.object(model_loader, "llama_supports_gpu_offload", lambda: True):
             with pytest.raises(InsufficientMemoryError):
                 model_loader.plan_gguf_placement(4_000, SMALL_KV, 32_768, requested=1)
+
+    def test_a_named_card_that_fits_on_a_cpu_only_build_is_refused(self):
+        """The case the test above is named for: cards EXIST and the named one
+        has room, but the llama.cpp build offloads nothing.
+
+        This returned choose_gpu's single-card placement, so the model ran on
+        the CPU under a placement reading "requested_card". The test above has
+        no cards at all, so it passed against that defect.
+
+        MUTATION CONTROL (round 1, 2026-09-13): `return choose_gpu(...)` in place
+        of the raise -> this test and the GGUF_GPU_LAYERS=0 one fail.
+        """
+        with fake_gpus(*NODE), patch.object(
+            model_loader, "llama_supports_gpu_offload", lambda: False
+        ):
+            with pytest.raises(InsufficientMemoryError) as raised:
+                model_loader.plan_gguf_placement(4_000, SMALL_KV, 32_768, requested=1)
+        assert raised.value.details["gpu_offload"] is False
+        assert raised.value.details["requested"] == 1
+
+    def test_a_named_card_with_gpu_layers_off_is_refused(self, offload):
+        with fake_gpus(*NODE), patch.object(model_loader, "GGUF_GPU_LAYERS", 0):
+            with pytest.raises(InsufficientMemoryError) as raised:
+                model_loader.plan_gguf_placement(4_000, SMALL_KV, 32_768, requested=1)
+        assert raised.value.details["gguf_gpu_layers"] == 0
+
+    def test_an_unknown_card_on_a_cpu_only_build_is_still_not_found(self):
+        with fake_gpus(*NODE), patch.object(
+            model_loader, "llama_supports_gpu_offload", lambda: False
+        ):
+            with pytest.raises(GpuNotFoundError):
+                model_loader.plan_gguf_placement(
+                    4_000, SMALL_KV, 32_768,
+                    requested="GPU-00000000-0000-0000-0000-000000000000",
+                )
 
 
 def _load(tmp_path, kv_bytes, gpu=None, fake=None, consume=None, predicted=None):

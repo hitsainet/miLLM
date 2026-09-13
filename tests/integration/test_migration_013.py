@@ -20,6 +20,7 @@ something else.
 
 import os
 import subprocess
+import sys
 import uuid
 
 import pytest
@@ -53,7 +54,9 @@ def _alembic(db: str, *args: str) -> subprocess.CompletedProcess:
         "DATABASE_URL_SYNC": f"{PG_SYNC_BASE}/{db}",
     }
     return subprocess.run(
-        ["venv/bin/python", "-m", "alembic", *args],
+        # sys.executable, not venv/bin/python: CI has no venv/, so the hardcoded path
+        # made every alembic call here fail there.
+        [sys.executable, "-m", "alembic", *args],
         capture_output=True,
         text=True,
         env=env,
@@ -65,6 +68,10 @@ def _alembic(db: str, *args: str) -> subprocess.CompletedProcess:
 async def scratch_db():
     """A throwaway database, dropped afterwards even on failure."""
     if not await _pg_available():
+        if os.environ.get("MILLM_REQUIRE_PG") == "1":
+            pytest.fail(
+                "PostgreSQL not reachable and MILLM_REQUIRE_PG=1 — migration 013 did NOT run"
+            )
         pytest.skip("PostgreSQL not reachable — migration 013 needs a real server")
 
     from sqlalchemy.ext.asyncio import create_async_engine

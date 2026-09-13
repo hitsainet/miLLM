@@ -79,6 +79,62 @@ jobs:
             -m "not slow" \
             -v --no-cov --tb=short
 
+  schema:
+    # The migrations build production; the models build every test schema, on
+    # SQLite. Nothing compared them and CI ran no PostgreSQL, so a model that
+    # disagreed with its migration — or an enum value the API accepts and the
+    # database lacks — could not fail here. This job migrates a real PostgreSQL 16
+    # (production's major version) from empty and compares it with the models.
+    #
+    # MILLM_REQUIRE_PG turns "server unreachable" into a FAILURE. These tests skip
+    # without it, and a skipped guard reads as a passing one.
+    name: Schema guards (PostgreSQL 16)
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    env:
+      FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+      SECRET_KEY: ci-test-secret-key-minimum-32-characters-long
+      DATA_DIR: /tmp/millm-ci
+      MILLM_TEST_PG_BASE: postgresql+asyncpg://postgres:postgres@localhost:5432
+      MILLM_REQUIRE_PG: '1'
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+          cache-dependency-path: pyproject.toml
+
+      - name: Install PyTorch (CPU)
+        run: |
+          # Same spec as the unit job, for the same reason: it must satisfy the
+          # pyproject floor or pip replaces it with the CUDA build.
+          pip install "torch>=2.10.0,<3" --index-url https://download.pytorch.org/whl/cpu
+
+      - name: Install package with dev dependencies
+        run: |
+          pip install -e ".[dev]"
+
+      - name: Run the schema guards and the migration 013 test
+        run: |
+          python -m pytest tests/schema/ tests/integration/test_migration_013.py \
+            -v --no-cov --tb=short
+
   cross-repo-contract:
     # F20 R2-02: the cross-repo guard existed and NOTHING RAN IT.
     #

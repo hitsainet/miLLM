@@ -13,10 +13,13 @@ from sqlalchemy.engine import Connection
 from sqlalchemy.ext.asyncio import async_engine_from_config
 
 from millm.core.config import settings
-from millm.db.base import Base
 
-# Import all models to ensure they're registered with Base.metadata
-from millm.db.models import Model, SAE, SAEAttachment  # noqa: F401
+# One definition of what autogenerate and `alembic check` compare against, shared with
+# tests/schema/test_schema_guards.py so the two cannot drift apart. It registers every
+# model and turns on type and server-default comparison. There is deliberately no
+# include_object filter: a filter hides real drift.
+from millm.db.alembic_support import COMPARE_OPTIONS
+from millm.db.alembic_support import target_metadata as load_target_metadata
 
 # Alembic Config object
 config = context.config
@@ -29,7 +32,7 @@ if config.config_file_name is not None:
     fileConfig(config.config_file_name)
 
 # Add model's MetaData object for 'autogenerate' support
-target_metadata = Base.metadata
+target_metadata = load_target_metadata()
 
 
 def run_migrations_offline() -> None:
@@ -45,6 +48,7 @@ def run_migrations_offline() -> None:
         target_metadata=target_metadata,
         literal_binds=True,
         dialect_opts={"paramstyle": "named"},
+        **COMPARE_OPTIONS,
     )
 
     with context.begin_transaction():
@@ -53,7 +57,9 @@ def run_migrations_offline() -> None:
 
 def do_run_migrations(connection: Connection) -> None:
     """Run migrations with the given connection."""
-    context.configure(connection=connection, target_metadata=target_metadata)
+    context.configure(
+        connection=connection, target_metadata=target_metadata, **COMPARE_OPTIONS
+    )
 
     with context.begin_transaction():
         context.run_migrations()

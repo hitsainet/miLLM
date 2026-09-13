@@ -9,6 +9,7 @@ Steering Formula:
 The hook applies steering uniformly to all token positions without full SAE reconstruction.
 """
 
+import itertools
 import logging
 from typing import Callable, Tuple, Union
 
@@ -91,6 +92,24 @@ class SAEHooker:
         )
         return handle
 
+    def layer_device(self, model: nn.Module, layer: int) -> torch.device:
+        """
+        The device holding `layer`'s weights.
+
+        A model spread across GPUs (device_map="auto") keeps later layers on
+        another card. An SAE hooked there must live on that card, or every
+        forward pass mixes devices.
+
+        Raises:
+            ValueError: If layer cannot be found in model.
+        """
+        target_layer = self._get_layer(model, layer)
+        for tensor in itertools.chain(target_layer.parameters(), target_layer.buffers()):
+            return tensor.device
+        for tensor in model.parameters():
+            return tensor.device
+        return torch.device("cpu")
+
     @staticmethod
     def _resolve_module_path(
         model: nn.Module, target: nn.Module, layer_idx: int
@@ -157,6 +176,19 @@ class SAEHooker:
             if not isinstance(hidden_states, Tensor):
                 # First element is not a tensor (None, metadata, etc.) — skip
                 return output
+
+            # ── Device ────────────────────────────────────────────────────────
+            # The SAE must sit on this layer's device. Attach places it there;
+            # this catches anything that moved it since. Encoding across devices
+            # raised inside the forward pass (monitoring) or failed silently on
+            # every pass (sensing), so move once and say so.
+            if sae.W_enc.device != hidden_states.device:
+                logger.warning(
+                    "sae_moved_to_layer_device: from=%s to=%s",
+                    sae.W_enc.device,
+                    hidden_states.device,
+                )
+                sae.to_device(str(hidden_states.device))
 
             # ── Monitoring ────────────────────────────────────────────────────
             if sae.is_monitoring_enabled:

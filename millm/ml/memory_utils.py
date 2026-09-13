@@ -141,12 +141,48 @@ def get_available_cpu_memory_mb() -> int:
     return 0
 
 
-def get_available_memory_mb(device: int = 0) -> int:
+def list_gpu_memory() -> list[dict[str, int]]:
+    """
+    Free and total memory for every visible GPU, in CUDA index order.
+
+    With CUDA_DEVICE_ORDER=PCI_BUS_ID the index matches nvidia-smi. Returns an
+    empty list when CUDA is unavailable.
+    """
+    try:
+        if not torch.cuda.is_available():
+            return []
+        gpus = []
+        for index in range(torch.cuda.device_count()):
+            free, total = torch.cuda.mem_get_info(index)
+            gpus.append(
+                {
+                    "index": index,
+                    "free_mb": int(free / (1024 * 1024)),
+                    "total_mb": int(total / (1024 * 1024)),
+                }
+            )
+        return gpus
+    except Exception as e:
+        logger.warning("failed_to_list_gpu_memory", error=str(e))
+        return []
+
+
+def get_total_free_memory_mb() -> int:
+    """Free GPU memory summed across every visible GPU, in megabytes."""
+    return sum(gpu["free_mb"] for gpu in list_gpu_memory())
+
+
+def get_largest_free_memory_mb() -> int:
+    """Free memory on the single GPU that has the most of it, in megabytes."""
+    return max((gpu["free_mb"] for gpu in list_gpu_memory()), default=0)
+
+
+def get_available_memory_mb(device: "int | str | torch.device" = 0) -> int:
     """
     Get available GPU memory in megabytes.
 
     Args:
-        device: CUDA device index (default: 0)
+        device: CUDA device index or device (default: 0)
 
     Returns:
         Available GPU memory in MB, or 0 if CUDA is not available.

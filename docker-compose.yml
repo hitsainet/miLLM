@@ -74,6 +74,9 @@ services:
       - LOG_LEVEL=${LOG_LEVEL:-INFO}
       - CORS_ORIGINS=${CORS_ORIGINS:-http://localhost,http://localhost:3000,http://millm.hitsai.local}
       - AUTO_LOAD_MODEL=${AUTO_LOAD_MODEL:-}
+      # cuda:N must be the card nvidia-smi calls N; CUDA's default order is
+      # fastest-first, which disagrees with NVML once there are two GPUs.
+      - CUDA_DEVICE_ORDER=PCI_BUS_ID
     ports:
       - "${API_PORT:-8000}:8000"
     volumes:

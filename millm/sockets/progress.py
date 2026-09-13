@@ -19,19 +19,62 @@ _system_metrics_subscribers: set[str] = set()
 _system_metrics_task: Optional[asyncio.Task] = None
 
 
+_NVIDIA_SMI_QUERY = (
+    "index,uuid,utilization.gpu,memory.used,memory.total,temperature.gpu,name"
+)
+
+
+def _smi_int(value: str) -> int:
+    """nvidia-smi reports "[N/A]" for fields a card does not expose; count it as 0."""
+    try:
+        return int(float(value))
+    except ValueError:
+        return 0
+
+
+def parse_nvidia_smi_gpus(stdout: str) -> list[dict[str, Any]]:
+    """
+    Parse `nvidia-smi --query-gpu=<_NVIDIA_SMI_QUERY>` CSV output, one GPU per line.
+
+    The previous parser split the whole output on ", " as if it were one line.
+    With two GPUs the fourth field became "36\\n33", int() raised, and every
+    card was reported as zero — the UI showed "No GPU" on a two-GPU node.
+    `name` is queried last so a name containing a comma cannot shift the
+    numeric fields.
+    """
+    gpus: list[dict[str, Any]] = []
+    for line in stdout.strip().splitlines():
+        parts = [part.strip() for part in line.split(",")]
+        if len(parts) < 7 or not parts[0].isdigit():
+            continue
+        gpus.append(
+            {
+                "index": int(parts[0]),
+                "uuid": parts[1],
+                "utilization": _smi_int(parts[2]),
+                "memory_used_mb": _smi_int(parts[3]),
+                "memory_total_mb": _smi_int(parts[4]),
+                "temperature": _smi_int(parts[5]),
+                "name": ", ".join(parts[6:]),
+            }
+        )
+    return gpus
+
+
 def get_gpu_metrics() -> dict[str, Any]:
     """
-    Get GPU metrics using nvidia-smi.
+    Get GPU metrics for every GPU using nvidia-smi.
 
     Returns:
-        Dictionary with GPU utilization, memory, and temperature.
-        Returns zeros if nvidia-smi is not available.
+        `gpus`: one entry per card. The single-GPU fields existing clients read
+        are kept as aggregates across all cards: mean utilization, summed
+        memory, hottest temperature. Returns zeros if nvidia-smi is unavailable.
     """
     try:
         result = subprocess.run(
             [
                 "nvidia-smi",
-                "--query-gpu=utilization.gpu,memory.used,memory.total,temperature.gpu",
+                f"--query-gpu={_NVIDIA_SMI_QUERY}",
                 "--format=csv,noheader,nounits",
             ],
             capture_output=True,
@@ -39,15 +82,19 @@ def get_gpu_metrics() -> dict[str, Any]:
             timeout=5,
         )
         if result.returncode == 0:
-            parts = result.stdout.strip().split(", ")
-            if len(parts) >= 4:
+            gpus = parse_nvidia_smi_gpus(result.stdout)
+            if gpus:
                 return {
-                    "gpu_utilization": int(parts[0]),
-                    "gpu_memory_used_mb": int(parts[1]),
-                    "gpu_memory_total_mb": int(parts[2]),
-                    "gpu_temperature": int(parts[3]),
+                    "gpu_utilization": round(
+                        sum(gpu["utilization"] for gpu in gpus) / len(gpus)
+                    ),
+                    "gpu_memory_used_mb": sum(gpu["memory_used_mb"] for gpu in gpus),
+                    "gpu_memory_total_mb": sum(gpu["memory_total_mb"] for gpu in gpus),
+                    "gpu_temperature": max(gpu["temperature"] for gpu in gpus),
+                    "gpu_count": len(gpus),
+                    "gpus": gpus,
                 }
-    except (subprocess.TimeoutExpired, FileNotFoundError, ValueError) as e:
+    except (subprocess.TimeoutExpired, FileNotFoundError) as e:
         logger.debug("nvidia_smi_failed", error=str(e))
 
     return {
@@ -55,6 +102,8 @@ def get_gpu_metrics() -> dict[str, Any]:
         "gpu_memory_used_mb": 0,
         "gpu_memory_total_mb": 0,
         "gpu_temperature": 0,
+        "gpu_count": 0,
+        "gpus": [],
     }
 
 

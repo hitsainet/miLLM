@@ -92,7 +92,12 @@ except Exception as _offload_probe_error:  # noqa: BLE001 - optional symbol
 
 from millm.core.errors import InsufficientMemoryError, ModelLoadError
 from millm.ml.gguf_catalog import quant_label_from_path
-from millm.ml.memory_utils import get_available_cpu_memory_mb, get_available_memory_mb
+from millm.ml.memory_utils import (
+    get_available_cpu_memory_mb,
+    get_available_memory_mb,
+    get_total_free_memory_mb,
+    list_gpu_memory,
+)
 
 
 #: The transformers engine: a torch nn.Module tree, hookable, differentiable.
@@ -1653,15 +1658,27 @@ class ModelLoader:
                 "PyTorch is not installed. Install with CUDA support.",
             )
 
-        # Check memory availability (skip for quantized/offloadable models that use CPU offloading)
-        available_mb = get_available_memory_mb()
+        # Check memory availability (skip for quantized/offloadable models that use CPU offloading).
+        #
+        # Capacity follows where the load will actually place the model.
+        # FP16/FP32 load with device_map="auto", which spreads a model across
+        # every visible GPU, so their capacity is free memory summed over all
+        # cards. Reading GPU 0 alone refused a model needing more than 12 GB
+        # while the 3090 had 24 GB free. Q8 is still pinned by
+        # max_memory={0: ...} in ModelLoadContext.load, so it is checked against
+        # GPU 0 until the placement resolver replaces both.
         skip_mem_check = is_pre_quantized or quantization.upper() in ("Q4", "Q2")
+        if quantization.upper() == "Q8":
+            available_mb = get_available_memory_mb(0)
+        else:
+            available_mb = get_total_free_memory_mb()
         if not skip_mem_check and available_mb < estimated_memory_mb:
             raise InsufficientMemoryError(
                 f"Not enough GPU memory. Need ~{estimated_memory_mb}MB, have {available_mb}MB",
                 details={
                     "required_mb": estimated_memory_mb,
                     "available_mb": available_mb,
+                    "gpus": list_gpu_memory(),
                 },
             )
 

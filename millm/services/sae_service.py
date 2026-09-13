@@ -1789,22 +1789,31 @@ class SAEService:
         for warning in compat.warnings:
             logger.warning("sae_compatibility_warning", warning=warning)
 
-        # Check available GPU memory before loading
-        if torch.cuda.is_available():
-            free_mb = torch.cuda.mem_get_info()[0] / (1024 * 1024)
+        # Put the SAE on the device of the layer it hooks. A model spread across
+        # GPUs keeps later layers on another card, and an SAE loaded on bare
+        # "cuda" (GPU 0) made monitoring raise a device mismatch inside the
+        # forward pass whenever its layer lived elsewhere.
+        target_device = self._sae_device_for_layer(model_state.current.model, layer)
+
+        # Check available memory on that device before loading
+        if self._is_gpu_device(target_device):
+            free_mb = torch.cuda.mem_get_info(target_device)[0] / (1024 * 1024)
             estimated_mb = (sae.file_size_bytes or 0) / (1024 * 1024) * 1.2  # 20% overhead
             if estimated_mb > 0 and estimated_mb > free_mb:
                 logger.warning(
                     "sae_memory_warning",
                     estimated_mb=int(estimated_mb),
                     available_mb=int(free_mb),
+                    device=str(target_device),
                 )
 
         # Load SAE weights
-        logger.info("loading_sae", sae_id=sae_id, cache_path=sae.cache_path)
+        logger.info(
+            "loading_sae", sae_id=sae_id, cache_path=sae.cache_path, device=str(target_device)
+        )
         loaded_sae = self._loader.load(
             cache_path=sae.cache_path,
-            device="cuda" if torch.cuda.is_available() else "cpu",
+            device=str(target_device),
         )
 
         # Match SAE dtype to model dtype to avoid per-forward-pass casts
@@ -1912,6 +1921,26 @@ class SAEService:
             ),
         }
 
+    def _sae_device_for_layer(self, model: Any, layer: int) -> "torch.device":
+        """
+        The device an SAE hooked at `layer` must live on: that layer's own device.
+
+        CPU when CUDA is unavailable. A model spread across GPUs keeps later
+        layers on another card; loading every SAE on bare "cuda" put them all
+        on GPU 0.
+        """
+        if not torch.cuda.is_available():
+            return torch.device("cpu")
+        return self._hooker.layer_device(model, layer)
+
+    @staticmethod
+    def _is_gpu_device(device: Any) -> bool:
+        """Whether a free-GPU-memory check applies to `device`."""
+        return torch.cuda.is_available() and getattr(device, "type", None) not in (
+            "cpu",
+            "meta",
+        )
+
     async def attach_set(
         self,
         sae_layers: list[tuple[str, int]],
@@ -1989,8 +2018,15 @@ class SAEService:
         # = 2·d_in·d_sae params × 2 bytes) — robust to a NULL file_size_bytes,
         # which would otherwise collapse the projection to 0 and defeat the gate.
         attach_bytes = torch.finfo(attach_dtype).bits // 8
-        if torch.cuda.is_available() and prepared:
-            free_mb = torch.cuda.mem_get_info()[0] / (1024 * 1024)
+        # Each SAE goes on the device of the layer it hooks (see attach_sae), so
+        # the footprint is projected and gated PER DEVICE. A set spread over two
+        # cards has to fit each card; comparing its total against GPU 0's free
+        # memory refused sets that fit and admitted sets that did not.
+        devices = {
+            (sae_id, layer): self._sae_device_for_layer(model, layer)
+            for sae_id, layer, _, _ in prepared
+        }
+        if prepared:
 
             def _projected_mb(sae) -> float:
                 by_dims = 2 * int(sae.d_in) * int(sae.d_sae) * attach_bytes / (1024 * 1024)
@@ -1999,13 +2035,26 @@ class SAEService:
                 # unknown/under-reported file size never under-projects.
                 return max(by_dims, by_file) * 1.1  # 10% headroom for buffers
 
-            projected_mb = sum(_projected_mb(sae) for _, _, sae, _ in prepared)
-            if projected_mb > free_mb:
-                raise InsufficientMemoryError(
-                    f"Attaching {len(prepared)} SAE(s) needs ~{int(projected_mb)} MB "
-                    f"but only {int(free_mb)} MB is free.",
-                    details={"projected_mb": int(projected_mb), "free_mb": int(free_mb)},
-                )
+            projected_by_device: dict[str, tuple[Any, float]] = {}
+            for sae_id, layer, sae, _ in prepared:
+                device = devices[(sae_id, layer)]
+                if not self._is_gpu_device(device):
+                    continue
+                _, so_far = projected_by_device.get(str(device), (device, 0.0))
+                projected_by_device[str(device)] = (device, so_far + _projected_mb(sae))
+
+            for device_name, (device, projected_mb) in projected_by_device.items():
+                free_mb = torch.cuda.mem_get_info(device)[0] / (1024 * 1024)
+                if projected_mb > free_mb:
+                    raise InsufficientMemoryError(
+                        f"Attaching {len(prepared)} SAE(s) needs ~{int(projected_mb)} MB "
+                        f"on {device_name} but only {int(free_mb)} MB is free there.",
+                        details={
+                            "projected_mb": int(projected_mb),
+                            "free_mb": int(free_mb),
+                            "device": device_name,
+                        },
+                    )
 
         # Attach, tracking keys added in THIS call so we can roll them all back
         # if a later load/install throws — never leave a partial attach or a
@@ -2015,7 +2064,7 @@ class SAEService:
             for sae_id, layer, sae, compat in prepared:
                 loaded_sae = self._loader.load(
                     cache_path=sae.cache_path,
-                    device="cuda" if torch.cuda.is_available() else "cpu",
+                    device=str(devices[(sae_id, layer)]),
                     dtype=attach_dtype,
                 )
                 try:

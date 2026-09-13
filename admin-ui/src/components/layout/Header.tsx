@@ -23,6 +23,7 @@ export function Header() {
     gpuMemoryTotal,
     gpuUtilization,
     gpuTemperature,
+    gpus,
     loadedModel,
     attachedSAE,
     steering,
@@ -103,7 +104,7 @@ export function Header() {
             {/* GPU Memory - Purple/Violet */}
             <div
               className="flex items-center gap-1.5 text-violet-400"
-              title="GPU Memory"
+              title={gpus.length > 1 ? `GPU Memory (all ${gpus.length} cards)` : 'GPU Memory'}
             >
               <HardDrive className="w-3.5 h-3.5" />
               <span className="font-mono font-medium">
@@ -113,6 +114,19 @@ export function Header() {
                 }
               </span>
             </div>
+            {/* Each card's memory. The chips beside these are aggregates
+                across every card, which hide a full card behind an empty one. */}
+            {gpus.length > 1 && gpus.map((gpu) => (
+              <div
+                key={gpu.uuid || gpu.index}
+                data-testid={`header-gpu-${gpu.index}`}
+                className="flex items-center gap-1 text-violet-300/80 font-mono"
+                title={`GPU ${gpu.index}: ${gpu.name} — ${gpu.utilization}% · ${gpu.temperature}°C`}
+              >
+                <span className="text-slate-500">{gpu.index}:</span>
+                {(gpu.memory_used_mb / 1024).toFixed(1)}/{(gpu.memory_total_mb / 1024).toFixed(1)}
+              </div>
+            ))}
             {/* GPU Temperature - Dynamic color based on temp */}
             <div
               className={`flex items-center gap-1.5 ${

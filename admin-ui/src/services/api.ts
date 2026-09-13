@@ -19,6 +19,7 @@ import type {
   ModelInfo,
   ModelDownloadRequest,
   ModelPreviewResponse,
+  GpuSelection,
   SAEInfo,
   SAEListResponse,
   DownloadSAERequest,
@@ -262,11 +263,14 @@ export const modelApi = {
    * Loads a downloaded model into GPU memory.
    * Only one model can be loaded at a time.
    * @param id - Model ID to load
+   * @param gpu - 'auto', a CUDA index, or a GPU UUID. A named card without
+   *   room is refused by the backend, never swapped for another.
    * @returns Promise resolving to updated model information
    */
-  load: (id: number) =>
+  load: (id: number, gpu: GpuSelection = 'auto') =>
     request<ModelInfo>(`/models/${id}/load`, {
       method: 'POST',
+      body: JSON.stringify({ gpu }),
     }),
 
   /**

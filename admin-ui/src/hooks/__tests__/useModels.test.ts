@@ -22,6 +22,7 @@ vi.mock('@/services/api', () => ({
 const mockSetModels = vi.hoisted(() => vi.fn());
 const mockSetLoadedModel = vi.hoisted(() => vi.fn());
 const mockSetModelLoading = vi.hoisted(() => vi.fn());
+const mockLoadGpu = vi.hoisted(() => ({ value: 'auto' }));
 
 vi.mock('@/stores/serverStore', () => ({
   useServerStore: Object.assign(
@@ -38,6 +39,7 @@ vi.mock('@/stores/serverStore', () => ({
         setModels: mockSetModels,
         setLoadedModel: mockSetLoadedModel,
         setModelLoading: mockSetModelLoading,
+        loadGpu: mockLoadGpu.value,
       }),
     }
   ),
@@ -156,10 +158,34 @@ describe('useModels', () => {
     });
 
     await waitFor(() => {
-      expect(mockModelApi.load).toHaveBeenCalledWith(1);
+      expect(mockModelApi.load).toHaveBeenCalledWith(1, 'auto');
     });
 
     expect(mockSetModelLoading).toHaveBeenCalledWith(true);
+  });
+
+  it('load sends the card chosen in the GPU selector', async () => {
+    // MUTATION CONTROL: call modelApi.load(id) without the store's loadGpu -> fails.
+    mockLoadGpu.value = 'GPU-aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee';
+    try {
+      mockModelApi.list.mockResolvedValue([]);
+      mockModelApi.load.mockResolvedValue(createMockModel({ id: 2, status: 'loaded' }));
+      const { result } = renderHook(() => useModels(), { wrapper: createWrapper() });
+      await waitFor(() => expect(result.current.isLoading).toBe(false));
+
+      await act(async () => {
+        result.current.load(2);
+      });
+
+      await waitFor(() => {
+        expect(mockModelApi.load).toHaveBeenCalledWith(
+          2,
+          'GPU-aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee',
+        );
+      });
+    } finally {
+      mockLoadGpu.value = 'auto';
+    }
   });
 
   it('unloadModel calls modelApi.unload and clears loaded model', async () => {

@@ -297,6 +297,9 @@ class SocketClient {
         gpuMemoryTotal: data.gpu_memory_total_mb,
         gpuUtilization: data.gpu_utilization,
         gpuTemperature: data.gpu_temperature,
+        // Each card. An older backend sends no list; an empty one then says
+        // "no per-card data" rather than keeping a stale card on screen.
+        gpus: data.gpus ?? [],
       });
     });
   }

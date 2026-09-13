@@ -114,6 +114,8 @@ describe('serverStore', () => {
       expect(state.gpuMemoryTotal).toBe(0);
       expect(state.gpuUtilization).toBe(0);
       expect(state.gpuTemperature).toBe(0);
+      expect(state.gpus).toEqual([]);
+      expect(state.loadGpu).toBe('auto');
     });
 
     it('has no profiles by default', () => {
@@ -543,6 +545,23 @@ describe('serverStore', () => {
       expect(state.gpuMemoryTotal).toBe(24576);
       expect(state.gpuUtilization).toBe(45);
       expect(state.gpuTemperature).toBe(52);
+    });
+
+    it('setSystemMetrics stores every card, and a partial update keeps them', () => {
+      const gpus = [
+        { index: 0, uuid: 'GPU-0', name: 'NVIDIA GeForce RTX 3080 Ti', utilization: 5, memory_used_mb: 1_000, memory_total_mb: 12_288, temperature: 40 },
+        { index: 1, uuid: 'GPU-1', name: 'NVIDIA GeForce RTX 3090', utilization: 90, memory_used_mb: 20_000, memory_total_mb: 24_576, temperature: 70 },
+      ];
+      useServerStore.getState().setSystemMetrics({ gpuMemoryTotal: 36_864, gpus });
+      expect(useServerStore.getState().gpus).toEqual(gpus);
+
+      useServerStore.getState().setSystemMetrics({ gpuUtilization: 80 });
+      expect(useServerStore.getState().gpus).toEqual(gpus);
+    });
+
+    it('setLoadGpu remembers the card for the next load', () => {
+      useServerStore.getState().setLoadGpu('GPU-1');
+      expect(useServerStore.getState().loadGpu).toBe('GPU-1');
     });
 
     it('setSystemMetrics partially updates metrics preserving others', () => {

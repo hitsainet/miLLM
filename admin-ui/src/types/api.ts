@@ -41,12 +41,43 @@ export interface ModelInfo {
   gguf_label?: string | null;
   /** The pinned commit this model was downloaded from. */
   revision?: string | null;
+  /** Card(s) the loaded model is on and what it used on each. Loaded model only. */
+  placement?: ModelPlacement | null;
 }
 
+/**
+ * Which GPU a load goes on: 'auto' (the card with the most free memory that
+ * fits), a CUDA index as a string ("1"), or a GPU UUID as nvidia-smi prints it.
+ * A named card without room is refused by the backend, never swapped.
+ */
+export type GpuSelection = string;
+
 export interface LoadModelRequest {
-  model_id: string;
-  device?: 'auto' | 'cuda' | 'cpu';
-  dtype?: string;
+  gpu?: GpuSelection | null;
+}
+
+/** Where the loaded model lives, as the backend decided and measured it. */
+export interface ModelPlacement {
+  /** 'single' = one card, 'all' = spread across every card, 'cpu' = GGUF on the CPU. */
+  mode: 'single' | 'all' | 'cpu';
+  reason: string;
+  requested: number | string | null;
+  required_mb: number;
+  capacity_mb: number;
+  devices: string[];
+  gpu_indices: number[];
+  memory_by_device_mb: Record<string, number>;
+}
+
+/** One card from the system:metrics event (nvidia-smi, one line per GPU). */
+export interface GpuMetrics {
+  index: number;
+  uuid: string;
+  name: string;
+  utilization: number;
+  memory_used_mb: number;
+  memory_total_mb: number;
+  temperature: number;
 }
 
 export interface ModelDownloadRequest {
@@ -54,7 +85,6 @@ export interface ModelDownloadRequest {
   repo_id?: string;
   local_path?: string;
   quantization: QuantizationType;
-  device?: 'auto' | 'cuda' | 'cpu';
   trust_remote_code?: boolean;
   hf_token?: string;
   revision?: string;
@@ -418,8 +448,12 @@ export interface SystemMetricsEvent {
   cpu_percent: number;
   ram_used_mb: number;
   ram_total_mb: number;
+  /** Aggregates across every card: mean utilization, summed memory, hottest temperature. */
   gpu_utilization: number;
   gpu_memory_used_mb: number;
   gpu_memory_total_mb: number;
   gpu_temperature: number;
+  gpu_count?: number;
+  /** One entry per card. Absent from backends older than multi-GPU Phase 0. */
+  gpus?: GpuMetrics[];
 }

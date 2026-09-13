@@ -398,7 +398,32 @@ describe('SocketClient', () => {
         gpuMemoryTotal: 24576,
         gpuUtilization: 45,
         gpuTemperature: 52,
+        gpus: [],
       });
+    });
+
+    it('passes every card through, not only the aggregates', () => {
+      socketClient.connect();
+      const metricsHandler = mockSocket.on.mock.calls.find(
+        (call) => call[0] === 'system:metrics'
+      )?.[1];
+      const gpus = [
+        { index: 0, uuid: 'GPU-0', name: 'NVIDIA GeForce RTX 3080 Ti', utilization: 5, memory_used_mb: 1_000, memory_total_mb: 12_288, temperature: 40 },
+        { index: 1, uuid: 'GPU-1', name: 'NVIDIA GeForce RTX 3090', utilization: 90, memory_used_mb: 20_000, memory_total_mb: 24_576, temperature: 70 },
+      ];
+
+      metricsHandler?.({
+        gpu_memory_used_mb: 21_000,
+        gpu_memory_total_mb: 36_864,
+        gpu_utilization: 48,
+        gpu_temperature: 70,
+        gpu_count: 2,
+        gpus,
+      });
+
+      expect(mockServerStore.setSystemMetrics).toHaveBeenCalledWith(
+        expect.objectContaining({ gpus })
+      );
     });
   });
 

@@ -18,6 +18,7 @@ import {
   SystemMetricCard,
   QuickActions,
   ActionButtons,
+  GpuCardList,
 } from '@components/dashboard';
 import type { StatusType } from '@components/dashboard/StatusCard';
 
@@ -38,6 +39,7 @@ export function DashboardPage() {
     gpuMemoryTotal,
     gpuUtilization,
     gpuTemperature,
+    gpus,
     connectionStatus,
   } = useServerStore();
 
@@ -192,6 +194,14 @@ export function DashboardPage() {
             status="neutral"
           />
         </div>
+      </section>
+
+      {/* Each GPU. The metrics above are aggregates across every card. */}
+      <section>
+        <h2 className="text-lg font-semibold text-slate-200 mb-4">
+          GPUs{gpus.length ? ` (${gpus.length})` : ''}
+        </h2>
+        <GpuCardList gpus={gpus} />
       </section>
 
       {/* Quick Start / Actions */}

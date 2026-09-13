@@ -45,7 +45,10 @@ export function useModels() {
   const loadMutation = useMutation({
     mutationFn: (id: number) => {
       setModelLoading(true);
-      return modelApi.load(id);
+      // The card chosen in the GPU selector at the moment of loading. Read
+      // from the store, not captured at render, so a change just before the
+      // click is the one sent.
+      return modelApi.load(id, useServerStore.getState().loadGpu ?? 'auto');
     },
     onSuccess: (model) => {
       setLoadedModel(model);

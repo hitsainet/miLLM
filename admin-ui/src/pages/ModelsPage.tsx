@@ -6,11 +6,12 @@ import { useServerStore } from '@stores/serverStore';
 import { ModelLoadForm, LoadedModelCard, ModelDetailsModal } from '@components/models';
 import { displayQuantization } from '@components/models/displayQuantization';
 import type { ModelLoadFormData } from '@components/models';
-import { Card, CardHeader, Spinner, EmptyState, Badge } from '@components/common';
+import { Card, CardHeader, Spinner, EmptyState, Badge, Select } from '@components/common';
+import { gpuOptions, resolveGpuSelection } from '@components/models/gpuOptions';
 import type { GGUFQuantInfo, ModelInfo } from '@/types';
 
 export function ModelsPage() {
-  const { loadedModel } = useServerStore();
+  const { loadedModel, gpus, loadGpu, setLoadGpu } = useServerStore();
   const {
     models,
     isLoading,
@@ -39,11 +40,13 @@ export function ModelsPage() {
   const [previewHfToken, setPreviewHfToken] = useState<string | undefined>(undefined);
 
   const handleLoadModel = async (data: ModelLoadFormData) => {
+    // The download does not load; the chosen card is remembered and sent by
+    // the Load / Switch buttons.
+    setLoadGpu(data.gpu);
     await downloadModel({
       source: 'huggingface',
       repo_id: data.repo_id,
       quantization: data.quantization,
-      device: data.device,
       trust_remote_code: data.trust_remote_code,
       hf_token: data.hf_token,
       // Present only when a GGUF quantization was chosen. Without these the
@@ -197,6 +200,9 @@ export function ModelsPage() {
           ggufQuants={formPreview?.quants ?? null}
           previewedRepoId={formPreview?.repoId ?? null}
           onRepoIdSettled={handleRepoIdSettled}
+          gpus={gpus}
+          gpu={loadGpu}
+          onGpuChange={setLoadGpu}
         />
       )}
 
@@ -206,6 +212,18 @@ export function ModelsPage() {
           title="Downloaded Models"
           subtitle="Click on a model to view details and actions"
           icon={<Server className="w-5 h-5 text-slate-400" />}
+          action={
+            // Here as well as in the form: the form is hidden while a model
+            // is loaded, and Switch still needs to know which card.
+            <div className="w-72">
+              <Select
+                aria-label="GPU for loading"
+                value={resolveGpuSelection(loadGpu, gpus)}
+                onChange={(e) => setLoadGpu(e.target.value)}
+                options={gpuOptions(gpus)}
+              />
+            </div>
+          }
         />
 
         {models && models.length > 0 ? (

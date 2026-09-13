@@ -22,8 +22,11 @@ export interface GGUFQuantPickerProps {
   quants: GGUFQuantInfo[];
   selectedLabel: string | null;
   onSelect: (label: string) => void;
-  /** Total VRAM of the target card, when known, for the fit hint. */
-  gpuTotalBytes?: number | null;
+  /**
+   * Total VRAM of each card on the node, live from the metrics socket. Empty
+   * or absent means unknown, and the fit column then says nothing.
+   */
+  gpuTotalsBytes?: number[] | null;
 }
 
 /** Binary units, because that is what `nvidia-smi` and the Hub both report in. */
@@ -38,20 +41,37 @@ export function formatBytes(bytes: number): string {
  * Weights are not the whole story — KV cache and runtime overhead land on the
  * same card — so this is a HINT, hedged in the UI copy, never a gate. A quant
  * that reads "tight" may still run at a short context.
+ *
+ * 'fits' means on ONE card, which the backend then uses alone; 'fits-across'
+ * means only the cards together hold it, which llama.cpp does by splitting
+ * layers between them. The totals are the node's live cards — this was a
+ * constant 24 GB, which was wrong the day a second card went in.
  */
-export function fitsInVram(totalSizeBytes: number, gpuTotalBytes?: number | null) {
-  if (!gpuTotalBytes || gpuTotalBytes <= 0) return null;
+export function fitsInVram(totalSizeBytes: number, gpuTotalsBytes?: number[] | null) {
+  const cards = (gpuTotalsBytes ?? []).filter((bytes) => bytes > 0);
+  if (!cards.length) return null;
   const withOverhead = totalSizeBytes * 1.15;
-  if (withOverhead <= gpuTotalBytes * 0.9) return 'fits' as const;
-  if (totalSizeBytes <= gpuTotalBytes) return 'tight' as const;
+  const largest = Math.max(...cards);
+  const combined = cards.reduce((sum, bytes) => sum + bytes, 0);
+  if (withOverhead <= largest * 0.9) return 'fits' as const;
+  if (cards.length > 1 && withOverhead <= combined * 0.9) return 'fits-across' as const;
+  if (totalSizeBytes <= (cards.length > 1 ? combined : largest)) return 'tight' as const;
   return 'too-large' as const;
+}
+
+/** The fit column's heading, naming the cards it was judged against. */
+function fitHeading(gpuTotalsBytes?: number[] | null): string {
+  const cards = (gpuTotalsBytes ?? []).filter((bytes) => bytes > 0);
+  if (!cards.length) return 'GPU fit';
+  const sizes = cards.map((bytes) => `${Math.round(bytes / 1024 ** 3)}`);
+  return cards.length === 1 ? `On a ${sizes[0]} GB card` : `On ${cards.length} cards (${sizes.join(' + ')} GB)`;
 }
 
 export function GGUFQuantPicker({
   quants,
   selectedLabel,
   onSelect,
-  gpuTotalBytes,
+  gpuTotalsBytes,
 }: GGUFQuantPickerProps) {
   if (!quants.length) return null;
 
@@ -81,14 +101,14 @@ export function GGUFQuantPicker({
                 Size
               </th>
               <th className="text-right px-4 py-3 text-sm font-medium text-slate-300">
-                On a 24 GB card
+                {fitHeading(gpuTotalsBytes)}
               </th>
             </tr>
           </thead>
           <tbody>
             {quants.map((q) => {
               const isSelected = selectedLabel === q.label;
-              const fit = fitsInVram(q.total_size_bytes, gpuTotalBytes);
+              const fit = fitsInVram(q.total_size_bytes, gpuTotalsBytes);
               return (
                 <tr
                   key={q.label}
@@ -142,7 +162,9 @@ export function GGUFQuantPicker({
                     {fit === null ? (
                       <span className="text-xs text-slate-500">—</span>
                     ) : fit === 'fits' ? (
-                      <span className="text-xs text-emerald-400">fits</span>
+                      <span className="text-xs text-emerald-400">fits on one card</span>
+                    ) : fit === 'fits-across' ? (
+                      <span className="text-xs text-sky-400">fits across cards</span>
                     ) : fit === 'tight' ? (
                       <span className="text-xs text-amber-400">tight</span>
                     ) : (

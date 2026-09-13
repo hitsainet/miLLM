@@ -19,19 +19,10 @@ import {
 } from 'lucide-react';
 import { Modal, Button, Spinner, Badge } from '@components/common';
 import type { ModelInfo, ModelPreviewResponse } from '@/types';
+import { useServerStore } from '@/stores/serverStore';
 import { GGUFQuantPicker } from './GGUFQuantPicker';
 import { displayQuantization } from './displayQuantization';
-
-/**
- * VRAM of the deployment card, for the fit hint only.
- *
- * A CONSTANT, and deliberately not dressed up as a measurement: this app has no
- * endpoint reporting the GPU's capacity at preview time, and inventing one to
- * fill a hint would be worse than a stated assumption. The hint is advisory —
- * it never blocks a download — so being wrong on a different card costs a
- * misleading word, not a failed action.
- */
-const GPU_TOTAL_BYTES = 24 * 1024 ** 3;
+import { gpuTotalsBytes } from './gpuOptions';
 
 export interface ModelDetailsModalProps {
   /** The downloaded model to show details for */
@@ -101,6 +92,8 @@ export function ModelDetailsModal({
   const [selectedQuantization, setSelectedQuantization] = useState('Q4');
   const [trustRemoteCode, setTrustRemoteCode] = useState(false);
   const [selectedGgufLabel, setSelectedGgufLabel] = useState<string | null>(null);
+  // Live per-card totals from the metrics socket, for the GGUF fit hint.
+  const liveGpuTotals = gpuTotalsBytes(useServerStore((state) => state.gpus));
 
   const ggufQuants = previewData?.gguf_quants ?? [];
   const isGguf = ggufQuants.length > 0;
@@ -509,7 +502,7 @@ export function ModelDetailsModal({
             quants={ggufQuants}
             selectedLabel={selectedGgufLabel}
             onSelect={setSelectedGgufLabel}
-            gpuTotalBytes={GPU_TOTAL_BYTES}
+            gpuTotalsBytes={liveGpuTotals}
           />
         )}
 

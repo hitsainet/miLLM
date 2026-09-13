@@ -102,6 +102,18 @@ export function LoadedModelCard({
               <p className="text-slate-200 font-semibold uppercase">
                 {model.device || 'Unknown'}
               </p>
+              {model.placement && Object.keys(model.placement.memory_by_device_mb).length > 0 && (
+                <p data-testid="placement-memory" className="text-xs text-slate-400 mt-1">
+                  {Object.entries(model.placement.memory_by_device_mb)
+                    .map(([device, mb]) => `${device}: ${(mb / 1024).toFixed(1)} GB`)
+                    .join(' · ')}
+                </p>
+              )}
+              {model.placement?.mode === 'all' && (
+                <p data-testid="placement-split" className="text-xs text-amber-400 mt-1">
+                  Split across cards
+                </p>
+              )}
             </div>
 
             <div className="bg-slate-800/50 rounded-lg p-3">

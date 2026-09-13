@@ -9,6 +9,8 @@ import type {
   FeatureActivation,
   ActivationRecord,
   FeatureStatistics,
+  GpuMetrics,
+  GpuSelection,
 } from '@/types';
 import type { ConnectionStatus } from '@/types/ui';
 
@@ -45,11 +47,15 @@ interface ServerState {
   activeProfile: Profile | null;
   profilesLoading: boolean;
 
-  // System metrics
+  // System metrics (aggregates across every card, kept as the summary)
   gpuMemoryUsed: number;
   gpuMemoryTotal: number;
   gpuUtilization: number;
   gpuTemperature: number;
+  /** Each card, from the socket's `gpus` list. */
+  gpus: GpuMetrics[];
+  /** The card the next model load asks for. 'auto' unless the operator picked one. */
+  loadGpu: GpuSelection;
 }
 
 interface ServerActions {
@@ -109,7 +115,9 @@ interface ServerActions {
     gpuMemoryTotal?: number;
     gpuUtilization?: number;
     gpuTemperature?: number;
+    gpus?: GpuMetrics[];
   }) => void;
+  setLoadGpu: (gpu: GpuSelection) => void;
 
   // Reset
   reset: () => void;
@@ -152,6 +160,8 @@ const initialState: ServerState = {
   gpuMemoryTotal: 0,
   gpuUtilization: 0,
   gpuTemperature: 0,
+  gpus: [],
+  loadGpu: 'auto',
 };
 
 export const useServerStore = create<ServerState & ServerActions>((set) => ({
@@ -295,7 +305,9 @@ export const useServerStore = create<ServerState & ServerActions>((set) => ({
       gpuMemoryTotal: metrics.gpuMemoryTotal ?? state.gpuMemoryTotal,
       gpuUtilization: metrics.gpuUtilization ?? state.gpuUtilization,
       gpuTemperature: metrics.gpuTemperature ?? state.gpuTemperature,
+      gpus: metrics.gpus ?? state.gpus,
     })),
+  setLoadGpu: (gpu) => set({ loadGpu: gpu }),
 
   // Reset
   reset: () => set(initialState),

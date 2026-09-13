@@ -10,6 +10,7 @@
  *   * drop the parts badge                         -> "says a quant is split" fails
  *   * report `files[0].size_bytes` as the size     -> "size covers every part" fails
  *   * make fitsInVram always return 'fits'         -> "too large" fails
+ *   * judge only the first card, not every card    -> "fits across cards" fails
  */
 
 import { describe, expect, it, vi } from 'vitest';
@@ -122,11 +123,11 @@ describe('GGUFQuantPicker', () => {
         quants={QUANTS}
         selectedLabel={null}
         onSelect={vi.fn()}
-        gpuTotalBytes={24 * GB}
+        gpuTotalsBytes={[24 * GB]}
       />,
     );
 
-    expect(within(screen.getByTestId('gguf-quant-Q4_K_M')).getByText('fits')).toBeInTheDocument();
+    expect(within(screen.getByTestId('gguf-quant-Q4_K_M')).getByText('fits on one card')).toBeInTheDocument();
     expect(within(screen.getByTestId('gguf-quant-Q6_K')).getByText('too large')).toBeInTheDocument();
   });
 
@@ -135,8 +136,33 @@ describe('GGUFQuantPicker', () => {
       <GGUFQuantPicker quants={QUANTS} selectedLabel={null} onSelect={vi.fn()} />,
     );
     // Silence beats a confident guess against an unknown card.
-    expect(screen.queryByText('fits')).not.toBeInTheDocument();
+    expect(screen.queryByText(/fits/)).not.toBeInTheDocument();
     expect(screen.queryByText('too large')).not.toBeInTheDocument();
+  });
+});
+
+describe('the fit column on a two-card node', () => {
+  it('names the cards and says when only the cards together hold a quant', () => {
+    render(
+      <GGUFQuantPicker
+        quants={[
+          {
+            label: 'Q8_0',
+            files: [{ path: 'X-Q8_0.gguf', size_bytes: 26 * GB }],
+            total_size_bytes: 26 * GB,
+            is_split: false,
+            quant_parsed: true,
+          },
+        ]}
+        selectedLabel={null}
+        onSelect={vi.fn()}
+        gpuTotalsBytes={[12 * GB, 24 * GB]}
+      />,
+    );
+    expect(screen.getByText('On 2 cards (12 + 24 GB)')).toBeInTheDocument();
+    expect(
+      within(screen.getByTestId('gguf-quant-Q8_0')).getByText('fits across cards'),
+    ).toBeInTheDocument();
   });
 });
 
@@ -148,9 +174,22 @@ describe('fitsInVram', () => {
 
   it('leaves headroom rather than calling a near-full card a fit', () => {
     // 21 GB of weights on a 24 GB card is not "fits" once overhead is counted.
-    expect(fitsInVram(21 * GB, 24 * GB)).toBe('tight');
-    expect(fitsInVram(4 * GB, 24 * GB)).toBe('fits');
-    expect(fitsInVram(64 * GB, 24 * GB)).toBe('too-large');
+    expect(fitsInVram(21 * GB, [24 * GB])).toBe('tight');
+    expect(fitsInVram(4 * GB, [24 * GB])).toBe('fits');
+    expect(fitsInVram(64 * GB, [24 * GB])).toBe('too-large');
+  });
+
+  it('is null with no cards reported', () => {
+    expect(fitsInVram(4 * GB, [])).toBeNull();
+  });
+
+  it('judges one card against the largest, and the rest against all of them', () => {
+    // The node: a 12 GB card beside a 24 GB card.
+    const node = [12 * GB, 24 * GB];
+    expect(fitsInVram(18 * GB, node)).toBe('fits'); // on the 24 GB card alone
+    expect(fitsInVram(26 * GB, node)).toBe('fits-across'); // only the two together
+    expect(fitsInVram(33 * GB, node)).toBe('tight');
+    expect(fitsInVram(40 * GB, node)).toBe('too-large');
   });
 });
 

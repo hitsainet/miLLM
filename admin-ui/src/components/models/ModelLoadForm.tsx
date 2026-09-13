@@ -1,12 +1,14 @@
 import { useEffect, useRef, useState } from 'react';
 import { Download, Play, HelpCircle } from 'lucide-react';
 import { Card, CardHeader, Button, Input, Select } from '@components/common';
-import type { GGUFQuantInfo } from '@/types';
+import type { GGUFQuantInfo, GpuMetrics, GpuSelection } from '@/types';
+import { gpuOptions, resolveGpuSelection } from './gpuOptions';
 
 export interface ModelLoadFormData {
   repo_id: string;
   quantization: 'FP32' | 'FP16' | 'Q8' | 'Q4' | 'Q2';
-  device: 'auto' | 'cuda' | 'cpu';
+  /** The card a later load asks for: 'auto', an index, or a GPU UUID. */
+  gpu: GpuSelection;
   trust_remote_code: boolean;
   hf_token?: string;
   /** Set only when a GGUF quantization was chosen. */
@@ -30,6 +32,11 @@ interface ModelLoadFormProps {
    * the quantization dropdown, so it must not surface anything.
    */
   onRepoIdSettled?: (repo_id: string, hf_token?: string) => void;
+  /** Every card, live from the metrics socket. One option each. */
+  gpus?: GpuMetrics[];
+  /** The selected card, when the page owns it (so the list's Load button uses it too). */
+  gpu?: GpuSelection;
+  onGpuChange?: (gpu: GpuSelection) => void;
 }
 
 /** How long the repo id must stay unchanged before it is looked up. */
@@ -61,12 +68,6 @@ function formatGB(bytes: number): string {
   return `${(bytes / 1024 ** 3).toFixed(2)} GB`;
 }
 
-const deviceOptions = [
-  { value: 'auto', label: 'Auto' },
-  { value: 'cuda', label: 'CUDA (GPU)' },
-  { value: 'cpu', label: 'CPU' },
-];
-
 export function ModelLoadForm({
   onSubmit,
   onPreview,
@@ -75,14 +76,24 @@ export function ModelLoadForm({
   ggufQuants,
   previewedRepoId,
   onRepoIdSettled,
+  gpus,
+  gpu,
+  onGpuChange,
 }: ModelLoadFormProps) {
-  const [formData, setFormData] = useState<ModelLoadFormData>({
+  const [formData, setFormData] = useState<Omit<ModelLoadFormData, 'gpu'>>({
     repo_id: '',
     quantization: 'Q4',
-    device: 'auto',
     trust_remote_code: false,
     hf_token: '',
   });
+  // One option per card, from the live metrics. This selector offered
+  // "CUDA (GPU)" and "CPU", named no card, and was sent nowhere the backend read.
+  const [localGpu, setLocalGpu] = useState<GpuSelection>('auto');
+  const selectedGpu = resolveGpuSelection(gpu ?? localGpu, gpus ?? []);
+  const handleGpuChange = (value: GpuSelection) => {
+    setLocalGpu(value);
+    onGpuChange?.(value);
+  };
   const [errors, setErrors] = useState<Record<string, string>>({});
   const [ggufLabel, setGgufLabel] = useState<string>('');
 
@@ -147,6 +158,7 @@ export function ModelLoadForm({
     if (validateForm()) {
       onSubmit({
         ...formData,
+        gpu: selectedGpu,
         hf_token: formData.hf_token || undefined,
         // EVERY file of the chosen quantization. The coarse `quantization`
         // above is ignored by the backend when a label is present — it derives
@@ -210,10 +222,11 @@ export function ModelLoadForm({
             />
           )}
           <Select
-            label="Device"
-            value={formData.device}
-            onChange={(e) => setFormData({ ...formData, device: e.target.value as ModelLoadFormData['device'] })}
-            options={deviceOptions}
+            label="GPU"
+            value={selectedGpu}
+            onChange={(e) => handleGpuChange(e.target.value)}
+            options={gpuOptions(gpus ?? [])}
+            helper="Used when the model is loaded"
           />
         </div>
 

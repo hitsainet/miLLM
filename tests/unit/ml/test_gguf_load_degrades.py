@@ -30,6 +30,8 @@ MUTATION CONTROLS (each must turn this file red):
 
 from unittest.mock import MagicMock, patch
 
+from tests.support.fake_gpus import RTX_3090, TI_3080, fake_gpus
+
 import pytest
 
 from millm.core.config import settings as config_settings
@@ -511,7 +513,8 @@ class TestTheContextIsPredictedNotDiscovered:
         with patch.object(model_loader, "Llama", lambda **k: (calls.append(k["n_ctx"]), MagicMock(close=MagicMock()))[1]), \
              patch.object(model_loader, "declared_context", return_value=262144), \
              patch.object(model_loader, "predicted_max_context", return_value=6144), \
-             patch("millm.ml.memory_utils.get_available_memory_mb", return_value=24000), \
+             fake_gpus((TI_3080, 11_000, 12_288), (RTX_3090, 23_000, 24_576)), \
+             patch.object(model_loader, "llama_supports_gpu_offload", lambda: True), \
              patch.object(config_settings, "GGUF_ENABLE_EMBEDDINGS", False), \
              patch.object(config_settings, "GGUF_CONTEXT_LENGTH", 32768):
             loaded = model_loader.load_gguf_model(1, "m", str(tmp_path), "m.gguf")
@@ -532,7 +535,8 @@ class TestTheContextIsPredictedNotDiscovered:
         with patch.object(model_loader, "Llama", lambda **k: (calls.append(k["n_ctx"]), MagicMock(close=MagicMock()))[1]), \
              patch.object(model_loader, "declared_context", return_value=4096), \
              patch.object(model_loader, "predicted_max_context", return_value=60000), \
-             patch("millm.ml.memory_utils.get_available_memory_mb", return_value=24000), \
+             fake_gpus((TI_3080, 11_000, 12_288), (RTX_3090, 23_000, 24_576)), \
+             patch.object(model_loader, "llama_supports_gpu_offload", lambda: True), \
              patch.object(config_settings, "GGUF_ENABLE_EMBEDDINGS", False), \
              patch.object(config_settings, "GGUF_CONTEXT_LENGTH", 32768):
             model_loader.load_gguf_model(1, "m", str(tmp_path), "m.gguf")

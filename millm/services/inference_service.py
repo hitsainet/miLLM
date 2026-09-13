@@ -326,7 +326,10 @@ class InferenceService:
                 detail="per-request steering/monitoring/sensing require 1; "
                        "use the CBM backend for batching",
             )
-        self._device = "cuda" if torch.cuda.is_available() else "cpu"
+        # Only the answer when NO model is loaded. Where inputs go is read from
+        # the loaded model in _get_input_device; a bare "cuda" here meant GPU 0,
+        # which on a multi-GPU node is often not where the model was placed.
+        self._device = "cpu"
         self._model_state = LoadedModelState()
         self._kv_cache_mode = kv_cache_mode
         self._speculative_model_id = speculative_model
@@ -445,6 +448,11 @@ class InferenceService:
             # Non-device_map model: use first parameter device
             return str(next(hf_model.parameters()).device)
         except Exception:
+            # The loader recorded which cards the model is on; the first of
+            # them beats a device the model does not live on.
+            indices = getattr(self._model_state.current, "gpu_indices", None) or []
+            if indices:
+                return f"cuda:{indices[0]}"
             return self._device
 
     def _use_cbm(self) -> bool:
@@ -1782,10 +1790,13 @@ class InferenceService:
                     "loading_draft_model",
                     model_id=self._speculative_model_id,
                 )
+                # On the main model's input device, whole. device_map="auto"
+                # spread the draft over every card, so each proposed token
+                # crossed cards before the main model could verify it.
                 self._draft_model = AutoModelForCausalLM.from_pretrained(
                     self._speculative_model_id,
                     torch_dtype=torch.bfloat16,
-                    device_map="auto",
+                    device_map={"": self._get_input_device()},
                 )
                 self._draft_model.eval()
                 logger.info("draft_model_loaded", model_id=self._speculative_model_id)
@@ -2505,6 +2516,37 @@ class InferenceService:
         except Exception:
             return None
 
+    def _loaded_gpu_indices(self) -> list[int]:
+        """The cards the loaded model holds memory on; empty when none."""
+        if not self._model_state.is_loaded:
+            return []
+        return list(getattr(self._model_state.current, "gpu_indices", None) or [])
+
+    @staticmethod
+    def _kv_fits(need_mb: int, gpu_indices: list[int]) -> tuple[bool, int]:
+        """Whether a KV cache of `need_mb` fits on the cards the model lives on.
+
+        This checked GPU 0 whatever card the model was on, so a batch for a
+        model on the 3090 was sized by the 3080 Ti's free memory.
+
+        The cache is allocated beside each layer, so a model split over N cards
+        puts about 1/N of it on each. Every card must hold its share. An even
+        share is the Phase 1 approximation; Phase 2's sharding knows the real
+        layer split.
+
+        Returns:
+            (fits, least free MB among those cards)
+        """
+        from millm.ml.memory_utils import verify_memory_available
+
+        share_mb = -(-int(need_mb) // len(gpu_indices))  # ceiling division
+        fits, least_free = True, None
+        for index in gpu_indices:
+            ok, free_mb = verify_memory_available(share_mb, device=index)
+            fits = fits and ok
+            least_free = free_mb if least_free is None else min(least_free, free_mb)
+        return fits, int(least_free or 0)
+
     def _chunk_batch_for_memory(
         self, prompts: list[str], max_new_tokens: int
     ) -> list[tuple[int, list[str]]]:
@@ -2517,9 +2559,8 @@ class InferenceService:
         rows = min(len(prompts), self.MAX_BATCH_ROWS)
 
         try:
-            from millm.ml.memory_utils import is_cuda_available, verify_memory_available
-
-            if is_cuda_available() and prompts:
+            gpu_indices = self._loaded_gpu_indices()
+            if gpu_indices and prompts:
                 longest = max(len(self._tokenizer.encode(p)) for p in prompts)
                 total_len = longest + max(int(max_new_tokens or 0), 0)
                 while rows > 1:
@@ -2527,7 +2568,7 @@ class InferenceService:
                     if projected is None:
                         break  # unmeasurable -> keep the row cap, do not grow
                     need_mb = int(projected / (1024 * 1024) * 1.2)  # +20% slack
-                    ok, available_mb = verify_memory_available(need_mb)
+                    ok, available_mb = self._kv_fits(need_mb, gpu_indices)
                     if ok:
                         break
                     rows -= 1

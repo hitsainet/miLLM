@@ -24,6 +24,7 @@ UNLOAD_TIMEOUT = 30.0  # seconds
 from millm.api.schemas.model import ModelDownloadRequest, ModelPreviewRequest
 from millm.core.errors import (
     DownloadCancelledError,
+    GpuNotFoundError,
     ModelAlreadyExistsError,
     ModelAlreadyLoadedError,
     ModelBusyError,
@@ -34,6 +35,7 @@ from millm.core.errors import (
 from millm.db.models.model import Model, ModelSource, ModelStatus, QuantizationType
 from millm.db.repositories.model_repository import ModelRepository
 from millm.ml.memory_utils import estimate_memory_mb
+from millm.ml.gpu_placement import GpuRequest, find_gpu, list_gpus, parse_gpu_request
 from millm.ml.gguf_catalog import coarse_quantization
 from millm.ml.model_downloader import ModelDownloader, _safe_variant
 from millm.ml.model_loader import ModelLoader
@@ -722,7 +724,7 @@ class ModelService:
     # Load/Unload Operations
     # =========================================================================
 
-    async def load_model(self, model_id: int) -> Model:
+    async def load_model(self, model_id: int, gpu: GpuRequest = None) -> Model:
         """
         Load a model into GPU memory.
 
@@ -731,6 +733,9 @@ class ModelService:
 
         Args:
             model_id: The model's database ID
+            gpu: None or "auto" (the most-free card that fits), a CUDA index,
+                or a GPU UUID. A named card that does not exist is refused
+                here; one without room is refused by the loader.
 
         Returns:
             The updated model record (status will be LOADED)
@@ -778,6 +783,17 @@ class ModelService:
                 details={"loading_model_id": self._loading_model_id},
             )
 
+        # A named card is checked NOW, while the request is still open. The
+        # load itself runs in the background, so a card that does not exist
+        # would otherwise surface only as an ERROR status — after the resident
+        # model had already been unloaded to make room.
+        try:
+            wanted = parse_gpu_request(gpu)
+        except ValueError as e:
+            raise GpuNotFoundError(str(e), details={"requested": gpu}) from e
+        if wanted is not None:
+            find_gpu(list_gpus(), wanted)
+
         # Unload any currently loaded model
         if self.loader.is_loaded:
             current_model_id = self.loader.loaded_model_id
@@ -823,6 +839,7 @@ class ModelService:
             # The chosen GGUF file, when this row is one. Its presence is what
             # routes the load to llama.cpp instead of transformers.
             (model.gguf_files or [None])[0],
+            wanted,
         )
 
         return model
@@ -836,6 +853,7 @@ class ModelService:
         estimated_memory_mb: int,
         trust_remote_code: bool,
         gguf_file: Optional[str] = None,
+        gpu: GpuRequest = None,
     ) -> None:
         """
         Background worker for loading models.
@@ -855,6 +873,9 @@ class ModelService:
 
             # Resolve TORCH_COMPILE=None (auto-detect) to a concrete bool.
             # Auto: enable for CUDA + non-bitsandbytes models; disable otherwise.
+            # A model that ENDS UP split across devices is also not compiled,
+            # but that is only knowable after from_pretrained, so the loader
+            # (ModelLoadContext.load) enforces it rather than this resolution.
             torch_compile_setting = settings.TORCH_COMPILE
             if torch_compile_setting is None:
                 try:
@@ -887,6 +908,7 @@ class ModelService:
                 torch_compile=torch_compile_resolved,
                 torch_compile_mode=settings.TORCH_COMPILE_MODE,
                 gguf_file=gguf_file,
+                gpu=gpu,
             )
 
             # Update database (thread-safe async call)
@@ -1086,6 +1108,15 @@ class ModelService:
             "memory_footprint": loaded.memory_used_mb * 1024 * 1024,  # Convert MB to bytes
             "device": loaded.device,
             "dtype": loaded.dtype,
+            # Additive: which card(s), how the choice was made, and what the
+            # load consumed on each card.
+            "gpu_indices": list(loaded.gpu_indices),
+            "memory_by_device_mb": dict(loaded.memory_by_device_mb),
+            "placement": (
+                {**loaded.placement, "memory_by_device_mb": dict(loaded.memory_by_device_mb)}
+                if loaded.placement
+                else None
+            ),
         }
 
     # =========================================================================

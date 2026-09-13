@@ -287,18 +287,17 @@ class TestBatchSafety:
     def test_unmeasurable_config_keeps_the_row_cap(self, service):
         """An unmeasurable batch must not become an unbounded one.
 
-        CUDA must be patched TRUE here. The projection block is guarded by
-        is_cuda_available(), which is False under this fixture, so without the
-        patch the code under test never executes and this assertion passes
-        against any implementation at all — which is exactly how the first
-        version of this test let a mutation survive.
+        The model must be ON A CARD here. The projection block runs only for a
+        model with recorded gpu_indices, which this fixture's CPU model lacks,
+        so without them the code under test never executes and this assertion
+        passes against any implementation at all — which is exactly how the
+        first version of this test let a mutation survive.
         """
         service._model.config.num_hidden_layers = None
         assert service._project_kv_bytes(8, 100) is None
+        LoadedModelState().current.gpu_indices = [1]
 
-        with patch("millm.ml.memory_utils.is_cuda_available",
-                   return_value=True), \
-             patch("millm.ml.memory_utils.verify_memory_available",
+        with patch("millm.ml.memory_utils.verify_memory_available",
                    return_value=(False, 0)):
             chunks = service._chunk_batch_for_memory(["a"] * 20, 10)
 
@@ -307,15 +306,19 @@ class TestBatchSafety:
         )
 
     def test_projection_shrinks_the_batch_when_memory_is_short(self, service):
-        """And the guard must actually bite when the projection IS available."""
-        with patch("millm.ml.memory_utils.is_cuda_available",
-                   return_value=True), \
-             patch("millm.ml.memory_utils.verify_memory_available",
-                   return_value=(False, 1)):
+        """And the guard must actually bite when the projection IS available.
+
+        On the card the model lives on: index 1 here, never an implicit GPU 0.
+        """
+        LoadedModelState().current.gpu_indices = [1]
+        with patch("millm.ml.memory_utils.verify_memory_available",
+                   return_value=(False, 1)) as verify:
             chunks = service._chunk_batch_for_memory(["a b c"] * 8, 64)
         assert all(len(c) == 1 for _, c in chunks), (
             "memory was exhausted at every size yet the batch was not reduced"
         )
+        assert verify.call_count == service.MAX_BATCH_ROWS - 1
+        assert {call.kwargs["device"] for call in verify.call_args_list} == {1}
 
     @pytest.mark.asyncio
     async def test_sensing_is_refused_out_loud_for_a_batch(self, service):

@@ -177,12 +177,13 @@ def get_largest_free_memory_mb() -> int:
     return max((gpu["free_mb"] for gpu in list_gpu_memory()), default=0)
 
 
-def get_available_memory_mb(device: "int | str | torch.device" = 0) -> int:
+def get_available_memory_mb(device: "int | str | torch.device") -> int:
     """
     Get available GPU memory in megabytes.
 
     Args:
-        device: CUDA device index or device (default: 0)
+        device: CUDA device index or device. Required: a default of 0 read
+            GPU 0 for callers whose model lived on another card.
 
     Returns:
         Available GPU memory in MB, or 0 if CUDA is not available.
@@ -199,12 +200,12 @@ def get_available_memory_mb(device: "int | str | torch.device" = 0) -> int:
         return 0
 
 
-def get_total_memory_mb(device: int = 0) -> int:
+def get_total_memory_mb(device: "int | str | torch.device") -> int:
     """
     Get total GPU memory in megabytes.
 
     Args:
-        device: CUDA device index (default: 0)
+        device: CUDA device index (required)
 
     Returns:
         Total GPU memory in MB, or 0 if CUDA is not available.
@@ -221,12 +222,12 @@ def get_total_memory_mb(device: int = 0) -> int:
         return 0
 
 
-def get_used_memory_mb(device: int = 0) -> int:
+def get_used_memory_mb(device: "int | str | torch.device") -> int:
     """
     Get currently used GPU memory in megabytes.
 
     Args:
-        device: CUDA device index (default: 0)
+        device: CUDA device index (required)
 
     Returns:
         Used GPU memory in MB, or 0 if CUDA is not available.
@@ -242,13 +243,15 @@ def get_used_memory_mb(device: int = 0) -> int:
         return 0
 
 
-def verify_memory_available(required_mb: int, device: int = 0) -> tuple[bool, int]:
+def verify_memory_available(
+    required_mb: int, device: "int | str | torch.device"
+) -> tuple[bool, int]:
     """
     Check if enough GPU memory is available.
 
     Args:
         required_mb: Required memory in megabytes
-        device: CUDA device index (default: 0)
+        device: CUDA device index (required)
 
     Returns:
         Tuple of (is_available, available_mb)
@@ -285,12 +288,12 @@ def get_device_count() -> int:
         return 0
 
 
-def get_device_name(device: int = 0) -> str:
+def get_device_name(device: "int | str | torch.device") -> str:
     """
     Get the name of a CUDA device.
 
     Args:
-        device: CUDA device index (default: 0)
+        device: CUDA device index (required)
 
     Returns:
         Device name string, or "Unknown" if not available.

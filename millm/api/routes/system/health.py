@@ -102,6 +102,13 @@ class DetailedHealthResponse(BaseModel):
     )
     model_loaded: bool = Field(False, description="Whether a model is currently loaded")
     model_name: Optional[str] = Field(None, description="Name of loaded model")
+    model_placement: Optional[dict[str, Any]] = Field(
+        None,
+        description=(
+            "Card(s) the loaded model is on: mode, reason, devices, gpu_indices "
+            "and memory_by_device_mb"
+        ),
+    )
     sae_attached: bool = Field(False, description="Whether an SAE is currently attached")
     sae_id: Optional[str] = Field(
         None,
@@ -255,6 +262,22 @@ async def readiness_check(
     return JSONResponse(content=response.model_dump(mode="json"), status_code=status_code)
 
 
+def _model_placement(model_loader: Any) -> Optional[dict[str, Any]]:
+    """The loaded model's placement, or None. Never fails the health check."""
+    try:
+        current = model_loader.current_model
+        placement = getattr(current, "placement", None)
+        if not isinstance(placement, dict):
+            return None
+        return {
+            **placement,
+            "memory_by_device_mb": dict(getattr(current, "memory_by_device_mb", {}) or {}),
+        }
+    except Exception as e:  # noqa: BLE001 - reporting, not a component check
+        logger.warning("health_placement_unavailable", error=str(e))
+        return None
+
+
 @router.get(
     "/detailed",
     response_model=DetailedHealthResponse,
@@ -375,6 +398,7 @@ async def detailed_health_check(
         circuit_breakers=circuit_breakers,
         model_loaded=model_loaded,
         model_name=model_name,
+        model_placement=_model_placement(model_loader) if model_loaded else None,
         sae_attached=sae_state.is_attached,
         sae_id=sae_state.attached_sae_id,
         # Multi-SAE aware (Feature 12/13): a cross-layer circuit attaches

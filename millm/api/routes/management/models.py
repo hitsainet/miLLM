@@ -6,12 +6,13 @@ Provides endpoints for downloading, loading, unloading, and managing LLM models.
 
 from typing import Annotated
 
-from fastapi import APIRouter, Path
+from fastapi import APIRouter, Body, Path
 
 from millm.api.dependencies import ModelServiceDep
 from millm.api.schemas.common import ApiResponse
 from millm.api.schemas.model import (
     ModelDownloadRequest,
+    ModelLoadRequest,
     ModelPreviewRequest,
     GGUFFileInfo,
     GGUFQuantInfo,
@@ -59,6 +60,7 @@ async def list_models(
             response.memory_footprint = loaded_info["memory_footprint"]
             response.device = loaded_info["device"]
             response.dtype = loaded_info["dtype"]
+            response.placement = loaded_info.get("placement")
         responses.append(response)
     return ApiResponse.ok(responses)
 
@@ -141,14 +143,18 @@ async def delete_model(
 async def load_model(
     model_id: ModelId,
     service: ModelServiceDep,
+    request: Annotated[ModelLoadRequest | None, Body()] = None,
 ) -> ApiResponse[ModelResponse]:
     """
     Load a model into GPU memory.
 
     If another model is already loaded, it will be unloaded first.
     Progress updates are sent via WebSocket.
+
+    The body is optional: without one (or with `gpu` null / "auto") the model
+    goes on the card with the most free memory that fits.
     """
-    model = await service.load_model(model_id)
+    model = await service.load_model(model_id, gpu=request.gpu if request else None)
     return ApiResponse.ok(ModelResponse.from_model(model))
 
 

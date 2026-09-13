@@ -428,11 +428,18 @@ class TestLoadingAGGUFFile:
         assert "embedding" not in fake.call_args.kwargs
 
     def test_records_the_engine_and_offloads_to_gpu(self, tmp_path):
+        from millm.ml import model_loader
+        from tests.support.fake_gpus import RTX_3090, TI_3080, fake_gpus
+
         gguf = tmp_path / "zora-Q5_K_M.gguf"
         gguf.write_bytes(b"\x00" * 2048)
         fake = MagicMock()
 
-        with patch("millm.ml.model_loader.Llama", fake):
+        # Two cards, the most free memory on index 1: the model goes there
+        # whole, in llama.cpp's single-GPU mode.
+        with fake_gpus((TI_3080, 11_000, 12_288), (RTX_3090, 23_000, 24_576)), \
+                patch.object(model_loader, "llama_supports_gpu_offload", lambda: True), \
+                patch("millm.ml.model_loader.Llama", fake):
             loaded = load_gguf_model(7, "zora", str(tmp_path), "zora-Q5_K_M.gguf")
 
         assert loaded.engine == ENGINE_LLAMACPP
@@ -443,6 +450,12 @@ class TestLoadingAGGUFFile:
         )
         # n_gpu_layers=-1 is what makes it a GPU load at all.
         assert fake.call_args.kwargs["n_gpu_layers"] == -1
+        # ...and single-GPU mode on the chosen card is what keeps it off the
+        # other one. llama.cpp's default split put every GGUF across both.
+        assert fake.call_args.kwargs["split_mode"] == 0, "LLAMA_SPLIT_MODE_NONE"
+        assert fake.call_args.kwargs["main_gpu"] == 1
+        assert loaded.device == "cuda:1"
+        assert loaded.gpu_indices == [1]
         assert fake.call_args.kwargs["model_path"].endswith("zora-Q5_K_M.gguf")
 
     def test_the_device_is_the_measured_one_not_a_constant(self, tmp_path, monkeypatch):
@@ -506,6 +519,19 @@ class TestLoadingAGGUFFile:
         assert loaded.quantization_method == "gguf:unknown"
 
 
+def _on_card_1():
+    """A single-card placement on index 1 — the 3090 on the node, not GPU 0."""
+    from millm.ml.gpu_placement import GpuInfo, MODE_SINGLE, Placement
+
+    return Placement(
+        mode=MODE_SINGLE,
+        reason="most_free_card_fits",
+        required_mb=8_000,
+        gpus=(GpuInfo(1, "NVIDIA GeForce RTX 3090", None, 24_576, 23_000),),
+        index=1,
+    )
+
+
 class TestTheReportedDeviceIsMeasuredNotRequested:
     """`device` on a GGUF LoadedModel must describe where the weights LANDED.
 
@@ -515,8 +541,11 @@ class TestTheReportedDeviceIsMeasuredNotRequested:
     happily reports a GPU — and /api/models/status then asserts a placement
     that never happened.
 
+    On a multi-GPU node "cuda" is not an answer either: it names no card. The
+    report is the placement's card(s), "cuda:1" here.
+
     MUTATION CONTROL: drop the `llama_supports_gpu_offload` half of
-    `_gguf_device` -> the CPU-only-build case returns "cuda" and fails.
+    `_gguf_can_offload` -> the CPU-only-build case returns "cuda:1" and fails.
     """
 
     def test_a_cpu_only_build_reports_cpu_even_with_a_card(self, monkeypatch):
@@ -526,16 +555,16 @@ class TestTheReportedDeviceIsMeasuredNotRequested:
         monkeypatch.setattr(
             model_loader, "llama_supports_gpu_offload", lambda: False, raising=False
         )
-        assert model_loader._gguf_device() == "cpu"
+        assert model_loader._gguf_device(_on_card_1()) == "cpu"
 
-    def test_a_cuda_build_with_a_card_reports_cuda(self, monkeypatch):
+    def test_a_cuda_build_with_a_card_reports_that_card(self, monkeypatch):
         from millm.ml import model_loader
 
         monkeypatch.setattr(model_loader.torch.cuda, "is_available", lambda: True)
         monkeypatch.setattr(
             model_loader, "llama_supports_gpu_offload", lambda: True, raising=False
         )
-        assert model_loader._gguf_device() == "cuda"
+        assert model_loader._gguf_device(_on_card_1()) == "cuda:1"
 
     def test_no_card_reports_cpu_whatever_the_build_says(self, monkeypatch):
         from millm.ml import model_loader
@@ -544,7 +573,7 @@ class TestTheReportedDeviceIsMeasuredNotRequested:
         monkeypatch.setattr(
             model_loader, "llama_supports_gpu_offload", lambda: True, raising=False
         )
-        assert model_loader._gguf_device() == "cpu"
+        assert model_loader._gguf_device(_on_card_1()) == "cpu"
 
     def test_an_unavailable_probe_never_fails_the_load(self, monkeypatch):
         """The symbol is optional across versions; absent or throwing, the
@@ -555,7 +584,7 @@ class TestTheReportedDeviceIsMeasuredNotRequested:
         monkeypatch.setattr(
             model_loader, "llama_supports_gpu_offload", None, raising=False
         )
-        assert model_loader._gguf_device() == "cuda"
+        assert model_loader._gguf_device(_on_card_1()) == "cuda:1"
 
         def _boom():
             raise RuntimeError("symbol removed upstream")
@@ -563,5 +592,5 @@ class TestTheReportedDeviceIsMeasuredNotRequested:
         monkeypatch.setattr(
             model_loader, "llama_supports_gpu_offload", _boom, raising=False
         )
-        assert model_loader._gguf_device() == "cuda"
+        assert model_loader._gguf_device(_on_card_1()) == "cuda:1"
 

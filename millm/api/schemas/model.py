@@ -261,6 +261,54 @@ class ModelPreviewResponse(BaseModel):
     )
 
 
+class ModelLoadRequest(BaseModel):
+    """Optional body for POST /api/models/{id}/load."""
+
+    gpu: int | str | None = Field(
+        default=None,
+        description=(
+            "Which GPU to load on: null or 'auto' for the card with the most "
+            "free memory that fits, a CUDA index (0, 1, ...), or a GPU UUID as "
+            "nvidia-smi prints it (GPU-...). A named card that lacks the memory "
+            "is refused, never swapped for another card."
+        ),
+        examples=[None, "auto", 1, "GPU-aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"],
+    )
+
+    @field_validator("gpu", mode="before")
+    @classmethod
+    def validate_gpu(cls, v: Any) -> int | str | None:
+        """Normalise to None (auto), an index, or a `GPU-...` UUID; reject the rest.
+
+        Checked BEFORE coercion so `true` is not read as card 1, and a typo is
+        a 422 rather than a load that quietly picks a card nobody chose.
+        """
+        from millm.ml.gpu_placement import parse_gpu_request
+
+        return parse_gpu_request(v)
+
+
+class ModelPlacement(BaseModel):
+    """Where the loaded model lives and how that was decided."""
+
+    mode: str = Field(..., description="'single' (one card), 'all' (every card), or 'cpu'")
+    reason: str = Field(
+        ...,
+        description=(
+            "most_free_card_fits | requested_card | no_single_card_fits | "
+            "size_unknown | no_gpu"
+        ),
+    )
+    requested: int | str | None = Field(default=None, description="The card asked for, if any")
+    required_mb: int = Field(0, description="Memory the placement was sized for")
+    capacity_mb: int = Field(0, description="Free memory of the chosen card(s) at decision time")
+    devices: list[str] = Field(default_factory=list, description="Devices the model holds tensors on")
+    gpu_indices: list[int] = Field(default_factory=list, description="CUDA indices the model uses")
+    memory_by_device_mb: dict[str, int] = Field(
+        default_factory=dict, description="Memory the load consumed on each card, in MB"
+    )
+
+
 class ModelResponse(BaseModel):
     """Response schema for a single model."""
 
@@ -344,6 +392,10 @@ class ModelResponse(BaseModel):
     dtype: str | None = Field(
         default=None,
         description="Data type of model weights (only available when loaded)",
+    )
+    placement: ModelPlacement | None = Field(
+        default=None,
+        description="Card(s) the model is on and per-card memory (only available when loaded)",
     )
 
     model_config = {"from_attributes": True}

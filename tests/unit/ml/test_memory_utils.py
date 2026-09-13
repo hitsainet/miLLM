@@ -110,7 +110,7 @@ class TestGetAvailableMemoryMb:
         mock_torch.cuda.is_available.return_value = True
         mock_torch.cuda.mem_get_info.return_value = (8 * 1024**3, 16 * 1024**3)
 
-        result = get_available_memory_mb()
+        result = get_available_memory_mb(0)
 
         assert result == 8 * 1024  # 8 GB in MB
 
@@ -119,7 +119,7 @@ class TestGetAvailableMemoryMb:
         """Test that 0 is returned when CUDA is not available."""
         mock_torch.cuda.is_available.return_value = False
 
-        result = get_available_memory_mb()
+        result = get_available_memory_mb(0)
 
         assert result == 0
 
@@ -133,7 +133,7 @@ class TestGetTotalMemoryMb:
         mock_torch.cuda.is_available.return_value = True
         mock_torch.cuda.mem_get_info.return_value = (8 * 1024**3, 16 * 1024**3)
 
-        result = get_total_memory_mb()
+        result = get_total_memory_mb(0)
 
         assert result == 16 * 1024  # 16 GB in MB
 
@@ -142,7 +142,7 @@ class TestGetTotalMemoryMb:
         """Test that 0 is returned when CUDA is not available."""
         mock_torch.cuda.is_available.return_value = False
 
-        result = get_total_memory_mb()
+        result = get_total_memory_mb(0)
 
         assert result == 0
 
@@ -156,7 +156,7 @@ class TestGetUsedMemoryMb:
         mock_torch.cuda.is_available.return_value = True
         mock_torch.cuda.memory_allocated.return_value = 4 * 1024**3  # 4 GB
 
-        result = get_used_memory_mb()
+        result = get_used_memory_mb(0)
 
         assert result == 4 * 1024  # 4 GB in MB
 
@@ -169,7 +169,7 @@ class TestVerifyMemoryAvailable:
         """Test that True is returned when enough memory is available."""
         mock_get_available.return_value = 8000  # 8 GB available
 
-        is_available, available = verify_memory_available(4000)  # Need 4 GB
+        is_available, available = verify_memory_available(4000, device=0)  # Need 4 GB
 
         assert is_available is True
         assert available == 8000
@@ -179,7 +179,7 @@ class TestVerifyMemoryAvailable:
         """Test that False is returned when not enough memory."""
         mock_get_available.return_value = 4000  # 4 GB available
 
-        is_available, available = verify_memory_available(8000)  # Need 8 GB
+        is_available, available = verify_memory_available(8000, device=0)  # Need 8 GB
 
         assert is_available is False
         assert available == 4000
@@ -231,14 +231,14 @@ class TestGetDeviceName:
         mock_torch.cuda.is_available.return_value = True
         mock_torch.cuda.get_device_name.return_value = "NVIDIA RTX 4090"
 
-        assert get_device_name() == "NVIDIA RTX 4090"
+        assert get_device_name(0) == "NVIDIA RTX 4090"
 
     @patch("millm.ml.memory_utils.torch")
     def test_returns_no_gpu_when_cuda_unavailable(self, mock_torch):
         """Test that 'No GPU' is returned when CUDA is not available."""
         mock_torch.cuda.is_available.return_value = False
 
-        assert get_device_name() == "No GPU"
+        assert get_device_name(0) == "No GPU"
 
 
 class TestFormatMemoryMb:

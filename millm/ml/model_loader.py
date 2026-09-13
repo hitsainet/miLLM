@@ -7,7 +7,7 @@ Handles loading and unloading models from GPU memory with quantization support.
 import gc
 import threading
 from pathlib import Path
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any, Optional
 
@@ -92,12 +92,20 @@ except Exception as _offload_probe_error:  # noqa: BLE001 - optional symbol
 
 from millm.core.errors import InsufficientMemoryError, ModelLoadError
 from millm.ml.gguf_catalog import quant_label_from_path
-from millm.ml.memory_utils import (
-    get_available_cpu_memory_mb,
-    get_available_memory_mb,
-    get_total_free_memory_mb,
-    list_gpu_memory,
+from millm.ml.gpu_placement import (
+    REASON_NO_GPU,
+    GpuRequest,
+    Placement,
+    choose_gpu,
+    cpu_placement,
+    free_mb_by_index,
+    gpu_indices_of,
+    list_gpus,
+    memory_used_by_device,
+    model_device_labels,
+    parse_gpu_request,
 )
+from millm.ml.memory_utils import get_available_cpu_memory_mb
 
 
 #: The transformers engine: a torch nn.Module tree, hookable, differentiable.
@@ -144,6 +152,15 @@ class LoadedModel:
     #: rather than sniffing the object, because a duck-typed check would quietly
     #: pick the wrong path the day llama.cpp grows a `.config`.
     engine: str = ENGINE_TRANSFORMERS
+    #: The CUDA indices this model actually holds memory on. Cleanup, KV-cache
+    #: sizing and the placement report all read this rather than assuming GPU 0.
+    #: Empty for a model with nothing on a card.
+    gpu_indices: list[int] = field(default_factory=list)
+    #: Memory the load consumed on each card ("cuda:N" -> MB), measured as the
+    #: drop in free memory across the load.
+    memory_by_device_mb: dict[str, int] = field(default_factory=dict)
+    #: How the placement was decided (mode, reason, requested card, devices).
+    placement: Optional[dict[str, Any]] = None
 
     @property
     def supports_hooks(self) -> bool:
@@ -154,6 +171,60 @@ class LoadedModel:
         to and no per-layer residual tensor is reachable from Python.
         """
         return self.engine == ENGINE_TRANSFORMERS
+
+
+def _release_cuda_memory(gpu_indices: list[int]) -> None:
+    """Synchronize, collect and release cached memory on the cards a model used.
+
+    This read and synchronized GPU 0 only. With a model on the 3090 (index 1)
+    that waited on the wrong card's stream before `empty_cache`, and logged the
+    3080 Ti's memory as what the unload freed. An empty list (a failed load
+    with nothing recorded) covers every visible card.
+
+    `empty_cache` and `ipc_collect` act on every device's allocator already;
+    `synchronize`, `reset_peak_memory_stats` and `mem_get_info` act on one
+    device, so they take the index.
+    """
+    indices = sorted(set(gpu_indices)) or list(range(torch.cuda.device_count()))
+    before: dict[int, tuple[int, int]] = {}
+    for index in indices:
+        before[index] = torch.cuda.mem_get_info(index)
+
+    for index in indices:
+        # Ensure all async CUDA operations on this card are complete.
+        torch.cuda.synchronize(index)
+
+    # GC first: Python must release bitsandbytes objects (which hold raw CUDA
+    # allocations via cudaMalloc) before empty_cache can reclaim them.
+    # Multiple passes handle circular references.
+    gc.collect()
+    gc.collect()
+
+    # Now release PyTorch's cached memory blocks (every device's allocator).
+    torch.cuda.empty_cache()
+
+    # Release any IPC handles
+    torch.cuda.ipc_collect()
+
+    # Final GC pass for anything freed by empty_cache
+    gc.collect()
+
+    for index in indices:
+        # reset_peak_memory_stats is safe and clears internal bookkeeping.
+        torch.cuda.reset_peak_memory_stats(index)
+
+    for index in indices:
+        free_before, total = before[index]
+        free_after, _ = torch.cuda.mem_get_info(index)
+        used_before = (total - free_before) / (1024 * 1024)
+        used_after = (total - free_after) / (1024 * 1024)
+        logger.info(
+            "gpu_memory_cleanup",
+            device=f"cuda:{index}",
+            used_before_mb=int(used_before),
+            used_after_mb=int(used_after),
+            freed_mb=int(used_before - used_after),
+        )
 
 
 class LoadedModelState:
@@ -198,6 +269,9 @@ class LoadedModelState:
     def clear(self) -> None:
         """Clear the currently loaded model and free GPU memory."""
         with self._lock:
+            # Read before the slot is emptied: cleanup must act on the cards
+            # this model used, and the record of which those were goes with it.
+            gpu_indices = list(self._loaded.gpu_indices) if self._loaded else []
             if self._loaded:
                 try:
                     # Move model to CPU first to release GPU tensors before deleting.
@@ -232,40 +306,7 @@ class LoadedModelState:
 
             try:
                 if torch.cuda.is_available():
-                    # Log memory before cleanup
-                    free_before, total = torch.cuda.mem_get_info()
-                    used_before = (total - free_before) / (1024 * 1024)
-
-                    # Ensure all async CUDA operations are complete
-                    torch.cuda.synchronize()
-
-                    # GC first: Python must release bitsandbytes objects (which hold
-                    # raw CUDA allocations via cudaMalloc) before empty_cache can
-                    # reclaim them.  Multiple passes handle circular references.
-                    gc.collect()
-                    gc.collect()
-
-                    # Now release PyTorch's cached memory blocks
-                    torch.cuda.empty_cache()
-
-                    # Release any IPC handles
-                    torch.cuda.ipc_collect()
-
-                    # Final GC pass for anything freed by empty_cache
-                    gc.collect()
-
-                    # If significant memory still held, try resetting CUDA state.
-                    # reset_peak_memory_stats is safe and clears internal bookkeeping.
-                    torch.cuda.reset_peak_memory_stats()
-
-                    free_after, _ = torch.cuda.mem_get_info()
-                    used_after = (total - free_after) / (1024 * 1024)
-                    logger.info(
-                        "gpu_memory_cleanup",
-                        used_before_mb=int(used_before),
-                        used_after_mb=int(used_after),
-                        freed_mb=int(used_before - used_after),
-                    )
+                    _release_cuda_memory(gpu_indices)
             except ImportError:
                 gc.collect()
 
@@ -381,6 +422,8 @@ class ModelLoadContext:
         self.model_name = model_name
         self.model: Any = None
         self.tokenizer: Any = None
+        #: The cards a failed load may have allocated on, for cleanup.
+        self.gpu_indices: list[int] = []
 
     def __enter__(self) -> "ModelLoadContext":
         return self
@@ -404,12 +447,7 @@ class ModelLoadContext:
 
             try:
                 if torch.cuda.is_available():
-                    torch.cuda.synchronize()
-                    gc.collect()
-                    gc.collect()
-                    torch.cuda.empty_cache()
-                    torch.cuda.ipc_collect()
-                    gc.collect()
+                    _release_cuda_memory(self.gpu_indices)
             except Exception:
                 gc.collect()
 
@@ -420,7 +458,7 @@ class ModelLoadContext:
         cache_path: str,
         quantization: str,
         trust_remote_code: bool = False,
-        device: str = "cuda",
+        placement: Optional[Placement] = None,
         torch_compile: bool = False,
         # "default", NOT "reduce-overhead". reduce-overhead enables CUDA Graphs,
         # which broke this generate path in production on 2026-07-27: every
@@ -435,11 +473,18 @@ class ModelLoadContext:
             cache_path: Path to the cached model files
             quantization: Quantization type ("FP16", "Q8", "Q4")
             trust_remote_code: Whether to trust remote code
-            device: Device to load model on
+            placement: Where the model goes, from `choose_gpu`. None resolves
+                it here (every card when CUDA is present, else the CPU), so no
+                entry point can skip placement and land on GPU 0 by default.
 
         Returns:
             LoadedModel instance
         """
+        if placement is None:
+            placement = (
+                choose_gpu(0) if torch.cuda.is_available() else cpu_placement()
+            )
+        self.gpu_indices = placement.gpu_indices
         # AutoConfig, AutoModelForCausalLM, AutoTokenizer, BitsAndBytesConfig are
         # imported at module level so test patches on 'millm.ml.model_loader.*'
         # apply correctly. If transformers is absent the module itself fails to load.
@@ -611,23 +656,24 @@ class ModelLoadContext:
         # Load model (large, slow)
         logger.debug("loading_model_weights", model_id=self.model_id, attn_impl=attn_impl)
 
-        # For bitsandbytes quantization, set max_memory to ensure large models
-        # are quantized in CPU RAM and only quantized weights are placed on GPU.
-        # This prevents OOM when the full FP16 model exceeds GPU VRAM.
+        # The device map comes from the placement decision. A model that fits
+        # one card goes on that card whole ({"": "cuda:N"}): device_map="auto"
+        # spread every model across both cards, paying a cross-card copy on
+        # every forward pass for a model the 3090 could hold alone.
+        #
+        # For bitsandbytes quantization, max_memory (keyed to the placement's
+        # cards) ensures large models are quantized in CPU RAM and only
+        # quantized weights are placed on the GPU.
+        is_bitsandbytes = quantization_config is not None
         load_kwargs = {
             "quantization_config": quantization_config,
             "torch_dtype": torch_dtype,
-            "device_map": "auto" if device == "cuda" else None,
+            "device_map": placement.transformers_device_map(bitsandbytes=is_bitsandbytes),
             "trust_remote_code": trust_remote_code,
             "attn_implementation": attn_impl,
             "low_cpu_mem_usage": True,
         }
-        if quantization_config is not None and device == "cuda" and torch.cuda.is_available():
-            # Use 90% of free GPU memory instead of total minus a fixed offset
-            free_gpu, _ = torch.cuda.mem_get_info(0)
-            max_gpu_bytes = int(free_gpu * 0.9)
-            max_gpu = f"{max_gpu_bytes // (1024**3)}GiB"
-
+        if is_bitsandbytes and placement.gpu_indices and torch.cuda.is_available():
             # Derive CPU memory dynamically (leave ~4GB headroom for OS)
             cpu_avail_mb = get_available_cpu_memory_mb()
             if cpu_avail_mb > 0:
@@ -638,8 +684,15 @@ class ModelLoadContext:
                 max_cpu = "64GiB"  # Fallback if detection fails
                 logger.warning("cpu_memory_detection_failed_using_fallback", fallback=max_cpu)
 
-            load_kwargs["max_memory"] = {0: max_gpu, "cpu": max_cpu}
-            logger.info("quantized_load_memory_map", max_gpu=max_gpu, max_cpu=max_cpu)
+            # Keyed to the chosen card(s), 90% of each one's live free memory.
+            # This was {0: ...}, which pinned every Q8/Q4 model to GPU 0.
+            load_kwargs["max_memory"] = placement.bitsandbytes_max_memory(max_cpu)
+            logger.info(
+                "quantized_load_memory_map",
+                max_memory={str(k): v for k, v in load_kwargs["max_memory"].items()},
+            )
+
+        free_before = free_mb_by_index(placement.gpu_indices)
 
         # Auto-detect the appropriate model class
         ModelClass = AutoModelForCausalLM  # default
@@ -712,15 +765,32 @@ class ModelLoadContext:
         # model so it tolerates attention-only caches.
         _patch_granite_hybrid_mamba_mask(self.model)
 
-        # Get memory usage using mem_get_info for accuracy (includes bitsandbytes allocations)
-        memory_used_mb = 0
-        if torch.cuda.is_available():
+        # Where the model ACTUALLY landed, from its device map and its tensors.
+        # hf_device_map comes first because device_map="auto" models always
+        # have model.device == "cpu" (the dispatch device), which is misleading.
+        device_labels = model_device_labels(self.model)
+        gpu_indices = gpu_indices_of(device_labels)
+
+        # Memory used, per card: the drop in free memory (mem_get_info sees
+        # bitsandbytes allocations too) on every card the model now occupies.
+        # This read "total minus free" on GPU 0 only — the wrong card for a
+        # model on the 3090, and it charged the model for whatever else the
+        # card was holding.
+        measured = sorted(set(gpu_indices) | set(placement.gpu_indices))
+        memory_by_device_mb: dict[str, int] = {}
+        if torch.cuda.is_available() and measured:
             try:
-                free_after, total = torch.cuda.mem_get_info(0)
-                memory_used_mb = int((total - free_after) / (1024 * 1024))
+                free_after = free_mb_by_index(measured)
+                memory_by_device_mb = memory_used_by_device(
+                    free_before, free_after, gpu_indices or placement.gpu_indices
+                )
             except Exception:
-                # Fallback to memory_allocated if mem_get_info fails
-                memory_used_mb = int(torch.cuda.memory_allocated() / (1024 * 1024))
+                # Fallback to the torch allocator's count on each card.
+                memory_by_device_mb = {
+                    f"cuda:{index}": int(torch.cuda.memory_allocated(index) / (1024 * 1024))
+                    for index in (gpu_indices or placement.gpu_indices)
+                }
+        memory_used_mb = sum(memory_by_device_mb.values())
 
         # Get model properties
         num_parameters = 0
@@ -729,18 +799,7 @@ class ModelLoadContext:
         except Exception:
             pass
 
-        # Get device info — check hf_device_map first since device_map="auto"
-        # models always have model.device == "cpu" (the dispatch device), which is
-        # misleading. hf_device_map shows where layers actually live.
-        device_str = "unknown"
-        try:
-            if hasattr(self.model, "hf_device_map") and self.model.hf_device_map:
-                devices = set(str(d) for d in self.model.hf_device_map.values())
-                device_str = ", ".join(sorted(devices)) if devices else "auto"
-            elif hasattr(self.model, "device"):
-                device_str = str(self.model.device)
-        except Exception:
-            pass
+        device_str = ", ".join(device_labels) if device_labels else "unknown"
 
         # Get dtype info
         dtype_str = "unknown"
@@ -760,6 +819,19 @@ class ModelLoadContext:
             logger.warning(
                 "torch_compile_skipped_bitsandbytes_incompatible",
                 quantization=quantization,
+            )
+        elif torch_compile and len(device_labels) > 1:
+            # A model split across devices runs through accelerate's per-module
+            # dispatch hooks, which move activations between cards inside the
+            # forward pass. A compiled graph over that breaks at every hook and
+            # gains nothing, and the split is only known here, after
+            # from_pretrained — model_service resolves the setting before the
+            # load and cannot see it. Single-card loads (the normal case now)
+            # still compile.
+            logger.warning(
+                "torch_compile_skipped_model_split_across_devices",
+                devices=device_labels,
+                placement_mode=placement.mode,
             )
         elif torch_compile:
             try:
@@ -809,7 +881,7 @@ class ModelLoadContext:
                     # Resolve the device where input embeddings live.
                     # device_map="auto" may spread layers across devices; we
                     # need the device that owns the embedding table.
-                    _input_device = device
+                    _input_device = device_labels[0] if device_labels else "cpu"
                     try:
                         _dm = getattr(self.model, "hf_device_map", None)
                         if _dm:
@@ -905,6 +977,9 @@ class ModelLoadContext:
             # request time, so there is no construction-time flag to refuse and
             # no architecture that can decline it.
             supports_embeddings=True,
+            gpu_indices=gpu_indices,
+            memory_by_device_mb=memory_by_device_mb,
+            placement={**placement.to_dict(), "devices": device_labels, "gpu_indices": gpu_indices},
         )
 
 
@@ -1049,33 +1124,13 @@ _GGUF_RUNTIME_OVERHEAD_MB = 2048
 _VRAM_PLANNING_FRACTION = 0.94
 
 
-def predicted_max_context(
-    path: str, kv_cache_type: str, free_vram_mb: int, weights_mb: int
-) -> int | None:
-    """The largest context the arithmetic says will fit. None if unknowable.
-
-    A KV cache has an exact size — there is no reason to discover it by loading
-    the model repeatedly:
+def gguf_kv_bytes_per_token(path: str, kv_cache_type: str) -> float | None:
+    """KV-cache bytes one token costs this model at `kv_cache_type`. None if unknowable.
 
         bytes/token = 2 (K and V) x n_layer x n_head_kv x head_dim x bytes/element
 
-    Every term comes from metadata the declared-context probe already reads.
-    For gemma-4-31b that is 2 x 60 x 16 x 168 = 630 KB/token at f16, halved at
-    q8_0 — which is why quantizing the cache doubled the usable window.
-
-    VALIDATED against every measurement taken on the RTX 3090, all four
-    predicted correctly:
-
-        f16  @ 4096  -> 20.6 GiB   loaded (20608 MiB measured)
-        f16  @ 8192  -> 23.1 GiB   failed
-        q8_0 @ 12288 -> 21.9 GiB   loaded
-        q8_0 @ 16384 -> 23.1 GiB   failed
-
-    This SEEDS the ladder; it does not replace it. The overhead term is
-    empirical and the compute buffer grows with batch size, so the number is a
-    good starting point and not a guarantee — the load attempt is still what
-    decides. Returning None simply means starting from the configured ceiling,
-    as before.
+    Read from the file's metadata with the same CPU-only mmap probe
+    `declared_context` uses — no weights read, no VRAM touched.
     """
     if llama_cpp_module is None:
         return None
@@ -1101,7 +1156,54 @@ def predicted_max_context(
         per_element = _KV_BYTES_PER_ELEMENT.get(
             (kv_cache_type or "f16").strip().lower(), 2.0
         )
-        bytes_per_token = 2 * n_layer * n_head_kv * head_dim * per_element
+        return float(2 * n_layer * n_head_kv * head_dim * per_element)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("gguf_kv_size_probe_failed", error=str(exc)[:200])
+        return None
+
+
+def predicted_max_context(
+    path: str,
+    kv_cache_type: str,
+    free_vram_mb: int,
+    weights_mb: int,
+    bytes_per_token: float | None = None,
+) -> int | None:
+    """The largest context the arithmetic says will fit. None if unknowable.
+
+    A KV cache has an exact size — there is no reason to discover it by loading
+    the model repeatedly:
+
+        bytes/token = 2 (K and V) x n_layer x n_head_kv x head_dim x bytes/element
+
+    Every term comes from metadata the declared-context probe already reads.
+    For gemma-4-31b that is 2 x 60 x 16 x 168 = 630 KB/token at f16, halved at
+    q8_0 — which is why quantizing the cache doubled the usable window.
+
+    VALIDATED against every measurement taken on the RTX 3090, all four
+    predicted correctly:
+
+        f16  @ 4096  -> 20.6 GiB   loaded (20608 MiB measured)
+        f16  @ 8192  -> 23.1 GiB   failed
+        q8_0 @ 12288 -> 21.9 GiB   loaded
+        q8_0 @ 16384 -> 23.1 GiB   failed
+
+    This SEEDS the ladder; it does not replace it. The overhead term is
+    empirical and the compute buffer grows with batch size, so the number is a
+    good starting point and not a guarantee — the load attempt is still what
+    decides. Returning None simply means starting from the configured ceiling,
+    as before.
+
+    `free_vram_mb` must be the free memory of the card(s) the model will use —
+    one card in single-GPU mode, their sum under a layer split. `bytes_per_token`
+    may be passed when the caller already probed it, saving a second metadata
+    load.
+    """
+    try:
+        if bytes_per_token is None:
+            bytes_per_token = gguf_kv_bytes_per_token(path, kv_cache_type)
+        if not bytes_per_token:
+            return None
 
         budget_mb = (
             free_vram_mb * _VRAM_PLANNING_FRACTION
@@ -1149,22 +1251,116 @@ GGUF_CONTEXT_FROM_FILE = 0
 _POOLING_MEAN = getattr(llama_cpp_module, "LLAMA_POOLING_TYPE_MEAN", 1) if llama_cpp_module else 1
 
 
-def _gguf_device() -> str:
-    """Where the GGUF weights actually landed: "cuda" or "cpu".
+#: llama.cpp split modes, resolved defensively like the pooling constant: the
+#: module is an extra. 0 = LLAMA_SPLIT_MODE_NONE (one GPU, `main_gpu`),
+#: 1 = LLAMA_SPLIT_MODE_LAYER (layers and KV spread across GPUs).
+_SPLIT_MODE_NONE = (
+    getattr(llama_cpp_module, "LLAMA_SPLIT_MODE_NONE", 0) if llama_cpp_module else 0
+)
+_SPLIT_MODE_LAYER = (
+    getattr(llama_cpp_module, "LLAMA_SPLIT_MODE_LAYER", 1) if llama_cpp_module else 1
+)
 
-    Reported, not requested. Answering from `GGUF_GPU_LAYERS` alone would
-    assert a placement that never happened on a CPU-only wheel or a box with
-    no card.
+
+def _gguf_can_offload() -> bool:
+    """Whether this process can put GGUF layers on a card at all.
+
+    BOTH halves are needed. `torch.cuda.is_available()` answers "is there a
+    card", which says nothing about the llama.cpp build: the wheel on PyPI is
+    CPU-only, so a CUDA box that installed it offloads nothing while torch
+    happily reports a GPU. `llama_supports_gpu_offload()` is the other half.
     """
     if GGUF_GPU_LAYERS == 0 or not torch.cuda.is_available():
-        return "cpu"
+        return False
     if llama_supports_gpu_offload is not None:
         try:
             if not llama_supports_gpu_offload():
-                return "cpu"
+                return False
         except Exception:  # noqa: BLE001 - a probe must never fail a load
             pass
-    return "cuda"
+    return True
+
+
+def _gguf_device(placement: Placement) -> str:
+    """Where the GGUF weights actually landed: "cuda:N", "cuda:0, cuda:1", or "cpu".
+
+    Reported, not requested. Answering from `GGUF_GPU_LAYERS` alone would
+    assert a placement that never happened on a CPU-only wheel or a box with
+    no card; answering "cuda" named no card at all on a two-GPU node.
+    """
+    if not _gguf_can_offload() or not placement.gpu_indices:
+        return "cpu"
+    return ", ".join(placement.device_labels)
+
+
+def _gguf_required_mb(weights_mb: int, bytes_per_token: float | None, n_ctx: int) -> int:
+    """Free memory a card needs for these weights, overhead and a KV cache of `n_ctx`.
+
+    Scaled by the planning fraction for the same reason `predicted_max_context`
+    is: planning to 100% of free memory picks a card that then fails to allocate.
+    """
+    kv_mb = (bytes_per_token * n_ctx / (1024 * 1024)) if bytes_per_token and n_ctx > 0 else 0
+    return int((weights_mb + _GGUF_RUNTIME_OVERHEAD_MB + kv_mb) / _VRAM_PLANNING_FRACTION)
+
+
+def plan_gguf_placement(
+    weights_mb: int,
+    bytes_per_token: float | None,
+    target_ctx: int,
+    requested: GpuRequest = None,
+) -> Placement:
+    """Where a GGUF model goes: one card, a layer split across cards, or the CPU.
+
+    Auto: the most-free card that holds the weights plus the KV cache at the
+    context the loader is aiming for. When no card does, llama.cpp's layer
+    split across every card (CPU spill stays allowed for GGUF — operator
+    decision 3).
+
+    An explicit card is sized at the SMALLEST usable context instead: the
+    context ladder shrinks the window to what that card holds, so refusing a
+    card that can serve the model at a shorter context would refuse a load
+    that works. A card that cannot hold even that is refused, never swapped.
+    """
+    wanted = parse_gpu_request(requested)
+    if not _gguf_can_offload():
+        if wanted is not None:
+            # A named card on a box (or build) that offloads nothing cannot be
+            # honoured; running on the CPU instead is a silent substitution.
+            return choose_gpu(
+                _gguf_required_mb(weights_mb, bytes_per_token, GGUF_MIN_CONTEXT),
+                requested=wanted,
+                gpus=list_gpus() if torch.cuda.is_available() else [],
+            )
+        return cpu_placement(REASON_NO_GPU)
+
+    gpus = list_gpus()
+    if not gpus and wanted is None:
+        return cpu_placement(REASON_NO_GPU)
+    if wanted is not None:
+        return choose_gpu(
+            _gguf_required_mb(weights_mb, bytes_per_token, GGUF_MIN_CONTEXT),
+            requested=wanted,
+            gpus=gpus,
+        )
+    return choose_gpu(
+        _gguf_required_mb(weights_mb, bytes_per_token, target_ctx or GGUF_MIN_CONTEXT),
+        gpus=gpus,
+    )
+
+
+def _gguf_placement_kwargs(placement: Placement) -> dict[str, Any]:
+    """llama.cpp kwargs that put the model where `placement` says.
+
+    One card: LLAMA_SPLIT_MODE_NONE with `main_gpu` = that card, so llama.cpp
+    allocates nothing on the others. Its default (layer split with main_gpu 0)
+    spread every GGUF model over both cards and put its scratch buffers on the
+    3080 Ti.
+    """
+    if placement.is_single:
+        return {"split_mode": _SPLIT_MODE_NONE, "main_gpu": placement.index}
+    if placement.gpu_indices:
+        return {"split_mode": _SPLIT_MODE_LAYER}
+    return {}
 
 
 def load_gguf_model(
@@ -1172,6 +1368,7 @@ def load_gguf_model(
     model_name: str,
     cache_path: str,
     gguf_file: str,
+    gpu: GpuRequest = None,
 ) -> LoadedModel:
     """Load one GGUF quantization through llama.cpp.
 
@@ -1206,9 +1403,34 @@ def load_gguf_model(
     logger.info(
         "gguf_load_started", model_id=model_id, model_name=model_name, path=str(path)
     )
-    try:
-        from millm.core.config import settings as _settings
+    from millm.core.config import settings as _settings
 
+    weights_mb = int(path.stat().st_size / (1024 * 1024))
+    bytes_per_token = gguf_kv_bytes_per_token(str(path), _settings.GGUF_KV_CACHE_TYPE)
+    declared = declared_context(str(path))
+    # The context the loader aims for before anything is measured: the tighter
+    # of policy and training. It sizes the job for placement below.
+    target_ctx = min(
+        [bound for bound in (_settings.GGUF_CONTEXT_LENGTH, declared) if bound and bound > 0],
+        default=0,
+    )
+
+    # WHICH CARD. Decided OUTSIDE the try below, which relabels every exception
+    # as a load failure: a refused or unknown card must reach the caller as
+    # itself, with the per-card figures in its details.
+    placement = plan_gguf_placement(weights_mb, bytes_per_token, target_ctx, requested=gpu)
+    logger.info(
+        "gguf_placement",
+        model_id=model_id,
+        mode=placement.mode,
+        reason=placement.reason,
+        devices=placement.device_labels,
+        required_mb=placement.required_mb,
+        capacity_mb=placement.capacity_mb,
+    )
+    free_before = free_mb_by_index(placement.gpu_indices)
+
+    try:
         # START FROM WHAT THE MODEL DECLARES, capped by configuration.
         #
         # GGUF_CONTEXT_LENGTH is a CEILING, not a target. Starting the ladder at
@@ -1222,7 +1444,6 @@ def load_gguf_model(
         # context creation, so an unbounded window reserves the card, and this
         # GPU is shared with miStudio's extraction, training and steering work.
         ceiling = _settings.GGUF_CONTEXT_LENGTH
-        declared = declared_context(str(path))
 
         # WHAT WILL ACTUALLY FIT, computed rather than discovered.
         #
@@ -1230,17 +1451,21 @@ def load_gguf_model(
         # load per rung — six of them to find a number the arithmetic gives in
         # milliseconds. A KV cache has an exact size, and every term is in the
         # metadata already read above.
+        #
+        # Budgeted against the card(s) the model is placed on: the chosen card
+        # alone in single-GPU mode, their sum under a layer split. This read
+        # GPU 0, so a model placed on the 3090 had its window sized by the
+        # 3080 Ti's free memory.
         predicted = None
         try:
-            from millm.ml.memory_utils import get_available_memory_mb
-
-            free_mb = get_available_memory_mb()
+            free_mb = placement.capacity_mb
             if free_mb > 0:
                 predicted = predicted_max_context(
                     str(path),
                     _settings.GGUF_KV_CACHE_TYPE,
                     free_mb,
-                    int(path.stat().st_size / (1024 * 1024)),
+                    weights_mb,
+                    bytes_per_token=bytes_per_token,
                 )
         except Exception as exc:  # noqa: BLE001
             logger.warning("gguf_context_prediction_skipped", error=str(exc)[:200])
@@ -1278,6 +1503,7 @@ def load_gguf_model(
             "n_ctx": start_ctx,
             "verbose": False,
             **kv_kwargs,
+            **_gguf_placement_kwargs(placement),
         }
         if _settings.GGUF_ENABLE_EMBEDDINGS:
             # MEAN pooling, matching what the transformers path does —
@@ -1509,7 +1735,20 @@ def load_gguf_model(
         ) from e
 
     size_mb = int(path.stat().st_size / (1024 * 1024))
-    logger.info("gguf_load_complete", model_id=model_id, size_mb=size_mb)
+    device = _gguf_device(placement)
+    gguf_gpu_indices = placement.gpu_indices if device != "cpu" else []
+    # mem_get_info reads the driver's free memory, so unlike the torch
+    # allocator it DOES see llama.cpp's weights and KV cache.
+    memory_by_device_mb = memory_used_by_device(
+        free_before, free_mb_by_index(gguf_gpu_indices), gguf_gpu_indices
+    )
+    logger.info(
+        "gguf_load_complete",
+        model_id=model_id,
+        size_mb=size_mb,
+        device=device,
+        memory_by_device_mb=memory_by_device_mb,
+    )
 
     return LoadedModel(
         model_id=model_id,
@@ -1530,7 +1769,14 @@ def load_gguf_model(
         # PyPI is CPU-only, so a CUDA box that installed it offloads nothing
         # while torch happily reports a GPU. `llama_supports_gpu_offload()` is
         # the other half, and it is asked of the library that did the loading.
-        device=_gguf_device(),
+        device=device,
+        gpu_indices=gguf_gpu_indices,
+        memory_by_device_mb=memory_by_device_mb,
+        placement={
+            **placement.to_dict(),
+            "devices": device.split(", "),
+            "gpu_indices": gguf_gpu_indices,
+        },
         dtype="gguf",
         attn_implementation="llama.cpp",
         # The label comes from the catalogue's parser, which reads the
@@ -1600,6 +1846,7 @@ class ModelLoader:
         torch_compile_mode: str = "default",
         is_pre_quantized: bool = False,
         gguf_file: Optional[str] = None,
+        gpu: GpuRequest = None,
     ) -> LoadedModel:
         """
         Load a model into GPU memory.
@@ -1620,6 +1867,8 @@ class ModelLoader:
             gguf_file: Repo-relative filename of a GGUF quantization. When set,
                 the model is served by llama.cpp instead of transformers, and it
                 CANNOT carry SAE attachment, steering or sensing.
+            gpu: None or "auto" (the most-free card that fits), a CUDA index,
+                or a GPU UUID. A named card that does not fit is refused.
 
         Returns:
             LoadedModel instance
@@ -1638,6 +1887,7 @@ class ModelLoader:
                 model_name=model_name,
                 cache_path=cache_path,
                 gguf_file=gguf_file,
+                gpu=gpu,
             )
             self.state.set(loaded)
             return loaded
@@ -1658,29 +1908,42 @@ class ModelLoader:
                 "PyTorch is not installed. Install with CUDA support.",
             )
 
-        # Check memory availability (skip for quantized/offloadable models that use CPU offloading).
+        # Decide the card, then check memory against THAT decision.
         #
-        # Capacity follows where the load will actually place the model.
-        # FP16/FP32 load with device_map="auto", which spreads a model across
-        # every visible GPU, so their capacity is free memory summed over all
-        # cards. Reading GPU 0 alone refused a model needing more than 12 GB
-        # while the 3090 had 24 GB free. Q8 is still pinned by
-        # max_memory={0: ...} in ModelLoadContext.load, so it is checked against
-        # GPU 0 until the placement resolver replaces both.
+        # A model that fits one card goes on the most-free such card (or the
+        # requested card, which choose_gpu refuses if it does not fit), so it
+        # fits by construction. Only the all-cards fallback still needs a fit
+        # check, against free memory summed over every card. Reading GPU 0
+        # alone refused a model needing more than 12 GB while the 3090 had
+        # 24 GB free.
+        #
+        # Q4/Q2 and pre-quantized models skip the summed check as before: they
+        # can offload to the CPU through bitsandbytes' max_memory.
         skip_mem_check = is_pre_quantized or quantization.upper() in ("Q4", "Q2")
-        if quantization.upper() == "Q8":
-            available_mb = get_available_memory_mb(0)
-        else:
-            available_mb = get_total_free_memory_mb()
-        if not skip_mem_check and available_mb < estimated_memory_mb:
+        placement = choose_gpu(estimated_memory_mb, requested=gpu)
+        if (
+            not placement.is_single
+            and not skip_mem_check
+            and placement.capacity_mb < estimated_memory_mb
+        ):
             raise InsufficientMemoryError(
-                f"Not enough GPU memory. Need ~{estimated_memory_mb}MB, have {available_mb}MB",
+                f"Not enough GPU memory. Need ~{estimated_memory_mb}MB, have "
+                f"{placement.capacity_mb}MB across {len(placement.gpus)} GPU(s)",
                 details={
                     "required_mb": estimated_memory_mb,
-                    "available_mb": available_mb,
-                    "gpus": list_gpu_memory(),
+                    "available_mb": placement.capacity_mb,
+                    "gpus": [gpu_info.to_dict() for gpu_info in placement.gpus],
                 },
             )
+        logger.info(
+            "model_placement",
+            model_id=model_id,
+            mode=placement.mode,
+            reason=placement.reason,
+            devices=placement.device_labels,
+            required_mb=placement.required_mb,
+            capacity_mb=placement.capacity_mb,
+        )
 
         # Load with context manager for cleanup on failure
         with ModelLoadContext(model_id, model_name) as ctx:
@@ -1688,6 +1951,7 @@ class ModelLoader:
                 cache_path=cache_path,
                 quantization=quantization,
                 trust_remote_code=trust_remote_code,
+                placement=placement,
                 torch_compile=torch_compile,
                 torch_compile_mode=torch_compile_mode,
             )

@@ -147,6 +147,17 @@ class InsufficientMemoryError(MiLLMError):
     status_code = 507
 
 
+class GpuNotFoundError(MiLLMError):
+    """Raised when a load names a GPU (index or UUID) that is not visible.
+
+    Separate from InsufficientMemoryError: a card that does not exist is a
+    wrong request, not a full card, and the fix is different.
+    """
+
+    code = "GPU_NOT_FOUND"
+    status_code = 404
+
+
 class InsufficientDiskError(MiLLMError):
     """Raised when there's not enough disk space."""
 

@@ -143,25 +143,20 @@ def get_available_cpu_memory_mb() -> int:
 
 def list_gpu_memory() -> list[dict[str, int]]:
     """
-    Free and total memory for every visible GPU, in CUDA index order.
+    Free and total memory for every usable GPU, by torch index.
 
-    With CUDA_DEVICE_ORDER=PCI_BUS_ID the index matches nvidia-smi. Returns an
-    empty list when CUDA is unavailable.
+    Read from nvidia-smi through the placement inventory, NOT from
+    `torch.cuda.mem_get_info(i)` over every card: that creates a CUDA context on
+    each card it asks about, taking memory from cards nothing here uses. Empty
+    when there is no CUDA or no nvidia-smi.
     """
+    from millm.ml.gpu_placement import list_gpus  # lazy: gpu_placement imports torch-side helpers
+
     try:
-        if not torch.cuda.is_available():
-            return []
-        gpus = []
-        for index in range(torch.cuda.device_count()):
-            free, total = torch.cuda.mem_get_info(index)
-            gpus.append(
-                {
-                    "index": index,
-                    "free_mb": int(free / (1024 * 1024)),
-                    "total_mb": int(total / (1024 * 1024)),
-                }
-            )
-        return gpus
+        return [
+            {"index": gpu.index, "free_mb": gpu.free_mb, "total_mb": gpu.total_mb}
+            for gpu in list_gpus()
+        ]
     except Exception as e:
         logger.warning("failed_to_list_gpu_memory", error=str(e))
         return []

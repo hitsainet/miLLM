@@ -12,9 +12,10 @@ from millm.sockets.progress import get_gpu_metrics, parse_nvidia_smi_gpus
 UUID_3080TI = "GPU-f47ba814-49a2-603f-3595-275284140251"
 UUID_3090 = "GPU-247aa582-0d1b-e161-8156-983ed1fefc57"
 
+# index, uuid, utilization, used, total, free, temperature, name
 TWO_GPUS = (
-    f"0, {UUID_3080TI}, 12, 812, 12288, 41, NVIDIA GeForce RTX 3080 Ti\n"
-    f"1, {UUID_3090}, 88, 20310, 24576, 67, NVIDIA GeForce RTX 3090\n"
+    f"0, {UUID_3080TI}, 12, 812, 12288, 11476, 41, NVIDIA GeForce RTX 3080 Ti\n"
+    f"1, {UUID_3090}, 88, 20310, 24576, 4266, 67, NVIDIA GeForce RTX 3090\n"
 )
 
 
@@ -35,12 +36,13 @@ class TestParseNvidiaSmi:
             "utilization": 88,
             "memory_used_mb": 20310,
             "memory_total_mb": 24576,
+            "memory_free_mb": 4266,
             "temperature": 67,
             "name": "NVIDIA GeForce RTX 3090",
         }
 
     def test_fields_a_card_does_not_expose_count_as_zero(self):
-        gpus = parse_nvidia_smi_gpus("0, GPU-x, [N/A], 100, 8192, [N/A], Tesla T4\n")
+        gpus = parse_nvidia_smi_gpus("0, GPU-x, [N/A], 100, 8192, 8092, [N/A], Tesla T4\n")
 
         assert gpus == [
             {
@@ -49,6 +51,7 @@ class TestParseNvidiaSmi:
                 "utilization": 0,
                 "memory_used_mb": 100,
                 "memory_total_mb": 8192,
+                "memory_free_mb": 8092,
                 "temperature": 0,
                 "name": "Tesla T4",
             }
@@ -73,7 +76,7 @@ class TestGetGpuMetrics:
         assert metrics["gpu_temperature"] == 67
 
     def test_one_gpu_keeps_its_own_values(self):
-        one = f"0, {UUID_3090}, 30, 4000, 24576, 55, NVIDIA GeForce RTX 3090\n"
+        one = f"0, {UUID_3090}, 30, 4000, 24576, 20576, 55, NVIDIA GeForce RTX 3090\n"
         with patch("millm.sockets.progress.subprocess.run", return_value=_smi(one)):
             metrics = get_gpu_metrics()
 

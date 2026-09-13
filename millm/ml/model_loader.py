@@ -104,6 +104,7 @@ from millm.ml.gpu_placement import (
     memory_used_by_device,
     model_device_labels,
     parse_gpu_request,
+    reported_free_mb_by_index,
 )
 from millm.ml.memory_utils import get_available_cpu_memory_mb
 
@@ -178,14 +179,22 @@ def _release_cuda_memory(gpu_indices: list[int]) -> None:
 
     This read and synchronized GPU 0 only. With a model on the 3090 (index 1)
     that waited on the wrong card's stream before `empty_cache`, and logged the
-    3080 Ti's memory as what the unload freed. An empty list (a failed load
-    with nothing recorded) covers every visible card.
+    3080 Ti's memory as what the unload freed. An empty list means no card was
+    used, and no card is touched.
 
     `empty_cache` and `ipc_collect` act on every device's allocator already;
     `synchronize`, `reset_peak_memory_stats` and `mem_get_info` act on one
     device, so they take the index.
     """
-    indices = sorted(set(gpu_indices)) or list(range(torch.cuda.device_count()))
+    indices = sorted(set(gpu_indices))
+    if not indices:
+        # Nothing torch placed on any card. Touching a card here would create a
+        # CUDA context on it just to clean up nothing, and that context's
+        # memory is what other tenants of the node place against.
+        gc.collect()
+        if torch.cuda.is_initialized():
+            torch.cuda.empty_cache()
+        return
     before: dict[int, tuple[int, int]] = {}
     for index in indices:
         before[index] = torch.cuda.mem_get_info(index)
@@ -271,7 +280,13 @@ class LoadedModelState:
         with self._lock:
             # Read before the slot is emptied: cleanup must act on the cards
             # this model used, and the record of which those were goes with it.
-            gpu_indices = list(self._loaded.gpu_indices) if self._loaded else []
+            # llama.cpp's memory is not torch's: torch calls on its cards would
+            # only create a torch context there, so a GGUF model records none.
+            gpu_indices = (
+                list(self._loaded.gpu_indices)
+                if self._loaded and self._loaded.engine == ENGINE_TRANSFORMERS
+                else []
+            )
             if self._loaded:
                 try:
                     # Move model to CPU first to release GPU tensors before deleting.
@@ -1428,7 +1443,9 @@ def load_gguf_model(
         required_mb=placement.required_mb,
         capacity_mb=placement.capacity_mb,
     )
-    free_before = free_mb_by_index(placement.gpu_indices)
+    # nvidia-smi, not torch: llama.cpp never creates a torch context, and
+    # reading the card through torch would create one just to measure.
+    free_before = reported_free_mb_by_index(placement.gpu_indices)
 
     try:
         # START FROM WHAT THE MODEL DECLARES, capped by configuration.
@@ -1737,10 +1754,10 @@ def load_gguf_model(
     size_mb = int(path.stat().st_size / (1024 * 1024))
     device = _gguf_device(placement)
     gguf_gpu_indices = placement.gpu_indices if device != "cpu" else []
-    # mem_get_info reads the driver's free memory, so unlike the torch
-    # allocator it DOES see llama.cpp's weights and KV cache.
+    # nvidia-smi reads the driver's free memory, so unlike the torch allocator
+    # it DOES see llama.cpp's weights and KV cache.
     memory_by_device_mb = memory_used_by_device(
-        free_before, free_mb_by_index(gguf_gpu_indices), gguf_gpu_indices
+        free_before, reported_free_mb_by_index(gguf_gpu_indices), gguf_gpu_indices
     )
     logger.info(
         "gguf_load_complete",

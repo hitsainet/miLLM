@@ -71,12 +71,13 @@ class TestInventory:
         with fake_gpus((TI_3080, 1_000, 12_288), (RTX_3090, 2_000, 24_576), ("A", 3_000, 48_000)):
             assert [g.index for g in list_gpus()] == [0, 1, 2]
 
-    def test_a_card_without_readable_properties_is_still_listed(self):
+    def test_a_card_torch_cannot_identify_is_left_out(self):
+        """Without its UUID a card cannot be mapped to a torch index, and a
+        guessed index could name another card."""
         with fake_gpus((TI_3080, 11_000, 12_288)), patch(
             "torch.cuda.get_device_properties", side_effect=RuntimeError("nvml")
         ):
-            [gpu] = list_gpus()
-        assert gpu.name == "Unknown" and gpu.uuid is None and gpu.free_mb == 11_000
+            assert list_gpus() == []
 
 
 class TestUuidNormalisation:
@@ -143,7 +144,9 @@ class TestAutoPicksTheMostFreeCardThatFits:
         with fake_gpus((TI_3080, 11_000, 12_288), (RTX_3090, 23_500, 24_576)) as fake:
             placement = choose_gpu(18_000)
         assert placement.index == 1
-        assert ("mem_get_info", 0) in fake.calls and ("mem_get_info", 1) in fake.calls
+        # Read from nvidia-smi: deciding creates no CUDA context on any card.
+        assert fake.smi_calls >= 1
+        assert fake.calls == []
 
 
 class TestNoSingleCardFits:
@@ -235,9 +238,9 @@ class TestMeasurement:
         )
         assert model_device_labels(model) == ["cpu", "cuda:0", "cuda:1"]
 
-    def test_placement_module_reads_memory_through_memory_utils(self):
-        # The inventory is built on memory_utils.list_gpu_memory, the same
-        # reader the Phase 0 fit check and metrics use.
-        with patch.object(gpu_placement, "list_gpu_memory", return_value=[]) as reader:
+    def test_the_inventory_comes_from_nvidia_smi(self):
+        with fake_gpus((TI_3080, 11_000, 12_288)), patch.object(
+            gpu_placement.nvidia_smi, "query_gpus", return_value=[]
+        ) as reader:
             assert list_gpus() == []
         reader.assert_called_once_with()

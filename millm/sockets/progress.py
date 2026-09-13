@@ -6,7 +6,7 @@ long-running operations via WebSocket connections.
 """
 
 import asyncio
-import subprocess
+import subprocess  # noqa: F401  (tests patch progress.subprocess.run; nvidia_smi runs it)
 from typing import Any, Optional
 
 import socketio
@@ -19,46 +19,11 @@ _system_metrics_subscribers: set[str] = set()
 _system_metrics_task: Optional[asyncio.Task] = None
 
 
-_NVIDIA_SMI_QUERY = (
-    "index,uuid,utilization.gpu,memory.used,memory.total,temperature.gpu,name"
-)
-
-
-def _smi_int(value: str) -> int:
-    """nvidia-smi reports "[N/A]" for fields a card does not expose; count it as 0."""
-    try:
-        return int(float(value))
-    except ValueError:
-        return 0
-
-
-def parse_nvidia_smi_gpus(stdout: str) -> list[dict[str, Any]]:
-    """
-    Parse `nvidia-smi --query-gpu=<_NVIDIA_SMI_QUERY>` CSV output, one GPU per line.
-
-    The previous parser split the whole output on ", " as if it were one line.
-    With two GPUs the fourth field became "36\\n33", int() raised, and every
-    card was reported as zero — the UI showed "No GPU" on a two-GPU node.
-    `name` is queried last so a name containing a comma cannot shift the
-    numeric fields.
-    """
-    gpus: list[dict[str, Any]] = []
-    for line in stdout.strip().splitlines():
-        parts = [part.strip() for part in line.split(",")]
-        if len(parts) < 7 or not parts[0].isdigit():
-            continue
-        gpus.append(
-            {
-                "index": int(parts[0]),
-                "uuid": parts[1],
-                "utilization": _smi_int(parts[2]),
-                "memory_used_mb": _smi_int(parts[3]),
-                "memory_total_mb": _smi_int(parts[4]),
-                "temperature": _smi_int(parts[5]),
-                "name": ", ".join(parts[6:]),
-            }
-        )
-    return gpus
+# The parser and the query live in millm.ml.nvidia_smi, which placement shares:
+# it reads every card without creating a CUDA context. Re-exported here for
+# existing importers.
+from millm.ml import nvidia_smi  # noqa: E402
+from millm.ml.nvidia_smi import parse_nvidia_smi_gpus  # noqa: E402,F401
 
 
 def get_gpu_metrics() -> dict[str, Any]:
@@ -70,32 +35,17 @@ def get_gpu_metrics() -> dict[str, Any]:
         are kept as aggregates across all cards: mean utilization, summed
         memory, hottest temperature. Returns zeros if nvidia-smi is unavailable.
     """
-    try:
-        result = subprocess.run(
-            [
-                "nvidia-smi",
-                f"--query-gpu={_NVIDIA_SMI_QUERY}",
-                "--format=csv,noheader,nounits",
-            ],
-            capture_output=True,
-            text=True,
-            timeout=5,
-        )
-        if result.returncode == 0:
-            gpus = parse_nvidia_smi_gpus(result.stdout)
-            if gpus:
-                return {
-                    "gpu_utilization": round(
-                        sum(gpu["utilization"] for gpu in gpus) / len(gpus)
-                    ),
-                    "gpu_memory_used_mb": sum(gpu["memory_used_mb"] for gpu in gpus),
-                    "gpu_memory_total_mb": sum(gpu["memory_total_mb"] for gpu in gpus),
-                    "gpu_temperature": max(gpu["temperature"] for gpu in gpus),
-                    "gpu_count": len(gpus),
-                    "gpus": gpus,
-                }
-    except (subprocess.TimeoutExpired, FileNotFoundError) as e:
-        logger.debug("nvidia_smi_failed", error=str(e))
+    stdout = nvidia_smi._run_query()
+    gpus = parse_nvidia_smi_gpus(stdout) if stdout else []
+    if gpus:
+        return {
+            "gpu_utilization": round(sum(gpu["utilization"] for gpu in gpus) / len(gpus)),
+            "gpu_memory_used_mb": sum(gpu["memory_used_mb"] for gpu in gpus),
+            "gpu_memory_total_mb": sum(gpu["memory_total_mb"] for gpu in gpus),
+            "gpu_temperature": max(gpu["temperature"] for gpu in gpus),
+            "gpu_count": len(gpus),
+            "gpus": gpus,
+        }
 
     return {
         "gpu_utilization": 0,

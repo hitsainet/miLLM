@@ -11,6 +11,12 @@ model that fit the 3090 was refused because the 3080 Ti was full.
 `tests/unit/test_no_hardcoded_gpu_device.py` keeps such choices out of the rest
 of `millm/`.
 
+Deciding where a job goes must not itself take memory from a card. The
+inventory is read from nvidia-smi, which needs no CUDA context in this process,
+and mapped to torch indices by UUID. `torch.cuda.mem_get_info(i)` creates a
+context on card i (a few hundred MB, kept for the life of the process), so it is
+used only on cards a model is already on or is being placed on.
+
 Policy (operator decisions, 2026-09-13):
   * Auto picks the card with the MOST free memory, read live, that fits.
   * Nothing is reserved for other applications; live free memory is the budget.
@@ -31,7 +37,7 @@ import structlog
 import torch
 
 from millm.core.errors import GpuNotFoundError, InsufficientMemoryError
-from millm.ml.memory_utils import list_gpu_memory
+from millm.ml import nvidia_smi
 
 logger = structlog.get_logger()
 
@@ -117,33 +123,69 @@ def normalize_gpu_uuid(value: Any) -> Optional[str]:
         return None
 
 
-def list_gpus() -> list[GpuInfo]:
-    """Every visible card with name, UUID and live free/total memory.
+def _torch_index_by_uuid() -> dict[str, int]:
+    """Torch's index for each card it can see, keyed by normalised UUID.
 
-    With CUDA_DEVICE_ORDER=PCI_BUS_ID (set in k8s and compose) the index here
-    matches nvidia-smi and llama.cpp. A card whose properties cannot be read is
-    still listed — its memory is what placement needs — with name "Unknown".
+    `get_device_properties` reads the device's properties without creating a
+    context. Matching by UUID, not by position, stays correct if torch's order
+    ever differs from nvidia-smi's (CUDA_VISIBLE_DEVICES, a CUDA_DEVICE_ORDER
+    that is not PCI_BUS_ID), where equal indices would be a coincidence.
     """
-    gpus: list[GpuInfo] = []
-    for entry in list_gpu_memory():
-        index = int(entry["index"])
-        name, gpu_uuid = "Unknown", None
+    mapping: dict[str, int] = {}
+    try:
+        count = torch.cuda.device_count()
+    except Exception as e:  # noqa: BLE001 - no card is an answer, not an error
+        logger.warning("gpu_device_count_unavailable", error=str(e))
+        return mapping
+    for index in range(count):
         try:
             props = torch.cuda.get_device_properties(index)
-            name = str(getattr(props, "name", "") or "Unknown")
-            gpu_uuid = normalize_gpu_uuid(getattr(props, "uuid", None))
-        except Exception as e:  # noqa: BLE001 - a missing name must not hide a card
+        except Exception as e:  # noqa: BLE001
             logger.warning("gpu_properties_unavailable", index=index, error=str(e))
+            continue
+        gpu_uuid = normalize_gpu_uuid(getattr(props, "uuid", None))
+        if gpu_uuid is not None:
+            mapping[gpu_uuid] = index
+    return mapping
+
+
+def list_gpus() -> list[GpuInfo]:
+    """Every card this process can use, with live free/total memory, by torch index.
+
+    Memory, name and UUID come from nvidia-smi; the index is torch's, found by
+    UUID. No CUDA context is created on any card. A card nvidia-smi reports but
+    torch cannot see is left out, and so is everything when either says there
+    are no cards — nvidia-smi absent means the CPU path, as when torch has no
+    CUDA.
+    """
+    if not torch.cuda.is_available():
+        return []
+    reported = nvidia_smi.query_gpus()
+    if not reported:
+        return []
+    torch_index = _torch_index_by_uuid()
+    gpus: list[GpuInfo] = []
+    for card in reported:
+        gpu_uuid = normalize_gpu_uuid(card.get("uuid"))
+        index = torch_index.get(gpu_uuid) if gpu_uuid is not None else None
+        if index is None:
+            logger.warning(
+                "gpu_not_mapped_to_torch",
+                nvidia_smi_index=card.get("index"),
+                uuid=card.get("uuid"),
+                detail="nvidia-smi reports this card but torch has no device with its UUID",
+            )
+            continue
         gpus.append(
             GpuInfo(
                 index=index,
-                name=name,
+                name=str(card.get("name") or "Unknown"),
                 uuid=gpu_uuid,
-                total_mb=int(entry["total_mb"]),
-                free_mb=int(entry["free_mb"]),
+                total_mb=int(card.get("memory_total_mb", 0)),
+                free_mb=int(card.get("memory_free_mb", 0)),
             )
         )
-    return gpus
+    return sorted(gpus, key=lambda gpu: gpu.index)
 
 
 def parse_gpu_request(requested: Any) -> Optional[Union[int, str]]:
@@ -276,9 +318,12 @@ class Placement:
         leaves layers there at run time. Decision 3 says transformers loads run
         on GPUs; if layers stay on the CPU, this entry violates it.
         """
+        # From the inventory snapshot, not mem_get_info: reading every card of an
+        # all-cards placement live would create a CUDA context on each first.
+        free_by_index = {gpu.index: gpu.free_mb for gpu in self.gpus}
         budget: dict[Any, str] = {}
         for index in self.gpu_indices:
-            free_bytes, _ = torch.cuda.mem_get_info(index)
+            free_bytes = free_by_index.get(index, 0) * _MIB
             budget[index] = f"{int(free_bytes * _BNB_GPU_FRACTION) // _GIB}GiB"
         budget["cpu"] = max_cpu
         return budget
@@ -387,8 +432,25 @@ def choose_gpu(
     )
 
 
+def reported_free_mb_by_index(indices: list[int]) -> dict[int, int]:
+    """Free memory per named card as nvidia-smi reports it — no CUDA context.
+
+    For measuring memory that torch does not own (llama.cpp's), where creating a
+    torch context on the card would itself cost the memory being measured.
+    """
+    wanted = set(indices)
+    if not wanted:
+        return {}
+    return {gpu.index: gpu.free_mb for gpu in list_gpus() if gpu.index in wanted}
+
+
 def free_mb_by_index(indices: list[int]) -> dict[int, int]:
-    """Live free memory for each named card. A card that cannot be read is omitted."""
+    """Live free memory for each named card, from torch. A card that cannot be read is omitted.
+
+    ONLY for cards a transformers model is on or is being placed on: each call
+    creates a CUDA context on its card, which is harmless where the model will
+    create one anyway and a loss of memory everywhere else.
+    """
     free: dict[int, int] = {}
     for index in indices:
         try:

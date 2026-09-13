@@ -193,12 +193,33 @@ class TestCleanupActsOnTheCardsTheModelUsed:
             state.clear()
             assert torch.cuda.synchronize.call_args_list == [call(0), call(1)]
 
-    def test_nothing_recorded_covers_every_visible_card(self):
+    def test_nothing_recorded_touches_no_card(self):
+        """No card used means no card touched: a torch call on a card creates a
+        CUDA context there, taking memory to clean up nothing."""
         state = LoadedModelState()
         state.set(LoadedModel(1, "m", MagicMock(), MagicMock(), datetime.utcnow()))
-        with fake_gpus(*NODE), _cleanup_mocks():
+        with fake_gpus(*NODE) as fake, _cleanup_mocks():
+            fake.forbid(0, 1)
             state.clear()
-            assert torch.cuda.synchronize.call_args_list == [call(0), call(1)]
+            assert torch.cuda.synchronize.call_args_list == []
+            assert torch.cuda.reset_peak_memory_stats.call_args_list == []
+        assert fake.calls == []
+
+    def test_a_gguf_model_gets_no_torch_calls_on_its_card(self):
+        """llama.cpp's memory is not torch's; torch calls on its card would only
+        create a torch context there."""
+        from millm.ml.model_loader import ENGINE_LLAMACPP
+
+        handle = MagicMock()
+        state = LoadedModelState()
+        state.set(LoadedModel(1, "m", handle, None, datetime.utcnow(),
+                              gpu_indices=[1], engine=ENGINE_LLAMACPP))
+        with fake_gpus(*NODE) as fake, _cleanup_mocks():
+            fake.forbid(0, 1)
+            state.clear()
+            assert torch.cuda.synchronize.call_args_list == []
+        assert handle.close.called
+        assert fake.calls == []
 
     def test_a_failed_load_cleans_the_placement_cards(self):
         placement = Placement(

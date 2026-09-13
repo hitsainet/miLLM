@@ -12,8 +12,10 @@ spec:
       labels:
         app: open-webui
     spec:
+      # Moved from mcs-lnxgpu01 to mcs-lnxhost02 on 2026-09-13 with the GPU and
+      # started fresh; the old data stayed on mcs-lnxgpu01's disk.
       nodeSelector:
-        kubernetes.io/hostname: mcs-lnxgpu01
+        kubernetes.io/hostname: mcs-lnxhost02
       containers:
         - name: open-webui
           image: ghcr.io/open-webui/open-webui:latest

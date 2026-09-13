@@ -22,12 +22,13 @@ spec:
       labels:
         app: millm-backend
     spec:
-      # Pin to the GPU node.
+      # Pin to the GPU node. Moved from mcs-lnxgpu01 to mcs-lnxhost02 on
+      # 2026-09-13 with the RTX 3090 and started fresh.
       nodeSelector:
-        kubernetes.io/hostname: mcs-lnxgpu01
+        kubernetes.io/hostname: mcs-lnxhost02
       # Cluster nodes cannot resolve the .local ingress hostname via DNS.
       hostAliases:
-        - ip: "192.168.244.61"
+        - ip: "192.168.244.52"
           hostnames:
             - "k8s-millm.hitsai.local"
       initContainers:

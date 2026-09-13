@@ -28,8 +28,11 @@ spec:
       # was reading a database created minutes earlier. millm-backend was
       # already pinned this way (it needs the GPU); postgres and redis simply
       # never had the same treatment.
+      #
+      # Moved from mcs-lnxgpu01 to mcs-lnxhost02 on 2026-09-13 with the GPU and
+      # started fresh; the old data stayed on mcs-lnxgpu01's disk.
       nodeSelector:
-        kubernetes.io/hostname: mcs-lnxgpu01
+        kubernetes.io/hostname: mcs-lnxhost02
       containers:
         - name: redis
           image: redis:7

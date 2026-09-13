@@ -28,6 +28,7 @@ Policy (operator decisions, 2026-09-13):
 
 from __future__ import annotations
 
+import dataclasses
 import itertools
 import uuid as _uuid
 from dataclasses import dataclass
@@ -186,6 +187,27 @@ def list_gpus() -> list[GpuInfo]:
             )
         )
     return sorted(gpus, key=lambda gpu: gpu.index)
+
+
+def project_free_after_unload(
+    gpus: list[GpuInfo], resident_memory_by_device_mb: Optional[dict[str, int]]
+) -> list[GpuInfo]:
+    """What each card will have once the resident model is unloaded.
+
+    Live free memory plus that model's recorded usage on the card, capped at the
+    card's total. A load is judged against this BEFORE the resident model is
+    unloaded, so a refusal no longer costs the operator the model they were
+    serving — and a switch that only fits once the old model is gone is not
+    refused for the memory that model is about to give back.
+    """
+    usage = resident_memory_by_device_mb or {}
+    return [
+        dataclasses.replace(
+            gpu,
+            free_mb=min(gpu.total_mb, gpu.free_mb + max(int(usage.get(gpu.device_label, 0)), 0)),
+        )
+        for gpu in gpus
+    ]
 
 
 def parse_gpu_request(requested: Any) -> Optional[Union[int, str]]:

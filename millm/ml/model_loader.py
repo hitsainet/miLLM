@@ -94,6 +94,7 @@ from millm.core.errors import InsufficientMemoryError, ModelLoadError
 from millm.ml.gguf_catalog import quant_label_from_path
 from millm.ml.gpu_placement import (
     REASON_NO_GPU,
+    GpuInfo,
     GpuRequest,
     Placement,
     choose_gpu,
@@ -1323,6 +1324,7 @@ def plan_gguf_placement(
     bytes_per_token: float | None,
     target_ctx: int,
     requested: GpuRequest = None,
+    gpus: Optional[list[GpuInfo]] = None,
 ) -> Placement:
     """Where a GGUF model goes: one card, a layer split across cards, or the CPU.
 
@@ -1335,6 +1337,9 @@ def plan_gguf_placement(
     context ladder shrinks the window to what that card holds, so refusing a
     card that can serve the model at a shorter context would refuse a load
     that works. A card that cannot hold even that is refused, never swapped.
+
+    `gpus` defaults to the live inventory; the pre-unload check passes a
+    projection of what the cards will have once the resident model is gone.
     """
     wanted = parse_gpu_request(requested)
     if not _gguf_can_offload():
@@ -1344,11 +1349,11 @@ def plan_gguf_placement(
             return choose_gpu(
                 _gguf_required_mb(weights_mb, bytes_per_token, GGUF_MIN_CONTEXT),
                 requested=wanted,
-                gpus=list_gpus() if torch.cuda.is_available() else [],
+                gpus=(list_gpus() if torch.cuda.is_available() else []) if gpus is None else gpus,
             )
         return cpu_placement(REASON_NO_GPU)
 
-    gpus = list_gpus()
+    gpus = list_gpus() if gpus is None else gpus
     if not gpus and wanted is None:
         return cpu_placement(REASON_NO_GPU)
     if wanted is not None:
@@ -1808,6 +1813,54 @@ def load_gguf_model(
     )
 
 
+def decide_transformers_placement(
+    estimated_memory_mb: int,
+    quantization: str,
+    requested: GpuRequest,
+    gpus: list[GpuInfo],
+    is_pre_quantized: bool = False,
+) -> Placement:
+    """Where a transformers load goes, or why it cannot go anywhere.
+
+    ONE decision for both checks that run it: the pre-unload check in
+    ModelService (against a projection of the cards with the resident model's
+    memory given back) and the authoritative check in ModelLoader.load (against
+    live memory, after the unload). Two copies of this rule could disagree, and
+    the pre-check would then refuse loads the loader accepts or wave through
+    loads it refuses.
+
+    A model that fits one card goes on the most-free such card (or the
+    requested card, which choose_gpu refuses if it does not fit), so it fits by
+    construction. Only the all-cards fallback needs a fit check, against free
+    memory summed over every card. Q4/Q2 and pre-quantized models skip that
+    summed check as before: they can offload to the CPU through bitsandbytes'
+    max_memory.
+
+    Raises:
+        GpuNotFoundError: the requested card is not visible.
+        InsufficientMemoryError: the requested card lacks room, no GPU is
+            visible, or (for quantizations that cannot offload) every card
+            together lacks room.
+    """
+    skip_mem_check = is_pre_quantized or quantization.upper() in ("Q4", "Q2")
+    placement = choose_gpu(estimated_memory_mb, requested=requested, gpus=gpus)
+    if (
+        not placement.is_single
+        and not skip_mem_check
+        and placement.capacity_mb < estimated_memory_mb
+    ):
+        raise InsufficientMemoryError(
+            f"Not enough GPU memory. Need ~{estimated_memory_mb}MB, have "
+            f"{placement.capacity_mb}MB across {len(placement.gpus)} GPU(s)",
+            details={
+                "required_mb": estimated_memory_mb,
+                "available_mb": placement.capacity_mb,
+                "gpus": [gpu_info.to_dict() for gpu_info in placement.gpus],
+            },
+        )
+    return placement
+
+
 class ModelLoader:
     """
     High-level model loading operations.
@@ -1925,33 +1978,18 @@ class ModelLoader:
                 "PyTorch is not installed. Install with CUDA support.",
             )
 
-        # Decide the card, then check memory against THAT decision.
-        #
-        # A model that fits one card goes on the most-free such card (or the
-        # requested card, which choose_gpu refuses if it does not fit), so it
-        # fits by construction. Only the all-cards fallback still needs a fit
-        # check, against free memory summed over every card. Reading GPU 0
-        # alone refused a model needing more than 12 GB while the 3090 had
-        # 24 GB free.
-        #
-        # Q4/Q2 and pre-quantized models skip the summed check as before: they
-        # can offload to the CPU through bitsandbytes' max_memory.
-        skip_mem_check = is_pre_quantized or quantization.upper() in ("Q4", "Q2")
-        placement = choose_gpu(estimated_memory_mb, requested=gpu)
-        if (
-            not placement.is_single
-            and not skip_mem_check
-            and placement.capacity_mb < estimated_memory_mb
-        ):
-            raise InsufficientMemoryError(
-                f"Not enough GPU memory. Need ~{estimated_memory_mb}MB, have "
-                f"{placement.capacity_mb}MB across {len(placement.gpus)} GPU(s)",
-                details={
-                    "required_mb": estimated_memory_mb,
-                    "available_mb": placement.capacity_mb,
-                    "gpus": [gpu_info.to_dict() for gpu_info in placement.gpus],
-                },
-            )
+        # Decide the card, then check memory against THAT decision — the same
+        # decision the pre-unload check made, now against live memory. This one
+        # is authoritative: free memory can change between the two. Reading
+        # GPU 0 alone refused a model needing more than 12 GB while the 3090
+        # had 24 GB free.
+        placement = decide_transformers_placement(
+            estimated_memory_mb,
+            quantization,
+            requested=gpu,
+            gpus=list_gpus(),
+            is_pre_quantized=is_pre_quantized,
+        )
         logger.info(
             "model_placement",
             model_id=model_id,

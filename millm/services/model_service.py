@@ -35,10 +35,19 @@ from millm.core.errors import (
 from millm.db.models.model import Model, ModelSource, ModelStatus, QuantizationType
 from millm.db.repositories.model_repository import ModelRepository
 from millm.ml.memory_utils import estimate_memory_mb
-from millm.ml.gpu_placement import GpuRequest, find_gpu, list_gpus, parse_gpu_request
+from millm.ml.gpu_placement import (
+    GpuRequest,
+    list_gpus,
+    parse_gpu_request,
+    project_free_after_unload,
+)
 from millm.ml.gguf_catalog import coarse_quantization
 from millm.ml.model_downloader import ModelDownloader, _safe_variant
-from millm.ml.model_loader import ModelLoader
+from millm.ml.model_loader import (
+    ModelLoader,
+    decide_transformers_placement,
+    plan_gguf_placement,
+)
 from millm.sockets.progress import ProgressEmitter
 
 logger = structlog.get_logger()
@@ -734,8 +743,9 @@ class ModelService:
         Args:
             model_id: The model's database ID
             gpu: None or "auto" (the most-free card that fits), a CUDA index,
-                or a GPU UUID. A named card that does not exist is refused
-                here; one without room is refused by the loader.
+                or a GPU UUID. A named card that does not exist, or that cannot
+                hold the model even with the resident model's memory given
+                back, is refused here — before anything is unloaded.
 
         Returns:
             The updated model record (status will be LOADED)
@@ -765,6 +775,16 @@ class ModelService:
                 details={"model_id": model_id},
             )
 
+        # The card, checked NOW: before any state below changes, and above all
+        # before the resident model is unloaded to make room. The load itself
+        # runs in the background, so a refusal found only there arrived as an
+        # ERROR status after the model being served was already gone.
+        try:
+            wanted = parse_gpu_request(gpu)
+        except ValueError as e:
+            raise GpuNotFoundError(str(e), details={"requested": gpu}) from e
+        self._precheck_placement(model, wanted)
+
         if model.status == ModelStatus.ERROR:
             # Allow retry from error state - reset to ready first
             logger.info(
@@ -782,17 +802,6 @@ class ModelService:
                 f"Another model ({self._loading_model_id}) is currently being loaded",
                 details={"loading_model_id": self._loading_model_id},
             )
-
-        # A named card is checked NOW, while the request is still open. The
-        # load itself runs in the background, so a card that does not exist
-        # would otherwise surface only as an ERROR status — after the resident
-        # model had already been unloaded to make room.
-        try:
-            wanted = parse_gpu_request(gpu)
-        except ValueError as e:
-            raise GpuNotFoundError(str(e), details={"requested": gpu}) from e
-        if wanted is not None:
-            find_gpu(list_gpus(), wanted)
 
         # Unload any currently loaded model
         if self.loader.is_loaded:
@@ -843,6 +852,57 @@ class ModelService:
         )
 
         return model
+
+    def _precheck_placement(self, model: Model, wanted: Any) -> None:
+        """Refuse, before unloading anything, a load that cannot be placed.
+
+        Judged against what each card WILL have once the resident model is
+        gone: live free memory plus that model's recorded usage on the card.
+        Without the add-back, switching from a model on the 3090 to a bigger
+        one on the same card would be refused while it fits.
+
+        The background load decides again after the unload, against live
+        memory, and that decision is authoritative — free memory can change in
+        between. This check only refuses early what would be refused there.
+
+        Raises:
+            GpuNotFoundError: the named card is not visible.
+            InsufficientMemoryError: the named card cannot hold the model, or
+                (for quantizations refused today) no card can, even summed.
+        """
+        from millm.core.config import settings
+
+        resident = self.loader.state.current if self.loader.is_loaded else None
+        gpus = project_free_after_unload(
+            list_gpus(), getattr(resident, "memory_by_device_mb", None)
+        )
+
+        gguf_file = (model.gguf_files or [None])[0]
+        if gguf_file:
+            # GGUF on Auto never refuses: CPU spill is allowed. A named card is
+            # sized on weights and overhead at the smallest context with no KV
+            # term — a lower bound on what the loader asks for, so this cannot
+            # refuse a card the loader would accept. Reading the KV size would
+            # load the file's metadata inside the request.
+            weights_mb = 0
+            if model.cache_path:
+                base = (
+                    model.cache_path
+                    if os.path.isabs(model.cache_path)
+                    else f"{settings.MODEL_CACHE_DIR}/{model.cache_path}"
+                )
+                path = Path(base) / gguf_file
+                if path.is_file():
+                    weights_mb = int(path.stat().st_size / (1024 * 1024))
+            plan_gguf_placement(weights_mb, None, 0, requested=wanted, gpus=gpus)
+            return
+
+        decide_transformers_placement(
+            model.estimated_memory_mb or 0,
+            model.quantization.value,
+            requested=wanted,
+            gpus=gpus,
+        )
 
     def _load_worker(
         self,

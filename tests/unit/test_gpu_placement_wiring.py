@@ -78,11 +78,20 @@ def _is_attr(node: ast.AST | None, owner: str, attr: str) -> bool:
 
 
 class TestTransformersLoad:
-    def test_model_loader_resolves_with_the_request(self):
+    def test_model_loader_resolves_with_the_request_against_live_memory(self):
+        """The authoritative check, after the unload: live inventory, not a projection."""
         fn = _function(model_loader, "ModelLoader.load")
-        [call] = _calls(fn, "choose_gpu")
+        [call] = _calls(fn, "decide_transformers_placement")
         assert _is_name(call.args[0], "estimated_memory_mb")
         assert _is_name(_kw(call, "requested"), "gpu")
+        gpus = _kw(call, "gpus")
+        assert isinstance(gpus, ast.Call) and _is_name(gpus.func, "list_gpus")
+
+    def test_the_shared_decision_is_choose_gpu(self):
+        fn = _function(model_loader, "decide_transformers_placement")
+        [call] = _calls(fn, "choose_gpu")
+        assert _is_name(_kw(call, "requested"), "requested")
+        assert _is_name(_kw(call, "gpus"), "gpus")
 
     def test_the_decision_is_handed_to_the_context(self):
         fn = _function(model_loader, "ModelLoader.load")
@@ -173,9 +182,25 @@ class TestServiceAndRoute:
 
     def test_service_validates_and_forwards_the_card(self):
         fn = _function(model_service, "ModelService.load_model")
-        assert _calls(fn, "find_gpu"), "a named card is no longer checked before the load starts"
+        [precheck] = _calls(fn, "_precheck_placement")
+        assert _is_name(precheck.args[1], "wanted")
         [call] = _calls(fn, "run_in_executor")
         assert _is_name(call.args[-1], "wanted")
+
+    def test_the_precheck_runs_before_the_resident_model_is_unloaded(self):
+        fn = _function(model_service, "ModelService.load_model")
+        [precheck] = _calls(fn, "_precheck_placement")
+        [unload] = _calls(fn, "unload_model")
+        assert precheck.lineno < unload.lineno
+
+    def test_the_precheck_projects_the_resident_models_memory_back(self):
+        fn = _function(model_service, "ModelService._precheck_placement")
+        [project] = _calls(fn, "project_free_after_unload")
+        assert isinstance(project.args[0], ast.Call) and _is_name(project.args[0].func, "list_gpus")
+        [decide] = _calls(fn, "decide_transformers_placement")
+        assert _is_name(_kw(decide, "gpus"), "gpus")
+        [gguf] = _calls(fn, "plan_gguf_placement")
+        assert _is_name(_kw(gguf, "gpus"), "gpus")
 
     def test_worker_forwards_the_card(self):
         fn = _function(model_service, "ModelService._load_worker")

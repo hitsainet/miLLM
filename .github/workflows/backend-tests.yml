@@ -193,6 +193,12 @@ jobs:
         with:
           repository: Onegaishimas/miStudio
           path: miStudio
+          # miStudio became PRIVATE on 2026-09-12, and the default GITHUB_TOKEN
+          # cannot read another private repository: this checkout returned "Not
+          # Found" and every Backend Tests run went red from then on. A read-only
+          # deploy key on miStudio, stored here as a secret, is the narrowest
+          # credential that works.
+          ssh-key: ${{ secrets.MISTUDIO_DEPLOY_KEY }}
 
       - name: Set up Python 3.11
         uses: actions/setup-python@v5
@@ -212,6 +218,13 @@ jobs:
         # Deriving it means the guard installs what miStudio actually declares,
         # and a future bump there needs no edit here.
         run: |
+          # Say WHY first. When the sibling checkout failed, this step used to report
+          # an unreadable mcp constraint — true, and pointing at the wrong problem.
+          if [ "${{ steps.sibling.outcome }}" != "success" ]; then
+            echo "::error::miStudio checkout failed, so the contract guard cannot run."
+            echo "::error::Check the MISTUDIO_DEPLOY_KEY secret and the read-only deploy key on Onegaishimas/miStudio."
+            exit 1
+          fi
           spec=$(grep -oE '^mcp[<>=!,.0-9]+' miStudio/backend/requirements.txt | head -1)
           if [ -z "$spec" ]; then
             echo "::error::could not read the mcp constraint from miStudio's"

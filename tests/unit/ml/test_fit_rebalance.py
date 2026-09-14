@@ -54,6 +54,18 @@ the fallback now re-plans with transformers_shard_rule.
   R5-M29 the fallback judges the fit's placement again     -> 3 red: all of TestAnUnknownLayoutFallsBackLoudly
   R5-M30 the slack's rule without the quantizer factor     -> test_the_slack_counts_the_quantizers_factor
   F-M16b re-run (Auto re-plans without the factor)         -> test_the_slack_counts_the_quantizers_factor
+
+REVIEW ROUND 6 (2026-09-14) — TWO SHORT CARDS IN ONE PASS RAISED KeyError. A step was
+recorded only when a cut was taken. When the lower-index card's shortfall is at least
+its limit (no cut) while the last card is cut without its map moving, the next pass
+finds the first card short at the same weights and reads its step to double it:
+`steps[0]`, never written. Llama-2-7B-32K at Q8 with a 32,768-token cache on 3,000 /
+16,000 MB free — 24 GB needed of 19 GB — raised KeyError out of the pre-unload check on
+both Auto and "all", a bare 500 where round 4 gave a refusal with every card's figures.
+Found by a targeted probe (millm-p2-review6/keyerror_probe.py): no grid round 5 ran
+combined a KV-heavy MHA model, a long context and a nearly full lower-index card.
+  R6-M1  the step recorded only when the cut is taken (round 5's code)
+         -> both TestTwoShortCardsInOnePass cases (KeyError: 0)
 """
 
 from __future__ import annotations
@@ -103,6 +115,13 @@ OLMO2_13B = dict(
 LLAMA32_1B = dict(
     vocab_size=128_256, hidden_size=2_048, intermediate_size=8_192, num_hidden_layers=16,
     num_attention_heads=32, num_key_value_heads=8, tie_word_embeddings=True,
+)
+#: togethercomputer/LLaMA-2-7B-32K: multi-head attention with 32,768 positions, so a
+#: layer's cache at full context (512 MiB) outweighs its Q8 weights (~193 MiB).
+LLAMA2_7B_32K = dict(
+    vocab_size=32_000, hidden_size=4_096, intermediate_size=11_008, num_hidden_layers=32,
+    num_attention_heads=32, num_key_value_heads=32, max_position_embeddings=32_768,
+    rms_norm_eps=1e-5, tie_word_embeddings=False,
 )
 
 
@@ -220,6 +239,32 @@ class TestWhatNoReplanFits:
         assert raised.value.details["rebalance_passes"] == 2
         assert raised.value.details["short_devices"] == ["cuda:0"]
         assert "did not settle within 2 re-plans" in raised.value.message
+
+
+class TestTwoShortCardsInOnePass:
+    @pytest.mark.parametrize("requested", [None, "all"])
+    def test_a_card_that_cannot_be_cut_beside_one_that_is_is_refused_not_a_key_error(
+        self, tmp_path, requested
+    ):
+        """Q8, 32,768 tokens, 3,000 / 16,000 MB free. Pass 1: cuda:0 holds 9 layers,
+        1,988 + 4,608 + 500 = 7,096 of 3,000, short 4,096 — more than its 2,500 MiB
+        limit, so it cannot be cut; cuda:1 holds 23, 4,690 + 11,776 + 500 = 16,966 of
+        16,000, short 966, and is cut without its map moving. Pass 2 finds cuda:0 short
+        at the same weights and doubles its step. The cards together are short (6,678
+        MiB of weights + 16,384 of cache + 1,000 of context against 19,000), so the
+        answer is a refusal with the last split's figures."""
+        path = _save(tmp_path, LlamaConfig(**LLAMA2_7B_32K))
+        cards = ((TI_3080, 3_000, 12_288), (RTX_3090, 16_000, 24_576))
+
+        with pytest.raises(InsufficientMemoryError) as raised:
+            _plan(cards, path, context=32_768, requested=requested, quantization="Q8")
+
+        details = raised.value.details
+        assert details["rebalance_passes"] == 5
+        assert details["short_devices"] == ["cuda:0", "cuda:1"]
+        assert [(c["device"], c["weights_mb"], c["layers"], c["kv_mb"], c["short_mb"]) for c in details["per_card"]] == [
+            ("cuda:0", 1_988, 9, 4_608, 4_096), ("cuda:1", 4_690, 23, 11_776, 966),
+        ]
 
 
 class TestTheSearchIsSafe:

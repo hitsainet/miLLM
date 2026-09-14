@@ -3213,10 +3213,16 @@ def _check_split_fit(
             else:
                 step = card.short_mb
             seen_weights[card.index] = card.weights_mb
+            # Recorded whether or not the cut is taken. A card whose cut would leave
+            # it nothing keeps its weights while another card is cut, so the next
+            # pass doubles ITS step; recorded only on a cut, that read raised
+            # KeyError and a load due a refusal with figures failed as a bare 500
+            # (Llama-2-7B-32K Q8 at 32,768 tokens on 3,000 / 16,000 MB). Review
+            # round 6, 2026-09-14.
+            steps[card.index] = step
             cut = limits[card.index] - step
             if cut > 0:
                 lowered[card.index] = cut
-                steps[card.index] = step
                 progress = True
         if not progress:
             raise _rebalance_refusal(

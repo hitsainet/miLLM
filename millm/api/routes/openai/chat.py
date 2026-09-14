@@ -17,6 +17,7 @@ from millm.api.dependencies import ModelServiceDep, get_inference_service
 from millm.api.routes.openai.errors import (
     embedding_model_error,
     is_embedding_only,
+    load_refused_error,
     model_locked_error,
     model_not_found_error,
     model_not_loaded_error,
@@ -113,7 +114,7 @@ async def create_chat_completion(
                 f"loading; retry shortly."
             )
         except MiLLMError as exc:
-            return server_error(f"Could not load '{request.model}': {exc}")
+            return load_refused_error(request.model, exc)
 
         # Confirm the switch actually happened rather than assuming it did.
         model_info = inference.get_loaded_model_info()

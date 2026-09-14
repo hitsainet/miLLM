@@ -13,6 +13,7 @@ from fastapi.responses import JSONResponse
 from millm.api.dependencies import ModelServiceDep, get_inference_service
 from millm.api.routes.openai.errors import (
     create_openai_error,
+    load_refused_error,
     model_locked_error,
     model_not_found_error,
     model_not_loaded_error,
@@ -93,7 +94,7 @@ async def create_embeddings(
         except asyncio.TimeoutError:
             return server_error(f"Timed out loading '{request.model}'.")
         except MiLLMError as exc:
-            return server_error(f"Could not load '{request.model}': {exc}")
+            return load_refused_error(request.model, exc)
 
         model_info = inference.get_loaded_model_info()
         if not model_info:

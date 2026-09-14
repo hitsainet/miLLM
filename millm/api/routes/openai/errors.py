@@ -260,6 +260,31 @@ def rate_limit_error(message: str = "Rate limit exceeded") -> JSONResponse:
     )
 
 
+def load_refused_error(model_id: str, exc: MiLLMError) -> JSONResponse:
+    """A load this request triggered was refused or failed: the refusal's own status and type.
+
+    The chat, completions and embeddings routes load the model a request names,
+    and answered EVERY load error as a 500 `server_error`. That left the rows
+    ERROR_STATUS_MAP keeps for load refusals unreachable on the one path that
+    raises them from /v1: a Q2 transformers checkpoint (UNSUPPORTED_QUANTIZATION,
+    a request to change) went out as a server fault to retry, and a model no card
+    or split holds (INSUFFICIENT_MEMORY) as 500 rather than 503. Review round 2
+    added the UNSUPPORTED_QUANTIZATION row for exactly this request and tested it
+    against millm_error_handler, which a caught exception never reaches. Review
+    round 3, 2026-09-14.
+
+    Codes without a row keep their own status, typed server_error — the fallback
+    millm_error_handler uses.
+    """
+    status_code, error_type = ERROR_STATUS_MAP.get(exc.code, (exc.status_code, "server_error"))
+    return create_openai_error(
+        message=f"Could not load '{model_id}': {exc}",
+        error_type=error_type,
+        code=exc.code.lower() if exc.code else None,
+        status_code=status_code,
+    )
+
+
 def server_error(message: str = "Internal server error") -> JSONResponse:
     """Create generic server error response."""
     return create_openai_error(

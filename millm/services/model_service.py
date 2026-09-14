@@ -28,6 +28,7 @@ from millm.core.errors import (
     ModelAlreadyExistsError,
     ModelAlreadyLoadedError,
     ModelBusyError,
+    ModelLoadError,
     ModelLockedError,
     ModelNotFoundError,
     ModelNotLoadedError,
@@ -1437,7 +1438,12 @@ class ModelService:
             if updated.status == ModelStatus.LOADED:
                 return updated
             if updated.status == ModelStatus.ERROR:
-                raise ModelBusyError(
+                # A load that FAILED, not one still running: as ModelBusyError
+                # the OpenAI routes answered it "Another model load is already
+                # in progress; retry once it finishes" — for a load that had
+                # already finished, unsuccessfully, and would fail again.
+                # Review round 3, 2026-09-14.
+                raise ModelLoadError(
                     f"Model failed to load: {updated.error_message}",
                     details={"model_id": model_id, "error": updated.error_message},
                 )

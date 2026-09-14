@@ -204,6 +204,7 @@ miLLM detects a trailing assistant message and completes it instead: everything 
 | The named model has to be loaded and its quantization cannot be (a Q2 transformers checkpoint) | 400 | `unsupported_quantization` |
 | The named model has to be loaded and no card, or split across cards, holds it | 503 | `insufficient_memory` |
 | The named model has to be loaded and the load failed | 500 | `model_load_failed` |
+| Generation runs a card out of memory (the prompt and its KV cache do not fit beside the model); type `invalid_request_error`, the message names the card. A stream ends with this error event and `[DONE]` | 503 | `insufficient_memory` |
 
 A request that names a model other than the one loaded loads it first. When that load is refused before the loaded model is unloaded, the response carries the refusal's own status and message, with the figures for each card. A load that fails after the unload, for example because free memory changed in between, answers `500 model_load_failed` with the failure's message. A request that arrives while its model is still being unloaded is told to retry.
 

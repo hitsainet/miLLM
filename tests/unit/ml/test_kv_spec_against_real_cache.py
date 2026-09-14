@@ -31,7 +31,7 @@ COLLECTION and took the whole module down as an error. Classes are now looked up
 name when a case runs, and a missing one skips that case.
   R6-C1  collected under a transformers with no Gemma4* classes (millm-p2-review6/hide_gemma4.py):
          before, "1 error during collection"; after, 12 passed, 2 skipped
-  R5-M6..M9 re-run against the rebuilt cases: all red again (see the round 6 review record)
+  R5-M6..M9 re-run against the rebuilt cases, all red again: M6 1 red, M7 2, M8 6, M9 14
 """
 
 from __future__ import annotations

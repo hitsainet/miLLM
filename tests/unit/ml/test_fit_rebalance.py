@@ -66,6 +66,9 @@ Found by a targeted probe (millm-p2-review6/keyerror_probe.py): no grid round 5 
 combined a KV-heavy MHA model, a long context and a nearly full lower-index card.
   R6-M1  the step recorded only when the cut is taken (round 5's code)
          -> both TestTwoShortCardsInOnePass cases (KeyError: 0)
+  Round 5's controls on the re-plan loop re-run after the fix (this file,
+  test_per_card_fit.py, test_split_preflight.py), all red: R5-M20 11, R5-M21 4,
+  R5-M22 10, R5-M23 13, R5-M26 1.
 """
 
 from __future__ import annotations

@@ -91,7 +91,7 @@ That ceiling is a **limit, not a target**, and it is needed in both directions. 
 | Gemma 2 9B Q8 + 16k SAE | ~11 GB | 16 GB card |
 | Gemma 2 9B FP16 + 131k SAE | ~23 GB | 24 GB card |
 
-miLLM estimates memory before loading and warns (but does not block) when the estimate exceeds free VRAM. On an out-of-memory event during inference with an SAE attached, miLLM degrades gracefully: the SAE is disabled and the base model continues serving.
+miLLM checks each card before loading and refuses a load that does not fit (see below), and refuses an SAE whose card cannot also keep the model's KV cache. If a request still runs out of memory during generation, that request fails with a typed error naming the card, its memory is released, and later requests are served; nothing is detached or disabled.
 
 ## Multi-GPU
 
@@ -107,7 +107,7 @@ A transformers model is judged **card by card**. From the checkpoint's configura
 - the **KV cache** of that card's layers at a minimum context, [`TRANSFORMERS_MIN_CONTEXT`](/reference/configuration#transformers-models) (4,096 tokens by default), or at the model's own maximum context if that is shorter, counted at bfloat16;
 - a **CUDA context**, [`TRANSFORMERS_CUDA_CONTEXT_MB`](/reference/configuration#transformers-models) (500 MB by default).
 
-A sliding-window layer is counted up to its window. In a hybrid model only the attention layers are counted; the fixed-size state of a Mamba or convolution layer is not. The minimum context is a floor for loading, not a limit on requests: a card with more room serves longer contexts. Requests are limited only by the model's own maximum context, so a request whose KV cache needs more than its cards have left runs out of GPU memory during generation and fails with a `500 server_error` (a streamed response ends with an error event). Raise `TRANSFORMERS_MIN_CONTEXT` to load only where the contexts you serve fit.
+A sliding-window layer is counted up to its window. In a hybrid model only the attention layers are counted; the fixed-size state of a Mamba or convolution layer is not. The minimum context is a floor for loading, not a limit on requests: a card with more room serves longer contexts. Requests are limited only by the model's own maximum context, so a request whose KV cache needs more than its cards have left runs out of GPU memory during generation. That request is refused with `503 insufficient_memory` (type `invalid_request_error`) on `/v1`, or `507 INSUFFICIENT_MEMORY` on the management API, naming the card torch ran out on, the prompt's tokens and `max_tokens`; a streamed response ends with the same error event and `[DONE]`. The failed request's memory is released and later requests are served. Raise `TRANSFORMERS_MIN_CONTEXT` to load only where the contexts you serve fit.
 
 The same test decides everything: whether Auto puts the model on one card or splits it, whether a named card is accepted, and whether a split is accepted. When a split leaves one card short while another has room, miLLM moves layers off the short card and works out the layout again, until every card fits or no arrangement can. A refusal lists every card the model would use, with its free memory, the weights, the KV cache and the context allowance, and how many MiB the short card is missing. For example, with an RTX 3080 Ti at 11,500 MB free and an RTX 3090 at 23,500 MB free:
 

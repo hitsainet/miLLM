@@ -83,7 +83,7 @@ class TestAModelThatFitsNoSingleCard:
         placement = kwargs["placement"]
         assert placement.mode == MODE_SHARD
         assert placement.gpu_indices == [0, 1]
-        assert placement.planned_mb_by_index == {1: 21_976, 0: 8_024}
+        assert placement.planned_mb_by_index == {0: 9_976, 1: 20_024}
 
     def test_refused_when_the_split_lacks_room(self):
         with fake_gpus(*NODE):

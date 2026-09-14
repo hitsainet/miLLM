@@ -8,8 +8,9 @@ might ignore.
 Cards are the node's: RTX 3080 Ti (index 0, 11 GB free), RTX 3090 (index 1,
 23 GB free). A single-card model is placed on index 1, so any implicit GPU 0
 read or write shows up as a wrong answer. A split's expected limits were worked
-out by hand: free - 1024 per card, the most-free card whole, the other only for
-the remainder.
+out by hand: free - 1024 per card, every card but the highest index whole (the
+order accelerate fills them — review round 1, 2026-09-14), the last card its
+whole limit with the remainder planned on it.
 
 MUTATION CONTROLS (each must turn this file red):
   * device_map back to "auto" for a single-card load   -> "whole on one card" fails
@@ -153,7 +154,7 @@ class TestTheDeviceMap:
             _, kwargs = _load(fake, placement, model=FakeModel([CUDA0, CUDA1]))
         assert placement.mode == MODE_SHARD
         assert kwargs["device_map"] == "sequential"
-        assert kwargs["max_memory"] == {0: "8024MiB", 1: "21976MiB"}
+        assert kwargs["max_memory"] == {0: "9976MiB", 1: "21976MiB"}
 
     def test_a_bitsandbytes_split_passes_its_limits_undiscounted(self):
         """transformers applies its 0.9 to these itself; applying it here too
@@ -163,7 +164,7 @@ class TestTheDeviceMap:
                 fake, _decide(25_000, "Q8"), quantization="Q8", model=FakeModel([CUDA0, CUDA1])
             )
         assert kwargs["device_map"] == "sequential"
-        assert kwargs["max_memory"] == {0: "5803MiB", 1: "21976MiB"}
+        assert kwargs["max_memory"] == {0: "9976MiB", 1: "21976MiB"}
 
     def test_q8_no_longer_permits_cpu_offload(self):
         bnb = MagicMock()
@@ -257,7 +258,7 @@ class TestWhatTheLoadRecords:
         assert loaded.memory_used_mb == 28_000
         assert loaded.gpu_indices == [0, 1]
         assert loaded.placement["mode"] == MODE_SHARD
-        assert loaded.placement["planned_mb_by_device"] == {"cuda:0": 8_024, "cuda:1": 21_976}
+        assert loaded.placement["planned_mb_by_device"] == {"cuda:0": 9_976, "cuda:1": 20_024}
 
 
 class TestTorchCompile:

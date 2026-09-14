@@ -175,7 +175,7 @@ class TestStatusReportsPlacement:
         assert model["placement"]["mode"] == "shard"
         assert model["placement"]["devices"] == ["cuda:0", "cuda:1"]
         assert model["placement"]["gpu_indices"] == [0, 1]
-        assert model["placement"]["planned_mb_by_device"] == {"cuda:0": 8_024, "cuda:1": 21_976}
+        assert model["placement"]["planned_mb_by_device"] == {"cuda:0": 9_976, "cuda:1": 20_024}
         assert model["placement"]["budget_mb_by_device"] == {"cuda:0": 9_976, "cuda:1": 21_976}
         assert model["placement"]["memory_by_device_mb"] == {"cuda:0": 7_000, "cuda:1": 19_000}
 
@@ -358,7 +358,7 @@ class TestDetailedHealthReportsPlacement:
         ))
         assert body["model_placement"]["mode"] == "shard"
         assert body["model_placement"]["gpu_indices"] == [0, 1]
-        assert body["model_placement"]["planned_mb_by_device"] == {"cuda:0": 8_024, "cuda:1": 21_976}
+        assert body["model_placement"]["planned_mb_by_device"] == {"cuda:0": 9_976, "cuda:1": 20_024}
         assert body["model_placement"]["memory_by_device_mb"] == {"cuda:0": 7_000, "cuda:1": 19_000}
 
     def test_an_unreadable_placement_never_fails_health(self):

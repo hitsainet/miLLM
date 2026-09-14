@@ -10,9 +10,15 @@ Operator decisions this pins (2026-09-13):
 
 Fixtures deliberately put the most free memory on a card that is NOT index 0,
 and give cards uneven sizes, so "pick index 0", "pick the biggest total" and
-"fill cards in index order" all produce wrong answers here. The expected split
+"choose cards in index order" all produce wrong answers here. The expected split
 figures were worked out by hand (free - 1024, x0.9 for bitsandbytes), not read
 back from the implementation.
+
+Review round 1 (2026-09-14): a transformers split CHOOSES its cards most free
+first but plans their shares in INDEX order, each card but the last to its
+whole budget — the order accelerate fills them, so its held-back largest layer
+lands on real memory (tests/unit/ml/test_shard_plan_against_accelerate.py runs
+the real map inference). GGUF shares stay most-free-first.
 
 MUTATION CONTROLS (each must turn this file red):
   * `max(..., key=free_mb)` -> `min(...)`             -> most-free tests fail
@@ -36,6 +42,16 @@ its sha256 verified):
          test_an_unmeasured_model_on_request_gets_every_card
   M30 "all" never refused                            -> test_refused_when_every_card_together_lacks_room,
          test_no_card_with_room_is_refused
+Review round 1, 2026-09-14 (mutate.py; restored and sha256-verified):
+  R1-M1  transformers_shard_rule back to most-free-first shares (fill_in_index_order=False)
+         -> 9 red: test_the_split_is_planned_on_gpus_only, test_a_split_reports_its_plan,
+            test_the_plan_counts_transformers_09_..., the two auto-split tests in
+            test_shard_plan_against_accelerate.py, and 4 load/fit-check tests
+  R1-M1b plan_shard ignores the rule's fill order                  -> the same 9 red
+  M4 re-run against the new plan (cards chosen by index)           -> 6 red, incl.
+         test_three_cards_takes_only_the_most_free_two and 4 GGUF tensor-split tests
+  M16 re-run (the highest-index card capped at its share too)      -> 10 red, incl.
+         test_all_divides_a_model_one_card_could_hold on real map inference
 """
 
 from types import SimpleNamespace
@@ -194,13 +210,15 @@ class TestASplitWhenNoSingleCardFits:
         placement = choose_gpu(30_000, gpus=_cards((11_000, 12_288), (23_500, 24_576)))
         assert (placement.mode, placement.reason) == (MODE_SHARD, REASON_NO_SINGLE_CARD)
         assert placement.gpu_indices == [0, 1]
-        # The 3090 (most free) is taken whole, the 3080 Ti only for the rest.
-        assert placement.planned_mb_by_index == {1: 22_476, 0: 7_524}
+        # Both cards are needed. accelerate fills index 0 first, so the 3080 Ti
+        # is planned whole and the 3090 carries the remainder with slack for
+        # the layer accelerate holds back on card 0.
+        assert placement.planned_mb_by_index == {0: 9_976, 1: 20_024}
         assert placement.budget_mb_by_index == {1: 22_476, 0: 9_976}
         assert placement.budget_mb == 32_452
         assert placement.capacity_mb == 34_500
         assert placement.transformers_device_map() == "sequential"
-        assert placement.transformers_max_memory() == {0: "7524MiB", 1: "22476MiB"}
+        assert placement.transformers_max_memory() == {0: "9976MiB", 1: "22476MiB"}
 
     def test_max_memory_names_gpus_only(self):
         placement = choose_gpu(30_000, gpus=_cards((11_000, 12_288), (23_500, 24_576)))
@@ -232,7 +250,7 @@ class TestASplitWhenNoSingleCardFits:
         report = choose_gpu(30_000, gpus=_cards((11_000, 12_288), (23_500, 24_576))).to_dict()
         assert report["mode"] == "shard"
         assert report["devices"] == ["cuda:0", "cuda:1"]
-        assert report["planned_mb_by_device"] == {"cuda:0": 7_524, "cuda:1": 22_476}
+        assert report["planned_mb_by_device"] == {"cuda:0": 9_976, "cuda:1": 20_024}
         assert report["budget_mb_by_device"] == {"cuda:0": 9_976, "cuda:1": 22_476}
 
 
@@ -285,9 +303,9 @@ class TestBitsandbytesFactorIsCountedOnce:
             shard=transformers_shard_rule(25_000, bitsandbytes=True),
         )
         assert placement.budget_mb_by_index == {1: 19_778, 0: 8_978}
-        assert placement.planned_mb_by_index == {1: 19_778, 0: 5_222}
-        # transformers multiplies these by 0.9: 21976 -> 19778 and 5803 -> 5222.
-        assert placement.transformers_max_memory() == {0: "5803MiB", 1: "21976MiB"}
+        assert placement.planned_mb_by_index == {0: 8_978, 1: 16_022}
+        # transformers multiplies these by 0.9: 9976 -> 8978 and 21976 -> 19778.
+        assert placement.transformers_max_memory() == {0: "9976MiB", 1: "21976MiB"}
 
 
 class TestAnExplicitCardIsHonouredOrRefused:

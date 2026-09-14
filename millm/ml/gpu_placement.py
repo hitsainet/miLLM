@@ -301,11 +301,18 @@ class ShardRule:
 
     `max_memory_factor` is what the engine itself multiplies a limit by before
     placing; the plan counts it, and the limit handed over does not repeat it.
+
+    `fill_in_index_order` says how the engine FILLS the cards a split chose.
+    llama.cpp takes proportions, so the cards taken first can carry the most.
+    accelerate cannot be given an order at all (see
+    `Placement.transformers_max_memory`), so its shares are planned the way it
+    fills: lowest index first, each card to its whole budget.
     """
 
     need_mb: int
     limit_mb: Callable[[GpuInfo], int]
     max_memory_factor: float = 1.0
+    fill_in_index_order: bool = False
 
 
 def transformers_shard_rule(need_mb: int, bitsandbytes: bool = False) -> ShardRule:
@@ -314,6 +321,7 @@ def transformers_shard_rule(need_mb: int, bitsandbytes: bool = False) -> ShardRu
         need_mb=need_mb,
         limit_mb=lambda gpu: max(gpu.free_mb - SHARD_RESERVE_MB, 0),
         max_memory_factor=BNB_MAX_MEMORY_FACTOR if bitsandbytes else 1.0,
+        fill_in_index_order=True,
     )
 
 
@@ -327,8 +335,8 @@ class Placement:
     gpus: tuple[GpuInfo, ...] = ()
     index: Optional[int] = None
     requested: Optional[Union[int, str]] = None
-    #: A split's planned share per card, (index, MB), in the order the cards
-    #: were taken (most free first).
+    #: A split's planned share per card, (index, MB), in the order the engine
+    #: fills them: most free first for llama.cpp, index order for accelerate.
     shares: tuple[tuple[int, int], ...] = ()
     #: A split's limit per card, (index, MB): what the engine may place there
     #: before its own `max_memory_factor`.
@@ -412,8 +420,9 @@ class Placement:
         "auto" is accelerate's balanced map, which caps every card but the
         highest-index one at about model/N (`get_balanced_memory`): on cards of
         uneven size a model the planned budgets hold was put partly on disk.
-        "sequential" fills each card to exactly the limit given, so the plan is
-        what happens.
+        "sequential" fills the cards in index order, each up to the limit given
+        — less what accelerate holds back on the first of them (see
+        `transformers_max_memory`).
 
         A split of an unmeasured model has no plan to follow, so it keeps
         "auto": balanced across every card, GPU-only, checked after the load.
@@ -427,15 +436,31 @@ class Placement:
     def transformers_max_memory(self) -> Optional[dict[int, str]]:
         """`max_memory` for a split: GPU indices only, never "cpu" or "disk".
 
-        accelerate orders the cards by INDEX whatever order they are given in
-        (`get_max_memory` sorts integer keys), so "most free first" cannot be an
-        order. It is expressed as limits instead: each card is limited to its
-        planned share, so the cards taken first carry the most.
+        accelerate fills the cards in INDEX order whatever order they are given
+        in (`get_max_memory` sorts integer keys). On the way it gives two things
+        away, both measured against transformers 5.15.1's copy of
+        `infer_auto_device_map` (integrations/accelerate.py):
+          * room for the model's largest layer, held back on the LOWEST-index
+            card (`main_devices = [gpus[0], "cpu"]`) and never returned;
+          * the tail of every card but the last, when the next layer does not
+            fit whole.
+        Both spill onto the next card, and past the last card onto "disk".
 
-        The highest-index card keeps its WHOLE limit. accelerate fills that one
-        last, and it also reserves room for the largest layer on the first card
-        it fills (`infer_auto_device_map` main_devices) — a layer pushed past the
-        planned shares lands on the last card's slack, not on disk.
+        So a card is not capped below its limit to express "most free first".
+        That was Phase 2's first plan, and on this node — the 3080 Ti at index
+        0 with the least free memory — it capped the 3080 Ti at the remainder
+        and planned the 3090 whole, leaving the spill nowhere to go: on the
+        Qwen2.5-14B shape with an estimate 5% over its weights, lm_head went to
+        disk with 4.3 GB of planned budget unused. An Auto split instead names
+        only the cards the plan CHOSE (most free first, as few as hold it) and
+        plans their shares in index order (`ShardRule.fill_in_index_order`), so
+        every card but the last gets its whole limit and the spill lands on
+        memory that exists. Pinned on real map inference by
+        tests/unit/ml/test_shard_plan_against_accelerate.py.
+
+        A share below the limit is left only where a split must divide a model
+        the first card could hold ("all"). The highest-index card always keeps
+        its whole limit, so that spill has somewhere to go.
 
         A share is divided by `max_memory_factor` because transformers
         multiplies it back (bitsandbytes' 0.9), so the planned share is what the
@@ -487,9 +512,12 @@ def plan_shard(
 ) -> Placement:
     """A split of `rule.need_mb` over `inventory`.
 
-    Auto takes the cards with the most free memory first and stops as soon as
+    Auto CHOOSES the cards with the most free memory first and stops as soon as
     their budgets cover the need, so a model two cards hold does not also claim
-    a third. The last card taken is given only the remainder.
+    a third. Their shares follow the engine's fill order: most free first for
+    llama.cpp (the last card taken gets the remainder), index order for
+    accelerate (`ShardRule.fill_in_index_order`; the highest-index card chosen
+    gets the remainder).
 
     `every_card` (an explicit "all") uses every card with any budget and gives
     each a share in proportion to its budget, so a small model is actually
@@ -524,6 +552,16 @@ def plan_shard(
             remaining -= take
         if remaining > 0:
             shares = {gpu.index: budgets[gpu.index] for gpu in usable}
+        elif rule.fill_in_index_order:
+            # The same cards, filled lowest index first. Every card but the
+            # last chosen gets its whole budget, so accelerate's held-back
+            # layer and stranded tails land on real memory, not on disk.
+            remaining = need
+            by_index: dict[int, int] = {}
+            for index in sorted(shares):
+                by_index[index] = min(budgets[index], remaining)
+                remaining -= by_index[index]
+            shares = by_index
     else:
         shares = {gpu.index: budgets[gpu.index] for gpu in usable}
 

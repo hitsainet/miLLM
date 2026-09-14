@@ -363,6 +363,55 @@ class TestAGgufTensorSplitIsCheckedBeforeTheUnload:
         assert not svc.unload_model.called
         assert svc._executor.calls == []
 
+    def test_a_model_one_card_holds_is_not_refused_for_the_setting(self, tmp_path):
+        """Review round 3, 2026-09-14 (R3-X3 survived: the check ran for a single
+        card too and nothing failed). GGUF_TENSOR_SPLIT has no effect on a model
+        one card holds — _gguf_placement_kwargs gives a single card split_mode
+        NONE and main_gpu, never a tensor_split — so a list no split matches must
+        not refuse it. 4 GB fits the 3090's projected 21,000 MB.
+
+        Negative control (mutate.py, restored and sha256-verified): R3-X3 re-run
+        -> this test red."""
+        from millm.core.config import settings
+
+        gguf = tmp_path / "small-Q4_K_M.gguf"
+        with open(gguf, "wb") as handle:
+            handle.truncate(4 * 1024 ** 3)  # sparse
+        svc, _ = _service(make_model(
+            id=3, status=ModelStatus.READY, quantization=QuantizationType.Q4,
+            gguf_label="Q4_K_M", gguf_files=["small-Q4_K_M.gguf"], cache_path=str(tmp_path),
+        ))
+        with fake_gpus(*NODE), \
+                patch.object(model_loader, "llama_supports_gpu_offload", lambda: True), \
+                patch.object(settings, "GGUF_TENSOR_SPLIT", "1,1,1"):
+            response = _post(svc, {})
+
+        assert response.status_code == 202, response.text
+        svc.unload_model.assert_awaited_once_with(9)
+
+    def test_a_card_without_room_past_llamas_overhead_cannot_take_part(self, tmp_path):
+        """Review round 3, 2026-09-14 (R3-X4 survived: counting every card, not
+        the cards with room, failed nothing). The 3080 Ti's projected limit is
+        int(2,000 x 0.94) - 2,048 < 0, so the loader's split can use the 3090
+        alone, and "1,1" names two cards: refused before the unload, not after.
+
+        Negative control (mutate.py, restored and sha256-verified): R3-X4 re-run
+        -> this test red."""
+        svc, _ = _service(self._gguf(tmp_path))
+        from millm.core.config import settings
+
+        with fake_gpus((TI_3080, 2_000, 12_288), (RTX_3090, 5_000, 24_576)), \
+                patch.object(model_loader, "llama_supports_gpu_offload", lambda: True), \
+                patch.object(settings, "GGUF_TENSOR_SPLIT", "1,1"):
+            response = _post(svc, {})
+
+        assert response.status_code == 500, response.text
+        error = response.json()["error"]
+        assert error["code"] == "INVALID_GGUF_TENSOR_SPLIT"
+        assert error["details"]["max_cards"] == 1
+        assert not svc.unload_model.called
+        assert svc._executor.calls == []
+
     def test_a_list_longer_than_the_cards_it_found_is_left_to_the_loader(self, tmp_path):
         """The pre-check's cards are a LOWER bound: sized without the KV cache,
         the loader may take a third card. Here it finds two (limits 17,692 and

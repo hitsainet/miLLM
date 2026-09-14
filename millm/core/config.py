@@ -34,6 +34,17 @@ def parse_gguf_tensor_split(value: Optional[str]) -> Optional[list[float]]:
     return proportions
 
 
+#: The context, in tokens, every card of a transformers load must have KV-cache
+#: room for (TRANSFORMERS_MIN_CONTEXT). Decision 7, 2026-09-14.
+TRANSFORMERS_MIN_CONTEXT_DEFAULT = 4096
+
+#: Memory, in MB, each card of a transformers load keeps for its CUDA context
+#: (TRANSFORMERS_CUDA_CONTEXT_MB). About 500 MB — TO BE MEASURED ON THE NODE: read
+#: a card's used memory before and after this process first touches it with no
+#: model loaded, on both the RTX 3080 Ti and the RTX 3090.
+TRANSFORMERS_CUDA_CONTEXT_MB_DEFAULT = 500
+
+
 class Settings(BaseSettings):
     """Application settings loaded from environment variables."""
 
@@ -260,6 +271,30 @@ class Settings(BaseSettings):
     # q8_0 without flash attention fails at 8192 where q8_0 with it reaches
     # 12288. The loader refuses to pair a quantized cache with this off.
     GGUF_FLASH_ATTENTION: bool = True
+
+    # THE CONTEXT EVERY TRANSFORMERS LOAD MUST HAVE ROOM FOR, in tokens.
+    #
+    # A transformers load — a split, Auto's one-card-or-split choice, or a named
+    # card — is accepted only when EACH card it uses has room, beside the weights
+    # transformers' own device map puts there, for its CUDA context
+    # (TRANSFORMERS_CUDA_CONTEXT_MB) and the KV cache of the layers it holds at
+    # this many tokens. It replaced a 20% slack on the weight estimate, which grew
+    # with the weights, not with what each card needs: on 11.5 + 23.5 GB free it
+    # refused Qwen2.5-14B at FP16 (room for about 8k tokens on both cards),
+    # accepted OLMo-2-13B (whose cuda:0 cannot hold an 8k cache), and split models
+    # that fit one card. Decision 7, 2026-09-14.
+    #
+    # An admission floor, not a limit on requests: a card with more room serves
+    # longer contexts. GGUF models keep their own context prediction
+    # (GGUF_CONTEXT_LENGTH).
+    TRANSFORMERS_MIN_CONTEXT: int = TRANSFORMERS_MIN_CONTEXT_DEFAULT
+
+    # MEMORY EACH CARD OF A TRANSFORMERS LOAD KEEPS FOR ITS CUDA CONTEXT, in MB.
+    # The default is a placeholder, TO BE MEASURED ON THE NODE (see
+    # TRANSFORMERS_CUDA_CONTEXT_MB_DEFAULT). Prefill activations and cuBLAS
+    # workspaces are not counted separately; this is where they must fit.
+    TRANSFORMERS_CUDA_CONTEXT_MB: int = TRANSFORMERS_CUDA_CONTEXT_MB_DEFAULT
+
     CBM_MAX_QUEUE_SIZE: int = 256
     # CBM fixes its sampling parameters at manager creation, and any request
     # whose temperature/top_p differ FALLS BACK TO THE SERIAL PATH
@@ -286,6 +321,20 @@ class Settings(BaseSettings):
     @classmethod
     def _validate_gguf_tensor_split(cls, value: str) -> str:
         parse_gguf_tensor_split(value)
+        return value
+
+    @field_validator("TRANSFORMERS_MIN_CONTEXT")
+    @classmethod
+    def _validate_transformers_min_context(cls, value: int) -> int:
+        if value < 1:
+            raise ValueError(f"TRANSFORMERS_MIN_CONTEXT must be at least 1 token, got {value}")
+        return value
+
+    @field_validator("TRANSFORMERS_CUDA_CONTEXT_MB")
+    @classmethod
+    def _validate_transformers_cuda_context_mb(cls, value: int) -> int:
+        if value < 0:
+            raise ValueError(f"TRANSFORMERS_CUDA_CONTEXT_MB must be 0 or more, got {value}")
         return value
 
     @property

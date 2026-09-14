@@ -216,7 +216,10 @@ def _checkpoint(directory, quantization_config):
     import json
 
     directory.mkdir(parents=True, exist_ok=True)
-    config = {"model_type": "llama"}
+    # kv_lora_rank: a KV cache miLLM cannot size, so the pre-check plans the
+    # row's estimate with the 20% slack — the plan these tests pin the factor on
+    # (Decision 7 judges a sizable checkpoint per card; test_per_card_fit.py).
+    config = {"model_type": "llama", "kv_lora_rank": 1}
     if quantization_config is not None:
         config["quantization_config"] = quantization_config
     (directory / "config.json").write_text(json.dumps(config))

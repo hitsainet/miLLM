@@ -5,11 +5,12 @@ Handles loading and unloading models from GPU memory with quantization support.
 """
 
 import gc
+import math
 import threading
 from pathlib import Path
 from dataclasses import dataclass, field
 from datetime import datetime
-from typing import Any, Optional
+from typing import Any, Iterable, Optional
 
 import structlog
 import torch
@@ -101,10 +102,15 @@ from millm.core.errors import (
 from millm.ml.gguf_catalog import quant_label_from_path
 from millm.ml.memory_utils import MEMORY_OVERHEAD_FACTOR
 from millm.ml.gpu_placement import (
+    ALL,
     BNB_MAX_MEMORY_FACTOR,
     MODE_CPU,
+    MODE_SINGLE,
     OFF_GPU_LABELS,
+    REASON_MOST_FREE,
     REASON_NO_GPU,
+    REASON_NO_SINGLE_CARD,
+    REASON_REQUESTED,
     REASON_REQUESTED_ALL,
     GpuInfo,
     GpuRequest,
@@ -112,6 +118,7 @@ from millm.ml.gpu_placement import (
     ShardRule,
     choose_gpu,
     cpu_placement,
+    find_gpu,
     free_mb_by_index,
     gpu_indices_of,
     list_gpus,
@@ -119,6 +126,8 @@ from millm.ml.gpu_placement import (
     model_device_labels,
     model_input_device,
     parse_gpu_request,
+    plan_shard,
+    refuse_cards_left_out_of_all,
     reported_free_mb_by_index,
     shard_refusal,
     transformers_shard_rule,
@@ -477,6 +486,15 @@ _STAGE_CHECKPOINT = "checkpoint"
 _STAGE_ENGINE = "engine"
 
 
+def _transformers_version() -> str:
+    try:
+        import transformers
+
+        return str(getattr(transformers, "__version__", "unknown"))
+    except ImportError:
+        return "unavailable"
+
+
 def _log_unverified(
     stage: str, error: BaseException, unverifiable_event: str, engine_event: str, **fields: Any
 ) -> None:
@@ -494,15 +512,9 @@ def _log_unverified(
     of odd checkpoints. Review round 4, 2026-09-14.
     """
     if stage == _STAGE_ENGINE:
-        try:
-            import transformers
-
-            version = str(getattr(transformers, "__version__", "unknown"))
-        except ImportError:
-            version = "unavailable"
         logger.error(
             engine_event,
-            transformers_version=version,
+            transformers_version=_transformers_version(),
             error_type=type(error).__name__,
             error=str(error)[:300],
             **fields,
@@ -2487,6 +2499,655 @@ def load_gguf_model(
     )
 
 
+# =============================================================================
+# Per-card fit of a transformers load (Decision 7, 2026-09-14)
+# =============================================================================
+
+#: The KV cache of a transformers load holds bfloat16 tensors, 2 bytes an element.
+#: ModelLoadContext.load loads every model with torch_dtype=torch.bfloat16
+#: (bitsandbytes computes in it too), and nothing on the transformers path
+#: quantizes the cache: KV_CACHE_MODE is "dynamic" or "static", and
+#: GGUF_KV_CACHE_TYPE (q8_0) applies to llama.cpp alone.
+TRANSFORMERS_KV_BYTES = 2
+
+#: Layer types as transformers' DynamicCache reads them (transformers 5.15.1,
+#: cache_utils.get_layer_types_and_kwargs and DYNAMIC_LAYER_TYPE_MAPPING), with
+#: the legacy names configuration_utils remaps ("attention", "mamba"). A type
+#: not listed here is not sized: the load falls back to the slack.
+_KV_FULL_LAYERS = frozenset({"full_attention", "attention", "hybrid"})
+#: Sliding and chunked layers keep only their window of tokens
+#: (DynamicSlidingWindowLayer); the value names the config field holding it.
+_KV_WINDOWED_LAYERS = {
+    "sliding_attention": "sliding_window",
+    "hybrid_sliding": "sliding_window",
+    "chunked_attention": "attention_chunk_size",
+}
+#: Layers with no per-token cache. Their convolution or recurrent state is fixed
+#: in size and NOT counted: it cannot be derived exactly from every config.
+_KV_FREE_LAYERS = frozenset({"conv", "linear_attention", "mamba", "moe", "mlp"})
+#: Config fields meaning a token's cache is not 2 x key-value heads x head_dim a
+#: layer: multi-head latent attention, layers reusing another's cache,
+#: cross-attention to an encoder, and keys shared with values.
+_KV_UNSIZED_FIELDS = (
+    "kv_lora_rank",
+    "num_kv_shared_layers",
+    "cross_attention_layers",
+    "attention_k_eq_v",
+)
+
+
+def refuse_unsupported_quantization(
+    quantization: str, is_pre_quantized: bool, estimated_memory_mb: int
+) -> None:
+    """Refuse Q2 on a transformers checkpoint that is not already quantized.
+
+    bitsandbytes has no 2-bit mode, so ModelLoadContext.load gives it no
+    quantization config and it loads in bfloat16. See decide_transformers_placement.
+    """
+    if quantization.upper() == "Q2" and not is_pre_quantized:
+        raise UnsupportedQuantizationError(
+            "Q2 cannot be loaded as a transformers model: bitsandbytes has no 2-bit "
+            "mode, so this checkpoint would load unquantized in bfloat16, eight times "
+            "the memory its Q2 estimate assumes. Load it as Q4, Q8 or FP16, or serve a "
+            "Q2 GGUF of the model.",
+            details={
+                "quantization": quantization,
+                "estimated_memory_mb": estimated_memory_mb,
+                "loads_as": "bfloat16",
+            },
+        )
+
+
+def split_max_memory_factor(
+    quantization: str, is_pre_quantized: bool, pre_quantized_factor: float
+) -> float:
+    """What transformers multiplies a split's `max_memory` by for this load.
+
+    Only Q4 and Q8 get a BitsAndBytesConfig in ModelLoadContext.load, and only
+    for a checkpoint that is not already quantized. A pre-quantized checkpoint
+    gets the quantizer its own config names, with that quantizer's factor.
+    """
+    if is_pre_quantized:
+        return pre_quantized_factor
+    if quantization.upper() in ("Q4", "Q8"):
+        return BNB_MAX_MEMORY_FACTOR
+    return 1.0
+
+
+def _architecture_name(config: Any) -> str:
+    architectures = getattr(config, "architectures", None) or []
+    if architectures and isinstance(architectures[0], str):
+        return architectures[0]
+    return str(getattr(config, "model_type", None) or type(config).__name__)
+
+
+def _positive_int(value: Any) -> bool:
+    return isinstance(value, int) and not isinstance(value, bool) and value > 0
+
+
+@dataclass(frozen=True)
+class KvCacheSpec:
+    """What one token of KV cache costs each decoder layer, as transformers allocates it.
+
+    `bytes_per_token[i]` is 2 x key-value heads x head_dim x TRANSFORMERS_KV_BYTES
+    for a layer with a cache and 0 for one without; `token_cap[i]` is a sliding
+    or chunked layer's window — all the tokens it keeps — or None.
+    """
+
+    architecture: str
+    bytes_per_token: tuple[int, ...]
+    token_cap: tuple[Optional[int], ...]
+
+    @property
+    def num_layers(self) -> int:
+        return len(self.bytes_per_token)
+
+    def mb(self, layers: Iterable[int], tokens: int) -> int:
+        """The cache of these decoder layers holding `tokens` tokens, in MB, rounded up."""
+        total = 0
+        for index in layers:
+            cap = self.token_cap[index]
+            total += self.bytes_per_token[index] * (min(tokens, cap) if cap else tokens)
+        return math.ceil(total / (1024 * 1024))
+
+
+def _layer_config(text: Any, index: int) -> Any:
+    """Decoder layer `index`'s config with its own overrides (Gemma 4's global layers)."""
+    if not getattr(text, "is_heterogeneous", False):
+        return text
+    return text.per_layer_config[index]
+
+
+def kv_cache_spec(config: Any) -> tuple[Optional[KvCacheSpec], str]:
+    """The KV cache a model's config says transformers allocates; (None, why) when unsure.
+
+    Mirrors DynamicCache: `layer_types` when the config has it, else every layer
+    sliding when `sliding_window` is set, chunked when `attention_chunk_size` is,
+    full otherwise. An attention layer costs 2 x key-value heads x head_dim x 2
+    bytes a token (keys and values, bfloat16), read per layer so a layer with
+    its own head_dim or key-value heads is sized as it is. A sliding or chunked
+    layer keeps at most its window. A linear-attention, Mamba or convolution
+    layer contributes nothing per token.
+
+    Not derivable, so (None, reason) and the load keeps the 20% slack: an
+    encoder-decoder, a config with a field that changes what a token costs
+    (_KV_UNSIZED_FIELDS), a layer type transformers may cache in a way this does
+    not model, or fields missing.
+    """
+    architecture = _architecture_name(config)
+    if getattr(config, "is_encoder_decoder", False):
+        return None, "it is an encoder-decoder model"
+    get_text_config = getattr(config, "get_text_config", None)
+    text = get_text_config(decoder=True) if callable(get_text_config) else config
+    for field_name in _KV_UNSIZED_FIELDS:
+        if getattr(text, field_name, None):
+            return None, (
+                f"its config sets {field_name}, so a token's cache is not "
+                "2 x key-value heads x head_dim a layer"
+            )
+    num_layers = getattr(text, "num_hidden_layers", None)
+    if not _positive_int(num_layers):
+        return None, "its config has no num_hidden_layers"
+    layer_types = getattr(text, "layer_types", None)
+    if layer_types is None:
+        if getattr(text, "sliding_window", None) is not None:
+            layer_types = ["sliding_attention"] * num_layers
+        elif getattr(text, "attention_chunk_size", None) is not None:
+            layer_types = ["chunked_attention"] * num_layers
+        else:
+            layer_types = ["full_attention"] * num_layers
+    layer_types = list(layer_types)
+    if len(layer_types) != num_layers:
+        return None, f"its layer_types names {len(layer_types)} layers of {num_layers}"
+
+    bytes_per_token: list[int] = []
+    token_cap: list[Optional[int]] = []
+    for index, layer_type in enumerate(layer_types):
+        if layer_type in _KV_FREE_LAYERS:
+            bytes_per_token.append(0)
+            token_cap.append(None)
+            continue
+        if layer_type not in _KV_FULL_LAYERS and layer_type not in _KV_WINDOWED_LAYERS:
+            return None, f"layer {index} is a {layer_type!r} layer, which miLLM does not size"
+        layer = _layer_config(text, index)
+        heads = getattr(layer, "num_attention_heads", None)
+        kv_heads = getattr(layer, "num_key_value_heads", None) or heads
+        head_dim = getattr(layer, "head_dim", None)
+        if not _positive_int(head_dim):
+            hidden = getattr(layer, "hidden_size", None)
+            if not (_positive_int(hidden) and _positive_int(heads) and hidden % heads == 0):
+                return None, (
+                    f"layer {index} has no head_dim, and hidden_size is not a multiple "
+                    "of num_attention_heads"
+                )
+            head_dim = hidden // heads
+        if not _positive_int(kv_heads):
+            return None, f"layer {index} has no num_key_value_heads or num_attention_heads"
+        cap: Optional[int] = None
+        if layer_type in _KV_WINDOWED_LAYERS:
+            window_field = _KV_WINDOWED_LAYERS[layer_type]
+            window = getattr(layer, window_field, None)
+            if not _positive_int(window):
+                return None, f"layer {index} is a {layer_type!r} layer with no {window_field}"
+            cap = int(window)
+        bytes_per_token.append(2 * int(kv_heads) * int(head_dim) * TRANSFORMERS_KV_BYTES)
+        token_cap.append(cap)
+    return KvCacheSpec(architecture, tuple(bytes_per_token), tuple(token_cap)), ""
+
+
+@dataclass(frozen=True)
+class CardFit:
+    """One card of a transformers load: its free memory, and what it must hold."""
+
+    index: int
+    name: str
+    free_mb: int
+    weights_mb: int
+    kv_mb: int
+    context_mb: int
+    layers: int
+
+    @property
+    def need_mb(self) -> int:
+        return self.weights_mb + self.kv_mb + self.context_mb
+
+    @property
+    def short_mb(self) -> int:
+        return max(self.need_mb - self.free_mb, 0)
+
+    @property
+    def fits(self) -> bool:
+        return self.need_mb <= self.free_mb
+
+    def describe(self, tokens: int) -> str:
+        verdict = (
+            f"{self.short_mb} MiB short" if not self.fits
+            else f"{self.free_mb - self.need_mb} MiB to spare"
+        )
+        return (
+            f"cuda:{self.index} ({self.name}) has {self.free_mb} MiB free for {self.weights_mb} "
+            f"MiB of weights, {self.kv_mb} MiB of KV cache at {tokens} tokens over its "
+            f"{self.layers} layers and a {self.context_mb} MiB CUDA context — {verdict}"
+        )
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "device": f"cuda:{self.index}",
+            "name": self.name,
+            "free_mb": self.free_mb,
+            "weights_mb": self.weights_mb,
+            "kv_mb": self.kv_mb,
+            "context_mb": self.context_mb,
+            "layers": self.layers,
+            "need_mb": self.need_mb,
+            "short_mb": self.short_mb,
+        }
+
+
+@dataclass(frozen=True)
+class SplitLayout:
+    """Where transformers' own device map puts a split: MB and decoder layers per device."""
+
+    weights_mb: dict[str, int]
+    layers: dict[str, tuple[int, ...]]
+    off_gpu: tuple[str, ...] = ()
+    #: bitsandbytes' own refusal of a map leaving the GPU, when it raised one.
+    engine_message: Optional[str] = None
+
+
+def _device_map_label(device: Any) -> str:
+    return f"cuda:{device}" if isinstance(device, int) and not isinstance(device, bool) else str(device)
+
+
+def _mapped_device(name: str, mapped: dict[str, Any]) -> Any:
+    """The device a module lands on: its own map entry, or its nearest mapped ancestor's."""
+    best, device = -1, None
+    for key, value in mapped.items():
+        if key == "" or name == key or name.startswith(key + "."):
+            if len(key) > best:
+                best, device = len(key), value
+    return device
+
+
+def _decoder_layer_names(model: Any, num_layers: int) -> Optional[list[str]]:
+    """The module names of a model's decoder layers, in order; None when they cannot be found."""
+    names = {id(module): name for name, module in model.named_modules()}
+    try:
+        decoder = model.get_decoder()
+    except Exception:  # noqa: BLE001 - fall back to the one "layers" list of that length
+        decoder = None
+    layers = getattr(decoder, "layers", None)
+    if isinstance(layers, torch.nn.ModuleList) and len(layers) == num_layers and id(layers) in names:
+        prefix = names[id(layers)]
+    else:
+        found = [
+            name
+            for name, module in model.named_modules()
+            if isinstance(module, torch.nn.ModuleList)
+            and name.rsplit(".", 1)[-1] == "layers"
+            and len(module) == num_layers
+        ]
+        if len(found) != 1:
+            return None
+        prefix = found[0]
+    return [f"{prefix}.{index}" for index in range(num_layers)]
+
+
+@dataclass(frozen=True)
+class TransformersFit:
+    """A checkpoint sized for the per-card fit: its weights as loaded and its KV cache.
+
+    `weights_mb` is what transformers materialises, measured on the meta device
+    with the quantizer the load uses (bitsandbytes for Q4/Q8, the checkpoint's own
+    for a pre-quantized one). `model`, `hf_quantizer` and `sizes` are kept to
+    compute a split's layout the way from_pretrained does.
+    """
+
+    architecture: str
+    weights_mb: int
+    kv: KvCacheSpec
+    min_context: int
+    context_mb: int
+    model: Any = field(repr=False, compare=False)
+    hf_quantizer: Any = field(repr=False, compare=False)
+    sizes: dict[str, int] = field(repr=False, compare=False)
+
+    def kv_mb(self, layers: Optional[Iterable[int]] = None) -> int:
+        return self.kv.mb(range(self.kv.num_layers) if layers is None else layers, self.min_context)
+
+    @property
+    def single_card_mb(self) -> int:
+        """What one card holding the whole model needs."""
+        return self.weights_mb + self.kv_mb() + self.context_mb
+
+    def card(self, gpu: GpuInfo, weights_mb: int, layers: Iterable[int]) -> CardFit:
+        on_card = tuple(layers)
+        return CardFit(
+            index=gpu.index,
+            name=gpu.name,
+            free_mb=gpu.free_mb,
+            weights_mb=weights_mb,
+            kv_mb=self.kv_mb(on_card),
+            context_mb=self.context_mb,
+            layers=len(on_card),
+        )
+
+    def layout(self, placement: Placement) -> Optional[SplitLayout]:
+        """transformers' own device map for this split; None when it cannot be computed here."""
+        names = _decoder_layer_names(self.model, self.kv.num_layers)
+        if names is None:
+            logger.error(
+                "transformers_fit_layers_not_found",
+                architecture=self.architecture,
+                num_layers=self.kv.num_layers,
+            )
+            return None
+        try:
+            from transformers.integrations.accelerate import _get_device_map
+
+            max_memory = placement.transformers_max_memory()
+            mapped = _get_device_map(
+                self.model,
+                placement.transformers_device_map(),
+                dict(max_memory) if max_memory else None,
+                self.hf_quantizer,
+            )
+        except ValueError as e:
+            if _is_offload_refusal(e):
+                return SplitLayout({}, {}, ("cpu or disk",), engine_message=str(e))
+            _log_unverified(
+                _STAGE_ENGINE, e, unverifiable_event="transformers_fit_layout_unknown",
+                engine_event="transformers_fit_engine_failed", architecture=self.architecture,
+            )
+            return None
+        except Exception as e:  # noqa: BLE001 - judged by the slack instead
+            _log_unverified(
+                _STAGE_ENGINE, e, unverifiable_event="transformers_fit_layout_unknown",
+                engine_event="transformers_fit_engine_failed", architecture=self.architecture,
+            )
+            return None
+        weights: dict[str, int] = {}
+        for name, device in mapped.items():
+            label = _device_map_label(device)
+            weights[label] = weights.get(label, 0) + int(self.sizes.get(name, 0) / (1024 * 1024))
+        layers: dict[str, list[int]] = {}
+        for index, name in enumerate(names):
+            layers.setdefault(_device_map_label(_mapped_device(name, mapped)), []).append(index)
+        allowed = set(placement.device_labels)
+        return SplitLayout(
+            weights_mb=weights,
+            layers={label: tuple(indices) for label, indices in layers.items()},
+            off_gpu=tuple(sorted(label for label in weights if label not in allowed)),
+        )
+
+
+def _fit_falls_back(
+    architecture: str,
+    reason: str,
+    error: Optional[BaseException] = None,
+    stage: Optional[str] = None,
+) -> None:
+    """Say, loudly, that a transformers load is judged by the 20% slack instead of per card."""
+    fields: dict[str, Any] = {
+        "architecture": architecture,
+        "reason": reason,
+        "slack_factor": MEMORY_OVERHEAD_FACTOR,
+    }
+    if error is not None:
+        fields.update(stage=stage, error_type=type(error).__name__, error=str(error)[:300])
+        if stage == _STAGE_ENGINE:
+            fields["transformers_version"] = _transformers_version()
+    logger.error("transformers_fit_falls_back_to_slack", **fields)
+
+
+def transformers_fit(
+    cache_path: Optional[str],
+    quantization: str,
+    is_pre_quantized: bool,
+    trust_remote_code: bool = False,
+) -> Optional[TransformersFit]:
+    """Size a checkpoint for the per-card fit; None (logged loudly) to keep the slack.
+
+    Reads TRANSFORMERS_MIN_CONTEXT and TRANSFORMERS_CUDA_CONTEXT_MB when called,
+    so both call sites of a load judge it with the settings in force.
+    """
+    from millm.core.config import settings
+
+    if not cache_path or AutoConfig is None:
+        _fit_falls_back("unknown", "there is no checkpoint config to read")
+        return None
+    architecture = "unknown"
+    stage = _STAGE_ENGINE  # the imports are transformers' private API
+    try:
+        from transformers.integrations.accelerate import compute_module_sizes
+        from transformers.quantizers.auto import get_hf_quantizer
+
+        stage = _STAGE_CHECKPOINT
+        config = AutoConfig.from_pretrained(cache_path, trust_remote_code=trust_remote_code)
+        architecture = _architecture_name(config)
+        kv, reason = kv_cache_spec(config)
+        if kv is None:
+            _fit_falls_back(architecture, reason)
+            return None
+        quantization_config = None if is_pre_quantized else _bitsandbytes_config(quantization)
+        hf_quantizer, config, device_map = get_hf_quantizer(
+            config, quantization_config, "sequential", True, {}
+        )
+        if is_pre_quantized and hf_quantizer is None:
+            _fit_falls_back(architecture, "its quantization method has no transformers quantizer")
+            return None
+        model = _meta_model(config, trust_remote_code)
+        # Config, class and quantizer all built: from here a failure is transformers'.
+        stage = _STAGE_ENGINE
+        if hf_quantizer is not None:
+            hf_quantizer.preprocess_model(
+                model=model,
+                dtype=torch.bfloat16,
+                device_map=device_map,
+                checkpoint_files=None,
+                use_kernels=False,
+            )
+        sizes, _ = compute_module_sizes(model, hf_quantizer, only_modules=False)
+    except Exception as e:  # noqa: BLE001 - unsized here; the slack judges it
+        _fit_falls_back(
+            architecture,
+            "its model could not be built on the meta device here"
+            if stage == _STAGE_CHECKPOINT
+            else "transformers' own sizing failed",
+            error=e,
+            stage=stage,
+        )
+        return None
+    weights_mb = int(sizes.get("", 0) / (1024 * 1024))
+    if weights_mb <= 0:
+        _fit_falls_back(architecture, "its model sizes to no weights")
+        return None
+    return TransformersFit(
+        architecture=architecture,
+        weights_mb=weights_mb,
+        kv=kv,
+        min_context=int(settings.TRANSFORMERS_MIN_CONTEXT),
+        context_mb=int(settings.TRANSFORMERS_CUDA_CONTEXT_MB),
+        model=model,
+        hf_quantizer=hf_quantizer,
+        sizes=dict(sizes),
+    )
+
+
+def per_card_fit_refusal(
+    fit: TransformersFit,
+    cards: list[CardFit],
+    detail: str,
+    requested: Any,
+    gpus: Iterable[GpuInfo],
+    placement: Optional[Placement] = None,
+    off_gpu_mb: Optional[dict[str, int]] = None,
+    mapped_mb_by_device: Optional[dict[str, int]] = None,
+) -> InsufficientMemoryError:
+    """The refusal of a transformers load that does not fit per card, naming every card."""
+    off_gpu_mb = dict(sorted((off_gpu_mb or {}).items()))
+    listing = "; ".join(card.describe(fit.min_context) for card in cards) or "no card takes any of it"
+    details: dict[str, Any] = {
+        "required_mb": sum(card.need_mb for card in cards) + sum(off_gpu_mb.values()),
+        "available_mb": sum(card.free_mb for card in cards),
+        "short_devices": [f"cuda:{card.index}" for card in cards if not card.fits],
+        "per_card": [card.to_dict() for card in cards],
+        "architecture": fit.architecture,
+        "weights_mb": fit.weights_mb,
+        "kv_mb": fit.kv_mb(),
+        "min_context_tokens": fit.min_context,
+        "cuda_context_mb": fit.context_mb,
+        "requested": requested,
+        "gpus": [gpu.to_dict() for gpu in gpus],
+        "before_loading": True,
+    }
+    if off_gpu_mb:
+        details["off_gpu"] = sorted(off_gpu_mb)
+        details["off_gpu_mb_by_device"] = off_gpu_mb
+    if placement is not None:
+        details["placement"] = placement.to_dict()
+    if mapped_mb_by_device is not None:
+        details["mapped_mb_by_device"] = dict(sorted(mapped_mb_by_device.items()))
+    return InsufficientMemoryError(
+        f"Not enough GPU memory for this {fit.architecture} model with a "
+        f"{fit.min_context}-token context on each card it uses: {listing}. {detail}",
+        details=details,
+    )
+
+
+def _check_split_fit(fit: TransformersFit, placement: Placement) -> Placement:
+    """Accept a split only when transformers' own map leaves each used card room for its context."""
+    if not placement.gpu_indices:
+        raise shard_refusal(placement, fit.weights_mb, "No GPU has memory to spare for it.")
+    layout = fit.layout(placement)
+    if layout is None:
+        # The map could not be computed here, and it was logged as an error:
+        # this split is judged by the slack it replaced.
+        need = int(fit.weights_mb * MEMORY_OVERHEAD_FACTOR)
+        if placement.budget_mb < need:
+            raise shard_refusal(
+                placement,
+                need,
+                "Its layout could not be worked out here, so it was judged by the 20% slack. "
+                "A transformers model is never offloaded to the CPU or disk.",
+            )
+        return placement
+    if layout.engine_message is not None:
+        raise _off_gpu_refusal(
+            fit.architecture, placement, list(layout.off_gpu), [],
+            engine_message=layout.engine_message, before_loading=True,
+        )
+    by_index = {gpu.index: gpu for gpu in placement.gpus}
+    cards = [
+        fit.card(by_index[index], layout.weights_mb[label], layout.layers.get(label, ()))
+        for index in placement.gpu_indices
+        if (label := f"cuda:{index}") in layout.weights_mb
+    ]
+    off_gpu_mb = {label: layout.weights_mb[label] for label in layout.off_gpu}
+    if off_gpu_mb or not all(card.fits for card in cards):
+        where = (
+            f"{sum(off_gpu_mb.values())} MiB would be placed on {', '.join(off_gpu_mb)}, and a "
+            "transformers model is never offloaded. " if off_gpu_mb else ""
+        )
+        raise per_card_fit_refusal(
+            fit,
+            cards,
+            where + "Free memory on the cards, lower TRANSFORMERS_MIN_CONTEXT, choose a smaller "
+            "quantization, or serve it as GGUF.",
+            requested=placement.requested,
+            gpus=placement.gpus,
+            placement=placement,
+            off_gpu_mb=off_gpu_mb,
+            mapped_mb_by_device=layout.weights_mb,
+        )
+    logger.info(
+        "transformers_fit_split_accepted",
+        architecture=fit.architecture,
+        per_card=[card.to_dict() for card in cards],
+        min_context_tokens=fit.min_context,
+    )
+    return placement
+
+
+def decide_transformers_fit(
+    fit: TransformersFit,
+    requested: GpuRequest,
+    gpus: list[GpuInfo],
+    max_memory_factor: float = 1.0,
+) -> Placement:
+    """Where a transformers load goes when every card can be judged on its own.
+
+    Decision 7 (user, 2026-09-14) replaced the 20% slack on the weight estimate
+    here. A load is accepted only when each card it uses has room, beside its
+    weights, for its CUDA context (TRANSFORMERS_CUDA_CONTEXT_MB) and the KV cache
+    of the layers it holds at TRANSFORMERS_MIN_CONTEXT tokens:
+
+      * one card (Auto's choice or a named card): the whole model on that card;
+      * a split (Auto's, when no card holds it, or "all"): the layout
+        transformers' own device map computes from the plan's `max_memory`.
+
+    The slack grew with the weights, not with what a card needs. On 11,500 and
+    23,500 MB free it refused Qwen2.5-14B at FP16, whose map leaves both cards
+    room for about 8k tokens, and accepted OLMo-2-13B, whose cuda:0 cannot hold
+    an 8k cache — and it split models one card holds (a 7B at FP16 on a card with
+    17 GB free: weights 14.5 GB x 1.2 > 17 GB). Nothing is re-planned to make a
+    card fit: a card that is short is named, with its figures, in the refusal.
+    """
+    inventory = list(gpus)
+    wanted = parse_gpu_request(requested)
+    if not inventory:
+        raise InsufficientMemoryError(
+            "No GPU is visible to miLLM.",
+            details={"required_mb": fit.single_card_mb, "available_mb": 0, "gpus": []},
+        )
+    everything = range(fit.kv.num_layers)
+    rule = transformers_shard_rule(fit.weights_mb, max_memory_factor=max_memory_factor)
+
+    if wanted == ALL:
+        placement = plan_shard(
+            inventory, rule, REASON_REQUESTED_ALL, fit.single_card_mb, requested=ALL,
+            every_card=True,
+        )
+        refuse_cards_left_out_of_all(placement, inventory, rule)
+        return _check_split_fit(fit, placement)
+
+    if wanted is not None:
+        card = find_gpu(inventory, wanted)
+        judged = fit.card(card, fit.weights_mb, everything)
+        if not judged.fits:
+            raise per_card_fit_refusal(
+                fit,
+                [judged],
+                "The requested card is not swapped for another one; choose a different "
+                "card or Auto.",
+                requested=wanted,
+                gpus=inventory,
+            )
+        return Placement(
+            mode=MODE_SINGLE,
+            reason=REASON_REQUESTED,
+            required_mb=judged.need_mb,
+            gpus=tuple(inventory),
+            index=card.index,
+            requested=wanted,
+        )
+
+    # Most free first; on a tie the lower index, so the choice is stable.
+    best = max(inventory, key=lambda gpu: (gpu.free_mb, -gpu.index))
+    judged = fit.card(best, fit.weights_mb, everything)
+    if judged.fits:
+        return Placement(
+            mode=MODE_SINGLE,
+            reason=REASON_MOST_FREE,
+            required_mb=judged.need_mb,
+            gpus=tuple(inventory),
+            index=best.index,
+        )
+    return _check_split_fit(
+        fit, plan_shard(inventory, rule, REASON_NO_SINGLE_CARD, fit.single_card_mb)
+    )
+
+
 def decide_transformers_placement(
     estimated_memory_mb: int,
     quantization: str,
@@ -2543,27 +3204,10 @@ def decide_transformers_placement(
             visible, or no split across the cards holds the model.
         UnsupportedQuantizationError: Q2 on a checkpoint that is not pre-quantized.
     """
-    if quantization.upper() == "Q2" and not is_pre_quantized:
-        raise UnsupportedQuantizationError(
-            "Q2 cannot be loaded as a transformers model: bitsandbytes has no 2-bit "
-            "mode, so this checkpoint would load unquantized in bfloat16, eight times "
-            "the memory its Q2 estimate assumes. Load it as Q4, Q8 or FP16, or serve a "
-            "Q2 GGUF of the model.",
-            details={
-                "quantization": quantization,
-                "estimated_memory_mb": estimated_memory_mb,
-                "loads_as": "bfloat16",
-            },
-        )
-    # Only Q4 and Q8 get a BitsAndBytesConfig in ModelLoadContext.load, and only
-    # for a checkpoint that is not already quantized. A pre-quantized checkpoint
-    # gets the quantizer its own config names, with that quantizer's factor.
-    if is_pre_quantized:
-        max_memory_factor = pre_quantized_max_memory_factor
-    elif quantization.upper() in ("Q4", "Q8"):
-        max_memory_factor = BNB_MAX_MEMORY_FACTOR
-    else:
-        max_memory_factor = 1.0
+    refuse_unsupported_quantization(quantization, is_pre_quantized, estimated_memory_mb)
+    max_memory_factor = split_max_memory_factor(
+        quantization, is_pre_quantized, pre_quantized_max_memory_factor
+    )
     placement = choose_gpu(
         estimated_memory_mb,
         requested=requested,
@@ -2611,8 +3255,30 @@ def plan_transformers_load(
     `cache_path` must be the resolved path the load opens
     (ModelService.resolve_cache_path). `is_pre_quantized` lets a caller that
     already knows say so; the checkpoint is read either way.
+
+    Fit is judged PER CARD (Decision 7, 2026-09-14; decide_transformers_fit):
+    the checkpoint is sized as it loads and each card must hold its weights, its
+    CUDA context and its layers' KV cache at TRANSFORMERS_MIN_CONTEXT. Only a
+    checkpoint that cannot be sized that way — its KV cache not derivable from
+    its config, or its model not buildable on the meta device — is judged by the
+    20% slack (decide_transformers_placement), and that is logged as an error
+    naming the architecture (transformers_fit_falls_back_to_slack).
     """
     pre_quantization = checkpoint_quantization_config(cache_path)
+    pre_quantized = is_pre_quantized or pre_quantization is not None
+    refuse_unsupported_quantization(quantization, pre_quantized, estimated_memory_mb)
+    fit = transformers_fit(
+        cache_path, quantization, pre_quantized, trust_remote_code=trust_remote_code
+    )
+    if fit is not None:
+        return decide_transformers_fit(
+            fit,
+            requested=requested,
+            gpus=gpus,
+            max_memory_factor=split_max_memory_factor(
+                quantization, pre_quantized, pre_quantized_max_memory_factor(pre_quantization)
+            ),
+        )
     return decide_transformers_placement(
         transformers_estimate_mb(
             estimated_memory_mb, cache_path, pre_quantization, trust_remote_code=trust_remote_code
@@ -2620,7 +3286,7 @@ def plan_transformers_load(
         quantization,
         requested=requested,
         gpus=gpus,
-        is_pre_quantized=is_pre_quantized or pre_quantization is not None,
+        is_pre_quantized=pre_quantized,
         pre_quantized_max_memory_factor=pre_quantized_max_memory_factor(pre_quantization),
     )
 

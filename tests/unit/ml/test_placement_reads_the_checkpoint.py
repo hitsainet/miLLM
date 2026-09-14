@@ -51,7 +51,10 @@ def _checkpoint(directory, quantization_config=None, raw=None):
     if raw is not None:
         (directory / "config.json").write_text(raw)
         return str(directory)
-    config = {"model_type": "llama"}
+    # kv_lora_rank: a KV cache miLLM cannot size, so the plan is the 20% slack's
+    # over the row's estimate — the plan these tests pin the quantizer factor on.
+    # A checkpoint it can size is judged per card (Decision 7, test_per_card_fit.py).
+    config = {"model_type": "llama", "kv_lora_rank": 1}
     if quantization_config is not None:
         config["quantization_config"] = quantization_config
     (directory / "config.json").write_text(json.dumps(config))

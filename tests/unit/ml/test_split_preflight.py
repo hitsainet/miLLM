@@ -109,6 +109,16 @@ dark on every load unnoticed (TestAnEngineFailureIsNotAnUnverifiableCheckpoint):
   R3-M4b re-run (the line beside the new stage marker)      -> the bitsandbytes factor test, test_kept_in_fp8_...
   R3-X6 re-run (the offload refusal branch the logging now follows)
          -> test_refused_from_the_quantizers_own_refusal
+
+DECISION 7, 2026-09-14: a transformers load is judged per card (test_per_card_fit.py).
+The plan now sizes a checkpoint as it loads and refuses a map to disk itself, so the
+tests here that exercise the PREFLIGHT, or the slack's estimate and factor, use a
+checkpoint whose KV cache miLLM cannot size (`_checkpoint(..., unsized=True)`), which
+keeps the slack's plan; F-M5 and F-M15 (test_per_card_fit.py) turn exactly those red.
+Re-derived under the per-card fit: the FP8 pair (30,120 MiB dequantized with lm_head on
+disk; 17,823 on the 3090 kept) and the "all" tests (the 7B Q4 share is now 1,835 MiB
+from its 5,191 MiB of weights; gemma-3-1b's pre-check leaves cuda:0 empty, not cuda:1).
+Round 3's two slack-planned "all" directions keep their plans, built directly.
 """
 
 from __future__ import annotations
@@ -154,14 +164,25 @@ SHORT = ((TI_3080, 11_500, 12_288), (RTX_3090, 23_500, 24_576))
 ROOMY = ((TI_3080, 11_500, 12_288), (RTX_3090, 24_500, 24_576))
 
 
-def _checkpoint(directory, layers=16, quantization_config=None):
+def _checkpoint(directory, layers=16, quantization_config=None, unsized=False):
+    """WIDE at `layers` layers, config only.
+
+    `unsized` adds the field multi-head latent attention sets (`kv_lora_rank`).
+    miLLM then cannot size the checkpoint's KV cache, so the plan is the 20%
+    slack's — the plan these tests were written against, whose splits only the
+    preflight can see past. A checkpoint it CAN size is judged per card by the
+    plan itself (Decision 7, test_per_card_fit.py), which refuses the same disk
+    map before the preflight is reached.
+    """
     directory.mkdir(parents=True, exist_ok=True)
     LlamaConfig(num_hidden_layers=layers, **WIDE).save_pretrained(directory)
+    path = directory / "config.json"
+    config = json.loads(path.read_text())
     if quantization_config is not None:
-        path = directory / "config.json"
-        config = json.loads(path.read_text())
         config["quantization_config"] = quantization_config
-        path.write_text(json.dumps(config))
+    if unsized:
+        config["kv_lora_rank"] = 1
+    path.write_text(json.dumps(config))
     return str(directory)
 
 
@@ -176,7 +197,7 @@ def _plan(cards, estimate=ESTIMATE_MB, quantization="FP16", requested=None, cach
 
 class TestThePreflightReadsTheRealMap:
     def test_a_split_whose_lm_head_would_go_to_disk_is_refused_with_the_map(self, tmp_path):
-        path = _checkpoint(tmp_path)
+        path = _checkpoint(tmp_path, unsized=True)
         placement = _plan(SHORT, cache_path=path)
         assert placement.mode == MODE_SHARD
         assert placement.transformers_max_memory() == {0: "10476MiB", 1: "22476MiB"}
@@ -208,7 +229,7 @@ class TestThePreflightReadsTheRealMap:
         assert preflight_split("m", str(tmp_path), "FP16", placement) is None
 
     def test_a_single_card_is_not_mapped(self, tmp_path):
-        path = _checkpoint(tmp_path)
+        path = _checkpoint(tmp_path, unsized=True)
         placement = _plan(SHORT, estimate=8_000, cache_path=path)
         assert placement.mode == MODE_SINGLE
         assert preflight_split("wide-16", path, "FP16", placement) is None
@@ -228,7 +249,7 @@ class TestThePreflightReadsTheRealMap:
 
 class TestTheLoaderRefusesBeforeReadingAWeight:
     def test_model_loader_load_runs_the_preflight(self, tmp_path):
-        path = _checkpoint(tmp_path)
+        path = _checkpoint(tmp_path, unsized=True)
         context = MagicMock()
         loader = ModelLoader()
         loader.state = MagicMock()
@@ -284,7 +305,7 @@ class TestThePreCheckRefusesBeforeTheUnload:
 
         model = make_model(
             id=3, status=ModelStatus.READY, quantization=QuantizationType.FP16,
-            estimated_memory_mb=ESTIMATE_MB, cache_path=_checkpoint(tmp_path),
+            estimated_memory_mb=ESTIMATE_MB, cache_path=_checkpoint(tmp_path, unsized=True),
         )
         svc = self._service(model)
         app = create_app()
@@ -388,7 +409,7 @@ class TestAPreQuantizedCheckpointIsPlannedWithItsOwnQuantizer:
             = 427,851,776 B; embed_tokens + lm_head stay bf16 = 4,202,692,608 B
           4,202,692,608 + 52 x 427,851,776 + 16,384 = 26,451,001,344 B = 25,225 MiB
           x1.2 = 30,270 MB: inside the whole budgets, outside the 0.9 ones."""
-        path = _checkpoint(tmp_path, layers=52, quantization_config={
+        path = _checkpoint(tmp_path, layers=52, unsized=True, quantization_config={
             "quant_method": "bitsandbytes", "load_in_4bit": True, "bnb_4bit_quant_type": "nf4",
         })
         with pytest.raises(InsufficientMemoryError) as raised:
@@ -397,7 +418,7 @@ class TestAPreQuantizedCheckpointIsPlannedWithItsOwnQuantizer:
         assert raised.value.details["required_mb"] == 30_270
 
     def test_an_awq_checkpoint_keeps_its_whole_budget(self, tmp_path):
-        path = _checkpoint(tmp_path, quantization_config={"quant_method": "awq", "bits": 4})
+        path = _checkpoint(tmp_path, unsized=True, quantization_config={"quant_method": "awq", "bits": 4})
         placement = _plan(((TI_3080, 11_000, 12_288), (RTX_3090, 23_000, 24_576)), 29_000, cache_path=path)
         assert placement.budget_mb == 31_952
 
@@ -407,14 +428,14 @@ class TestAPreQuantizedCheckpointIsSizedByWhatItStores:
         """A 4-bit GPTQ checkpoint on an FP16 row: 18 GiB stored -> 18,432 x 1.2
         = 22,118 MB, which the 3090's 23,000 holds. At the row's label (74,387 MB
         for 32.5B params) it was refused outright."""
-        path = _checkpoint(tmp_path, quantization_config={"quant_method": "gptq", "bits": 4})
+        path = _checkpoint(tmp_path, unsized=True, quantization_config={"quant_method": "gptq", "bits": 4})
         with open(tmp_path / "model.safetensors", "wb") as handle:
             handle.truncate(18 * 1024 ** 3)  # sparse
         placement = _plan(((TI_3080, 11_000, 12_288), (RTX_3090, 23_000, 24_576)), 74_387, cache_path=path)
         assert (placement.mode, placement.index, placement.required_mb) == (MODE_SINGLE, 1, 22_118)
 
     def test_a_checkpoint_that_is_not_pre_quantized_keeps_the_rows_estimate(self, tmp_path):
-        path = _checkpoint(tmp_path)
+        path = _checkpoint(tmp_path, unsized=True)
         with open(tmp_path / "model.safetensors", "wb") as handle:
             handle.truncate(18 * 1024 ** 3)
         with pytest.raises(InsufficientMemoryError) as raised:
@@ -452,7 +473,7 @@ class TestABitsandbytesMapIsRefusedByTheQuantizerItself:
       cards 11,000 / 20,000 free: card 1 has 17,078 -> lm_head fits"""
 
     def test_refused_from_the_quantizers_own_refusal(self, tmp_path):
-        path = _checkpoint(tmp_path, layers=48)
+        path = _checkpoint(tmp_path, layers=48, unsized=True)
         placement = _plan(((TI_3080, 11_000, 12_288), (RTX_3090, 18_700, 24_576)), 24_719, "Q4", cache_path=path)
         assert placement.budget_mb == 24_886
 
@@ -495,7 +516,17 @@ class TestACheckpointTransformersDequantizesIsSizedAsItLoads:
       x 2 B = 31,583,649,792 B = 30,120 MiB -> x1.2 = 36,144 MB
     Stored: a sparse 16 GiB model.safetensors -> x1.2 = 19,660 MB, which the
     3090's 23,500 MB free holds whole. Dequantized, no single card and no split
-    of these cards (budgets 10,476 + 22,476 = 32,952 MB) holds it."""
+    of these cards (budgets 10,476 + 22,476 = 32,952 MB) holds it.
+
+    Since Decision 7 (2026-09-14) the plan sizes it as it loads and judges it per
+    card, with no x1.2. Dequantized: 30,120 MiB, which no card holds, and the
+    split's map is WIDE's FP16 map, lm_head on disk. Kept in FP8: each layer's
+    linears 855,638,016 B at 1 B, their block scales (128 x 128 blocks: q, o
+    4,096; k, v 512; gate, up, down 14,336 -> 52,224 x 4 B) and two bf16 norms
+    (32,768 B) = 855,879,680 B; 16 layers + bf16 embed_tokens and lm_head
+    (4,202,692,608 B) + final norm (16,384 B) = 17,896,783,872 B = 17,067 MiB;
+    + KV 256 MiB (16 layers x 2 x 8 x 128 x 2 B x 4,096 tokens) + 500 MiB context
+    = 17,823 on the 3090."""
 
     CARDS = ((TI_3080, 11_500, 12_288), (RTX_3090, 23_500, 24_576))
 
@@ -511,8 +542,10 @@ class TestACheckpointTransformersDequantizesIsSizedAsItLoads:
         with patch("torch.cuda.get_device_capability", return_value=(8, 6)):
             with pytest.raises(InsufficientMemoryError) as raised:
                 _plan(self.CARDS, 19_660, cache_path=path)
-        assert raised.value.details["required_mb"] == 36_144
-        assert raised.value.details["available_mb"] == 32_952
+        details = raised.value.details
+        assert details["weights_mb"] == 30_120
+        assert details["off_gpu"] == ["disk"]
+        assert details["mapped_mb_by_device"] == {"cuda:0": 6_900, "cuda:1": 21_216, "disk": 2_004}
 
     def test_kept_in_fp8_it_is_sized_by_what_it_stores(self, tmp_path):
         """On a card that runs FP8 the checkpoint is not refused for a bf16 size
@@ -521,7 +554,7 @@ class TestACheckpointTransformersDequantizesIsSizedAsItLoads:
         with patch("torch.cuda.get_device_capability", return_value=(8, 9)):
             placement = _plan(self.CARDS, 19_660, cache_path=path)
         assert (placement.mode, placement.index) == (MODE_SINGLE, 1)
-        assert 19_660 <= placement.required_mb < 23_500
+        assert placement.required_mb == 17_823
 
 
 # Real configurations' shapes (config.json fields), built on the meta device only.
@@ -555,12 +588,15 @@ class TestAllIsHonouredOrRefused:
     plan_shard's "all" branches do it, including round 2's index-order one.
 
     Plan figures, worked by hand (limits = free - 1,024):
-      Qwen2.5-7B Q4, cards 11,500 / 23,500, row estimate 4,348: bitsandbytes
-        budgets int(x 0.9) = 9,428 / 20,228; 4,348 <= 9,428, so proportional:
-        card 0 share ceil(4,348 x 9,428 / 29,656) = 1,383 -> max_memory
-        ceil(1,383 / 0.9) = 1,537. transformers gives 1,383 back; the untied
-        embedding stays bf16 at 152,064 x 3,584 x 2 B = 1,039 MiB and is held back
-        as the largest layer, so no layer fits card 0.
+      Qwen2.5-7B Q4, cards 11,500 / 23,500, sized as it loads (Decision 7):
+        a layer's 4-bit linears 233,046,016 params x 0.5 B + bf16 biases and
+        norms 23,552 B = 116,546,560 B; 28 layers + bf16 embed_tokens and lm_head
+        1,089,994,752 B each + final norm 7,168 B = 5,443,300,352 B = 5,191 MiB.
+        bitsandbytes budgets int(x 0.9) = 9,428 / 20,228; 5,191 <= 9,428, so
+        proportional: card 0 share ceil(5,191 x 9,428 / 29,656) = 1,651 ->
+        max_memory ceil(1,651 / 0.9) = 1,835. transformers gives 1,651 back; the
+        untied embedding stays bf16 at 1,039 MiB and is held back as the largest
+        layer, so no layer fits card 0. (Round 3 planned the row's 4,348: 1,537.)
       gemma-3-1b FP16, cards 3,000 / 23,500, row estimate 2,288: limits 1,976 /
         22,476; 2,288 > 1,976, so round 2's index-order branch: card 0 whole
         (1,976). The ~1,907 MiB of weights fit it, and card 1 gets nothing.
@@ -574,7 +610,7 @@ class TestAllIsHonouredOrRefused:
 
         path = _config_checkpoint(tmp_path, Qwen2Config(**QWEN25_7B))
         placement = _plan(self.IDLE, 4_348, "Q4", requested="all", cache_path=path)
-        assert placement.transformers_max_memory() == {0: "1537MiB", 1: "22476MiB"}
+        assert placement.transformers_max_memory() == {0: "1835MiB", 1: "22476MiB"}
 
         with pytest.raises(SplitNotHonouredError) as raised:
             preflight_split("qwen2.5-7b", path, "Q4", placement)
@@ -585,10 +621,18 @@ class TestAllIsHonouredOrRefused:
         assert details["before_loading"] is True
 
     def test_a_first_card_that_holds_the_whole_model_is_refused(self, tmp_path):
+        """The other direction, on the plan the 20% slack makes (a model whose KV
+        cache miLLM cannot size is still planned that way). Sized as it loads,
+        "all" plans from the weights, whose smaller share never let card 0 take
+        everything in a sweep of four shapes over ten card-0 budgets (review round
+        4) — so the slack's plan is built here directly."""
         from transformers import Gemma3TextConfig
 
+        from millm.ml.gpu_placement import list_gpus
+
         path = _config_checkpoint(tmp_path, Gemma3TextConfig(**GEMMA3_1B))
-        placement = _plan(self.BUSY, 2_288, requested="all", cache_path=path)
+        with fake_gpus(*self.BUSY):
+            placement = decide_transformers_placement(2_288, "FP16", requested="all", gpus=list_gpus())
         assert placement.transformers_max_memory() == {0: "1976MiB", 1: "22476MiB"}
 
         with pytest.raises(SplitNotHonouredError) as raised:
@@ -615,7 +659,12 @@ class TestAllIsHonouredOrRefused:
         either card has free (12,000 / 11,000), so Auto plans both
         (max_memory 10,976 / 9,976) — and the weights fit the first card whole.
         That load runs on one card and fits; refusing it would turn away a model
-        the node holds."""
+        the node holds.
+
+        That plan is the slack's. Judged per card (Decision 7) an Auto split that
+        lands on one card is refused on that card instead: it needed a split
+        because the most-free card could not hold the model with its context, so
+        no card can. The preflight still guards a load the slack plans."""
         from transformers import LlamaConfig
 
         path = _config_checkpoint(tmp_path, LlamaConfig(
@@ -623,14 +672,20 @@ class TestAllIsHonouredOrRefused:
             num_attention_heads=32, num_key_value_heads=32, tie_word_embeddings=False,
         ))
         cards = ((TI_3080, 12_000, 12_288), (RTX_3090, 11_000, 24_576))
-        placement = _plan(cards, 12_643, cache_path=path)
+        from millm.ml.gpu_placement import list_gpus
+
+        with fake_gpus(*cards):
+            placement = decide_transformers_placement(12_643, "FP16", requested=None, gpus=list_gpus())
         assert placement.mode == MODE_SHARD
         assert placement.transformers_max_memory() == {0: "10976MiB", 1: "9976MiB"}
 
         assert preflight_split("llama-7b-widths-26", path, "FP16", placement) == {"cuda:0": 10_536}
 
     def test_the_pre_check_refuses_it_before_the_unload(self, tmp_path):
-        """The resident model holds 16,000 MB of card 1: projected 3,000 / 23,500."""
+        """The resident model holds 16,000 MB of card 1: projected 3,000 / 23,500.
+        Sized as it loads (Decision 7), gemma-3-1b is 1,907 MiB: limits 1,976 /
+        22,476, 1,907 <= 1,976, so proportional: card 0 share ceil(1,907 x 1,976
+        / 24,452) = 155, under its 576 MiB embedding — card 0 takes nothing."""
         from transformers import Gemma3TextConfig
 
         from millm.api.dependencies import get_model_service
@@ -649,8 +704,8 @@ class TestAllIsHonouredOrRefused:
         assert response.status_code == 409, response.text
         error = response.json()["error"]
         assert error["code"] == "SPLIT_NOT_HONOURED"
-        assert error["details"]["unused_devices"] == ["cuda:1"]
-        assert "cuda:1" in error["message"]
+        assert error["details"]["unused_devices"] == ["cuda:0"]
+        assert "cuda:0" in error["message"]
         assert not svc.unload_model.called
         assert not svc._executor.method_calls and not svc._executor.called
 
@@ -712,7 +767,7 @@ class TestAnEngineFailureIsNotAnUnverifiableCheckpoint:
     def test_the_device_map_call_raising_is_an_error_of_its_own(self, tmp_path):
         import millm.ml.model_loader as module
 
-        path = _checkpoint(tmp_path)
+        path = _checkpoint(tmp_path, unsized=True)
         placement = _plan(SHORT, cache_path=path)
         changed = TypeError("_get_device_map() takes 3 positional arguments but 4 were given")
         with patch("transformers.integrations.accelerate._get_device_map", side_effect=changed), \
@@ -730,7 +785,7 @@ class TestAnEngineFailureIsNotAnUnverifiableCheckpoint:
 
         import millm.ml.model_loader as module
 
-        path = _checkpoint(tmp_path)
+        path = _checkpoint(tmp_path, unsized=True)
         placement = _plan(SHORT, cache_path=path)
         monkeypatch.delattr(accelerate, "_get_device_map")
         with patch.object(module, "logger") as logger:

@@ -127,6 +127,35 @@ class TestTransformersLoad:
         factor = _kw(decide, "pre_quantized_max_memory_factor")
         assert isinstance(factor, ast.Call) and _is_name(factor.func, "pre_quantized_max_memory_factor")
 
+    def test_a_transformers_plan_is_judged_per_card_before_the_slack(self):
+        """Decision 7, 2026-09-14: plan_transformers_load sizes the checkpoint as it
+        loads (transformers_fit) and hands it to the per-card decision with the
+        split's quantizer factor; the slack decides only when the fit is None."""
+        plan = _function(model_loader, "plan_transformers_load")
+        [fit] = _calls(plan, "transformers_fit")
+        assert _is_name(fit.args[0], "cache_path") and _is_name(fit.args[1], "quantization")
+        assert _is_name(fit.args[2], "pre_quantized")
+        assert _is_name(_kw(fit, "trust_remote_code"), "trust_remote_code")
+        [decide] = _calls(plan, "decide_transformers_fit")
+        assert _is_name(decide.args[0], "fit")
+        assert _is_name(_kw(decide, "gpus"), "gpus")
+        assert _is_name(_kw(decide, "requested"), "requested")
+        factor = _kw(decide, "max_memory_factor")
+        assert isinstance(factor, ast.Call) and _is_name(factor.func, "split_max_memory_factor")
+        [refusal] = _calls(plan, "refuse_unsupported_quantization")
+        assert _is_name(refusal.args[1], "pre_quantized")
+
+        per_card = _function(model_loader, "decide_transformers_fit")
+        assert len(_calls(per_card, "_check_split_fit")) == 2, "\"all\" and Auto's split"
+        [left_out] = _calls(per_card, "refuse_cards_left_out_of_all")
+        assert _is_name(left_out.args[1], "inventory")
+
+        slack = _function(model_loader, "decide_transformers_placement")
+        [q2] = _calls(slack, "refuse_unsupported_quantization")
+        assert _is_name(q2.args[1], "is_pre_quantized")
+        [factor] = _calls(slack, "split_max_memory_factor")
+        assert _is_name(factor.args[2], "pre_quantized_max_memory_factor")
+
     def test_a_pre_quantized_checkpoint_is_sized_as_transformers_will_load_it(self):
         """Review round 3: what a checkpoint stores is a floor; the estimate also
         asks what transformers materialises (it dequantizes FP8 on these cards)."""

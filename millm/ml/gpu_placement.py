@@ -75,13 +75,22 @@ REASON_NO_GPU = "no_gpu"
 #: None or "auto", "all", a CUDA index, or a UUID as nvidia-smi prints it.
 GpuRequest = Union[None, int, str]
 
-#: Memory kept back on every card of a split, in MB: its CUDA context, cuBLAS
-#: workspaces, and the activations and KV cache of the layers it runs.
-#: `max_memory` is a budget for WEIGHTS — accelerate fills a card up to it — so a
-#: split planned to each card's whole free memory would leave the forward pass
-#: nothing on any card. A single card needs no such term: the estimate already
-#: carries a 20% runtime overhead (memory_utils.MEMORY_OVERHEAD_FACTOR) and all
-#: of it lands on that card.
+#: Memory kept out of every card's `max_memory` in a split, in MB. `max_memory` is
+#: a budget for WEIGHTS — accelerate fills a card up to it — so a split planned to
+#: each card's whole free memory would leave the forward pass nothing on any card.
+#:
+#: Since Decision 7 (2026-09-14) this only SHAPES the map; it does not decide fit.
+#: A transformers load is accepted when transformers' own map leaves each card its
+#: CUDA context and the KV cache of its layers at TRANSFORMERS_MIN_CONTEXT
+#: (model_loader.decide_transformers_fit). Kept, not removed: without it a card's
+#: budget is its whole free memory and accelerate fills it to within a layer, so
+#: the context and KV room the check then asks for is gone. Measured on 11,500 /
+#: 23,500 MB free at 4,096 tokens (review round 4): with it, Qwen2.5-14B, OLMo-2-13B
+#: and Vicuna-13B split and are accepted; with 0, OLMo-2-13B and Vicuna-13B are
+#: refused, cuda:0 short by 255 and 957 MiB, and only Qwen2.5-14B still loads.
+#: Not added to the per-card need either: it was sized for the CUDA context the
+#: need now counts itself. Only a model whose KV cache cannot be sized from its
+#: config is still judged by the 20% slack (memory_utils.MEMORY_OVERHEAD_FACTOR).
 SHARD_RESERVE_MB = 1024
 
 #: What transformers multiplies `max_memory` by for a bitsandbytes load before
@@ -633,6 +642,23 @@ def shard_refusal(placement: Placement, need_mb: int, detail: str) -> Insufficie
     )
 
 
+def refuse_cards_left_out_of_all(
+    placement: Placement, inventory: list[GpuInfo], rule: ShardRule
+) -> None:
+    """Refuse an "all" split that does not name every visible card.
+
+    plan_shard names only the cards with a budget, so a card too full to take any
+    share (the 3080 Ti with a miStudio job on it) was left out, and "all" became a
+    split over the rest — one card, on this node — that every later check
+    accepted, since they look for an unused card among the planned ones. Review
+    round 4, 2026-09-14. ONE rule for both deciders of an "all": decide_placement
+    and model_loader.decide_transformers_fit.
+    """
+    left_out = [gpu for gpu in inventory if gpu.index not in placement.gpu_indices]
+    if left_out:
+        raise all_cards_refusal(placement, left_out, rule)
+
+
 def all_cards_refusal(
     placement: Placement, left_out: list[GpuInfo], rule: ShardRule
 ) -> SplitNotHonouredError:
@@ -708,14 +734,7 @@ def choose_gpu(
                 "A split across every GPU was requested; it is not swapped for "
                 "one card or for the CPU.",
             )
-        left_out = [gpu for gpu in inventory if gpu.index not in placement.gpu_indices]
-        if left_out:
-            # plan_shard names only the cards with a budget, so a card too full
-            # to take any share (the 3080 Ti with a miStudio job on it) was left
-            # out, and "all" became a split over the rest — one card, on this
-            # node — that every later check accepted, since they look for an
-            # unused card among the planned ones. Review round 4, 2026-09-14.
-            raise all_cards_refusal(placement, left_out, rule)
+        refuse_cards_left_out_of_all(placement, inventory, rule)
         return placement
 
     if wanted is not None:

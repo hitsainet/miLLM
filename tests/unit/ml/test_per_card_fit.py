@@ -66,6 +66,18 @@ preflight, load, API and wiring test files run, 323 tests):
   F-M17 the fit's "all" does not refuse a card left out -> the wiring test, both TestAllNamesEveryVisibleCard
   F-M18 SHARD_RESERVE_MB = 0                            -> 44 red, both acceptances here among them:
         the reserve still shapes every split's map (see gpu_placement.SHARD_RESERVE_MB)
+Controls re-run in review round 5 on the lines it moved (mutate.py, millm-p2-review5; this
+file, test_split_preflight, test_fit_rebalance, test_split_layout_attribution and the
+wiring test; restored, sha256 verified):
+  F-M7  (short = [] in _check_split_fit's re-plan loop)                    -> 11 red
+  F-M13 (every layer attributed to cuda:0, now in _layer_device_labels)   -> 9 red
+  F-M17 (plan_all without refuse_cards_left_out_of_all)                    -> 3 red
+  F-M16a ("all" re-plans without the quantizer factor)                     -> 1 red
+  F-M16b (Auto re-plans without it) SURVIVED at first: the factor only decided the slack
+        fallback's budget, which that fallback no longer took from the slack's own rule.
+        Fixed (the fallback re-plans with transformers_shard_rule) and re-run: 1 red,
+        test_fit_rebalance::test_the_slack_counts_the_quantizers_factor.
+  R2 preflight off-GPU refusal (off_gpu = [] beside the new MiB sum)       -> 3 red
 Controls re-run on lines Decision 7 moved into helpers:
   R4-M1 (the "all" left-out rule, now refuse_cards_left_out_of_all) -> the GGUF case, both
         TestAllNamesEveryVisibleCard tests

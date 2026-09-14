@@ -42,6 +42,18 @@ git diff clean):
   R5-M28 "all" with a card the layout leaves empty is not refused by the plan
          -> test_a_card_whose_budget_holds_no_layer_is_refused_by_the_plan and
             test_split_preflight::test_a_card_whose_share_holds_no_layer_is_refused
+
+FOUND BY RE-RUNNING ROUND 4'S F-M16 ON THE MOVED LINES: with Auto's re-plan given no
+quantizer factor, the suite stayed green. The factor still decided one thing — the
+budget of the slack fallback taken when the layout cannot be computed — and that
+fallback (as first written in this round) judged the split against the FIT's budget
+(free less the CUDA context) rather than the slack's own (free less SHARD_RESERVE_MB,
+times the factor): it admitted OLMo-2-13B FP16 on 16,000 / 16,500 MB, which the slack
+refuses. Both TestAnUnknownLayoutFallsBackLoudly refusal tests failed on that code;
+the fallback now re-plans with transformers_shard_rule.
+  R5-M29 the fallback judges the fit's placement again     -> 3 red: all of TestAnUnknownLayoutFallsBackLoudly
+  R5-M30 the slack's rule without the quantizer factor     -> test_the_slack_counts_the_quantizers_factor
+  F-M16b re-run (Auto re-plans without the factor)         -> test_the_slack_counts_the_quantizers_factor
 """
 
 from __future__ import annotations
@@ -286,17 +298,53 @@ class TestAllIsRefusedFromTheLayout:
 class TestAnUnknownLayoutFallsBackLoudly:
     def test_the_slack_judges_it_and_says_so(self, tmp_path):
         """When transformers' map cannot be computed here the split is judged by the
-        20% slack. Round 4 logged only why the layout failed, never that the fit had
-        fallen back."""
+        20% slack, and that is logged as an error. Round 4 logged only why the layout
+        failed, never that the fit had fallen back. Qwen2.5-14B FP16 on 11,500 / 23,500:
+        28,172 MiB x 1.2 = 33,806 against the slack's budgets 10,476 + 22,476 = 32,952 —
+        refused, exactly as the slack refuses it on its own (Decision 7's example)."""
         path = _save(tmp_path, Qwen2Config(**QWEN25_14B))
 
         with patch.object(model_loader.TransformersFit, "layout", return_value=None), \
-                patch.object(model_loader, "logger") as logger, fake_gpus(*NODE):
-            placement = plan_transformers_load(0, "FP16", requested=None, gpus=list_gpus(), cache_path=path)
+                patch.object(model_loader, "logger") as logger, fake_gpus(*NODE), \
+                pytest.raises(InsufficientMemoryError) as raised:
+            plan_transformers_load(0, "FP16", requested=None, gpus=list_gpus(), cache_path=path)
 
-        assert placement.mode == MODE_SHARD
         [fallback] = [c for c in logger.error.call_args_list if c.args == ("transformers_fit_falls_back_to_slack",)]
         assert fallback.kwargs["architecture"] == "qwen2"
         assert "layout" in fallback.kwargs["reason"]
-        with fake_gpus(*NODE):
-            assert decide_transformers_placement(0, "FP16", requested=None, gpus=list_gpus()).mode == MODE_SHARD
+        assert (raised.value.details["required_mb"], raised.value.details["available_mb"]) == (33_806, 32_952)
+        with fake_gpus(*NODE), pytest.raises(InsufficientMemoryError) as slack:
+            decide_transformers_placement(33_806, "FP16", requested=None, gpus=list_gpus())
+        assert slack.value.details["available_mb"] == 32_952
+
+    def test_the_slack_is_the_slacks_own_budget_not_the_fits(self, tmp_path):
+        """OLMo-2-13B FP16, 26,162 MiB of weights: the slack needs x1.2 = 31,394. The
+        slack budgets a card at free less SHARD_RESERVE_MB: 14,976 + 15,476 = 30,452, and
+        refuses. Judged against the fit's own budget (free less the 500 MB context,
+        15,500 + 16,000 = 31,500) the fallback accepted it: a load "judged by the 20%
+        slack" that the slack itself refuses. Review round 5."""
+        path = _save(tmp_path, Olmo2Config(**OLMO2_13B))
+        cards = ((TI_3080, 16_000, 24_576), (RTX_3090, 16_500, 24_576))
+
+        with patch.object(model_loader.TransformersFit, "layout", return_value=None), \
+                patch.object(model_loader, "logger"), fake_gpus(*cards), \
+                pytest.raises(InsufficientMemoryError) as raised:
+            plan_transformers_load(0, "FP16", requested=None, gpus=list_gpus(), cache_path=path)
+
+        assert raised.value.details["required_mb"] == int(26_162 * 1.2)
+        assert "judged by the 20% slack" in raised.value.message
+
+    def test_the_slack_counts_the_quantizers_factor(self, tmp_path):
+        """OLMo-2-13B Q4, 8,012 MiB: the slack needs 9,614. Slack limits 4,976 / 4,676;
+        bitsandbytes places x0.9 of them, 4,478 + 4,208 = 8,686, and it is refused.
+        Without the factor, 9,652 would have accepted it."""
+        path = _save(tmp_path, Olmo2Config(**OLMO2_13B))
+        cards = ((TI_3080, 6_000, 12_288), (RTX_3090, 5_700, 24_576))
+
+        with patch.object(model_loader.TransformersFit, "layout", return_value=None), \
+                patch.object(model_loader, "logger"), fake_gpus(*cards), \
+                pytest.raises(InsufficientMemoryError) as raised:
+            plan_transformers_load(0, "Q4", requested=None, gpus=list_gpus(), cache_path=path)
+
+        assert raised.value.details["required_mb"] == int(8_012 * 1.2)
+        assert raised.value.details["available_mb"] == 4_478 + 4_208

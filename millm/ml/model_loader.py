@@ -3138,17 +3138,21 @@ def _check_split_fit(
         layout = fit.layout(placement)
         if layout is None:
             # The map could not be computed here (logged by layout): this split is
-            # judged by the slack Decision 7 replaced, and says so.
+            # judged by the slack Decision 7 replaced, and says so. By the slack's OWN
+            # plan — each card's free memory less SHARD_RESERVE_MB, times the
+            # quantizer's factor — not by this fit's budget (free less the CUDA
+            # context), which admitted splits the slack refuses. Review round 5.
             _fit_falls_back(fit.architecture, "the layout of its split could not be worked out here")
+            slack = plan(transformers_shard_rule(fit.weights_mb, max_memory_factor=max_memory_factor))
             need = int(fit.weights_mb * MEMORY_OVERHEAD_FACTOR)
-            if placement.budget_mb < need:
+            if slack.budget_mb < need:
                 raise shard_refusal(
-                    placement,
+                    slack,
                     need,
                     "Its layout could not be worked out here, so it was judged by the 20% slack. "
                     "A transformers model is never offloaded to the CPU or disk.",
                 )
-            return placement
+            return slack
         if layout.engine_message is not None and last_on_gpu is None:
             raise _off_gpu_refusal(
                 fit.architecture, placement, list(layout.off_gpu), [],

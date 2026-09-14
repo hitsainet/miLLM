@@ -93,6 +93,21 @@ def _directional_budget(budget: float, sign: int) -> float:
     return b if b < 0 else float(sign) * b
 
 
+def _card_room_mb(device: Any) -> int:
+    """What torch can still allocate on `device`, in MiB: free memory plus blocks it has cached and not handed out.
+
+    A finished generation's KV cache goes back to torch's caching allocator, not
+    to the card, so the driver's free memory (mem_get_info, nvidia-smi) counts it
+    as used while torch allocates from it first.
+    """
+    free_bytes = torch.cuda.mem_get_info(device)[0]
+    try:
+        cached = int(torch.cuda.memory_reserved(device)) - int(torch.cuda.memory_allocated(device))
+    except Exception:  # noqa: BLE001 - an allocator that cannot say: free memory alone
+        cached = 0
+    return int((free_bytes + max(cached, 0)) / (1024 * 1024))
+
+
 def _resolve_attach_dtype(name: str) -> "torch.dtype":
     """Resolve a configured attach-dtype name to a torch dtype.
 
@@ -1795,16 +1810,18 @@ class SAEService:
         # forward pass whenever its layer lived elsewhere.
         target_device = self._sae_device_for_layer(model_state.current.model, layer)
 
-        # Check available memory on that device before loading
+        # Check the card BEFORE loading, and refuse what does not fit. This only
+        # logged a warning and loaded anyway, and it did not keep the room the
+        # load was admitted with for the model's KV cache (review round 5,
+        # 2026-09-14): see _refuse_without_room.
         if self._is_gpu_device(target_device):
-            free_mb = torch.cuda.mem_get_info(target_device)[0] / (1024 * 1024)
             estimated_mb = (sae.file_size_bytes or 0) / (1024 * 1024) * 1.2  # 20% overhead
-            if estimated_mb > 0 and estimated_mb > free_mb:
-                logger.warning(
-                    "sae_memory_warning",
-                    estimated_mb=int(estimated_mb),
-                    available_mb=int(free_mb),
-                    device=str(target_device),
+            if estimated_mb > 0:
+                self._refuse_without_room(
+                    model_state.current.model,
+                    target_device,
+                    int(estimated_mb),
+                    f"Attaching SAE '{sae_id}' at layer {layer}",
                 )
 
         # Load SAE weights
@@ -1920,6 +1937,77 @@ class SAEService:
                 self._hooker, "last_resolved_module_path", None
             ),
         }
+
+    def _kv_reserve_mb(self, model: Any, device: Any) -> tuple[int, Optional[int]]:
+        """(MiB, tokens): the KV cache the model was admitted with, over its layers on `device`.
+
+        The per-card fit accepted the load only with room on each card for its
+        layers' cache at the admitted context (model_loader.admitted_context:
+        TRANSFORMERS_MIN_CONTEXT, or the model's own limit if shorter). The cache
+        is not allocated until generation, so that room still reads as free when
+        an SAE attaches. (0, None) for a model whose cache cannot be sized — it
+        was admitted by the 20% slack instead.
+        """
+        from millm.core.config import settings
+        from millm.ml.model_loader import admitted_context, kv_cache_spec
+
+        config = getattr(model, "config", None)
+        spec = None
+        if config is not None:
+            try:
+                spec, _ = kv_cache_spec(config)
+            except Exception:  # noqa: BLE001 - an odd config: no reserve, as for the slack
+                spec = None
+        if spec is None:
+            return 0, None
+        tokens = admitted_context(spec, int(settings.TRANSFORMERS_MIN_CONTEXT))
+        target = str(device)
+        on_card = []
+        for index in range(spec.num_layers):
+            try:
+                here = str(self._hooker.layer_device(model, index)) == target
+            except Exception:  # noqa: BLE001 - a layer that cannot be placed is counted here
+                here = True
+            if here:
+                on_card.append(index)
+        return spec.mb(on_card, tokens), tokens
+
+    def _refuse_without_room(
+        self, model: Any, device: Any, projected_mb: int, what: str
+    ) -> None:
+        """Refuse an attach whose SAE weights and the model's KV cache on that card do not both fit.
+
+        Review round 5, 2026-09-14. Both attach paths compared an SAE with the
+        card's free memory alone, so an attach could take the room the per-card
+        fit had kept for the KV cache, and generation then ran out of memory at a
+        context the load had accepted. OLMo-2-13B split on 11,500 / 23,500 MB
+        free leaves cuda:0 about 1,550 MiB, 1,120 of it for a 4,096-token cache.
+
+        Raises:
+            InsufficientMemoryError: naming the card, the SAE's projected MB, the
+                KV reserve and its context, and what torch can still allocate there.
+        """
+        room = _card_room_mb(device)
+        reserve, tokens = self._kv_reserve_mb(model, device)
+        if projected_mb + reserve <= room:
+            return
+        cache = (
+            f" and the model's KV cache for {tokens} tokens over its layers there needs "
+            f"{reserve} MB" if tokens else ""
+        )
+        raise InsufficientMemoryError(
+            f"{what} needs ~{projected_mb} MB on {device}{cache}, but only {room} MB is free "
+            "there. Detach an SAE on that card, lower TRANSFORMERS_MIN_CONTEXT and reload the "
+            "model, or free memory on the card.",
+            details={
+                "device": str(device),
+                "projected_mb": projected_mb,
+                "kv_reserve_mb": reserve,
+                "kv_context_tokens": tokens,
+                "available_mb": room,
+                "free_mb": room,
+            },
+        )
 
     def _sae_device_for_layer(self, model: Any, layer: int) -> "torch.device":
         """
@@ -2044,17 +2132,9 @@ class SAEService:
                 projected_by_device[str(device)] = (device, so_far + _projected_mb(sae))
 
             for device_name, (device, projected_mb) in projected_by_device.items():
-                free_mb = torch.cuda.mem_get_info(device)[0] / (1024 * 1024)
-                if projected_mb > free_mb:
-                    raise InsufficientMemoryError(
-                        f"Attaching {len(prepared)} SAE(s) needs ~{int(projected_mb)} MB "
-                        f"on {device_name} but only {int(free_mb)} MB is free there.",
-                        details={
-                            "projected_mb": int(projected_mb),
-                            "free_mb": int(free_mb),
-                            "device": device_name,
-                        },
-                    )
+                self._refuse_without_room(
+                    model, device, int(projected_mb), f"Attaching {len(prepared)} SAE(s)"
+                )
 
         # Attach, tracking keys added in THIS call so we can roll them all back
         # if a later load/install throws — never leave a partial attach or a

@@ -46,6 +46,10 @@ TRANSFORMERS_MIN_CONTEXT_DEFAULT = 4096
 #: model and per card (millm/ml/working_memory.py), not taken from this.
 TRANSFORMERS_CUDA_CONTEXT_MB_DEFAULT = 500
 
+#: Seconds a transformers model's cards stay idle before torch's unused cached blocks
+#: are returned to them (TRANSFORMERS_IDLE_CACHE_RELEASE_S). See the setting.
+TRANSFORMERS_IDLE_CACHE_RELEASE_S_DEFAULT = 5.0
+
 
 class Settings(BaseSettings):
     """Application settings loaded from environment variables."""
@@ -298,6 +302,23 @@ class Settings(BaseSettings):
     # acceptance, 2026-09-14: this was the only allowance, and OLMo-2-13B admitted
     # with 11 MiB to spare ran a 3,879-token request out of memory.
     TRANSFORMERS_CUDA_CONTEXT_MB: int = TRANSFORMERS_CUDA_CONTEXT_MB_DEFAULT
+
+    # SECONDS A TRANSFORMERS MODEL'S CARDS STAY IDLE BEFORE TORCH'S CACHE IS RETURNED.
+    #
+    # torch keeps the blocks a finished request freed, and nvidia-smi — which
+    # miStudio's placement and every other tenant of the node read — counts them
+    # as used. After three requests the RTX 3080 Ti sat at 12,004 MiB used / 155
+    # MiB free until the model was unloaded (hardware acceptance, 2026-09-14).
+    # Once no request has held or waited for a slot for this long, the model's
+    # cards get their unused cached blocks back (torch.cuda.empty_cache, taken
+    # through the request queue so it never runs during a request). A request that
+    # arrives in the meantime cancels it. The cost is paid by the next request,
+    # which reserves those segments again: for a 2,000-token request on OLMo-2-13B's
+    # cuda:0 that is 29 cudaMalloc calls (1,070 MiB), for Qwen2.5-7B 13. 0 releases
+    # as soon as the queue is idle; a negative value never releases. Nothing is
+    # released while continuous batching runs: its manager generates without a
+    # queue slot, so the queue reads idle during a CBM request.
+    TRANSFORMERS_IDLE_CACHE_RELEASE_S: float = TRANSFORMERS_IDLE_CACHE_RELEASE_S_DEFAULT
 
     CBM_MAX_QUEUE_SIZE: int = 256
     # CBM fixes its sampling parameters at manager creation, and any request

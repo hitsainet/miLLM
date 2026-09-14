@@ -140,6 +140,25 @@ def _release_generation_memory() -> None:
         logger.warning("generation_oom_release_failed", error=str(e))
 
 
+def _release_cached_gpu_memory(indices: list[int]) -> dict[str, int]:
+    """Return torch's unused cached blocks to the cards, reporting what each of these got back (MiB). Never raises.
+
+    torch.cuda.empty_cache acts on every card's allocator and creates no CUDA
+    context; the before/after reads touch only the model's own cards.
+    """
+    try:
+        before = {index: int(torch.cuda.memory_reserved(index)) for index in indices}
+        torch.cuda.empty_cache()
+        return {
+            f"cuda:{index}": max(before[index] - int(torch.cuda.memory_reserved(index)), 0)
+            // (1024 * 1024)
+            for index in indices
+        }
+    except Exception as e:  # noqa: BLE001 - a release is housekeeping, never a failure
+        logger.warning("idle_cache_release_failed", error=str(e))
+        return {}
+
+
 def _stream_error_event(exc: MiLLMError) -> str:
     """The SSE error event for a refusal raised after a stream's 200 was committed.
 
@@ -475,6 +494,9 @@ class InferenceService:
         # for another model and is not kept (see _get_draft_model). Review round
         # 3, 2026-09-14.
         self._model_epoch = 0
+        # Advanced by every admitted request; an idle cache release scheduled under an
+        # older value is void (_schedule_idle_cache_release).
+        self._idle_release_generation = 0
         self._cbm_force_serial_monitoring = cbm_force_serial_monitoring
 
         # Continuous Batching backend. Initialised once in __init__ when
@@ -538,14 +560,96 @@ class InferenceService:
         """
         refusal = self._unloading_refusal()
         if refusal is None:
-            async with self._request_queue.acquire():
-                refusal = self._unloading_refusal()
-                if refusal is None or not raise_refusal:
-                    yield refusal
-                    return
+            admitted = False
+            try:
+                async with self._request_queue.acquire():
+                    refusal = self._unloading_refusal()
+                    if refusal is None or not raise_refusal:
+                        if refusal is None:
+                            admitted = True
+                            # Work is running: a cache release scheduled before it is void.
+                            self._idle_release_generation = (
+                                getattr(self, "_idle_release_generation", 0) + 1
+                            )
+                        yield refusal
+                        return
+            finally:
+                if admitted:
+                    # The slot is free again (the `async with` has exited).
+                    self._schedule_idle_cache_release()
         if raise_refusal:
             raise refusal
         yield refusal
+
+    def _schedule_idle_cache_release(self) -> None:
+        """Once the queue has stayed idle for TRANSFORMERS_IDLE_CACHE_RELEASE_S, give the model's cards torch's unused cache back.
+
+        torch keeps the blocks a finished request freed, and nvidia-smi — what
+        miStudio's placement and every other tenant of the node read — counts
+        them as used: after three requests the RTX 3080 Ti sat at 12,004 MiB used
+        with 155 MiB free until the model was unloaded (hardware acceptance,
+        2026-09-14). Only the out-of-memory path emptied the cache.
+
+        Released only when idle, and never during a request (_release_idle_cache
+        takes the queue's slot). The cost falls on the next request, which
+        reserves those segments again: replaying a 2,000 + 64-token request on
+        OLMo-2-13B's cuda:0 through the allocator model, 29 cudaMalloc calls for
+        1,070 MiB; on Qwen2.5-7B, 13 for 428 MiB — against seconds of generation.
+        Waiting first keeps back-to-back requests (a labeling run) from paying it
+        on every request. A GGUF model's memory is llama.cpp's, not torch's.
+
+        Not while continuous batching runs: its manager generates without a queue
+        slot (the queue reads idle during CBM generation), so a release timed by
+        the queue could run in the middle of a CBM request. A serial request —
+        sampling parameters CBM cannot serve fall back to it — used to schedule
+        one anyway.
+        """
+        from millm.core.config import settings
+
+        # Called from _admit's `finally`: anything raised here would replace the
+        # request's own answer (a 400 became an AttributeError in a test with a
+        # stand-in queue). Housekeeping never does that.
+        try:
+            if self._engine_is_llamacpp() or self._use_cbm() or not self._loaded_gpu_indices():
+                return
+            delay = float(settings.TRANSFORMERS_IDLE_CACHE_RELEASE_S)
+            if delay < 0 or getattr(self._request_queue, "pending_count", 0):
+                return
+            generation = getattr(self, "_idle_release_generation", 0)
+            loop = asyncio.get_running_loop()
+            tasks = self.__dict__.setdefault("_idle_release_tasks", set())
+
+            def start() -> None:
+                task = loop.create_task(self._release_idle_cache(generation))
+                tasks.add(task)
+                task.add_done_callback(tasks.discard)
+
+            loop.call_later(delay, start)
+        except Exception as e:  # noqa: BLE001 - never replace the request's outcome
+            logger.warning("idle_cache_release_not_scheduled", error=str(e))
+
+    async def _release_idle_cache(self, generation: int) -> None:
+        """Empty torch's cache on the model's cards, unless work has been admitted since `generation`.
+
+        The checks and the slot come with no await between them, so no request can
+        be admitted in between; holding the slot keeps any that arrive during the
+        release from starting until it is done. Checked again here, not only when
+        scheduled: continuous batching may have started since, and it holds no slot.
+        """
+        if generation != getattr(self, "_idle_release_generation", 0):
+            return
+        if self._request_queue.pending_count or self._use_cbm():
+            return
+        indices = self._loaded_gpu_indices()
+        if not indices or self._engine_is_llamacpp():
+            return
+        try:
+            async with self._request_queue.acquire():
+                freed = await asyncio.to_thread(_release_cached_gpu_memory, indices)
+        except Exception as e:  # noqa: BLE001 - a full queue, a closed loop: nothing to release now
+            logger.warning("idle_cache_release_skipped", error=str(e))
+            return
+        logger.info("idle_cache_released", freed_mb_by_device=freed)
 
     def is_model_loaded(self) -> bool:
         """Check if a model is currently loaded."""

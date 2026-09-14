@@ -449,7 +449,10 @@ async def test_a_llamacpp_stream_whose_model_starts_unloading_ends_with_the_refu
 
 
 def test_every_request_queue_slot_is_taken_through_admission():
-    """A new `self._request_queue.acquire()` elsewhere would skip the unloading check."""
+    """A new `self._request_queue.acquire()` elsewhere would skip the unloading check.
+
+    The idle cache release takes a slot too, so it never runs during a request; it
+    does no work on the model."""
     tree = ast.parse(inspect.getsource(inference_service))
     callers: list[str] = []
 
@@ -475,4 +478,4 @@ def test_every_request_queue_slot_is_taken_through_admission():
 
     _Visitor().visit(tree)
 
-    assert callers == ["_admit"]
+    assert sorted(callers) == ["_admit", "_release_idle_cache"]

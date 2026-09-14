@@ -33,6 +33,17 @@ Review round 2, 2026-09-14 (mutate.py; restored and sha256-verified):
       -> test_a_model_change_releases_the_draft_..., test_no_draft_is_loaded_between_the_unload_...
   R1-M2 re-run (on_model_loaded was edited; its split guard -> False)
       -> test_a_split_model_does_not_start_the_manager
+Review round 3, 2026-09-14 (mutate.py; restored and sha256-verified). Round 2's
+suspension flag was cleared by the next load, so a draft whose load outlasted a
+whole model switch was kept; the discard now compares a model epoch:
+  R3-M3  the draft is kept whatever the epoch (compare -> False)
+      -> test_a_draft_that_finishes_loading_after_the_unload_began_is_not_kept,
+         test_a_draft_still_loading_when_the_next_model_has_loaded_is_not_kept
+  R3-M3b on_model_unloading does not advance the epoch -> the same two
+  R3-M3c the epoch is not captured before the draft loads (NameError, swallowed as a failed draft)
+      -> both unload tests, the new switch test, test_a_draft_that_failed_on_the_old_card_...
+  R2-M9's string no longer exists (the suspension check it mutated is now the
+  epoch compare); R3-M3 is its replacement.
 """
 
 from types import SimpleNamespace
@@ -262,4 +273,35 @@ class TestTheDraftDuringAnUnload:
             factory.from_pretrained.side_effect = None
             svc.on_model_loaded()
             assert svc._get_draft_model() is factory.from_pretrained.return_value
+        assert not late.eval.called
+
+    def test_a_draft_still_loading_when_the_next_model_has_loaded_is_not_kept(self):
+        """Review round 3, 2026-09-14. Round 2's suspension was a flag the NEXT
+        load cleared, so it could not tell "loaded before the switch" from
+        "loaded across it". A draft whose load outlasted a whole model switch — one
+        downloaded from the Hub on its first use takes minutes — was kept: placed
+        for the old model's card (cuda:1), handed to a model now on cuda:0, and
+        holding memory the new model's placement had read as free."""
+        svc = _service(SimpleNamespace(hf_device_map={"model.embed_tokens": 1}), [1])
+        late = MagicMock(name="draft placed for the old model")
+
+        def _load_through_a_whole_model_switch(*args, **kwargs):
+            svc.on_model_unloading()
+            svc._model_state.current = SimpleNamespace(
+                model=SimpleNamespace(hf_device_map={"model.embed_tokens": 0}), gpu_indices=[0]
+            )
+            svc.on_model_loaded()
+            return late
+
+        with patch("transformers.AutoModelForCausalLM") as factory:
+            factory.from_pretrained.side_effect = _load_through_a_whole_model_switch
+            assert svc._get_draft_model() is None, "a draft loaded across a model switch was kept"
+            assert svc._draft_model is None
+            factory.from_pretrained.side_effect = None
+            assert svc._get_draft_model() is factory.from_pretrained.return_value
+        assert [c.kwargs["device_map"] for c in factory.from_pretrained.call_args_list] == [
+            {"": "cuda:1"},
+            {"": "cuda:0"},
+        ], "the next request loads the draft beside the NEW model"
+        assert svc._speculative_model_id == "draft/model", "a discarded draft must not disable speculation"
         assert not late.eval.called

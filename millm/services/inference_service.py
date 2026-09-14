@@ -347,6 +347,11 @@ class InferenceService:
         # Set while a model is unloading, cleared when the next one is loaded:
         # no draft is loaded, or kept, in between (see on_model_unloading).
         self._draft_suspended = False
+        # Advanced by every unload (on_model_unloading), which every model change
+        # goes through. A draft whose load began under another epoch was placed
+        # for another model and is not kept (see _get_draft_model). Review round
+        # 3, 2026-09-14.
+        self._model_epoch = 0
         self._cbm_force_serial_monitoring = cbm_force_serial_monitoring
 
         # Continuous Batching backend. Initialised once in __init__ when
@@ -712,6 +717,7 @@ class InferenceService:
         the model being unloaded and held its memory through the next load,
         whose placement read those cards as free. Review round 2, 2026-09-14.
         """
+        self._model_epoch = getattr(self, "_model_epoch", 0) + 1
         self._draft_suspended = True
         self._release_draft_model()
         if self._cbm_backend is not None and self._cbm_backend.is_running:
@@ -1845,6 +1851,7 @@ class InferenceService:
             try:
                 from transformers import AutoModelForCausalLM
 
+                epoch = getattr(self, "_model_epoch", 0)
                 device = self._draft_device()
                 logger.info(
                     "loading_draft_model",
@@ -1859,9 +1866,16 @@ class InferenceService:
                     torch_dtype=torch.bfloat16,
                     device_map={"": device},
                 )
-                if getattr(self, "_draft_suspended", False):
-                    # The unload began while this draft was loading.
-                    logger.info("draft_model_discarded_model_unloading")
+                if getattr(self, "_model_epoch", 0) != epoch:
+                    # The model changed while this draft was loading: an unload
+                    # began, or an unload AND the next load both finished. Round
+                    # 2 checked the suspension flag, which that next load had
+                    # already cleared, so a draft that outlasted the whole switch
+                    # (one downloaded from the Hub on first use takes minutes)
+                    # was kept: placed for the old model's card, holding memory
+                    # the new model's placement had read as free. Review round
+                    # 3, 2026-09-14.
+                    logger.info("draft_model_discarded_model_changed")
                     return None
                 draft.eval()
                 self._draft_model = draft

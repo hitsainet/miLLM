@@ -95,6 +95,7 @@ Most errors map to an HTTP error status. A few **circuit refusals** deliberately
 | Code | HTTP | Meaning |
 |------|------|---------|
 | `VALIDATION_ERROR` | 422 | Request body failed schema validation (also FastAPI's native 422s). A few handlers also return this code in a 200 envelope for semantic input problems — see the [200-envelope note](#the-200-envelope-house-style) |
+| `CONTEXT_LENGTH_EXCEEDED` | 400 | A `/v1` request whose prompt plus `max_tokens` (or an embeddings input) is longer than the model's context window. `details` carries `max_context_tokens`, `requested_tokens`, `prompt_tokens` and `max_tokens`. On `/v1` it is `400 context_length_exceeded`, typed `invalid_request_error`; a streamed request is refused before its stream starts. Retrying unchanged cannot succeed: shorten the prompt or ask for fewer `max_tokens` |
 
 ## Handling errors in code
 

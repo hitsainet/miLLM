@@ -260,11 +260,16 @@ class TestCheckContextLength:
         # Should not raise
 
     def test_raises_when_exceeds_limit(self, service, mock_model):
-        """Raises ValueError when prompt + max_tokens exceeds context."""
-        with pytest.raises(ValueError, match="Context length exceeded"):
+        """Raises ContextLengthExceededError (400 on /v1) when prompt + max_tokens exceeds context."""
+        from millm.core.errors import ContextLengthExceededError
+
+        with pytest.raises(ContextLengthExceededError, match="maximum context length is 2048") as raised:
             service._check_context_length(
                 prompt_tokens=1500, max_new_tokens=1000
             )
+        assert raised.value.details == {
+            "max_context_tokens": 2048, "requested_tokens": 2500, "prompt_tokens": 1500, "max_tokens": 1000,
+        }
 
     def test_passes_when_exactly_at_limit(self, service):
         """No error when prompt + max_tokens exactly equals context limit."""

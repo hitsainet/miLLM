@@ -196,7 +196,7 @@ miLLM detects a trailing assistant message and completes it instead: everything 
 |-----------|--------|--------|
 | No model loaded | 503 | `model_not_loaded` |
 | Unknown model name in request | 404 | `model_not_found` |
-| Prompt + `max_tokens` exceeds context window | 400 | `context_length_exceeded` |
+| Prompt + `max_tokens` exceeds the model's context window, on any engine and any route (an embeddings input past it too). The message gives the limit and what was asked for. A streamed request is refused with this 400 before the stream starts; if the stream has already started, it ends with this error event and `[DONE]` | 400 | `context_length_exceeded` |
 | Steering error on an in-flight stream (mismatched cluster, bad index) | SSE `error` event, then `[DONE]` | `invalid_feature_index` |
 | Request queue full (backpressure) | 503 | `queue_full` |
 | Unknown `profile` | 404 | `profile_not_found` |

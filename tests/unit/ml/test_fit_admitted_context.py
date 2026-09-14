@@ -43,7 +43,7 @@ pytest.importorskip("transformers")
 from transformers import Gemma3Config, Olmo2Config, Qwen2Config  # noqa: E402
 
 from millm.core.config import settings  # noqa: E402
-from millm.core.errors import InsufficientMemoryError  # noqa: E402
+from millm.core.errors import ContextLengthExceededError, InsufficientMemoryError  # noqa: E402
 from millm.ml import model_loader  # noqa: E402
 from millm.ml.gpu_placement import MODE_SHARD, list_gpus  # noqa: E402
 from millm.ml.model_loader import kv_cache_spec, plan_transformers_load  # noqa: E402
@@ -153,13 +153,13 @@ class TestTheRequestCheckReadsTheSameLimit:
         top-level config it was accepted at any length."""
         service = self._service(Gemma3Config(**GEMMA3_12B))
 
-        with pytest.raises(ValueError, match="Context length exceeded"):
+        with pytest.raises(ContextLengthExceededError, match="maximum context length is 131072"):
             service._check_context_length(prompt_tokens=131_000, max_new_tokens=1_000)
         service._check_context_length(prompt_tokens=130_000, max_new_tokens=1_000)
 
     def test_a_text_model_is_checked_as_before(self):
         service = self._service(Olmo2Config(**OLMO2_13B))
 
-        with pytest.raises(ValueError, match="4097 > 4096"):
+        with pytest.raises(ContextLengthExceededError, match="is 4096 tokens. However, you requested 4097"):
             service._check_context_length(prompt_tokens=4_000, max_new_tokens=97)
         service._check_context_length(prompt_tokens=4_000, max_new_tokens=96)

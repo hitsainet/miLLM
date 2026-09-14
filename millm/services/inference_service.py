@@ -138,6 +138,22 @@ def _release_generation_memory() -> None:
         logger.warning("generation_oom_release_failed", error=str(e))
 
 
+def _stream_error_event(exc: MiLLMError) -> str:
+    """The SSE error event for a refusal raised after a stream's 200 was committed.
+
+    The same envelope /v1 answers with when it can still choose the status: the
+    error's own OpenAI type when it names one, otherwise invalid_request_error for
+    a request to change (4xx) and server_error for the rest.
+    """
+    import json
+
+    error_type = getattr(exc, "openai_error_type", None) or (
+        "invalid_request_error" if exc.status_code < 500 else "server_error"
+    )
+    body = {"error": {"message": exc.message, "type": error_type, "code": exc.code.lower()}}
+    return f"data: {json.dumps(body)}\n\n"
+
+
 def _served_max_context(config: Any) -> Optional[int]:
     """The longest prompt + generation a transformers model is asked to serve; None when unknown.
 
@@ -2492,8 +2508,14 @@ class InferenceService:
         """
         Validate that prompt + generation fits within model context.
 
+        Raised as ContextLengthExceededError (400 context_length_exceeded on
+        /v1). It was a bare ValueError from 2026-02-07, which reached a
+        non-streaming client as a 500 — an invitation to retry a request that
+        can never succeed — and cut a stream off after its 200 with no error
+        event and no [DONE]. Hardware acceptance, 2026-09-14 (item 7).
+
         Raises:
-            ValueError: If context length would be exceeded.
+            ContextLengthExceededError: If context length would be exceeded.
         """
         max_length = _served_max_context(getattr(self._model, "config", None))
         if max_length is None:
@@ -2501,11 +2523,49 @@ class InferenceService:
 
         total = prompt_tokens + max_new_tokens
         if total > max_length:
-            from millm.api.routes.openai.errors import context_length_exceeded_error
-            raise ValueError(
-                f"Context length exceeded: {prompt_tokens} prompt + "
-                f"{max_new_tokens} max_tokens = {total} > {max_length}"
+            asked = (
+                f"{prompt_tokens} in the prompt, {max_new_tokens} for the completion"
+                if max_new_tokens
+                else f"{prompt_tokens} in the input"
             )
+            raise ContextLengthExceededError(
+                f"This model's maximum context length is {max_length} tokens. However, "
+                f"you requested {total} tokens ({asked}). Shorten the prompt or ask for "
+                "fewer max_tokens.",
+                details={
+                    "max_context_tokens": max_length,
+                    "requested_tokens": total,
+                    "prompt_tokens": prompt_tokens,
+                    "max_tokens": max_new_tokens,
+                },
+            )
+
+    def check_stream_admission(self, request: ChatCompletionRequest) -> None:
+        """Refuse, before a stream's 200 is committed, a chat request its generator would refuse.
+
+        A streaming response commits its status and headers before the
+        generator runs, so a refusal found there can only be an error event.
+        The route calls this first, so a prompt past the model's context is a
+        400 with the error envelope, as it is without streaming. The generator
+        checks again (the model can change in between) and answers with an
+        error event and [DONE]. Hardware acceptance, 2026-09-14 (item 7): the
+        stream was cut off after its 200 with neither.
+
+        llama.cpp is skipped: it measures its own window and its refusal is
+        translated where it is raised.
+
+        Raises:
+            ContextLengthExceededError: prompt tokens plus max_tokens exceed the
+                model's context.
+        """
+        if not self._model_state.is_loaded or self._engine_is_llamacpp():
+            return
+        prompt = self._format_chat_messages(request.messages, request.chat_template_kwargs)
+        inputs = self._tokenizer(prompt, return_tensors="pt")
+        self._check_context_length(
+            int(inputs["input_ids"].shape[1]),
+            GenerationConfig.from_request(request).max_new_tokens,
+        )
 
     def _determine_finish_reason(
         self,
@@ -3814,14 +3874,28 @@ class InferenceService:
                     args=(generation_kwargs, thread_error),
                 )
                 thread.start()
-            except BaseException:
+            except BaseException as setup_error:
                 self._restore_request_profile(_saved_steering)
                 # Close the sensing boundary too — a stale open boundary
                 # would let later non-begin passes sense with garbage
                 # offsets (011 R1).
                 if _sensing_sae is not None:
                     _sensing_sae.sae.collect_sensing_hits()
-                raise
+                if not isinstance(setup_error, MiLLMError):
+                    raise
+                # A refusal found here — a prompt past the context, which the
+                # route's check_stream_admission refuses first unless the model
+                # changed in between — arrives after the 200 is committed.
+                # Raised, it cut the stream off with no error event and no
+                # [DONE] (hardware acceptance, 2026-09-14, item 7).
+                logger.info(
+                    "stream_refused_before_generation",
+                    code=setup_error.code,
+                    completion_id=completion_id,
+                )
+                yield _stream_error_event(setup_error)
+                yield "data: [DONE]\n\n"
+                return
 
             try:
                 # Send first chunk with role
@@ -4274,6 +4348,9 @@ class InferenceService:
                 encoded = self._tokenizer(
                     text, return_tensors="pt", padding=True, truncation=True
                 ).to(self._get_input_device())
+                # A tokenizer with no model_max_length does not truncate, and an
+                # input past the model's positions ran as a 500 or out of memory.
+                self._check_context_length(int(encoded.input_ids.shape[1]), 0)
                 total_tokens += encoded.input_ids.shape[1]
 
                 # Get embeddings from last hidden layer
@@ -4407,6 +4484,9 @@ class InferenceService:
         )
         input_ids = self._tokenizer.encode(prompt, return_tensors="pt")[0].tolist()
         gen_config = GenerationConfig.from_request(request)
+        # The serial path's check; this delegation had none (hardware acceptance,
+        # 2026-09-14, item 7).
+        self._check_context_length(len(input_ids), gen_config.max_new_tokens)
 
         generated_ids, finish_reason = await self._cbm_backend.generate(
             input_ids=input_ids,
@@ -4457,6 +4537,14 @@ class InferenceService:
         )
         input_ids = self._tokenizer.encode(prompt, return_tensors="pt")[0].tolist()
         gen_config = GenerationConfig.from_request(request)
+        try:
+            # The route's check_stream_admission refuses this first; after the
+            # 200 a refusal is an error event and [DONE], never a cut-off stream.
+            self._check_context_length(len(input_ids), gen_config.max_new_tokens)
+        except ContextLengthExceededError as refusal:
+            yield _stream_error_event(refusal)
+            yield "data: [DONE]\n\n"
+            return
         _splitter = StreamingReasoningSplitter(
             self._prompt_opened_think(prompt)
         )
@@ -4570,6 +4658,7 @@ class InferenceService:
                 prompt_text, return_tensors="pt"
             )[0].tolist()
             prompt_tokens = len(input_ids)
+            self._check_context_length(prompt_tokens, gen_config.max_new_tokens)
 
             generated_ids, finish_reason = await self._cbm_backend.generate(
                 input_ids=input_ids,

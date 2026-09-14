@@ -190,6 +190,10 @@ async def create_chat_completion(
         if request.profile and request.steering_intensity is None:
             await inference.ensure_profile_exists(request.profile)
 
+        # And a prompt past the model's context: a 400 with the error envelope,
+        # not a 200 whose stream is cut off (hardware acceptance, 2026-09-14).
+        inference.check_stream_admission(request)
+
         queue = inference.request_queue
         if queue.pending_count >= queue.max_pending:
             raise QueueFullError(

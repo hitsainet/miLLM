@@ -64,7 +64,7 @@ Requests acquire a slot in a semaphore-guarded queue (`MAX_CONCURRENT_REQUESTS`,
 
 ### Speculative decoding (opt-in)
 
-Set `SPECULATIVE_MODEL` to a small draft model (e.g. `google/gemma-2-2b` drafting for 27B). The draft proposes `SPECULATIVE_NUM_TOKENS` tokens; the main model verifies them in one pass. With an SAE attached, the draft is unsteered — acceptance rate drops, but **correctness is preserved** because every accepted token was verified by the steered main model, and monitoring captures real main-model activations.
+Set `SPECULATIVE_MODEL` to a small draft model (e.g. `google/gemma-2-2b` drafting for 27B). The draft is loaded whole onto one card: the main model's card, or, for a model split across GPUs, whichever of its cards has the most free memory at that moment. The draft is dropped when the model is unloaded, and it is not loaded again until the next model is in place. The draft proposes `SPECULATIVE_NUM_TOKENS` tokens; the main model verifies them in one pass. With an SAE attached, the draft is unsteered — acceptance rate drops, but **correctness is preserved** because every accepted token was verified by the steered main model, and monitoring captures real main-model activations.
 
 ## Request lifecycle (serial chat completion)
 

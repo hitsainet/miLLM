@@ -69,7 +69,7 @@ curl -X POST http://localhost:8000/api/models \
 | `source` | `huggingface` or `local` |
 | `repo_id` | Required for `huggingface` |
 | `local_path` | Required for `local`; system directories are rejected |
-| `quantization` | `FP16`, `Q8`, `Q4`, `Q2` — applied at download time, weights saved quantized. A `Q2` transformers checkpoint that is not already quantized is refused at load (`400 UNSUPPORTED_QUANTIZATION`): bitsandbytes has no 2-bit mode |
+| `quantization` | `FP16`, `Q8`, `Q4`, `Q2` — the precision the model is **loaded** at. The download stores the repository's checkpoint as published whatever you pick (a `Q4` row downloads full-precision weights), and bitsandbytes quantizes it on every load. A checkpoint that is already quantized (GPTQ, AWQ, bitsandbytes, BitNet) loads at its own precision and is sized from the weights it stores. A `Q2` transformers checkpoint that is not already quantized is refused at load (`400 UNSUPPORTED_QUANTIZATION`): bitsandbytes has no 2-bit mode |
 | `trust_remote_code` | Explicit opt-in per download |
 | `hf_token` | Never logged or persisted |
 | `gguf_label` | The exact GGUF quantization to fetch, e.g. `IQ4_XS`. Names the model `repo:LABEL` so several quantizations of one repository can coexist — see [Model Management](/features/model-management#gguf-models-and-quantization). |

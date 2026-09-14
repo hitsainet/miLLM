@@ -5,7 +5,7 @@ title: Model Management
 
 # Model Management
 
-Everything starts with a loaded model. miLLM downloads models from HuggingFace (or imports from a local path), optionally quantizes them at download time, and loads one model at a time onto the GPU.
+Everything starts with a loaded model. miLLM downloads models from HuggingFace (or imports from a local path), loads one model at a time onto the GPU, and optionally quantizes it as it loads.
 
 ![miLLM Models Page](/img/miLLM_Models_01.jpg)
 
@@ -31,7 +31,7 @@ bitsandbytes has no 2-bit mode. A Q2 transformers checkpoint that is not already
 6. Check **Trust Remote Code** only if the model requires custom code (explicit opt-in, per download)
 7. Click **Download & Load Model**
 
-Quantization happens **at download time** — miLLM saves the quantized weights to disk, so subsequent loads skip re-quantization. Download progress streams over WebSocket to the UI; downloads can be cancelled but not paused.
+Quantization happens **at load time**, not at download time. Whatever quantization you pick, the download stores the repository's checkpoint exactly as it was published. Then, on every load, bitsandbytes quantizes each weight as it is placed on the GPU. So picking `Q4` does not make the download smaller. Downloading the same repository as both `FP16` and `Q4` stores the same files twice, once in each model's cache directory. Download progress streams over WebSocket to the UI; downloads can be cancelled but not paused.
 
 :::tip Choosing quantization for steering work
 Prefer **FP16** for a model that fits: quantized (bitsandbytes) models cannot use `torch.compile`, so FP16 decodes faster on capable GPUs despite the extra memory. See [Hardware Requirements](/getting-started/hardware) for sizing tables.
@@ -41,7 +41,7 @@ Prefer **FP16** for a model that fits: quantized (bitsandbytes) models cannot us
 
 miLLM serves **GGUF** files the way Ollama does, alongside HuggingFace checkpoints. A GGUF repository usually publishes several quantizations of the same weights, and **Preview** lists each one with its file size so you can pick before downloading.
 
-The distinction that matters against the table above: bitsandbytes quantization happens *at download time* from a full-precision checkpoint, while a GGUF file was quantized ahead of time by whoever published it. What you choose is a file, not a mode — `IQ4_XS`, `Q4_K_M`, `Q5_K_M` and so on.
+The distinction that matters against the table above: bitsandbytes quantizes a full-precision checkpoint *every time it loads*, while a GGUF file was quantized ahead of time by whoever published it. What you choose is a file, not a mode — `IQ4_XS`, `Q4_K_M`, `Q5_K_M` and so on.
 
 ### Several quantizations of one repository can coexist
 

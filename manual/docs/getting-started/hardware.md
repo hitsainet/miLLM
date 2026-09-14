@@ -30,7 +30,7 @@ Total VRAM ≈ **model weights + KV cache + SAE + overhead (~1 GB)**.
 | Llama 3.1 8B / Gemma 2 9B | ~16–18 GB | ~9 GB | ~5.5 GB |
 | Gemma 2 27B | ~54 GB | ~28 GB | ~15 GB |
 
-Quantization is chosen **at download time** — miLLM saves the quantized weights to disk, so a Q4 download loads directly without a full-precision intermediate.
+Quantization is applied **when the model is loaded**, not when it is downloaded. The download stores the repository's checkpoint as published, so a `Q4` download takes as much disk as `FP16`. While loading, bitsandbytes quantizes each weight on the card it is placed on, so the GPU never holds a full-precision copy of the model.
 
 The table above is **bitsandbytes** quantization of a HuggingFace checkpoint. **GGUF** files are quantized ahead of time by whoever published them, so the figure that matters is the file size on the Hub — an `IQ4_XS` build of a 31B model is ~16 GB, a `Q5_K_M` ~22 GB. miLLM shows the size of each quantization before you download it, and several quantizations of one repository can coexist; see [Model Management](/features/model-management#gguf-models-and-quantization).
 
@@ -99,7 +99,9 @@ A model goes on **one card whenever one card holds it**: with **Auto**, the card
 
 A model that no single card can hold is **split across GPUs**. The cards with the most free memory are taken first, and only as many as the model needs. Each card of a split keeps 1 GB back for its CUDA context and for the activations of the layers it runs. Splitting costs a copy between cards at every layer boundary, and a split model is not compiled, so a model that fits one card is never split unless you ask.
 
-**A transformers model never runs from CPU memory or disk.** This covers FP16/BF16 and bitsandbytes Q8/Q4. If the cards together cannot hold it, the load is refused before anything is unloaded, and the refusal gives the figures for each card. miLLM also checks where the weights actually landed, and refuses the load if any part ended up on the CPU or disk. Only GGUF models may run partly on the CPU.
+**A transformers model never runs from CPU memory or disk.** This covers FP16/BF16 and bitsandbytes Q8/Q4. If the cards together cannot hold it, the load is refused before anything is unloaded, and the refusal gives the figures for each card. A split is also checked layer by layer before anything is unloaded: miLLM works out where each layer of the model would go from the checkpoint's configuration, without reading any weights, and refuses a split that would put any layer on the CPU or disk. The refusal lists how much would land on each device. After loading, miLLM checks again where the weights actually landed.
+
+A GGUF model runs on the CPU only when no card has room for it, and then it runs there entirely. A GGUF model too big for all the cards together is still loaded with every layer on the GPUs, at the largest context that fits. If its weights alone do not fit, the load fails. miLLM does not yet offload part of a GGUF model to the CPU.
 
 Choose **All GPUs (split)** in the GPU selector, or send `"gpu": "all"`, to split a model across every card even when one card could hold it. This is useful for checking that a split model generates what the single-card model does. Like a named card, "all" is honoured or refused, never swapped.
 

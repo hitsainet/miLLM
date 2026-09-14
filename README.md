@@ -52,7 +52,7 @@ This compatibility is what allows Open WebUI, miStudio, and custom research scri
 
 ## Key Features
 
-**Model Management** — Download models from HuggingFace with optional 4-bit (Q4) or 8-bit (Q8) quantization via bitsandbytes. Models are cached locally and loaded to GPU on demand. The Admin UI shows VRAM usage so you can plan memory budgets before loading.
+**Model Management** — Download models from HuggingFace and load them at 4-bit (Q4) or 8-bit (Q8) through bitsandbytes, which quantizes each time the model is loaded. Models are cached locally and loaded to GPU on demand. The Admin UI shows VRAM usage so you can plan memory budgets before loading.
 
 **SAE Management** — Download SAEs from any HuggingFace repository (including Gemma Scope, EleutherAI's SAE suite, and custom uploads). The preview browser groups SAE files by layer and width so you can select the right configuration for your model without guessing. Multiple SAEs can be cached; one can be attached at a time.
 

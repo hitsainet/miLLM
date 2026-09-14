@@ -208,7 +208,7 @@ class TestThePreflightReadsTheRealMap:
 
         details = raised.value.details
         assert details["off_gpu"] == ["disk"]
-        assert details["mapped_mb_by_device"] == {"cuda:0": 6_900, "cuda:1": 21_216, "disk": 2_004}
+        assert details["mapped_mb_by_device"] == {"cuda:0": 6_901, "cuda:1": 21_217, "disk": 2_004}
         assert details["before_loading"] is True
 
     def test_the_same_split_with_room_for_lm_head_maps_onto_the_gpus(self, tmp_path):
@@ -217,8 +217,8 @@ class TestThePreflightReadsTheRealMap:
         assert placement.transformers_max_memory() == {0: "10476MiB", 1: "23476MiB"}
 
         assert preflight_split("wide-16", path, "FP16", placement) == {
-            "cuda:0": 6_900,
-            "cuda:1": 23_220,
+            "cuda:0": 6_901,
+            "cuda:1": 23_221,
         }
 
     def test_nothing_to_compute_is_not_a_refusal(self, tmp_path):
@@ -321,7 +321,7 @@ class TestThePreCheckRefusesBeforeTheUnload:
         error = response.json()["error"]
         assert error["code"] == "INSUFFICIENT_MEMORY"
         assert error["details"]["mapped_mb_by_device"] == {
-            "cuda:0": 6_900, "cuda:1": 21_216, "disk": 2_004,
+            "cuda:0": 6_901, "cuda:1": 21_217, "disk": 2_004,
         }
         assert "would run from disk" in error["message"], "the toast shows the refusal, not a generic sentence"
         assert not svc.unload_model.called
@@ -519,15 +519,15 @@ class TestACheckpointTransformersDequantizesIsSizedAsItLoads:
     of these cards (budgets 10,476 + 22,476 = 32,952 MB) holds it.
 
     Since Decision 7 (2026-09-14) the plan sizes it as it loads and judges it per
-    card, with no x1.2. Dequantized: 30,120 MiB, which no card holds, and the
+    card, with no x1.2. Dequantized: 30,121 MiB, which no card holds, and the
     split's map is WIDE's FP16 map, lm_head on disk. Kept in FP8: each layer's
     linears 855,638,016 B at 1 B, their block scales (128 x 128 blocks: q, o
     4,096; k, v 512; gate, up, down 14,336 -> 52,224 x 4 B) and two bf16 norms
     (32,768 B) = 855,879,680 B; 16 layers + bf16 embed_tokens and lm_head
-    (4,202,692,608 B) + final norm (16,384 B) = 17,896,783,872 B = 17,067 MiB;
+    (4,202,692,608 B) + final norm (16,384 B) = 17,896,783,872 B = 17,068 MiB (rounded up);
     + KV 128 MiB (16 layers x 2 x 8 x 128 x 2 B x 2,048 tokens — LlamaConfig's
     max_position_embeddings, below the 4,096 floor; review round 5) + 500 MiB
-    context = 17,695 on the 3090."""
+    context = 17,696 on the 3090."""
 
     CARDS = ((TI_3080, 11_500, 12_288), (RTX_3090, 23_500, 24_576))
 
@@ -544,9 +544,9 @@ class TestACheckpointTransformersDequantizesIsSizedAsItLoads:
             with pytest.raises(InsufficientMemoryError) as raised:
                 _plan(self.CARDS, 19_660, cache_path=path)
         details = raised.value.details
-        assert details["weights_mb"] == 30_120
+        assert details["weights_mb"] == 30_121
         assert details["off_gpu"] == ["disk"]
-        assert details["mapped_mb_by_device"] == {"cuda:0": 6_900, "cuda:1": 21_216, "disk": 2_004}
+        assert details["mapped_mb_by_device"] == {"cuda:0": 6_901, "cuda:1": 21_217, "disk": 2_004}
 
     def test_kept_in_fp8_it_is_sized_by_what_it_stores(self, tmp_path):
         """On a card that runs FP8 the checkpoint is not refused for a bf16 size
@@ -555,7 +555,7 @@ class TestACheckpointTransformersDequantizesIsSizedAsItLoads:
         with patch("torch.cuda.get_device_capability", return_value=(8, 9)):
             placement = _plan(self.CARDS, 19_660, cache_path=path)
         assert (placement.mode, placement.index) == (MODE_SINGLE, 1)
-        assert placement.required_mb == 17_695
+        assert placement.required_mb == 17_696
 
 
 # Real configurations' shapes (config.json fields), built on the meta device only.
@@ -656,7 +656,7 @@ class TestAllIsHonouredOrRefused:
         """Only "all" promises every card. Llama at 7B widths, 26 layers, 32,000
         vocab, untied, worked by hand: a layer 4 x 4,096^2 + 3 x 4,096 x 11,008 +
         8,192 = 202,383,360 params = 386 MiB; embed_tokens + lm_head 2 x 250 MiB;
-        500 + 26 x 386.02 = 10,536 MiB. Row estimate x1.2 = 12,643, more than
+        500 + 26 x 386.02 = 10,536.5, 10,537 MiB rounded up. Row estimate x1.2 = 12,643, more than
         either card has free (12,000 / 11,000), so Auto plans both
         (max_memory 10,976 / 9,976) — and the weights fit the first card whole.
         That load runs on one card and fits; refusing it would turn away a model
@@ -680,7 +680,7 @@ class TestAllIsHonouredOrRefused:
         assert placement.mode == MODE_SHARD
         assert placement.transformers_max_memory() == {0: "10976MiB", 1: "9976MiB"}
 
-        assert preflight_split("llama-7b-widths-26", path, "FP16", placement) == {"cuda:0": 10_536}
+        assert preflight_split("llama-7b-widths-26", path, "FP16", placement) == {"cuda:0": 10_537}
 
     def test_the_pre_check_refuses_it_before_the_unload(self, tmp_path):
         """The resident model holds 16,000 MB of card 1: projected 3,000 / 23,500.

@@ -29,14 +29,14 @@ Weights, by hand:
                       1,835,008 each; gate, up, down 3,584 x 18,944 = 67,895,296 each;
                       q/k/v biases 4,608; two norms 7,168 -> 233,057,792 params x 2 B;
                       28 layers + embed_tokens and lm_head 544,997,376 params each x 2 B
-                      + final norm = 15,231,233,024 B = 14,525 MiB. Its KV at 4k is
+                      + final norm = 15,231,233,024 B = 14,526 MiB (rounded up). Its KV at 4k is
                       28 x 2 x 4 x 128 x 2 B x 4,096 = 224 MiB. One card needs
-                      14,525 + 224 + 500 = 15,249; the slack's row estimate was
+                      14,526 + 224 + 500 = 15,250; the slack's row estimate was
                       7.6B x 2 B x 1.2 = 17,395.
 The per-card layouts of Qwen2.5-14B and OLMo-2-13B are transformers' own map over
 max_memory 10,476 / 22,476 (free less SHARD_RESERVE_MB), the map review round 3
-measured: Qwen2.5-14B 8,835 MiB and 14 layers on cuda:0, 19,335 and 34 on cuda:1;
-OLMo-2-13B 9,450 and 14 / 16,710 and 26.
+measured: Qwen2.5-14B 8,836 MiB and 14 layers on cuda:0, 19,337 and 34 on cuda:1;
+OLMo-2-13B 9,451 and 14 / 16,712 and 26 (MiB rounded up once per card, review round 5).
 
 MUTATION CONTROLS (mutate.py; each restored and its sha256 verified; the placement,
 preflight, load, API and wiring test files run, 323 tests):
@@ -217,16 +217,16 @@ class TestThePlacement:
         assert placement.mode == MODE_SHARD
         assert placement.transformers_max_memory() == {0: "10476MiB", 1: "22476MiB"}
         assert cards["cuda:0"] == {
-            "device": "cuda:0", "name": TI_3080, "free_mb": 11_500, "weights_mb": 8_835,
-            "kv_mb": 224, "context_mb": 500, "layers": 14, "need_mb": 9_559, "short_mb": 0,
+            "device": "cuda:0", "name": TI_3080, "free_mb": 11_500, "weights_mb": 8_836,
+            "kv_mb": 224, "context_mb": 500, "layers": 14, "need_mb": 9_560, "short_mb": 0,
         }
-        assert (cards["cuda:1"]["weights_mb"], cards["cuda:1"]["layers"], cards["cuda:1"]["kv_mb"]) == (19_335, 34, 544)
-        assert cards["cuda:1"]["need_mb"] == 20_379
+        assert (cards["cuda:1"]["weights_mb"], cards["cuda:1"]["layers"], cards["cuda:1"]["kv_mb"]) == (19_337, 34, 544)
+        assert cards["cuda:1"]["need_mb"] == 20_381
 
     def test_qwen25_14b_is_refused_where_cuda1_cannot_hold_a_32k_context(self, tmp_path):
-        """Qwen2.5-14B serves 32,768 tokens. cuda:1 needs 19,335 + 34 layers x 128 MiB
-        (4,352) + 500 = 24,187 of its 23,500: 687 short. cuda:0 needs 8,835 + 1,792 +
-        500 = 11,127 of 11,500, and fits. (Round 4 refused OLMo-2-13B at 8,192 here,
+        """Qwen2.5-14B serves 32,768 tokens. cuda:1 needs 19,337 + 34 layers x 128 MiB
+        (4,352) + 500 = 24,189 of its 23,500: 689 short. cuda:0 needs 8,836 + 1,792 +
+        500 = 11,128 of 11,500, and fits. (Round 4 refused OLMo-2-13B at 8,192 here,
         a context that model never serves: review round 5.)"""
         path = _save(tmp_path, Qwen2Config(**QWEN25_14B))
 
@@ -238,22 +238,22 @@ class TestThePlacement:
         assert details["short_devices"] == ["cuda:1"]
         assert (details["min_context_tokens"], details["model_max_context_tokens"]) == (32_768, 32_768)
         assert details["per_card"][1] == {
-            "device": "cuda:1", "name": RTX_3090, "free_mb": 23_500, "weights_mb": 19_335,
-            "kv_mb": 4_352, "context_mb": 500, "layers": 34, "need_mb": 24_187, "short_mb": 687,
+            "device": "cuda:1", "name": RTX_3090, "free_mb": 23_500, "weights_mb": 19_337,
+            "kv_mb": 4_352, "context_mb": 500, "layers": 34, "need_mb": 24_189, "short_mb": 689,
         }
-        assert (details["per_card"][0]["need_mb"], details["per_card"][0]["short_mb"]) == (11_127, 0)
+        assert (details["per_card"][0]["need_mb"], details["per_card"][0]["short_mb"]) == (11_128, 0)
         message = raised.value.message
-        for figure in ("cuda:1", "23500 MiB free", "19335 MiB of weights", "4352 MiB of KV cache", "500 MiB CUDA context", "687 MiB short"):
+        for figure in ("cuda:1", "23500 MiB free", "19337 MiB of weights", "4352 MiB of KV cache", "500 MiB CUDA context", "689 MiB short"):
             assert figure in message
 
     def test_olmo2_13b_is_accepted_at_the_default_4k_context(self, tmp_path):
-        """cuda:0: 9,450 + 1,120 + 500 = 11,070 of 11,500. The minimum context is read."""
+        """cuda:0: 9,451 + 1,120 + 500 = 11,071 of 11,500. The minimum context is read."""
         path = _save(tmp_path, Olmo2Config(**OLMO2_13B))
 
         placement, cards = _accepted_cards(NODE, path)
 
         assert placement.mode == MODE_SHARD
-        assert (cards["cuda:0"]["kv_mb"], cards["cuda:0"]["need_mb"]) == (1_120, 11_070)
+        assert (cards["cuda:0"]["kv_mb"], cards["cuda:0"]["need_mb"]) == (1_120, 11_071)
 
     def test_a_7b_width_model_that_fits_one_card_goes_on_it(self, tmp_path):
         """Card 1 has 17,000 free. The slack's 17,395 did not fit it and split the model."""
@@ -270,7 +270,7 @@ class TestThePlacement:
 
         placement = _plan(cards, path, estimate=row_estimate)
 
-        assert (placement.mode, placement.index, placement.required_mb) == (MODE_SINGLE, 1, 15_249)
+        assert (placement.mode, placement.index, placement.required_mb) == (MODE_SINGLE, 1, 15_250)
 
     def test_a_named_card_that_cannot_hold_its_context_is_refused_naming_it(self, tmp_path):
         path = _save(tmp_path, Qwen2Config(**QWEN25_7B))
@@ -281,13 +281,13 @@ class TestThePlacement:
 
         [card] = raised.value.details["per_card"]
         assert card == {
-            "device": "cuda:0", "name": TI_3080, "free_mb": 15_000, "weights_mb": 14_525,
-            "kv_mb": 224, "context_mb": 500, "layers": 28, "need_mb": 15_249, "short_mb": 249,
+            "device": "cuda:0", "name": TI_3080, "free_mb": 15_000, "weights_mb": 14_526,
+            "kv_mb": 224, "context_mb": 500, "layers": 28, "need_mb": 15_250, "short_mb": 250,
         }
         assert "not swapped for another one" in raised.value.message
 
     def test_the_cuda_context_allowance_is_read(self, tmp_path):
-        """With 3,000 MB a card, 14,525 + 224 + 3,000 = 17,749 no longer fits card 1's 17,000."""
+        """With 3,000 MB a card, 14,526 + 224 + 3,000 = 17,750 no longer fits card 1's 17,000."""
         path = _save(tmp_path, Qwen2Config(**QWEN25_7B))
         cards = ((TI_3080, 11_500, 12_288), (RTX_3090, 17_000, 24_576))
 
@@ -373,7 +373,7 @@ class TestThePreCheckRefusesPerCardBeforeTheUnload:
         error = response.json()["error"]
         assert error["code"] == "INSUFFICIENT_MEMORY"
         assert error["details"]["short_devices"] == ["cuda:1"]
-        assert "687 MiB short" in error["message"]
+        assert "689 MiB short" in error["message"]
         assert not svc.unload_model.called
         assert not svc._executor.method_calls and not svc._executor.called
 
@@ -397,5 +397,5 @@ class TestThePreCheckRefusesPerCardBeforeTheUnload:
         assert response.status_code == 503, response.text
         body = response.json()["error"]
         assert body["code"] == "insufficient_memory"
-        assert "cuda:1" in body["message"] and "687 MiB short" in body["message"]
+        assert "cuda:1" in body["message"] and "689 MiB short" in body["message"]
         assert not svc.unload_model.called

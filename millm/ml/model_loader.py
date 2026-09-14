@@ -765,10 +765,7 @@ def preflight_split(
         )
         return None
 
-    mapped_mb: dict[str, int] = {}
-    for name, device in mapped.items():
-        label = f"cuda:{device}" if isinstance(device, int) and not isinstance(device, bool) else str(device)
-        mapped_mb[label] = mapped_mb.get(label, 0) + int(sizes.get(name, 0) / (1024 * 1024))
+    mapped_mb = _mb_by_device(mapped, sizes)
     allowed = set(placement.device_labels)
     off_gpu = sorted(label for label in mapped_mb if label not in allowed)
     if off_gpu:
@@ -2800,6 +2797,37 @@ def _mapped_device(name: str, mapped: dict[str, Any]) -> Any:
     return device
 
 
+def _mb_by_device(mapped: dict[str, Any], sizes: dict[str, int]) -> dict[str, int]:
+    """MiB per device of a device map: the bytes of the modules mapped there, rounded up once.
+
+    Flooring each module's MiB and then summing lost up to a MiB a module: on
+    gemma-3-12b-it's two-card map the cards summed to 23,248 MiB of a 23,274 MiB
+    model, 26 MiB the fit asked of no card. Review round 5, 2026-09-14.
+    """
+    total_bytes: dict[str, int] = {}
+    for name, device in mapped.items():
+        label = _device_map_label(device)
+        total_bytes[label] = total_bytes.get(label, 0) + int(sizes.get(name, 0))
+    return {label: math.ceil(size / (1024 * 1024)) for label, size in total_bytes.items()}
+
+
+def _layer_device_labels(name: str, mapped: dict[str, Any]) -> set[str]:
+    """Every device holding part of the module `name`: its own entry or nearest ancestor's, else its children's.
+
+    A class with no `_no_split_modules` (BioGPT) lets transformers put one decoder
+    layer's submodules on two cards: then neither the layer nor an ancestor is in
+    the map, only its children, and the layer resolved to no device — its KV
+    cache was counted on no card. Keys and values follow their projections, so
+    the layer's cache may sit on any card holding part of it, and it is counted
+    on each. Review round 5, 2026-09-14.
+    """
+    device = _mapped_device(name, mapped)
+    if device is not None:
+        return {_device_map_label(device)}
+    prefix = name + "."
+    return {_device_map_label(value) for key, value in mapped.items() if key.startswith(prefix)}
+
+
 def _decoder_layer_names(model: Any, num_layers: int) -> Optional[list[str]]:
     """The module names of a model's decoder layers, in order; None when they cannot be found."""
     names = {id(module): name for name, module in model.named_modules()}
@@ -2897,13 +2925,17 @@ class TransformersFit:
                 engine_event="transformers_fit_engine_failed", architecture=self.architecture,
             )
             return None
-        weights: dict[str, int] = {}
-        for name, device in mapped.items():
-            label = _device_map_label(device)
-            weights[label] = weights.get(label, 0) + int(self.sizes.get(name, 0) / (1024 * 1024))
+        weights = _mb_by_device(mapped, self.sizes)
         layers: dict[str, list[int]] = {}
         for index, name in enumerate(names):
-            layers.setdefault(_device_map_label(_mapped_device(name, mapped)), []).append(index)
+            devices = _layer_device_labels(name, mapped)
+            if not devices:
+                logger.error(
+                    "transformers_fit_layer_not_mapped", architecture=self.architecture, layer=name
+                )
+                return None
+            for label in sorted(devices):
+                layers.setdefault(label, []).append(index)
         allowed = set(placement.device_labels)
         return SplitLayout(
             weights_mb=weights,
@@ -2989,7 +3021,7 @@ def transformers_fit(
             stage=stage,
         )
         return None
-    weights_mb = int(sizes.get("", 0) / (1024 * 1024))
+    weights_mb = math.ceil(sizes.get("", 0) / (1024 * 1024))
     if weights_mb <= 0:
         _fit_falls_back(architecture, "its model sizes to no weights")
         return None

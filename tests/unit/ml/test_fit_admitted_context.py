@@ -96,7 +96,7 @@ def _accepted(path, context):
 class TestTheCacheIsSizedAtWhatTheModelServes:
     def test_a_model_that_serves_4096_is_sized_at_4096_under_an_8192_floor(self, tmp_path):
         """cuda:0 holds 14 of 40 layers: 14 x 2 x 40 x 128 x 2 B x 4,096 = 1,120 MiB,
-        need 9,450 + 1,120 + 500 = 11,070 of 11,500. At 8,192 it was 2,240 and a
+        need 9,451 + 1,120 + 500 = 11,071 of 11,500. At 8,192 it was 2,240 and a
         refusal, 690 short."""
         path = _save(tmp_path, Olmo2Config(**OLMO2_13B))
 
@@ -105,7 +105,7 @@ class TestTheCacheIsSizedAtWhatTheModelServes:
         assert placement.mode == MODE_SHARD
         assert logged["min_context_tokens"] == 4_096
         cuda0 = next(card for card in logged["per_card"] if card["device"] == "cuda:0")
-        assert (cuda0["layers"], cuda0["kv_mb"], cuda0["need_mb"]) == (14, 1_120, 11_070)
+        assert (cuda0["layers"], cuda0["kv_mb"], cuda0["need_mb"]) == (14, 1_120, 11_071)
 
     def test_a_model_that_serves_more_is_sized_at_the_floor(self, tmp_path):
         """Qwen2.5-14B serves 32,768: at an 8,192 floor, cuda:0's 14 layers hold

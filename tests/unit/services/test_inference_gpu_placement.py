@@ -44,6 +44,21 @@ whole model switch was kept; the discard now compares a model epoch:
       -> both unload tests, the new switch test, test_a_draft_that_failed_on_the_old_card_...
   R2-M9's string no longer exists (the suspension check it mutated is now the
   epoch compare); R3-M3 is its replacement.
+Review round 4, 2026-09-14 (mutate.py; restored and sha256-verified). Round 3
+compared the epoch BEFORE keeping the draft, with no lock, and a discarded draft's
+memory stayed in torch's cache, which nvidia-smi counts as used:
+  R4-M3  no epoch check once the draft is kept (round 3's code)
+      -> test_an_unload_between_the_check_and_the_keep_does_not_keep_the_draft
+  R4-M3b the check at the keep does not drop the kept draft -> the same test
+  R4-M4  the first discard does not give the cached memory back
+      -> test_a_discarded_draft_gives_its_memory_back_before_the_next_placement
+  R4-M4b the cache emptied while the draft is still referenced -> the same test
+  R4-M4c the helper collects but never empties the cache -> both of the above
+  R4-M4d the discard at the keep does not give the memory back
+      -> test_an_unload_between_the_check_and_the_keep_does_not_keep_the_draft
+  R3-M3 re-run on the first check (its line gained a sibling)
+      -> test_a_draft_that_finishes_loading_after_the_unload_began_is_not_kept,
+         test_a_draft_still_loading_when_the_next_model_has_loaded_is_not_kept
 """
 
 from types import SimpleNamespace
@@ -305,3 +320,69 @@ class TestTheDraftDuringAnUnload:
         ], "the next request loads the draft beside the NEW model"
         assert svc._speculative_model_id == "draft/model", "a discarded draft must not disable speculation"
         assert not late.eval.called
+
+    def test_an_unload_between_the_check_and_the_keep_does_not_keep_the_draft(self):
+        """Review round 4, 2026-09-14. Round 3 compared the epoch and THEN kept the
+        draft, with no lock. The unload runs on the event loop while the draft
+        finishes in a generation thread: landing between the comparison and the
+        assignment, it advanced the epoch, found no draft to release, and the draft
+        was kept for the model being removed — holding its memory through the next
+        load's placement, the defect rounds 2 and 3 each closed once. The unload is
+        injected AT the assignment."""
+
+        class _UnloadLandsAtTheKeep(InferenceService):
+            def __setattr__(self, name, value):
+                if name == "_draft_model" and value is not None and not getattr(self, "_landed", False):
+                    object.__setattr__(self, "_landed", True)
+                    self.on_model_unloading()
+                object.__setattr__(self, name, value)
+
+        svc = _service(SimpleNamespace(hf_device_map={"model.embed_tokens": 1}), [1])
+        svc.__class__ = _UnloadLandsAtTheKeep
+        with patch("transformers.AutoModelForCausalLM"), \
+                patch("torch.cuda.is_initialized", return_value=True), \
+                patch("torch.cuda.empty_cache") as empty_cache:
+            assert svc._get_draft_model() is None, "a draft kept across the unload"
+        assert svc._landed, "the unload must have landed at the keep"
+        assert svc._draft_model is None
+        assert empty_cache.call_count == 1
+        assert svc._speculative_model_id == "draft/model"
+
+    def test_a_discarded_draft_gives_its_memory_back_before_the_next_placement(self):
+        """Review round 4, 2026-09-14. A discarded draft's tensors went back to
+        torch's caching allocator, not to the card: nvidia-smi — what every
+        placement, the pre-check and miStudio's jobs on the same node read — still
+        counted them as used, until something emptied the cache. The unload that
+        discarded it had already emptied it, before the draft finished. The cache
+        is emptied once the draft is no longer referenced."""
+        import weakref
+
+        svc = _service(SimpleNamespace(hf_device_map={"model.embed_tokens": 1}), [1])
+        refs = []
+
+        class _Draft:
+            def eval(self):
+                return self
+
+        def _load_while_the_model_unloads(*args, **kwargs):
+            svc.on_model_unloading()
+            draft = _Draft()
+            refs.append(weakref.ref(draft))
+            return draft
+
+        still_referenced = []
+        with patch("transformers.AutoModelForCausalLM") as factory, \
+                patch("torch.cuda.is_initialized", return_value=True), \
+                patch("torch.cuda.empty_cache", side_effect=lambda: still_referenced.append(refs[0]() is not None)) as empty_cache:
+            factory.from_pretrained.side_effect = _load_while_the_model_unloads
+            assert svc._get_draft_model() is None
+        assert empty_cache.call_count == 1
+        assert still_referenced == [False], "the cache was emptied while the draft was still referenced"
+
+    def test_a_kept_draft_does_not_empty_the_cache(self):
+        svc = _service(SimpleNamespace(hf_device_map={"model.embed_tokens": 1}), [1])
+        with patch("transformers.AutoModelForCausalLM"), \
+                patch("torch.cuda.is_initialized", return_value=True), \
+                patch("torch.cuda.empty_cache") as empty_cache:
+            assert svc._get_draft_model() is not None
+        assert not empty_cache.called

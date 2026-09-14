@@ -13,6 +13,7 @@ Implementation notes:
 
 import asyncio
 import contextvars
+import gc
 import math
 import uuid
 from datetime import datetime
@@ -59,6 +60,24 @@ from millm.services.reasoning_split import (
 
 
 logger = get_logger(__name__)
+
+
+def _return_cached_draft_memory() -> None:
+    """Give a discarded draft's memory back to the card. Never raises.
+
+    Dropping the last reference returns a draft's tensors to torch's caching
+    allocator, not to the card: nvidia-smi — what every placement, the pre-unload
+    check and the other tenants of the node read — still counts them as used
+    until the cache is emptied. A draft discarded because the model changed
+    finishes AFTER the unload that emptied the cache, so nothing else would.
+    Review round 4, 2026-09-14.
+    """
+    gc.collect()
+    try:
+        if torch.cuda.is_initialized():
+            torch.cuda.empty_cache()
+    except Exception as e:  # noqa: BLE001 - a cleanup must not turn off speculation
+        logger.warning("draft_memory_release_failed", error=str(e))
 
 #: Per-request memo for "which circuit is actually steering". A ContextVar
 #: because the InferenceService is a process singleton (see _steering_circuit).
@@ -1876,9 +1895,25 @@ class InferenceService:
                     # the new model's placement had read as free. Review round
                     # 3, 2026-09-14.
                     logger.info("draft_model_discarded_model_changed")
+                    del draft
+                    _return_cached_draft_memory()
                     return None
                 draft.eval()
                 self._draft_model = draft
+                if getattr(self, "_model_epoch", 0) != epoch:
+                    # ...and again once it is KEPT. No lock guards the draft: the
+                    # unload runs on the event loop while this runs in a
+                    # generation thread, and one landing between the check above
+                    # and the assignment advanced the epoch, found no draft to
+                    # release, and this kept the draft for the model being
+                    # removed. Publishing first and checking after closes that:
+                    # whichever runs second sees the other. Review round 4.
+                    if self._draft_model is draft:
+                        self._draft_model = None
+                    logger.info("draft_model_discarded_model_changed")
+                    del draft
+                    _return_cached_draft_memory()
+                    return None
                 logger.info("draft_model_loaded", model_id=self._speculative_model_id)
             except Exception as e:
                 logger.warning(

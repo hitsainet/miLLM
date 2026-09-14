@@ -7,7 +7,31 @@ with support for .env files.
 
 from typing import Literal, Optional
 
+from pydantic import field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+
+def parse_gguf_tensor_split(value: Optional[str]) -> Optional[list[float]]:
+    """GGUF_TENSOR_SPLIT as proportions, or None when unset.
+
+    Comma-separated, one non-negative number per GPU a split uses, in index
+    order ("3,1"). Raises ValueError for anything else, so a typo fails at
+    startup instead of silently splitting by free memory.
+    """
+    text = (value or "").strip()
+    if not text:
+        return None
+    try:
+        proportions = [float(part) for part in text.split(",")]
+    except ValueError as e:
+        raise ValueError(
+            f"GGUF_TENSOR_SPLIT must be comma-separated numbers such as '3,1', got {value!r}"
+        ) from e
+    if any(p < 0 or p != p or p == float("inf") for p in proportions):
+        raise ValueError(f"GGUF_TENSOR_SPLIT proportions must be finite and >= 0, got {value!r}")
+    if not any(p > 0 for p in proportions):
+        raise ValueError(f"GGUF_TENSOR_SPLIT needs at least one proportion above 0, got {value!r}")
+    return proportions
 
 
 class Settings(BaseSettings):
@@ -197,6 +221,18 @@ class Settings(BaseSettings):
     # by what fits.
     GGUF_CONTEXT_LENGTH: int = 32768
 
+    # HOW A GGUF LAYER SPLIT DIVIDES ITS LAYERS, when a model needs more than
+    # one GPU. Empty (the default) splits in proportion to the free memory the
+    # plan found on each card used, largest first. Otherwise one proportion per
+    # card the split uses, in CUDA index order: "1,3" puts a quarter of the
+    # layers on the lower-index card. llama.cpp indexes its list by device, so
+    # miLLM maps these onto the cards used and gives every other card 0.
+    #
+    # A value with the wrong number of entries for a load is REFUSED, not
+    # stretched: guessing would put layers on cards nobody chose. It has no
+    # effect on a model that fits one card.
+    GGUF_TENSOR_SPLIT: str = ""
+
     # KV-CACHE PRECISION. This is the single biggest lever on how much context
     # a GGUF model can hold, and it sat at llama.cpp's F16 default unexamined.
     #
@@ -245,6 +281,12 @@ class Settings(BaseSettings):
     # path instead of CBM, ensuring accurate per-request activation attribution.
     # Trades throughput for monitoring fidelity. Default False (batch-level monitoring).
     CBM_FORCE_SERIAL_MONITORING: bool = False
+
+    @field_validator("GGUF_TENSOR_SPLIT")
+    @classmethod
+    def _validate_gguf_tensor_split(cls, value: str) -> str:
+        parse_gguf_tensor_split(value)
+        return value
 
     @property
     def cors_origins_list(self) -> list[str]:

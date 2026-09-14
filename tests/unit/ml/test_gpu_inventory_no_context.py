@@ -108,7 +108,8 @@ class TestNoContextOnCardsTheModelDoesNotUse:
         with fake_gpus(*NODE) as fake:
             fake.forbid(0)
             _, kwargs = _load(fake, choose_gpu(8_000), quantization="Q8")
-        assert set(kwargs["max_memory"]) == {1, "cpu"}
+        assert kwargs["device_map"] == {"": "cuda:1"}
+        assert "max_memory" not in kwargs
         assert all(index == 1 for _, index in fake.calls)
 
     def test_a_gguf_load_reads_no_card_through_torch(self, tmp_path):

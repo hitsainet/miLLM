@@ -12,6 +12,7 @@ free because the resident model holds 16 GB of it).
 MUTATION CONTROLS (each must turn this file red):
   * drop the resident-usage add-back   -> "fits once the resident memory is counted back" fails
   * remove the pre-check call          -> both refusal tests see the model unloaded and a 202
+Phase 2, 2026-09-14: M7 (Q4 skips the check again) -> test_a_quantized_model_no_split_holds_is_refused_before_the_unload
 """
 
 from concurrent.futures import Future
@@ -119,6 +120,43 @@ class TestARefusalKeepsTheServedModel:
 
         assert response.status_code == 507, response.text
         assert not svc.unload_model.called
+
+
+class TestSplitsAreJudgedBeforeTheUnload:
+    """Projected: 11 GB on card 0, 5 + 16 = 21 GB on card 1. A split's budgets
+    are 9,976 + 19,976 = 29,952 MB."""
+
+    def test_all_cards_that_cannot_hold_it_are_refused_synchronously(self):
+        svc, _ = _service(_fp16(31_000))
+        with fake_gpus(*NODE):
+            response = _post(svc, {"gpu": "all"})
+
+        assert response.status_code == 507, response.text
+        assert not svc.unload_model.called
+        assert svc._executor.calls == []
+
+    def test_a_quantized_model_no_split_holds_is_refused_before_the_unload(self):
+        """Q4 skipped the check on the grounds that it could spill to the CPU;
+        with no spill, skipping it only moved the refusal past the unload."""
+        model = make_model(
+            id=3, status=ModelStatus.READY, quantization=QuantizationType.Q4,
+            estimated_memory_mb=60_000,
+        )
+        svc, _ = _service(model)
+        with fake_gpus(*NODE):
+            response = _post(svc, {})
+
+        assert response.status_code == 507, response.text
+        assert not svc.unload_model.called
+
+    def test_all_that_fits_is_accepted_and_forwarded(self):
+        svc, _ = _service(_fp16(8_000))
+        with fake_gpus(*NODE):
+            response = _post(svc, {"gpu": "all"})
+
+        assert response.status_code == 202, response.text
+        [(_, args)] = svc._executor.calls
+        assert args[-1] == "all"
 
 
 class TestAValidSwitchStillHappens:

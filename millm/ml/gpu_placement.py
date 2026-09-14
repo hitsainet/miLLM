@@ -21,18 +21,22 @@ Policy (operator decisions, 2026-09-13):
   * Auto picks the card with the MOST free memory, read live, that fits.
   * Nothing is reserved for other applications; live free memory is the budget.
   * An explicitly requested card is honoured if it fits, and refused if it does
-    not. It is never silently swapped for another card.
-  * A model no single card can hold falls back to spreading across every card.
-    That is Phase 1's stand-in for real sharding; Phase 2 replaces it.
+    not. It is never silently swapped for another card. "all" (split across
+    every visible card) is an explicit request too.
+  * A model no single card can hold is SPLIT across GPUs: the cards with the
+    most free memory first, and only as many as it needs. A transformers model
+    never spills to the CPU or disk — a split that cannot hold it is refused.
+    Only GGUF may run (partly) on the CPU.
 """
 
 from __future__ import annotations
 
 import dataclasses
 import itertools
+import math
 import uuid as _uuid
 from dataclasses import dataclass
-from typing import Any, Optional, Union
+from typing import Any, Callable, Optional, Union
 
 import structlog
 import torch
@@ -43,29 +47,51 @@ from millm.ml import nvidia_smi
 logger = structlog.get_logger()
 
 _MIB = 1024 * 1024
-_GIB = 1024 ** 3
 
 #: The request value meaning "let the resolver choose".
 AUTO = "auto"
+#: The request value meaning "split across every visible card". Needed to
+#: force-split a model that fits one card (the sharded-vs-single equivalence
+#: check), and honoured or refused like any explicit choice.
+ALL = "all"
 
 #: The whole model on one card.
 MODE_SINGLE = "single"
-#: Spread across every visible card (device_map="auto" / llama.cpp layer split).
-MODE_ALL = "all"
+#: Split across several cards, each with a planned share of GPU memory and no
+#: CPU or disk entry. Phase 1 reported a split as "all": `device_map="auto"`
+#: with no `max_memory`, which accelerate was free to finish on the CPU.
+MODE_SHARD = "shard"
 #: No card is used. Only GGUF may run like this.
 MODE_CPU = "cpu"
 
 REASON_MOST_FREE = "most_free_card_fits"
 REASON_REQUESTED = "requested_card"
+REASON_REQUESTED_ALL = "requested_all_cards"
 REASON_NO_SINGLE_CARD = "no_single_card_fits"
 REASON_SIZE_UNKNOWN = "size_unknown"
 REASON_NO_GPU = "no_gpu"
 
-#: None or "auto", a CUDA index, or a UUID as nvidia-smi prints it.
+#: None or "auto", "all", a CUDA index, or a UUID as nvidia-smi prints it.
 GpuRequest = Union[None, int, str]
 
-#: What bitsandbytes may place on a card, as a share of that card's free memory.
-_BNB_GPU_FRACTION = 0.9
+#: Memory kept back on every card of a split, in MB: its CUDA context, cuBLAS
+#: workspaces, and the activations and KV cache of the layers it runs.
+#: `max_memory` is a budget for WEIGHTS — accelerate fills a card up to it — so a
+#: split planned to each card's whole free memory would leave the forward pass
+#: nothing on any card. A single card needs no such term: the estimate already
+#: carries a 20% runtime overhead (memory_utils.MEMORY_OVERHEAD_FACTOR) and all
+#: of it lands on that card.
+SHARD_RESERVE_MB = 1024
+
+#: What transformers multiplies `max_memory` by for a bitsandbytes load before
+#: placing layers (`quantizer_bnb_{4,8}bit.adjust_max_memory`, transformers
+#: 5.15.1). Counted in the plan and never applied to the map: miLLM applied its
+#: own 0.9 on top, so a bitsandbytes load could use 81% of what was budgeted.
+BNB_MAX_MEMORY_FACTOR = 0.9
+
+#: Labels that mean a module is NOT on a GPU. "meta" is how a disk-offloaded
+#: parameter looks after dispatch.
+OFF_GPU_LABELS = ("cpu", "disk", "meta")
 
 
 @dataclass(frozen=True)
@@ -211,7 +237,7 @@ def project_free_after_unload(
 
 
 def parse_gpu_request(requested: Any) -> Optional[Union[int, str]]:
-    """Normalise a request to None (auto), a card index, or a normalised UUID.
+    """Normalise a request to None (auto), ALL, a card index, or a normalised UUID.
 
     Raises:
         ValueError: for anything that is none of those. A typo must not quietly
@@ -220,7 +246,9 @@ def parse_gpu_request(requested: Any) -> Optional[Union[int, str]]:
     if requested is None:
         return None
     if isinstance(requested, bool):
-        raise ValueError("gpu must be 'auto', a GPU index, or a GPU UUID, not a boolean")
+        raise ValueError(
+            "gpu must be 'auto', 'all', a GPU index, or a GPU UUID, not a boolean"
+        )
     if isinstance(requested, int):
         if requested < 0:
             raise ValueError(f"gpu index must be >= 0, got {requested}")
@@ -229,15 +257,20 @@ def parse_gpu_request(requested: Any) -> Optional[Union[int, str]]:
         text = requested.strip()
         if not text or text.lower() == AUTO:
             return None
+        if text.lower() == ALL:
+            return ALL
         if text.isdigit():
             return int(text)
         normalised = normalize_gpu_uuid(text)
         if normalised is None:
             raise ValueError(
-                f"gpu must be 'auto', a GPU index, or a GPU UUID (GPU-...), got {requested!r}"
+                "gpu must be 'auto', 'all', a GPU index, or a GPU UUID (GPU-...), "
+                f"got {requested!r}"
             )
         return normalised
-    raise ValueError(f"gpu must be 'auto', a GPU index, or a GPU UUID, got {requested!r}")
+    raise ValueError(
+        f"gpu must be 'auto', 'all', a GPU index, or a GPU UUID, got {requested!r}"
+    )
 
 
 def find_gpu(gpus: list[GpuInfo], requested: Union[int, str]) -> GpuInfo:
@@ -258,8 +291,35 @@ def find_gpu(gpus: list[GpuInfo], requested: Union[int, str]) -> GpuInfo:
 
 
 @dataclass(frozen=True)
+class ShardRule:
+    """How a split is sized.
+
+    `need_mb` is what the model needs across every card it uses, and
+    `limit_mb(card)` is what one card can be given. Transformers and llama.cpp
+    count a card differently (a flat reserve here, a planning fraction and
+    per-card runtime overhead there), so the rule comes from the engine.
+
+    `max_memory_factor` is what the engine itself multiplies a limit by before
+    placing; the plan counts it, and the limit handed over does not repeat it.
+    """
+
+    need_mb: int
+    limit_mb: Callable[[GpuInfo], int]
+    max_memory_factor: float = 1.0
+
+
+def transformers_shard_rule(need_mb: int, bitsandbytes: bool = False) -> ShardRule:
+    """A split for `from_pretrained`: each card's free memory less SHARD_RESERVE_MB."""
+    return ShardRule(
+        need_mb=need_mb,
+        limit_mb=lambda gpu: max(gpu.free_mb - SHARD_RESERVE_MB, 0),
+        max_memory_factor=BNB_MAX_MEMORY_FACTOR if bitsandbytes else 1.0,
+    )
+
+
+@dataclass(frozen=True)
 class Placement:
-    """Where one load goes: a single card, every card, or (GGUF only) the CPU."""
+    """Where one load goes: a single card, a split across cards, or (GGUF only) the CPU."""
 
     mode: str
     reason: str
@@ -267,10 +327,21 @@ class Placement:
     gpus: tuple[GpuInfo, ...] = ()
     index: Optional[int] = None
     requested: Optional[Union[int, str]] = None
+    #: A split's planned share per card, (index, MB), in the order the cards
+    #: were taken (most free first).
+    shares: tuple[tuple[int, int], ...] = ()
+    #: A split's limit per card, (index, MB): what the engine may place there
+    #: before its own `max_memory_factor`.
+    limits: tuple[tuple[int, int], ...] = ()
+    max_memory_factor: float = 1.0
 
     @property
     def is_single(self) -> bool:
         return self.mode == MODE_SINGLE
+
+    @property
+    def is_shard(self) -> bool:
+        return self.mode == MODE_SHARD
 
     @property
     def chosen(self) -> Optional[GpuInfo]:
@@ -283,8 +354,8 @@ class Placement:
         """The cards this placement may allocate on."""
         if self.mode == MODE_SINGLE:
             return [int(self.index)] if self.index is not None else []
-        if self.mode == MODE_ALL:
-            return [gpu.index for gpu in self.gpus]
+        if self.mode == MODE_SHARD:
+            return sorted(index for index, _ in self.shares)
         return []
 
     @property
@@ -299,55 +370,88 @@ class Placement:
         return f"cuda:{self.index}" if self.is_single else None
 
     @property
+    def planned_mb_by_index(self) -> dict[int, int]:
+        return dict(self.shares)
+
+    @property
+    def budget_mb_by_index(self) -> dict[int, int]:
+        """What each card of a split can hold, after the engine's own factor."""
+        return {index: int(limit * self.max_memory_factor) for index, limit in self.limits}
+
+    @property
     def capacity_mb(self) -> int:
-        """Free memory this placement can draw on, as read at decision time."""
+        """Free memory of the card(s) this placement uses, as read at decision time."""
         chosen = self.chosen
         if chosen is not None:
             return chosen.free_mb
-        if self.mode == MODE_ALL:
-            return sum(gpu.free_mb for gpu in self.gpus)
+        if self.is_shard:
+            used = set(self.gpu_indices)
+            return sum(gpu.free_mb for gpu in self.gpus if gpu.index in used)
         return 0
 
-    def transformers_device_map(self, bitsandbytes: bool) -> Any:
+    @property
+    def budget_mb(self) -> int:
+        """What this placement can hold: a card's free memory, or a split's summed budgets."""
+        if self.is_shard:
+            return sum(self.budget_mb_by_index.values())
+        return self.capacity_mb
+
+    def transformers_device_map(self) -> Any:
         """The `device_map` for `from_pretrained`.
 
-        One card: `{"": "cuda:N"}` — everything on that card, no accelerate
-        dispatch hooks and no cross-card copies in the forward pass.
+        One card, whatever the quantization: `{"": "cuda:N"}` — everything on
+        that card, no accelerate dispatch hooks and no cross-card copies in the
+        forward pass. bitsandbytes used to take "auto" with a "cpu" entry in
+        `max_memory`, on the belief that it staged weights in host RAM while
+        quantizing. It does not (transformers 5.15.1 materialises each weight on
+        its device-map target and quantizes it there:
+        `core_model_loading.py:1677-1697`, `integrations/bitsandbytes.py:58`);
+        the entry only let a model that did not fit finish on the CPU.
 
-        bitsandbytes keeps "auto" on purpose: its `max_memory` (see
-        `bitsandbytes_max_memory`) names only the chosen card(s) and the CPU, so
-        "auto" places on exactly those, and the CPU entry is what lets
-        bitsandbytes stage weights while it quantizes.
+        A split: "sequential" over `transformers_max_memory()`. NOT "auto".
+        "auto" is accelerate's balanced map, which caps every card but the
+        highest-index one at about model/N (`get_balanced_memory`): on cards of
+        uneven size a model the planned budgets hold was put partly on disk.
+        "sequential" fills each card to exactly the limit given, so the plan is
+        what happens.
 
-        PHASE 1 FALLBACK: a model no single card holds gets "auto" across every
-        card, which is how every load behaved before placement existed. Phase 2
-        replaces this with planned sharding.
+        A split of an unmeasured model has no plan to follow, so it keeps
+        "auto": balanced across every card, GPU-only, checked after the load.
         """
         if self.mode == MODE_CPU:
             return None
-        if self.is_single and not bitsandbytes:
+        if self.is_single:
             return {"": self.device_label}
-        return "auto"
+        return "sequential" if self.required_mb > 0 else "auto"
 
-    def bitsandbytes_max_memory(self, max_cpu: str) -> dict[Any, str]:
-        """`max_memory` for a bitsandbytes load, keyed to this placement's cards.
+    def transformers_max_memory(self) -> Optional[dict[int, str]]:
+        """`max_memory` for a split: GPU indices only, never "cpu" or "disk".
 
-        It was `{0: ..., "cpu": ...}`, which put every Q8/Q4 model on GPU 0 —
-        the smaller card on this node — whatever the other cards held.
+        accelerate orders the cards by INDEX whatever order they are given in
+        (`get_max_memory` sorts integer keys), so "most free first" cannot be an
+        order. It is expressed as limits instead: each card is limited to its
+        planned share, so the cards taken first carry the most.
 
-        PHASE 2 MUST VERIFY: whether bitsandbytes needs the "cpu" entry only as
-        load-time staging (weights quantized in host RAM, then moved) or also
-        leaves layers there at run time. Decision 3 says transformers loads run
-        on GPUs; if layers stay on the CPU, this entry violates it.
+        The highest-index card keeps its WHOLE limit. accelerate fills that one
+        last, and it also reserves room for the largest layer on the first card
+        it fills (`infer_auto_device_map` main_devices) — a layer pushed past the
+        planned shares lands on the last card's slack, not on disk.
+
+        A share is divided by `max_memory_factor` because transformers
+        multiplies it back (bitsandbytes' 0.9), so the planned share is what the
+        load gets.
         """
-        # From the inventory snapshot, not mem_get_info: reading every card of an
-        # all-cards placement live would create a CUDA context on each first.
-        free_by_index = {gpu.index: gpu.free_mb for gpu in self.gpus}
-        budget: dict[Any, str] = {}
-        for index in self.gpu_indices:
-            free_bytes = free_by_index.get(index, 0) * _MIB
-            budget[index] = f"{int(free_bytes * _BNB_GPU_FRACTION) // _GIB}GiB"
-        budget["cpu"] = max_cpu
+        if not self.is_shard or not self.limits:
+            return None
+        limits = dict(self.limits)
+        planned = self.planned_mb_by_index
+        last = max(limits)
+        budget: dict[int, str] = {}
+        for index in sorted(limits):
+            mb = limits[index]
+            if index != last and self.required_mb > 0:
+                mb = min(mb, math.ceil(planned[index] / self.max_memory_factor))
+            budget[index] = f"{mb}MiB"
         return budget
 
     def to_dict(self) -> dict[str, Any]:
@@ -359,6 +463,12 @@ class Placement:
             "capacity_mb": self.capacity_mb,
             "gpu_indices": self.gpu_indices,
             "devices": self.device_labels,
+            "planned_mb_by_device": {
+                f"cuda:{index}": mb for index, mb in sorted(self.shares)
+            },
+            "budget_mb_by_device": {
+                f"cuda:{index}": mb for index, mb in sorted(self.budget_mb_by_index.items())
+            },
         }
 
 
@@ -367,37 +477,138 @@ def cpu_placement(reason: str = REASON_NO_GPU, required_mb: int = 0) -> Placemen
     return Placement(mode=MODE_CPU, reason=reason, required_mb=max(int(required_mb), 0))
 
 
+def plan_shard(
+    inventory: list[GpuInfo],
+    rule: ShardRule,
+    reason: str,
+    required_mb: int,
+    requested: Optional[Union[int, str]] = None,
+    every_card: bool = False,
+) -> Placement:
+    """A split of `rule.need_mb` over `inventory`.
+
+    Auto takes the cards with the most free memory first and stops as soon as
+    their budgets cover the need, so a model two cards hold does not also claim
+    a third. The last card taken is given only the remainder.
+
+    `every_card` (an explicit "all") uses every card with any budget and gives
+    each a share in proportion to its budget, so a small model is actually
+    divided rather than landing whole on the first card.
+
+    An unmeasured model (need 0) gets every card's whole budget. When every card
+    together is short, the split still names every usable card with its whole
+    budget and the caller decides: a transformers load is refused, and GGUF may
+    spill to the CPU. A card with no budget at all is never part of a split.
+    """
+    # Most free first; on a tie the lower index, matching the single-card choice.
+    ordered = sorted(inventory, key=lambda gpu: (-gpu.free_mb, gpu.index))
+    limits = {gpu.index: max(int(rule.limit_mb(gpu)), 0) for gpu in ordered}
+    budgets = {index: int(limit * rule.max_memory_factor) for index, limit in limits.items()}
+    usable = [gpu for gpu in ordered if budgets[gpu.index] > 0]
+    need = max(int(rule.need_mb), 0)
+
+    shares: dict[int, int] = {}
+    if need > 0 and every_card:
+        total = sum(budgets[gpu.index] for gpu in usable)
+        shares = {
+            gpu.index: min(budgets[gpu.index], math.ceil(need * budgets[gpu.index] / total))
+            for gpu in usable
+        }
+    elif need > 0:
+        remaining = need
+        for gpu in usable:
+            if remaining <= 0:
+                break
+            take = min(budgets[gpu.index], remaining)
+            shares[gpu.index] = take
+            remaining -= take
+        if remaining > 0:
+            shares = {gpu.index: budgets[gpu.index] for gpu in usable}
+    else:
+        shares = {gpu.index: budgets[gpu.index] for gpu in usable}
+
+    return Placement(
+        mode=MODE_SHARD,
+        reason=reason,
+        required_mb=max(int(required_mb), 0),
+        gpus=tuple(inventory),
+        requested=requested,
+        shares=tuple(shares.items()),
+        limits=tuple((index, limits[index]) for index in shares),
+        max_memory_factor=rule.max_memory_factor,
+    )
+
+
+def shard_refusal(placement: Placement, need_mb: int, detail: str) -> InsufficientMemoryError:
+    """The refusal for a split that cannot hold `need_mb`, with every card's figures."""
+    budgets = placement.budget_mb_by_index
+    per_card = ", ".join(f"GPU {index}: {budgets[index]} MB" for index in sorted(budgets))
+    return InsufficientMemoryError(
+        f"Not enough GPU memory. Need ~{need_mb} MB; split across GPUs this can "
+        f"hold {placement.budget_mb} MB ({per_card or 'no card has usable memory'}). "
+        + detail,
+        details={
+            "required_mb": need_mb,
+            "available_mb": placement.budget_mb,
+            "budget_mb_by_device": {f"cuda:{i}": mb for i, mb in sorted(budgets.items())},
+            "requested": placement.requested,
+            "gpus": [gpu.to_dict() for gpu in placement.gpus],
+        },
+    )
+
+
 def choose_gpu(
     required_mb: int,
     requested: GpuRequest = None,
     gpus: Optional[list[GpuInfo]] = None,
+    shard: Optional[ShardRule] = None,
 ) -> Placement:
-    """Decide where a job needing `required_mb` goes.
+    """Decide where a job needing `required_mb` on one card goes.
 
     Args:
-        required_mb: Memory the job needs on a card. 0 or less means unknown.
-        requested: None / "auto", a CUDA index, or a GPU UUID.
+        required_mb: Memory the job needs on a single card. 0 or less means unknown.
+        requested: None / "auto", "all", a CUDA index, or a GPU UUID.
         gpus: The inventory to decide over; read live when omitted.
+        shard: How to size a split. Defaults to a transformers split of
+            `required_mb`.
 
     Returns:
-        A single-card Placement when one card fits (or the requested card fits),
-        otherwise an all-cards Placement (Phase 1's stand-in for sharding).
+        A single-card Placement when one card fits (or the requested card
+        fits), otherwise a split. Whether a split holds the model is for the
+        caller to judge (`budget_mb` against `shard.need_mb`): the engines
+        disagree about what to do when it does not.
 
     Raises:
         GpuNotFoundError: the requested card is not visible.
-        InsufficientMemoryError: no GPU is visible, or the requested card lacks
-            the free memory. The requested card is never swapped for another.
+        InsufficientMemoryError: no GPU is visible, the requested card lacks the
+            free memory, or "all" was requested and every card together cannot
+            hold the model. An explicit choice is never swapped for another.
     """
     inventory = list_gpus() if gpus is None else list(gpus)
     wanted = parse_gpu_request(requested)
     required = max(int(required_mb or 0), 0)
     listing = [gpu.to_dict() for gpu in inventory]
+    rule = shard if shard is not None else transformers_shard_rule(required)
 
     if not inventory:
         raise InsufficientMemoryError(
             "No GPU is visible to miLLM.",
             details={"required_mb": required, "available_mb": 0, "gpus": []},
         )
+
+    if wanted == ALL:
+        placement = plan_shard(
+            inventory, rule, REASON_REQUESTED_ALL, required, requested=ALL, every_card=True
+        )
+        need = max(int(rule.need_mb), 0)
+        if not placement.gpu_indices or (need > 0 and placement.budget_mb < need):
+            raise shard_refusal(
+                placement,
+                need,
+                "A split across every GPU was requested; it is not swapped for "
+                "one card or for the CPU.",
+            )
+        return placement
 
     if wanted is not None:
         card = find_gpu(inventory, wanted)
@@ -423,15 +634,11 @@ def choose_gpu(
         )
 
     if required <= 0:
-        # An unknown size cannot be shown to fit any card. Spreading across
-        # every card is what every load did before placement existed, so an
-        # unmeasured model keeps that rather than gambling on one card.
-        return Placement(
-            mode=MODE_ALL,
-            reason=REASON_SIZE_UNKNOWN,
-            required_mb=required,
-            gpus=tuple(inventory),
-        )
+        # An unknown size cannot be shown to fit any card, and there is nothing
+        # to plan a split with. Every card, GPU memory only, balanced by
+        # accelerate — the spread every load had before placement existed, less
+        # the CPU — and the load checks afterwards where it actually landed.
+        return plan_shard(inventory, rule, REASON_SIZE_UNKNOWN, required)
 
     # Most free first; on a tie the lower index, so the choice is stable.
     best = max(inventory, key=lambda gpu: (gpu.free_mb, -gpu.index))
@@ -444,14 +651,7 @@ def choose_gpu(
             index=best.index,
         )
 
-    # PHASE 1: no single card holds it. Spread across every card as before;
-    # Phase 2 replaces this with planned sharding.
-    return Placement(
-        mode=MODE_ALL,
-        reason=REASON_NO_SINGLE_CARD,
-        required_mb=required,
-        gpus=tuple(inventory),
-    )
+    return plan_shard(inventory, rule, REASON_NO_SINGLE_CARD, required)
 
 
 def reported_free_mb_by_index(indices: list[int]) -> dict[int, int]:
@@ -548,3 +748,93 @@ def gpu_indices_of(labels: list[str]) -> list[int]:
     return sorted(
         {int(label[5:]) for label in labels if label.startswith("cuda:") and label[5:].isdigit()}
     )
+
+
+#: Where the input embedding table sits in `hf_device_map`, for models whose
+#: `get_input_embeddings()` cannot answer: the flat layouts by full name...
+_EMBEDDING_MAP_KEYS = (
+    "",
+    "model.embed_tokens",
+    "transformer.wte",
+    "model.embedding",
+    "model.shared",
+    "model.embed",
+)
+#: ...and any nesting by the embedding's own name. Multimodal checkpoints put
+#: the text stack a level deeper (gemma-4's `model.language_model.embed_tokens`,
+#: after a vision tower in the map), and the flat names alone sent their inputs
+#: to whichever card the map listed first. Only names that are unambiguously an
+#: input embedding: "shared" or "embed" as a leaf can be an MoE expert or a
+#: projection.
+_EMBEDDING_LEAF_NAMES = ("embed_tokens", "wte", "word_embeddings", "embed_in")
+
+
+def model_input_device(model: Any) -> Optional[str]:
+    """The device `input_ids` must go to: where the input embedding table lives.
+
+    Asked of the model first (`get_input_embeddings()`), which knows its own
+    nesting; then of `hf_device_map` by known names, then by any key ending in an
+    embedding's name; then the first card in the map. None when nothing answers.
+
+    A split model's `model.device` is not this: it names the first parameter's
+    device, and under accelerate dispatch that need not be the embedding's.
+    """
+    try:
+        embeddings = model.get_input_embeddings()
+        label = _device_label(getattr(getattr(embeddings, "weight", None), "device", None))
+        if label is not None and label not in ("disk", "meta"):
+            return label
+    except Exception:  # noqa: BLE001 - a stub or a model without the accessor
+        pass
+
+    device_map = getattr(model, "hf_device_map", None)
+    if isinstance(device_map, dict) and device_map:
+        for key in _EMBEDDING_MAP_KEYS:
+            if key in device_map:
+                label = _device_label(device_map[key])
+                if label is not None and label not in ("disk", "meta"):
+                    return label
+        for key, value in device_map.items():
+            if str(key).rsplit(".", 1)[-1] in _EMBEDDING_LEAF_NAMES:
+                label = _device_label(value)
+                if label is not None and label not in ("disk", "meta"):
+                    return label
+        labels = [_device_label(value) for value in device_map.values()]
+        for label in labels:
+            if label is not None and label.startswith("cuda:"):
+                return label
+        return "cpu"
+
+    try:
+        return _device_label(next(model.parameters()).device)
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def layer_share_by_index(model: Any, indices: list[int]) -> dict[int, float]:
+    """The fraction of the model's layers on each card, from `hf_device_map`.
+
+    A KV cache is allocated beside the attention layers, so a card holding a
+    quarter of the layers holds about a quarter of the cache. A layer is an
+    entry whose last name is a number (`model.layers.12`) — accelerate lists a
+    split stack layer by layer. A card with no layers holds no cache. When the
+    map names no layers at all, the cards share it evenly.
+    """
+    wanted = sorted(set(indices))
+    if not wanted:
+        return {}
+    if len(wanted) == 1:
+        return {wanted[0]: 1.0}
+    counts = {index: 0 for index in wanted}
+    device_map = getattr(model, "hf_device_map", None)
+    if isinstance(device_map, dict):
+        for key, value in device_map.items():
+            if not str(key).rsplit(".", 1)[-1].isdigit():
+                continue
+            label = _device_label(value)
+            if label is not None and label.startswith("cuda:") and int(label[5:]) in counts:
+                counts[int(label[5:])] += 1
+    total = sum(counts.values())
+    if total == 0:
+        return {index: 1 / len(wanted) for index in wanted}
+    return {index: count / total for index, count in counts.items()}

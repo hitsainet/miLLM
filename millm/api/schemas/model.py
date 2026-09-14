@@ -268,17 +268,19 @@ class ModelLoadRequest(BaseModel):
         default=None,
         description=(
             "Which GPU to load on: null or 'auto' for the card with the most "
-            "free memory that fits, a CUDA index (0, 1, ...), or a GPU UUID as "
-            "nvidia-smi prints it (GPU-...). A named card that lacks the memory "
-            "is refused, never swapped for another card."
+            "free memory that fits (split across the fewest cards when none "
+            "does), 'all' to split across every visible card, a CUDA index "
+            "(0, 1, ...), or a GPU UUID as nvidia-smi prints it (GPU-...). A "
+            "named card, or 'all', that lacks the memory is refused, never "
+            "swapped for other cards or the CPU."
         ),
-        examples=[None, "auto", 1, "GPU-aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"],
+        examples=[None, "auto", "all", 1, "GPU-aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"],
     )
 
     @field_validator("gpu", mode="before")
     @classmethod
     def validate_gpu(cls, v: Any) -> int | str | None:
-        """Normalise to None (auto), an index, or a `GPU-...` UUID; reject the rest.
+        """Normalise to None (auto), 'all', an index, or a `GPU-...` UUID; reject the rest.
 
         Checked BEFORE coercion so `true` is not read as card 1, and a typo is
         a 422 rather than a load that quietly picks a card nobody chose.
@@ -291,21 +293,41 @@ class ModelLoadRequest(BaseModel):
 class ModelPlacement(BaseModel):
     """Where the loaded model lives and how that was decided."""
 
-    mode: str = Field(..., description="'single' (one card), 'all' (every card), or 'cpu'")
+    mode: str = Field(
+        ...,
+        description=(
+            "'single' (one card), 'shard' (split across GPUs, never the CPU for a "
+            "transformers model), or 'cpu' (GGUF only). Servers before 2026-09-14 "
+            "reported an unplanned split as 'all'."
+        ),
+    )
     reason: str = Field(
         ...,
         description=(
-            "most_free_card_fits | requested_card | no_single_card_fits | "
-            "size_unknown | no_gpu"
+            "most_free_card_fits | requested_card | requested_all_cards | "
+            "no_single_card_fits | size_unknown | no_gpu"
         ),
     )
-    requested: int | str | None = Field(default=None, description="The card asked for, if any")
+    requested: int | str | None = Field(
+        default=None, description="The card asked for ('all' for every card), if any"
+    )
     required_mb: int = Field(0, description="Memory the placement was sized for")
-    capacity_mb: int = Field(0, description="Free memory of the chosen card(s) at decision time")
+    capacity_mb: int = Field(0, description="Free memory of the card(s) used, at decision time")
     devices: list[str] = Field(default_factory=list, description="Devices the model holds tensors on")
     gpu_indices: list[int] = Field(default_factory=list, description="CUDA indices the model uses")
     memory_by_device_mb: dict[str, int] = Field(
         default_factory=dict, description="Memory the load consumed on each card, in MB"
+    )
+    planned_mb_by_device: dict[str, int] = Field(
+        default_factory=dict,
+        description="A split's planned share on each card, in MB; empty for one card",
+    )
+    budget_mb_by_device: dict[str, int] = Field(
+        default_factory=dict,
+        description=(
+            "What each card of a split could hold after its runtime reserve, in MB; "
+            "empty for one card"
+        ),
     )
 
 

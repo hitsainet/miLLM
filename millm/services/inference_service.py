@@ -333,6 +333,10 @@ class InferenceService:
         self._model_state = LoadedModelState()
         self._kv_cache_mode = kv_cache_mode
         self._speculative_model_id = speculative_model
+        # What the operator configured, kept apart from the live id above: a
+        # draft that fails to load disables speculation, and a model reloaded
+        # on another card must be able to try again.
+        self._configured_speculative_model_id = speculative_model
         self._speculative_num_tokens = speculative_num_tokens
         # Lazy-loaded on first use. Thread-safety note: with max_concurrent=1
         # only one generate call is active at a time, so the double-init race
@@ -395,58 +399,28 @@ class InferenceService:
             raise RuntimeError("No model is loaded")
         return self._model_state.current.tokenizer
 
-    @staticmethod
-    def _normalize_device(d: object) -> str:
-        """
-        Convert an accelerate device_map value to a valid PyTorch device string.
-
-        accelerate stores device_map values as integers (0, 1, ...) for CUDA
-        devices, or as the strings "cpu" / "disk".  PyTorch's .to() only accepts
-        proper device strings like "cuda:0", so integers must be converted.
-        """
-        if isinstance(d, int):
-            return f"cuda:{d}"
-        s = str(d)
-        if s == "cpu" or s.startswith("cuda"):
-            return s
-        # Bare integer stored as string (shouldn't happen, but be safe)
-        try:
-            return f"cuda:{int(s)}"
-        except ValueError:
-            return s
-
     def _get_input_device(self) -> str:
         """
         Return the device where model inputs (input_ids) should be placed.
 
-        For device_map="auto" models, model.device returns "cpu" (a dispatch
-        device), which doesn't reflect where the embedding layer actually lives.
-        We inspect hf_device_map first, then fall back to the first parameter's
-        device, and finally to self._device.
+        A split model's `model.device` names its first parameter's device, which
+        under accelerate dispatch need not be the embedding's. The answer comes
+        from `gpu_placement.model_input_device`, shared with the loader's compile
+        warm-up: the model's own `get_input_embeddings()` first, which knows a
+        nested multimodal layout (gemma-4 keeps its text stack at
+        `model.language_model`), then `hf_device_map`. This list named only flat
+        layouts, so a split gemma-4 sent its inputs to whichever card the map
+        listed first.
         """
         if not self._model_state.is_loaded:
             return self._device
         try:
-            hf_model = self._model_state.current.model
-            # device_map models expose hf_device_map; find where embeddings live
-            device_map = getattr(hf_model, "hf_device_map", None)
-            if device_map:
-                for key in ("", "model.embed_tokens", "transformer.wte",
-                            "model.embedding", "model.shared", "model.embed"):
-                    if key in device_map:
-                        d = self._normalize_device(device_map[key])
-                        # Skip "disk" (offloaded to disk, not a valid .to() target)
-                        if d != "disk":
-                            return d
-                # Fall back to the device of the first non-disk layer
-                for val in device_map.values():
-                    d = self._normalize_device(val)
-                    if d not in ("disk", "cpu"):
-                        return d
-                # All layers on CPU or disk — return cpu
-                return "cpu"
-            # Non-device_map model: use first parameter device
-            return str(next(hf_model.parameters()).device)
+            from millm.ml.gpu_placement import model_input_device
+
+            device = model_input_device(self._model_state.current.model)
+            if device is None:
+                raise LookupError("the model names no input device")
+            return device
         except Exception:
             # The loader recorded which cards the model is on; the first of
             # them beats a device the model does not live on.
@@ -666,8 +640,31 @@ class InferenceService:
             return False
         return True
 
+    def _release_draft_model(self) -> None:
+        """Forget the speculative draft, so the next request loads it beside the NEW model.
+
+        The draft is loaded once, on the input device of whatever model was
+        loaded then, and was never dropped. After an unload and a load on
+        another card — or a load that is now split — generation handed the old
+        card's draft to the new model and every proposed token crossed cards,
+        or failed on a device mismatch. Also re-arms a draft that failed to
+        load, since the failure may have been the old card's lack of room.
+
+        Never raises. ModelService calls both hooks inside a bare
+        `except Exception: pass`, so a failure here would also silently skip
+        starting continuous batching, with nothing logged.
+        """
+        configured = getattr(
+            self, "_configured_speculative_model_id", getattr(self, "_speculative_model_id", None)
+        )
+        if getattr(self, "_draft_model", None) is not None:
+            logger.info("draft_model_released", model_id=configured)
+        self._draft_model = None
+        self._speculative_model_id = configured
+
     def on_model_loaded(self) -> None:
-        """Called after model is loaded. Starts CBM if enabled."""
+        """Called after model is loaded. Drops any old draft; starts CBM if enabled."""
+        self._release_draft_model()
         if self._cbm_backend is not None and self._model_state.is_loaded:
             # Continuous batching is transformers' ContinuousBatchingManager. It
             # would be handed a llama.cpp ctypes handle and a None tokenizer.
@@ -689,7 +686,8 @@ class InferenceService:
                 logger.warning("cbm_start_failed", error=str(e))
 
     def on_model_unloading(self) -> None:
-        """Called before model unload. Stops CBM if running."""
+        """Called before model unload. Drops the draft; stops CBM if running."""
+        self._release_draft_model()
         if self._cbm_backend is not None and self._cbm_backend.is_running:
             self._cbm_backend.stop()
 
@@ -2523,25 +2521,38 @@ class InferenceService:
         return list(getattr(self._model_state.current, "gpu_indices", None) or [])
 
     @staticmethod
-    def _kv_fits(need_mb: int, gpu_indices: list[int]) -> tuple[bool, int]:
+    def _kv_fits(
+        need_mb: int, gpu_indices: list[int], shares: Optional[dict[int, float]] = None
+    ) -> tuple[bool, int]:
         """Whether a KV cache of `need_mb` fits on the cards the model lives on.
 
         This checked GPU 0 whatever card the model was on, so a batch for a
         model on the 3090 was sized by the 3080 Ti's free memory.
 
-        The cache is allocated beside each layer, so a model split over N cards
-        puts about 1/N of it on each. Every card must hold its share. An even
-        share is the Phase 1 approximation; Phase 2's sharding knows the real
-        layer split.
+        The cache is allocated beside each attention layer, so each card holds
+        the share of it that it holds of the layers (`shares`, from the model's
+        device map — `gpu_placement.layer_share_by_index`). A split planned
+        largest-free-first is deliberately uneven: an even 1/N share asked the
+        3080 Ti for as much cache as the 3090 while it held a fraction of the
+        layers. A card with no layers is not asked. Without shares, an even
+        split.
 
         Returns:
-            (fits, least free MB among those cards)
+            (fits, least free MB among the cards asked)
         """
         from millm.ml.memory_utils import verify_memory_available
 
-        share_mb = -(-int(need_mb) // len(gpu_indices))  # ceiling division
+        if shares and any(shares.get(index, 0) > 0 for index in gpu_indices):
+            asked = {
+                index: math.ceil(int(need_mb) * shares[index])
+                for index in gpu_indices
+                if shares.get(index, 0) > 0
+            }
+        else:
+            even_mb = -(-int(need_mb) // len(gpu_indices))  # ceiling division
+            asked = {index: even_mb for index in gpu_indices}
         fits, least_free = True, None
-        for index in gpu_indices:
+        for index, share_mb in asked.items():
             ok, free_mb = verify_memory_available(share_mb, device=index)
             fits = fits and ok
             least_free = free_mb if least_free is None else min(least_free, free_mb)
@@ -2561,6 +2572,9 @@ class InferenceService:
         try:
             gpu_indices = self._loaded_gpu_indices()
             if gpu_indices and prompts:
+                from millm.ml.gpu_placement import layer_share_by_index
+
+                shares = layer_share_by_index(self._model, gpu_indices)
                 longest = max(len(self._tokenizer.encode(p)) for p in prompts)
                 total_len = longest + max(int(max_new_tokens or 0), 0)
                 while rows > 1:
@@ -2568,7 +2582,7 @@ class InferenceService:
                     if projected is None:
                         break  # unmeasurable -> keep the row cap, do not grow
                     need_mb = int(projected / (1024 * 1024) * 1.2)  # +20% slack
-                    ok, available_mb = self._kv_fits(need_mb, gpu_indices)
+                    ok, available_mb = self._kv_fits(need_mb, gpu_indices, shares)
                     if ok:
                         break
                     rows -= 1

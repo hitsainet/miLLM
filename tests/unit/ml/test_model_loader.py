@@ -194,8 +194,9 @@ class TestModelLoader:
 
         Was already failing before multi-GPU Phase 1: it patched
         model_loader.get_available_memory_mb, which Phase 0 stopped using for
-        this check. Now: no single card holds 8 GB and the cards together have
-        4 GB free, so the all-cards fallback refuses with the summed figure.
+        this check. Now: no single card holds 8 GB, and a split holds only what
+        each card has past its 1024 MB reserve (476 + 1476 MB), so it is refused
+        with that figure.
         """
         mock_torch.cuda.is_available.return_value = True
 
@@ -209,7 +210,7 @@ class TestModelLoader:
                 estimated_memory_mb=8000,  # Need 8 GB
             )
 
-        assert exc_info.value.details["available_mb"] == 4000
+        assert exc_info.value.details["available_mb"] == 1952
         assert exc_info.value.details["required_mb"] == 8000
 
     @patch("millm.ml.model_loader.torch")

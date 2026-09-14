@@ -936,8 +936,9 @@ class ModelService:
 
         Raises:
             GpuNotFoundError: the named card is not visible.
-            InsufficientMemoryError: the named card cannot hold the model, or
-                (for quantizations refused today) no card can, even summed.
+            InsufficientMemoryError: the named card cannot hold the model, a
+                requested split across every card ('all') cannot, or no split
+                across the cards can hold a transformers model.
         """
         from millm.core.config import settings
 

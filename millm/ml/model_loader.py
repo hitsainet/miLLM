@@ -90,13 +90,17 @@ except Exception as _offload_probe_error:  # noqa: BLE001 - optional symbol
         ),
     )
 
+from millm.core.config import parse_gguf_tensor_split
 from millm.core.errors import InsufficientMemoryError, ModelLoadError
 from millm.ml.gguf_catalog import quant_label_from_path
 from millm.ml.gpu_placement import (
+    MODE_CPU,
+    OFF_GPU_LABELS,
     REASON_NO_GPU,
     GpuInfo,
     GpuRequest,
     Placement,
+    ShardRule,
     choose_gpu,
     cpu_placement,
     free_mb_by_index,
@@ -104,10 +108,12 @@ from millm.ml.gpu_placement import (
     list_gpus,
     memory_used_by_device,
     model_device_labels,
+    model_input_device,
     parse_gpu_request,
     reported_free_mb_by_index,
+    shard_refusal,
+    transformers_shard_rule,
 )
-from millm.ml.memory_utils import get_available_cpu_memory_mb
 
 
 #: The transformers engine: a torch nn.Module tree, hookable, differentiable.
@@ -325,6 +331,42 @@ class LoadedModelState:
                     _release_cuda_memory(gpu_indices)
             except ImportError:
                 gc.collect()
+
+
+def _is_offload_refusal(exc: BaseException) -> bool:
+    """Whether transformers refused a bitsandbytes device map that leaves the GPU.
+
+    Matched on its message because it is a plain ValueError
+    (`quantizer_bnb_{4,8}bit.validate_environment`, transformers 5.15.1). It is
+    raised while the device map is computed, before any weight is read.
+    """
+    return isinstance(exc, ValueError) and "dispatched on the CPU or the disk" in str(exc)
+
+
+def _off_gpu_refusal(
+    model_name: str,
+    placement: Placement,
+    off_gpu: list[str],
+    device_labels: list[str],
+    engine_message: Optional[str] = None,
+) -> InsufficientMemoryError:
+    """The refusal for a transformers load that would run partly off the GPU."""
+    details: dict[str, Any] = {
+        "required_mb": placement.required_mb,
+        "available_mb": placement.budget_mb,
+        "off_gpu": off_gpu,
+        "devices": device_labels,
+        "placement": placement.to_dict(),
+    }
+    if engine_message:
+        details["engine_message"] = engine_message[:500]
+    return InsufficientMemoryError(
+        f"{model_name} does not fit on the GPU memory it was given "
+        f"({', '.join(placement.device_labels) or 'no card'}): part of it would run from "
+        f"{', '.join(off_gpu)}. A transformers model is never offloaded to the CPU or "
+        "disk. Free memory on the cards, choose a smaller quantization, or serve it as GGUF.",
+        details=details,
+    )
 
 
 def _get_auto_model_class(config: Any) -> Any:
@@ -584,10 +626,13 @@ class ModelLoadContext:
             )
             quant_method = "bitsandbytes"
         elif quantization == "Q8":
-            quantization_config = BitsAndBytesConfig(
-                load_in_8bit=True,
-                llm_int8_enable_fp32_cpu_offload=True,
-            )
+            # No `llm_int8_enable_fp32_cpu_offload`. That flag is what lets a
+            # bitsandbytes device map put modules on the CPU or disk; without
+            # it transformers refuses such a map before reading a weight
+            # (quantizer_bnb_8bit.validate_environment). A transformers model
+            # runs on GPUs only (operator decision 3, 2026-09-13), and the flag
+            # was set on every Q8 load while nothing needed it.
+            quantization_config = BitsAndBytesConfig(load_in_8bit=True)
             quant_method = "bitsandbytes"
 
         # Load tokenizer first (small, quick)
@@ -672,40 +717,37 @@ class ModelLoadContext:
         # Load model (large, slow)
         logger.debug("loading_model_weights", model_id=self.model_id, attn_impl=attn_impl)
 
-        # The device map comes from the placement decision. A model that fits
-        # one card goes on that card whole ({"": "cuda:N"}): device_map="auto"
-        # spread every model across both cards, paying a cross-card copy on
-        # every forward pass for a model the 3090 could hold alone.
+        # The device map comes from the placement decision, the same for every
+        # quantization. A model that fits one card goes on that card whole
+        # ({"": "cuda:N"}): device_map="auto" spread every model across both
+        # cards, paying a cross-card copy on every forward pass for a model the
+        # 3090 could hold alone.
         #
-        # For bitsandbytes quantization, max_memory (keyed to the placement's
-        # cards) ensures large models are quantized in CPU RAM and only
-        # quantized weights are placed on the GPU.
+        # A split carries max_memory for EVERY quantization, GPU indices only.
+        # Phase 1 passed "auto" with no max_memory for FP16, so accelerate took
+        # every card and then the CPU; and bitsandbytes got a "cpu" entry,
+        # which was never needed as staging (transformers 5.15.1 quantizes each
+        # weight on its target device) and only let a model that did not fit
+        # run from host RAM. See Placement.transformers_device_map.
         is_bitsandbytes = quantization_config is not None
         load_kwargs = {
             "quantization_config": quantization_config,
             "torch_dtype": torch_dtype,
-            "device_map": placement.transformers_device_map(bitsandbytes=is_bitsandbytes),
+            "device_map": placement.transformers_device_map(),
             "trust_remote_code": trust_remote_code,
             "attn_implementation": attn_impl,
             "low_cpu_mem_usage": True,
         }
-        if is_bitsandbytes and placement.gpu_indices and torch.cuda.is_available():
-            # Derive CPU memory dynamically (leave ~4GB headroom for OS)
-            cpu_avail_mb = get_available_cpu_memory_mb()
-            if cpu_avail_mb > 0:
-                cpu_headroom_mb = 4096  # 4 GB for OS
-                usable_cpu_mb = max(cpu_avail_mb - cpu_headroom_mb, 1024)
-                max_cpu = f"{usable_cpu_mb // 1024}GiB"
-            else:
-                max_cpu = "64GiB"  # Fallback if detection fails
-                logger.warning("cpu_memory_detection_failed_using_fallback", fallback=max_cpu)
-
-            # Keyed to the chosen card(s), 90% of each one's live free memory.
-            # This was {0: ...}, which pinned every Q8/Q4 model to GPU 0.
-            load_kwargs["max_memory"] = placement.bitsandbytes_max_memory(max_cpu)
+        max_memory = placement.transformers_max_memory()
+        if max_memory is not None:
+            load_kwargs["max_memory"] = max_memory
             logger.info(
-                "quantized_load_memory_map",
-                max_memory={str(k): v for k, v in load_kwargs["max_memory"].items()},
+                "split_load_memory_map",
+                model_id=self.model_id,
+                device_map=load_kwargs["device_map"],
+                max_memory={str(k): v for k, v in max_memory.items()},
+                planned_mb_by_device=placement.to_dict()["planned_mb_by_device"],
+                bitsandbytes=is_bitsandbytes,
             )
 
         free_before = free_mb_by_index(placement.gpu_indices)
@@ -724,54 +766,66 @@ class ModelLoadContext:
                 logger.warning("auto_model_class_detection_failed", error=str(e))
 
         try:
-            self.model = ModelClass.from_pretrained(
-                cache_path,
-                **load_kwargs,
-            )
-        except (ImportError, OSError) as e:
-            if trust_remote_code:
-                # Custom model code may reference missing .py files or removed
-                # transformers internals. Fall back to built-in implementation
-                # (e.g. BitNet auto_map references local .py but class is now
-                # built into transformers).
-                logger.warning(
-                    "trust_remote_code_fallback",
-                    model_id=self.model_id,
-                    error=str(e),
-                )
-                load_kwargs["trust_remote_code"] = False
+            try:
                 self.model = ModelClass.from_pretrained(
                     cache_path,
                     **load_kwargs,
                 )
-            else:
-                raise
-        except Exception as e:
-            # If the chosen ModelClass fails, try AutoModelForCausalLM as fallback,
-            # and then AutoModel as a last resort
-            if ModelClass is not AutoModelForCausalLM:
-                logger.warning(
-                    "model_class_fallback_to_causal_lm",
-                    original_class=ModelClass.__name__,
-                    error=str(e),
-                )
-                try:
-                    self.model = AutoModelForCausalLM.from_pretrained(
-                        cache_path,
-                        **load_kwargs,
-                    )
-                except Exception:
-                    from transformers import AutoModel
+            except (ImportError, OSError) as e:
+                if trust_remote_code:
+                    # Custom model code may reference missing .py files or removed
+                    # transformers internals. Fall back to built-in implementation
+                    # (e.g. BitNet auto_map references local .py but class is now
+                    # built into transformers).
                     logger.warning(
-                        "model_class_fallback_to_auto_model",
+                        "trust_remote_code_fallback",
+                        model_id=self.model_id,
                         error=str(e),
                     )
-                    self.model = AutoModel.from_pretrained(
+                    load_kwargs["trust_remote_code"] = False
+                    self.model = ModelClass.from_pretrained(
                         cache_path,
                         **load_kwargs,
                     )
-            else:
-                raise
+                else:
+                    raise
+            except Exception as e:
+                if _is_offload_refusal(e):
+                    # The placement did not hold the model. Another model class
+                    # computes the same device map and is refused the same way,
+                    # so the fallbacks below would only repeat it twice.
+                    raise
+                # If the chosen ModelClass fails, try AutoModelForCausalLM as fallback,
+                # and then AutoModel as a last resort
+                if ModelClass is not AutoModelForCausalLM:
+                    logger.warning(
+                        "model_class_fallback_to_causal_lm",
+                        original_class=ModelClass.__name__,
+                        error=str(e),
+                    )
+                    try:
+                        self.model = AutoModelForCausalLM.from_pretrained(
+                            cache_path,
+                            **load_kwargs,
+                        )
+                    except Exception:
+                        from transformers import AutoModel
+                        logger.warning(
+                            "model_class_fallback_to_auto_model",
+                            error=str(e),
+                        )
+                        self.model = AutoModel.from_pretrained(
+                            cache_path,
+                            **load_kwargs,
+                        )
+                else:
+                    raise
+        except ValueError as e:
+            if _is_offload_refusal(e):
+                raise _off_gpu_refusal(
+                    self.model_name, placement, ["cpu or disk"], [], engine_message=str(e)
+                ) from e
+            raise
 
         # Workaround for GraniteMoEHybrid models whose config has no mamba layers
         # (layers_block_type empty, all layer_types == "attention") but whose model
@@ -786,6 +840,18 @@ class ModelLoadContext:
         # have model.device == "cpu" (the dispatch device), which is misleading.
         device_labels = model_device_labels(self.model)
         gpu_indices = gpu_indices_of(device_labels)
+
+        # REFUSE a transformers model that did not land entirely on GPUs. A
+        # GPU-only max_memory does not guarantee it: accelerate always adds
+        # "disk" as a last device (`_init_infer_auto_device_map`), and
+        # transformers 5.15.1 serves safetensors "disk" entries straight from
+        # the checkpoint with no offload folder and no error. The model would
+        # load and answer, hours slower, with nothing saying why. bitsandbytes
+        # refuses such a map itself (handled above); FP16 only shows it here.
+        # The context manager's exit releases what was loaded.
+        off_gpu = [label for label in device_labels if label in OFF_GPU_LABELS]
+        if off_gpu and placement.mode != MODE_CPU:
+            raise _off_gpu_refusal(self.model_name, placement, off_gpu, device_labels)
 
         # Memory used, per card: the drop in free memory (mem_get_info sees
         # bitsandbytes allocations too) on every card the model now occupies.
@@ -894,24 +960,13 @@ class ModelLoadContext:
                     logger.info("torch_compile_warmup_starting")
                     _t0 = _time.monotonic()
 
-                    # Resolve the device where input embeddings live.
-                    # device_map="auto" may spread layers across devices; we
-                    # need the device that owns the embedding table.
-                    _input_device = device_labels[0] if device_labels else "cpu"
-                    try:
-                        _dm = getattr(self.model, "hf_device_map", None)
-                        if _dm:
-                            for _key in ("", "model.embed_tokens",
-                                         "transformer.wte", "model.embedding"):
-                                if _key in _dm:
-                                    _d = str(_dm[_key])
-                                    if _d not in ("cpu", "disk"):
-                                        _input_device = f"cuda:{_d}" if _d.isdigit() else _d
-                                    break
-                        else:
-                            _input_device = str(next(self.model.parameters()).device)
-                    except Exception:
-                        pass
+                    # Where the input embeddings live — the same answer the
+                    # inference path uses. This kept its own shorter key list,
+                    # which named no nested multimodal layout, so the two could
+                    # disagree about one model.
+                    _input_device = model_input_device(self.model) or (
+                        device_labels[0] if device_labels else "cpu"
+                    )
 
                     # SOAK, not a single call.
                     #
@@ -1184,6 +1239,7 @@ def predicted_max_context(
     free_vram_mb: int,
     weights_mb: int,
     bytes_per_token: float | None = None,
+    n_cards: int = 1,
 ) -> int | None:
     """The largest context the arithmetic says will fit. None if unknowable.
 
@@ -1211,9 +1267,12 @@ def predicted_max_context(
     as before.
 
     `free_vram_mb` must be the free memory of the card(s) the model will use —
-    one card in single-GPU mode, their sum under a layer split. `bytes_per_token`
-    may be passed when the caller already probed it, saving a second metadata
-    load.
+    one card in single-GPU mode, their sum under a layer split — and `n_cards`
+    how many cards that is. The runtime overhead is PER CARD: each card of a
+    split holds its own CUDA context and compute buffers. Counting it once for a
+    two-card split over-predicted the window by 2 GiB of cache, and the ladder
+    then spent a full model load discovering that. `bytes_per_token` may be
+    passed when the caller already probed it, saving a second metadata load.
     """
     try:
         if bytes_per_token is None:
@@ -1224,7 +1283,7 @@ def predicted_max_context(
         budget_mb = (
             free_vram_mb * _VRAM_PLANNING_FRACTION
             - weights_mb
-            - _GGUF_RUNTIME_OVERHEAD_MB
+            - _GGUF_RUNTIME_OVERHEAD_MB * max(int(n_cards), 1)
         )
         if budget_mb <= 0:
             return None
@@ -1319,6 +1378,21 @@ def _gguf_required_mb(weights_mb: int, bytes_per_token: float | None, n_ctx: int
     return int((weights_mb + _GGUF_RUNTIME_OVERHEAD_MB + kv_mb) / _VRAM_PLANNING_FRACTION)
 
 
+def _gguf_shard_rule(weights_mb: int, bytes_per_token: float | None, n_ctx: int) -> ShardRule:
+    """A llama.cpp layer split: weights plus KV cache, spread over cards.
+
+    Each card offers its free memory at the planning fraction LESS its own
+    runtime overhead — the same arithmetic as the single-card check
+    (`_gguf_required_mb`), applied per card. The transformers rule's flat
+    reserve does not describe llama.cpp, whose per-card overhead is measured.
+    """
+    kv_mb = (bytes_per_token * n_ctx / (1024 * 1024)) if bytes_per_token and n_ctx > 0 else 0
+    return ShardRule(
+        need_mb=int(weights_mb + kv_mb),
+        limit_mb=lambda gpu: int(gpu.free_mb * _VRAM_PLANNING_FRACTION) - _GGUF_RUNTIME_OVERHEAD_MB,
+    )
+
+
 def plan_gguf_placement(
     weights_mb: int,
     bytes_per_token: float | None,
@@ -1329,14 +1403,18 @@ def plan_gguf_placement(
     """Where a GGUF model goes: one card, a layer split across cards, or the CPU.
 
     Auto: the most-free card that holds the weights plus the KV cache at the
-    context the loader is aiming for. When no card does, llama.cpp's layer
-    split across every card (CPU spill stays allowed for GGUF — operator
-    decision 3).
+    context the loader is aiming for. When no card does, a layer split over the
+    cards with the most free memory, as few as hold it, each counted with its own
+    runtime overhead. When even every card together does not, the split uses
+    every card and the context ladder shrinks the window (CPU spill stays
+    allowed for GGUF — operator decision 3); when no card has any room at all,
+    the CPU.
 
-    An explicit card is sized at the SMALLEST usable context instead: the
-    context ladder shrinks the window to what that card holds, so refusing a
-    card that can serve the model at a shorter context would refuse a load
-    that works. A card that cannot hold even that is refused, never swapped.
+    An explicit card, or "all", is sized at the SMALLEST usable context
+    instead: the context ladder shrinks the window to what the cards hold, so
+    refusing cards that can serve the model at a shorter context would refuse a
+    load that works. Cards that cannot hold even that are refused, never
+    swapped.
 
     `gpus` defaults to the live inventory; the pre-unload check passes a
     projection of what the cards will have once the resident model is gone.
@@ -1357,6 +1435,7 @@ def plan_gguf_placement(
                 _gguf_required_mb(weights_mb, bytes_per_token, GGUF_MIN_CONTEXT),
                 requested=wanted,
                 gpus=(list_gpus() if torch.cuda.is_available() else []) if gpus is None else gpus,
+                shard=_gguf_shard_rule(weights_mb, bytes_per_token, GGUF_MIN_CONTEXT),
             )
             raise InsufficientMemoryError(
                 f"GPU {wanted!r} was requested, but llama.cpp here offloads no layers "
@@ -1379,25 +1458,88 @@ def plan_gguf_placement(
             _gguf_required_mb(weights_mb, bytes_per_token, GGUF_MIN_CONTEXT),
             requested=wanted,
             gpus=gpus,
+            shard=_gguf_shard_rule(weights_mb, bytes_per_token, GGUF_MIN_CONTEXT),
         )
-    return choose_gpu(
-        _gguf_required_mb(weights_mb, bytes_per_token, target_ctx or GGUF_MIN_CONTEXT),
+    target = target_ctx or GGUF_MIN_CONTEXT
+    placement = choose_gpu(
+        _gguf_required_mb(weights_mb, bytes_per_token, target),
         gpus=gpus,
+        shard=_gguf_shard_rule(weights_mb, bytes_per_token, target),
     )
+    if placement.is_shard and not placement.gpu_indices:
+        # Not one card has room for its own runtime overhead. A split over
+        # nothing would still be handed n_gpu_layers=-1 and fail at every
+        # context; GGUF may run on the CPU, so it does.
+        return cpu_placement(REASON_NO_GPU, required_mb=placement.required_mb)
+    return placement
 
 
-def _gguf_placement_kwargs(placement: Placement) -> dict[str, Any]:
+def _gguf_tensor_split(
+    placement: Placement, configured: Optional[list[float]] = None
+) -> list[float]:
+    """llama.cpp's `tensor_split` for a layer split: one proportion per CUDA index.
+
+    llama.cpp indexes the list by DEVICE, not by the cards a load uses, and a
+    layer split with no list spreads over every visible card. So the list is as
+    long as the highest card used, with 0 for every card the plan left out —
+    that zero is what keeps a model two cards hold off a third.
+
+    `configured` (GGUF_TENSOR_SPLIT) names one proportion per card USED, in
+    index order; without it the proportions are the plan's shares, so the cards
+    with the most free memory carry the most layers.
+
+    Raises:
+        ModelLoadError: `configured` does not have one value per card used. A
+            misconfigured split is not guessed at: stretched or truncated, it
+            would put layers on cards nobody chose.
+    """
+    used = placement.gpu_indices
+    if not used:
+        return []
+    if configured is not None:
+        if len(configured) != len(used):
+            raise ModelLoadError(
+                f"GGUF_TENSOR_SPLIT has {len(configured)} value(s) but this load "
+                f"splits across {len(used)} GPU(s) ({', '.join(placement.device_labels)}). "
+                "Give one proportion per card used, in index order, or leave it empty "
+                "to split by free memory.",
+                details={
+                    "tensor_split": configured,
+                    "gpu_indices": used,
+                    "placement": placement.to_dict(),
+                },
+            )
+        weights = dict(zip(used, configured))
+    else:
+        weights = {index: float(mb) for index, mb in placement.planned_mb_by_index.items()}
+    total = sum(weights.values())
+    vector = [0.0] * (max(used) + 1)
+    for index, weight in weights.items():
+        vector[index] = round(weight / total, 4) if total > 0 else 0.0
+    return vector
+
+
+def _gguf_placement_kwargs(
+    placement: Placement, tensor_split: Optional[list[float]] = None
+) -> dict[str, Any]:
     """llama.cpp kwargs that put the model where `placement` says.
 
     One card: LLAMA_SPLIT_MODE_NONE with `main_gpu` = that card, so llama.cpp
     allocates nothing on the others. Its default (layer split with main_gpu 0)
     spread every GGUF model over both cards and put its scratch buffers on the
     3080 Ti.
+
+    A split: LLAMA_SPLIT_MODE_LAYER with a `tensor_split` naming only the cards
+    the plan took (see `_gguf_tensor_split`). `tensor_split` is the operator's
+    GGUF_TENSOR_SPLIT, already parsed.
     """
     if placement.is_single:
         return {"split_mode": _SPLIT_MODE_NONE, "main_gpu": placement.index}
     if placement.gpu_indices:
-        return {"split_mode": _SPLIT_MODE_LAYER}
+        return {
+            "split_mode": _SPLIT_MODE_LAYER,
+            "tensor_split": _gguf_tensor_split(placement, tensor_split),
+        }
     return {}
 
 
@@ -1466,6 +1608,11 @@ def load_gguf_model(
         required_mb=placement.required_mb,
         capacity_mb=placement.capacity_mb,
     )
+    # Also outside the try: a GGUF_TENSOR_SPLIT that does not match the cards
+    # used is a configuration error, and must not read as a failed load.
+    placement_kwargs = _gguf_placement_kwargs(
+        placement, parse_gguf_tensor_split(_settings.GGUF_TENSOR_SPLIT)
+    )
     # nvidia-smi, not torch: llama.cpp never creates a torch context, and
     # reading the card through torch would create one just to measure.
     free_before = reported_free_mb_by_index(placement.gpu_indices)
@@ -1493,9 +1640,9 @@ def load_gguf_model(
         # metadata already read above.
         #
         # Budgeted against the card(s) the model is placed on: the chosen card
-        # alone in single-GPU mode, their sum under a layer split. This read
-        # GPU 0, so a model placed on the 3090 had its window sized by the
-        # 3080 Ti's free memory.
+        # alone in single-GPU mode, the cards the split actually uses otherwise
+        # — each with its own runtime overhead. This read GPU 0, so a model
+        # placed on the 3090 had its window sized by the 3080 Ti's free memory.
         predicted = None
         try:
             free_mb = placement.capacity_mb
@@ -1506,6 +1653,7 @@ def load_gguf_model(
                     free_mb,
                     weights_mb,
                     bytes_per_token=bytes_per_token,
+                    n_cards=len(placement.gpu_indices),
                 )
         except Exception as exc:  # noqa: BLE001
             logger.warning("gguf_context_prediction_skipped", error=str(exc)[:200])
@@ -1548,7 +1696,7 @@ def load_gguf_model(
             "n_ctx": start_ctx,
             "verbose": False,
             **kv_kwargs,
-            **_gguf_placement_kwargs(placement),
+            **placement_kwargs,
         }
         if _settings.GGUF_ENABLE_EMBEDDINGS:
             # MEAN pooling, matching what the transformers path does —
@@ -1854,32 +2002,43 @@ def decide_transformers_placement(
 
     A model that fits one card goes on the most-free such card (or the
     requested card, which choose_gpu refuses if it does not fit), so it fits by
-    construction. Only the all-cards fallback needs a fit check, against free
-    memory summed over every card. Q4/Q2 and pre-quantized models skip that
-    summed check as before: they can offload to the CPU through bitsandbytes'
-    max_memory.
+    construction. A split is checked against its planned budgets — each card's
+    free memory less SHARD_RESERVE_MB, and for bitsandbytes less the 0.9
+    transformers applies itself — which are exactly the `max_memory` the load
+    passes, so the check and the load cannot disagree about what a card holds.
+
+    EVERY quantization is checked. Q4, Q2 and pre-quantized models used to skip
+    the check because bitsandbytes could offload to the CPU; offload is gone
+    (operator decision 3), so a skipped check only moved the refusal into the
+    load, after the resident model had been unloaded.
 
     Raises:
         GpuNotFoundError: the requested card is not visible.
         InsufficientMemoryError: the requested card lacks room, no GPU is
-            visible, or (for quantizations that cannot offload) every card
-            together lacks room.
+            visible, or no split across the cards holds the model.
     """
-    skip_mem_check = is_pre_quantized or quantization.upper() in ("Q4", "Q2")
-    placement = choose_gpu(estimated_memory_mb, requested=requested, gpus=gpus)
-    if (
-        not placement.is_single
-        and not skip_mem_check
-        and placement.capacity_mb < estimated_memory_mb
-    ):
-        raise InsufficientMemoryError(
-            f"Not enough GPU memory. Need ~{estimated_memory_mb}MB, have "
-            f"{placement.capacity_mb}MB across {len(placement.gpus)} GPU(s)",
-            details={
-                "required_mb": estimated_memory_mb,
-                "available_mb": placement.capacity_mb,
-                "gpus": [gpu_info.to_dict() for gpu_info in placement.gpus],
-            },
+    # Only Q4 and Q8 get a BitsAndBytesConfig in ModelLoadContext.load; Q2 has
+    # none and loads unquantized, so it is not planned with bitsandbytes' factor.
+    bitsandbytes = not is_pre_quantized and quantization.upper() in ("Q4", "Q8")
+    placement = choose_gpu(
+        estimated_memory_mb,
+        requested=requested,
+        gpus=gpus,
+        shard=transformers_shard_rule(estimated_memory_mb, bitsandbytes=bitsandbytes),
+    )
+    if placement.is_shard and placement.required_mb > 0 and placement.budget_mb < estimated_memory_mb:
+        raise shard_refusal(
+            placement,
+            estimated_memory_mb,
+            "No single GPU holds it either. A transformers model is never "
+            "offloaded to the CPU or disk: free memory on the cards, choose a "
+            "smaller quantization, or serve it as GGUF.",
+        )
+    if placement.is_shard and not placement.gpu_indices:
+        raise shard_refusal(
+            placement,
+            estimated_memory_mb,
+            "No GPU has memory to spare for a model of unknown size.",
         )
     return placement
 

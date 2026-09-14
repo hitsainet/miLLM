@@ -13,6 +13,13 @@ MUTATION CONTROLS (each must turn this file red):
   * load_gguf_model: drop **_gguf_placement_kwargs(placement) from the kwargs
   * ModelLoadContext.load: device_map back to "auto"
   * LoadedModelState.clear: _release_cuda_memory([]) instead of gpu_indices
+Phase 2, 2026-09-14 (mutate.py; restored and sha256-verified):
+  M9b on_model_unloading no longer calls _release_draft_model
+      -> test_the_draft_is_released_on_every_model_change
+  M13b _chunk_batch_for_memory passes no layer shares to _kv_fits
+      -> test_kv_sizing_asks_the_models_cards
+  M23 the compile warm-up keeps its own input-device lookup
+      -> test_the_compile_warm_up_asks_the_shared_input_device
 """
 
 from __future__ import annotations
@@ -92,6 +99,9 @@ class TestTransformersLoad:
         [call] = _calls(fn, "choose_gpu")
         assert _is_name(_kw(call, "requested"), "requested")
         assert _is_name(_kw(call, "gpus"), "gpus")
+        shard = _kw(call, "shard")
+        assert isinstance(shard, ast.Call) and _is_name(shard.func, "transformers_shard_rule")
+        assert _is_name(_kw(shard, "bitsandbytes"), "bitsandbytes")
 
     def test_the_decision_is_handed_to_the_context(self):
         fn = _function(model_loader, "ModelLoader.load")
@@ -111,10 +121,27 @@ class TestTransformersLoad:
         call = maps[0]
         assert isinstance(call, ast.Call) and _is_attr(call.func, "placement", "transformers_device_map")
 
-    def test_bitsandbytes_max_memory_comes_from_the_placement(self):
+    def test_max_memory_comes_from_the_placement_for_every_quantization(self):
         fn = _function(model_loader, "ModelLoadContext.load")
-        [call] = _calls(fn, "bitsandbytes_max_memory")
-        assert _is_attr(call.func, "placement", "bitsandbytes_max_memory")
+        [call] = _calls(fn, "transformers_max_memory")
+        assert _is_attr(call.func, "placement", "transformers_max_memory")
+        assert not _calls(fn, "get_available_cpu_memory_mb"), "a CPU budget is back in the load"
+
+    def test_the_load_refuses_what_landed_off_the_gpu(self):
+        """Both refusals raise from the load itself: bitsandbytes' own, and the
+        check of where the weights actually landed."""
+        fn = _function(model_loader, "ModelLoadContext.load")
+        raises = [
+            node for node in ast.walk(fn)
+            if isinstance(node, ast.Raise) and isinstance(node.exc, ast.Call)
+            and _is_name(node.exc.func, "_off_gpu_refusal")
+        ]
+        assert len(raises) == 2
+
+    def test_the_compile_warm_up_asks_the_shared_input_device(self):
+        fn = _function(model_loader, "ModelLoadContext.load")
+        [call] = _calls(fn, "model_input_device")
+        assert _is_attr(call.args[0], "self", "model")
 
 
 class TestGgufLoad:
@@ -133,9 +160,21 @@ class TestGgufLoad:
         calls = _calls(fn, "choose_gpu")
         assert len(calls) >= 2
         assert any(_is_name(_kw(c, "requested"), "wanted") for c in calls)
+        for call in calls:
+            shard = _kw(call, "shard")
+            assert isinstance(shard, ast.Call) and _is_name(shard.func, "_gguf_shard_rule"), (
+                "a GGUF split must be sized with llama.cpp's per-card overhead"
+            )
 
     def test_llama_kwargs_carry_the_placement(self):
         fn = _function(model_loader, "load_gguf_model")
+        [call] = _calls(fn, "_gguf_placement_kwargs")
+        assert _is_name(call.args[0], "placement")
+        parse = call.args[1]
+        assert isinstance(parse, ast.Call) and _is_name(parse.func, "parse_gguf_tensor_split")
+        assert _is_attr(parse.args[0], "_settings", "GGUF_TENSOR_SPLIT")
+        [assign] = [n for n in ast.walk(fn) if isinstance(n, ast.Assign) and n.value is call]
+        assert _is_name(assign.targets[0], "placement_kwargs")
         spreads = [
             value
             for d in ast.walk(fn)
@@ -143,12 +182,7 @@ class TestGgufLoad:
             for key, value in zip(d.keys, d.values)
             if key is None  # a ** entry
         ]
-        placement_spreads = [
-            v for v in spreads
-            if isinstance(v, ast.Call) and _is_name(v.func, "_gguf_placement_kwargs")
-            and _is_name(v.args[0], "placement")
-        ]
-        assert len(placement_spreads) == 1
+        assert len([v for v in spreads if _is_name(v, "placement_kwargs")]) == 1
 
     def test_the_context_prediction_is_budgeted_on_the_placement(self):
         fn = _function(model_loader, "load_gguf_model")
@@ -160,6 +194,9 @@ class TestGgufLoad:
         assert [a.value for a in assigns if _is_attr(a.value, "placement", "capacity_mb")]
         [predict] = _calls(fn, "predicted_max_context")
         assert _is_name(predict.args[2], "free_mb")
+        n_cards = _kw(predict, "n_cards")
+        assert isinstance(n_cards, ast.Call) and _is_name(n_cards.func, "len")
+        assert _is_attr(n_cards.args[0], "placement", "gpu_indices")
 
 
 class TestCleanup:
@@ -221,9 +258,25 @@ class TestInference:
         fn = _function(inference_service, "InferenceService._chunk_batch_for_memory")
         [call] = _calls(fn, "_kv_fits")
         assert _is_name(call.args[1], "gpu_indices")
+        assert _is_name(call.args[2], "shares")
+        [shares] = _calls(fn, "layer_share_by_index")
+        assert _is_attr(shares.args[0], "self", "_model")
+        assert _is_name(shares.args[1], "gpu_indices")
         fits = _function(inference_service, "InferenceService._kv_fits")
         [verify] = _calls(fits, "verify_memory_available")
         assert _is_name(_kw(verify, "device"), "index")
+
+    def test_the_draft_is_released_on_every_model_change(self):
+        for hook in ("on_model_loaded", "on_model_unloading"):
+            fn = _function(inference_service, f"InferenceService.{hook}")
+            assert len(_calls(fn, "_release_draft_model")) == 1, hook
+        # ...and the service calls both hooks.
+        assert _calls(_function(model_service, "ModelService._load_worker"), "on_model_loaded")
+        assert _calls(_function(model_service, "ModelService.unload_model"), "on_model_unloading")
+
+    def test_inputs_follow_the_shared_input_device(self):
+        fn = _function(inference_service, "InferenceService._get_input_device")
+        assert len(_calls(fn, "model_input_device")) == 1
 
 
 @pytest.mark.parametrize(

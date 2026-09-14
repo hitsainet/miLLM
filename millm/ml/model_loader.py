@@ -472,6 +472,45 @@ def checkpoint_weights_mb(cache_path: Optional[str]) -> int:
     return 0
 
 
+#: Which part of a meta-device check failed decides how the failure is logged.
+_STAGE_CHECKPOINT = "checkpoint"
+_STAGE_ENGINE = "engine"
+
+
+def _log_unverified(
+    stage: str, error: BaseException, unverifiable_event: str, engine_event: str, **fields: Any
+) -> None:
+    """Log a meta-device check that could not run: the checkpoint's limit, or transformers'.
+
+    The split preflight and the materialised sizing go through transformers
+    PRIVATE functions (`_get_device_map`, `compute_module_sizes`,
+    `get_hf_quantizer`). A checkpoint whose config no class builds on the meta
+    device, or whose quantizer's package is missing, is a WARNING: that
+    checkpoint cannot be verified here, and the load decides. A failure in
+    transformers' own machinery, after the config, the class and the quantizer
+    all built (an import that is gone, a call whose signature changed), is an
+    ERROR with its own event. It happens to every checkpoint, so the check has
+    gone dark for every load, and under the one shared warning it read as a run
+    of odd checkpoints. Review round 4, 2026-09-14.
+    """
+    if stage == _STAGE_ENGINE:
+        try:
+            import transformers
+
+            version = str(getattr(transformers, "__version__", "unknown"))
+        except ImportError:
+            version = "unavailable"
+        logger.error(
+            engine_event,
+            transformers_version=version,
+            error_type=type(error).__name__,
+            error=str(error)[:300],
+            **fields,
+        )
+    else:
+        logger.warning(unverifiable_event, error=str(error)[:300], **fields)
+
+
 def checkpoint_materialised_mb(cache_path: Optional[str], trust_remote_code: bool = False) -> int:
     """What a pre-quantized checkpoint occupies once transformers has loaded it, in MB; 0 when unknown.
 
@@ -482,23 +521,30 @@ def checkpoint_materialised_mb(cache_path: Optional[str], trust_remote_code: boo
     `kernels` package or Triton (transformers 5.15.1). So the checkpoint's config
     is built on the meta device with the quantizer the load constructs, and its
     modules are sized the way transformers sizes them for a device map
-    (`compute_module_sizes`) — no weight read, no CUDA context.
+    (`compute_module_sizes`), with no weight read. The quantizer's own
+    `validate_environment` reads the current card's compute capability, exactly
+    as the load's does, and that initialises CUDA in this process.
 
     0 means unknown, never empty: no config, a method with no transformers
     quantizer, or a quantizer that cannot be constructed here (GPTQ without
-    optimum — the load fails the same way). Review round 3, 2026-09-14.
+    optimum — the load fails the same way). Review round 3, 2026-09-14. A
+    failure in transformers' own machinery is logged apart (_log_unverified).
     """
     if not cache_path or AutoConfig is None:
         return 0
+    stage = _STAGE_ENGINE  # the imports are transformers' private API
     try:
         from transformers.integrations.accelerate import compute_module_sizes
         from transformers.quantizers.auto import get_hf_quantizer
 
+        stage = _STAGE_CHECKPOINT
         config = AutoConfig.from_pretrained(cache_path, trust_remote_code=trust_remote_code)
         hf_quantizer, config, device_map = get_hf_quantizer(config, None, "sequential", True, {})
         if hf_quantizer is None:
             return 0
         model = _meta_model(config, trust_remote_code)
+        # Config, class and quantizer all built: from here a failure is transformers'.
+        stage = _STAGE_ENGINE
         hf_quantizer.preprocess_model(
             model=model,
             dtype=torch.bfloat16,
@@ -508,8 +554,12 @@ def checkpoint_materialised_mb(cache_path: Optional[str], trust_remote_code: boo
         )
         sizes, _ = compute_module_sizes(model, hf_quantizer)
     except Exception as e:  # noqa: BLE001 - unknown here; what the checkpoint stores is the floor
-        logger.warning(
-            "checkpoint_materialised_size_unknown", cache_path=cache_path, error=str(e)[:300]
+        _log_unverified(
+            stage,
+            e,
+            unverifiable_event="checkpoint_materialised_size_unknown",
+            engine_event="checkpoint_materialised_engine_failed",
+            cache_path=cache_path,
         )
         return 0
     return int(sizes.get("", 0) / (1024 * 1024))
@@ -632,23 +682,29 @@ def preflight_split(
     So the map itself is computed here, the way from_pretrained computes it: the
     checkpoint's config on the meta device, the quantizer the load would use, and
     exactly the `device_map` and `max_memory` the placement passes, through
-    transformers' own `_get_device_map`. Well under a second, no CUDA context.
+    transformers' own `_get_device_map`. Well under a second, with no weight read
+    and no per-card memory query; a quantizer's own environment check may read
+    the current card's compute capability, as the load's does.
 
     Returns:
         MB per device of the map ("cuda:N"), or None when it cannot be computed
         here: not a split, no readable config, a class that will not build on
         meta, a quantizer whose package is missing. None never refuses — the
-        load computes the map again and refuses a map off the GPU itself.
+        load checks where the model landed, off the GPU or (for "all") on
+        fewer cards. Why it is None is logged: a warning for the checkpoint, an
+        ERROR when transformers' own machinery failed (_log_unverified).
 
     Raises:
         InsufficientMemoryError: part of the model would map to the CPU or disk.
     """
     if not placement.is_shard or not placement.gpu_indices or not cache_path or AutoConfig is None:
         return None
+    stage = _STAGE_ENGINE  # the imports are transformers' private API
     try:
         from transformers.integrations.accelerate import _get_device_map, compute_module_sizes
         from transformers.quantizers.auto import get_hf_quantizer
 
+        stage = _STAGE_CHECKPOINT
         config = AutoConfig.from_pretrained(cache_path, trust_remote_code=trust_remote_code)
         quantization_config = (
             None if checkpoint_is_pre_quantized(cache_path) else _bitsandbytes_config(quantization)
@@ -658,6 +714,8 @@ def preflight_split(
             config, quantization_config, device_map, True, {}
         )
         model = _meta_model(config, trust_remote_code)
+        # Config, class and quantizer all built: from here a failure is transformers'.
+        stage = _STAGE_ENGINE
         if hf_quantizer is not None:
             hf_quantizer.preprocess_model(
                 model=model,
@@ -677,10 +735,22 @@ def preflight_split(
                 model_name, placement, ["cpu or disk"], [], engine_message=str(e),
                 before_loading=True,
             ) from e
-        logger.warning("split_preflight_skipped", model_name=model_name, error=str(e)[:300])
+        _log_unverified(
+            stage,
+            e,
+            unverifiable_event="split_preflight_skipped",
+            engine_event="split_preflight_engine_failed",
+            model_name=model_name,
+        )
         return None
     except Exception as e:  # noqa: BLE001 - unverifiable here; the load checks again
-        logger.warning("split_preflight_skipped", model_name=model_name, error=str(e)[:300])
+        _log_unverified(
+            stage,
+            e,
+            unverifiable_event="split_preflight_skipped",
+            engine_event="split_preflight_engine_failed",
+            model_name=model_name,
+        )
         return None
 
     mapped_mb: dict[str, int] = {}

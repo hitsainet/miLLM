@@ -96,6 +96,19 @@ Mutation controls (mutate.py; restored and sha256-verified):
          -> both TestAllNamesEveryVisibleCard tests (+ the GGUF case in test_gguf_placement.py)
   R3-M5 re-run (the preflight's own check, now reached only with every card planned)
          -> the two refusal tests and test_the_pre_check_refuses_it_before_the_unload
+
+A failure in transformers' own machinery (a private function gone or changed)
+logged the same warning as an unverifiable checkpoint, so the preflight could go
+dark on every load unnoticed (TestAnEngineFailureIsNotAnUnverifiableCheckpoint):
+  R4-M6  the preflight's map call logged as the checkpoint's -> test_the_device_map_call_raising_is_an_error_of_its_own
+  R4-M6b its private imports counted as the checkpoint's     -> test_the_private_function_gone_is_an_error_of_its_own
+  R4-M6c it never enters the checkpoint stage                -> test_an_unverifiable_checkpoint_is_still_only_a_warning
+  R4-M6d _log_unverified logs an engine failure as the warning -> the three engine-failure tests
+  R4-M7  the materialised sizing's engine stage never entered -> test_the_materialised_size_engine_failure_is_an_error_too
+  R4-M7b it never enters the checkpoint stage                -> test_an_unbuildable_checkpoint_is_still_an_ordinary_unknown
+  R3-M4b re-run (the line beside the new stage marker)      -> the bitsandbytes factor test, test_kept_in_fp8_...
+  R3-X6 re-run (the offload refusal branch the logging now follows)
+         -> test_refused_from_the_quantizers_own_refusal
 """
 
 from __future__ import annotations
@@ -685,3 +698,83 @@ class TestAllNamesEveryVisibleCard:
         assert error["details"]["unused_devices"] == ["cuda:0"]
         assert not svc.unload_model.called
         assert not svc._executor.method_calls and not svc._executor.called
+
+class TestAnEngineFailureIsNotAnUnverifiableCheckpoint:
+    """Review round 4, 2026-09-14 (a leftover from round 3). The preflight and the
+    materialised sizing call transformers PRIVATE functions (`_get_device_map`,
+    `compute_module_sizes`). When one of those changes under an upgrade, every
+    split preflight skipped with the same warning as a checkpoint whose config no
+    class builds — so the check went quietly dark on every load and read as a run
+    of odd checkpoints. A failure inside transformers' own machinery, after the
+    checkpoint's config, class and quantizer were all built, is now a separate
+    ERROR event naming the call and the transformers version."""
+
+    def test_the_device_map_call_raising_is_an_error_of_its_own(self, tmp_path):
+        import millm.ml.model_loader as module
+
+        path = _checkpoint(tmp_path)
+        placement = _plan(SHORT, cache_path=path)
+        changed = TypeError("_get_device_map() takes 3 positional arguments but 4 were given")
+        with patch("transformers.integrations.accelerate._get_device_map", side_effect=changed), \
+                patch.object(module, "logger") as logger:
+            assert preflight_split("wide-16", path, "FP16", placement) is None
+
+        [error] = logger.error.call_args_list
+        assert error.args == ("split_preflight_engine_failed",)
+        assert error.kwargs["error_type"] == "TypeError"
+        assert error.kwargs["transformers_version"]
+        assert "split_preflight_skipped" not in [c.args[0] for c in logger.warning.call_args_list]
+
+    def test_the_private_function_gone_is_an_error_of_its_own(self, tmp_path, monkeypatch):
+        import transformers.integrations.accelerate as accelerate
+
+        import millm.ml.model_loader as module
+
+        path = _checkpoint(tmp_path)
+        placement = _plan(SHORT, cache_path=path)
+        monkeypatch.delattr(accelerate, "_get_device_map")
+        with patch.object(module, "logger") as logger:
+            assert preflight_split("wide-16", path, "FP16", placement) is None
+
+        assert [c.args[0] for c in logger.error.call_args_list] == ["split_preflight_engine_failed"]
+        assert logger.error.call_args.kwargs["error_type"] == "ImportError"
+
+    def test_an_unverifiable_checkpoint_is_still_only_a_warning(self, tmp_path):
+        import millm.ml.model_loader as module
+
+        placement = _plan(SHORT)
+        (tmp_path / "config.json").write_text(json.dumps({"model_type": "not-a-real-model"}))
+        with patch.object(module, "logger") as logger:
+            assert preflight_split("m", str(tmp_path), "FP16", placement) is None
+
+        assert [c.args[0] for c in logger.warning.call_args_list] == ["split_preflight_skipped"]
+        assert not logger.error.called
+
+    def test_the_materialised_size_engine_failure_is_an_error_too(self, tmp_path):
+        """Its fallback is the stored weights, which for FP8 on these cards is the
+        mid-load out-of-memory round 3 fixed: an API change must not look like an
+        ordinary unknown."""
+        import millm.ml.model_loader as module
+
+        path = _checkpoint(tmp_path, quantization_config=FP8)
+        changed = TypeError("compute_module_sizes() got an unexpected keyword argument")
+        with patch("transformers.integrations.accelerate.compute_module_sizes", side_effect=changed), \
+                patch.object(module, "logger") as logger:
+            assert module.checkpoint_materialised_mb(path) == 0
+
+        assert [c.args[0] for c in logger.error.call_args_list] == ["checkpoint_materialised_engine_failed"]
+        assert "checkpoint_materialised_size_unknown" not in [
+            c.args[0] for c in logger.warning.call_args_list
+        ]
+
+    def test_an_unbuildable_checkpoint_is_still_an_ordinary_unknown(self, tmp_path):
+        import millm.ml.model_loader as module
+
+        (tmp_path / "config.json").write_text(
+            json.dumps({"model_type": "not-a-real-model", "quantization_config": FP8})
+        )
+        with patch.object(module, "logger") as logger:
+            assert module.checkpoint_materialised_mb(str(tmp_path)) == 0
+
+        assert [c.args[0] for c in logger.warning.call_args_list] == ["checkpoint_materialised_size_unknown"]
+        assert not logger.error.called

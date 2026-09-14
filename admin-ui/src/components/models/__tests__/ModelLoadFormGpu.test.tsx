@@ -8,6 +8,8 @@
  *   * go back to the static device options   -> "one option per card" fails
  *   * submit without `gpu`                    -> "submits the chosen card" fails
  *   * stop calling onGpuChange                -> "tells the page" fails
+ * Phase 2, 2026-09-14 (applied, run, restored; sha256 verified):
+ *   M18c the split badge reads only mode 'all' -> "says when the model is split" fails
  */
 
 import { describe, expect, it, vi } from 'vitest';
@@ -31,10 +33,20 @@ describe('ModelLoadForm GPU selector', () => {
     expect(select.value).toBe('auto');
     expect(Array.from(select.options).map((o) => o.textContent)).toEqual([
       'Auto (most free memory)',
+      'All GPUs (split)',
       'GPU 0 · NVIDIA GeForce RTX 3080 Ti · 10.7 GB free',
       'GPU 1 · NVIDIA GeForce RTX 3090 · 22.5 GB free',
     ]);
     expect(select).not.toHaveTextContent('CPU');
+  });
+
+  it('submits a split across every card', async () => {
+    const onSubmit = vi.fn();
+    render(<ModelLoadForm onSubmit={onSubmit} gpus={GPUS} />);
+    await userEvent.selectOptions(screen.getByLabelText('GPU'), 'all');
+    await userEvent.type(screen.getByLabelText(/Hugging Face Repository ID/i), 'google/gemma-2-2b');
+    await userEvent.click(screen.getByRole('button', { name: /Download & Load Model/i }));
+    expect(onSubmit.mock.calls[0][0].gpu).toBe('all');
   });
 
   it('tells the page and submits the chosen card', async () => {
@@ -86,6 +98,25 @@ describe('LoadedModelCard placement', () => {
   });
 
   it('says when the model is split across cards', () => {
+    render(
+      <LoadedModelCard
+        model={{
+          ...base,
+          device: 'cuda:0, cuda:1',
+          placement: {
+            mode: 'shard', reason: 'no_single_card_fits', requested: null, required_mb: 30_000,
+            capacity_mb: 34_000, devices: ['cuda:0', 'cuda:1'], gpu_indices: [0, 1],
+            memory_by_device_mb: { 'cuda:0': 8_000, 'cuda:1': 20_000 },
+            planned_mb_by_device: { 'cuda:0': 8_024, 'cuda:1': 21_976 },
+          },
+        }}
+        onUnload={vi.fn()}
+      />,
+    );
+    expect(screen.getByTestId('placement-split')).toBeInTheDocument();
+  });
+
+  it('still says so for a server that reports the older "all"', () => {
     render(
       <LoadedModelCard
         model={{

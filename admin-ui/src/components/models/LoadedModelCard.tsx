@@ -109,7 +109,7 @@ export function LoadedModelCard({
                     .join(' · ')}
                 </p>
               )}
-              {model.placement?.mode === 'all' && (
+              {(model.placement?.mode === 'shard' || model.placement?.mode === 'all') && (
                 <p data-testid="placement-split" className="text-xs text-amber-400 mt-1">
                   Split across cards
                 </p>

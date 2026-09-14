@@ -47,8 +47,10 @@ export interface ModelInfo {
 
 /**
  * Which GPU a load goes on: 'auto' (the card with the most free memory that
- * fits), a CUDA index as a string ("1"), or a GPU UUID as nvidia-smi prints it.
- * A named card without room is refused by the backend, never swapped.
+ * fits, split across the fewest cards when none does), 'all' (split across
+ * every card), a CUDA index as a string ("1"), or a GPU UUID as nvidia-smi
+ * prints it. A named card or 'all' without room is refused by the backend,
+ * never swapped.
  */
 export type GpuSelection = string;
 
@@ -58,8 +60,12 @@ export interface LoadModelRequest {
 
 /** Where the loaded model lives, as the backend decided and measured it. */
 export interface ModelPlacement {
-  /** 'single' = one card, 'all' = spread across every card, 'cpu' = GGUF on the CPU. */
-  mode: 'single' | 'all' | 'cpu';
+  /**
+   * 'single' = one card, 'shard' = split across GPUs (never the CPU for a
+   * transformers model), 'cpu' = GGUF on the CPU. 'all' is what a server from
+   * before 2026-09-14 reports for a split.
+   */
+  mode: 'single' | 'shard' | 'cpu' | 'all';
   reason: string;
   requested: number | string | null;
   required_mb: number;
@@ -67,6 +73,10 @@ export interface ModelPlacement {
   devices: string[];
   gpu_indices: number[];
   memory_by_device_mb: Record<string, number>;
+  /** A split's planned share on each card, in MB. Empty or absent for one card. */
+  planned_mb_by_device?: Record<string, number>;
+  /** What each card of a split could hold after its runtime reserve, in MB. */
+  budget_mb_by_device?: Record<string, number>;
 }
 
 /** One card from the system:metrics event (nvidia-smi, one line per GPU). */

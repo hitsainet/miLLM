@@ -526,52 +526,8 @@ class NoActiveCircuitError(MiLLMError):
     status_code = 200  # house style: handler-level refusal in the envelope
 
 
-# =============================================================================
-# Error code to class mapping for lookup
-# =============================================================================
-
 class CircuitSensingEventNotFoundError(MiLLMError):
     """A circuit edge sensing event id that does not exist (Feature 15)."""
 
     code = "CIRCUIT_SENSING_EVENT_NOT_FOUND"
     status_code = 404
-
-
-ERROR_CLASSES: dict[str, type[MiLLMError]] = {
-    "CIRCUIT_LAYER_CONTENTION": CircuitLayerContentionError,
-    "CIRCUIT_SENSING_EVENT_NOT_FOUND": CircuitSensingEventNotFoundError,
-    "INTERNAL_ERROR": MiLLMError,
-    "MODEL_NOT_FOUND": ModelNotFoundError,
-    "MODEL_ALREADY_EXISTS": ModelAlreadyExistsError,
-    "MODEL_LOAD_FAILED": ModelLoadError,
-    "INVALID_GGUF_TENSOR_SPLIT": GgufTensorSplitError,
-    "UNSUPPORTED_QUANTIZATION": UnsupportedQuantizationError,
-    "GPU_NOT_FOUND": GpuNotFoundError,
-    "MODEL_NOT_LOADED": ModelNotLoadedError,
-    "MODEL_ALREADY_LOADED": ModelAlreadyLoadedError,
-    "MODEL_BUSY": ModelBusyError,
-    "INSUFFICIENT_MEMORY": InsufficientMemoryError,
-    "INSUFFICIENT_DISK": InsufficientDiskError,
-    "DOWNLOAD_FAILED": DownloadFailedError,
-    "DOWNLOAD_CANCELLED": DownloadCancelledError,
-    "REPO_NOT_FOUND": RepoNotFoundError,
-    "GATED_MODEL_NO_TOKEN": GatedModelError,
-    "INVALID_HF_TOKEN": InvalidTokenError,
-    "INVALID_LOCAL_PATH": InvalidLocalPathError,
-    "SAE_NOT_FOUND": SAENotFoundError,
-    "SAE_NOT_ATTACHED": SAENotAttachedError,
-    "SAE_ALREADY_ATTACHED": SAEAlreadyAttachedError,
-    "SAE_INCOMPATIBLE": SAEIncompatibleError,
-    "SAE_LOAD_FAILED": SAELoadError,
-    "INVALID_FEATURE_INDEX": InvalidFeatureIndexError,
-
-    "PROFILE_NOT_FOUND": ProfileNotFoundError,
-    "PROFILE_ALREADY_EXISTS": ProfileAlreadyExistsError,
-    "PROFILE_INCOMPATIBLE": ProfileCompatibilityError,
-    "INVALID_PROFILE_FORMAT": InvalidProfileFormatError,
-    "VALIDATION_ERROR": ValidationError,
-    "SAE_SET_INCOMPLETE": SAESetIncompleteError,
-    "CIRCUIT_NOT_FOUND": CircuitNotFoundError,
-    "UNVALIDATED_CIRCUIT": UnvalidatedCircuitError,
-    "NO_ACTIVE_CIRCUIT": NoActiveCircuitError,
-}

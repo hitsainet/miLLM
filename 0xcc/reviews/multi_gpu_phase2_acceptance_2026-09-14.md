@@ -23,11 +23,38 @@
 | 9 | Out of memory while generating | **PASS** | Qwen `all`, prompt of 15,993 tokens + 256. Non-streaming at 1:09 PM: **503**, `type invalid_request_error, code insufficient_memory`, naming **cuda:0 (RTX 3080 Ti)**, the prompt tokens and max_tokens. Process on cuda:0: 10,294 MiB before, 11,868 MiB peak, **10,288 after**. The next request returned 200. Streaming ×3 at 1:11 PM: each stream ended with the error event and then `data: [DONE]`. cuda:0 was 10,296 MiB after each (+2 MiB), the next request returned 200, and health was 200. |
 | 10 | bitsandbytes split | **PASS** | Local Q8 row over OLMo's FP16 files, `gpu: all`, at 1:22 PM. There was no CPU staging refusal. `bitsandbytes: true` in `split_load_memory_map`. The map equals the fit's layout (8,847 / 5,216 MiB, 26 / 14 layers). The model served (200). Two notes, both part of Failure 1: the landed memory is **9,500 / 5,660 MiB, 653 / 444 MiB above the map** (FP16 agreed within 18 MiB); and a request of 3,879 + 16 tokens **ran cuda:0 out of memory** at 1:24 PM (peak 12,136 MiB). |
 | 11 | Unload and switch | **FAIL** | Switch OLMo FP16 → Q8 at 1:22 PM: `gpu_memory_cleanup` freed 10,074 / 16,124 MiB, down to 391 / 397. Every unload returned both cards to context only. **A `/v1` request during an unload is not told to retry**: while the Q8 split unloaded (17:24:13–17:24:21Z), requests at +1 s and +3 s both got **HTTP 500 `server_error`**, `RuntimeError: Expected all tensors to be on the same device, but got index is on cuda:0, different from other tensors on cpu` in `embed_tokens`. See Failure 3. Health stayed 200 and memory still returned. |
-| 12 | Logs | **PASS** | Sweep of the whole session (6,016 lines): **no** `transformers_fit_falls_back_to_slack`, **no** `*_engine_failed`, **no** `split_preflight_skipped`. Also no `torch_compile_*`, `cbm_*` or `draft_*` (disabled). There were 6 `generation_out_of_memory`: 4 deliberate (item 9), plus the item 4 and item 10 failures. There were 5 `unhandled_exception`: 3 from item 7 and 2 from item 11. |
+| 12 | Logs | **PASS** (unchanged by the fixes below) | Sweep of the whole session (6,016 lines): **no** `transformers_fit_falls_back_to_slack`, **no** `*_engine_failed`, **no** `split_preflight_skipped`. Also no `torch_compile_*`, `cbm_*` or `draft_*` (disabled). There were 6 `generation_out_of_memory`: 4 deliberate (item 9), plus the item 4 and item 10 failures. There were 5 `unhandled_exception`: 3 from item 7 and 2 from item 11. |
+
+## Fixes (2026-09-14, after this run; on local `main`, not yet deployed or re-run on the node)
+
+| Finding | Commits | Fix |
+|---|---|---|
+| Failure 1 (items 4, 10) | `6ce5c38`, `80a9aef` | Each card now also holds a request's **working memory**, traced from the model, and a bitsandbytes load's staging. Torch's unused cache goes back to the cards once the request queue has been idle for `TRANSFORMERS_IDLE_CACHE_RELEASE_S` (5 s). |
+| Failure 2 (item 7) | `2c84fe8` | A request past the model's context is a 400 on every route. A stream is refused before its 200 is sent. |
+| Failure 3 (item 11) | `ee20b11` | A request for a model being unloaded is refused with 503 `model_busy` ("retry once the unload finishes"), and nothing runs on its moving weights. |
+
+**Failure 1 in figures.** A card's working memory is T + ⌈0.40 × (T + KV)⌉. T is the transient peak of the phases that card runs, traced by running the model's forward pass on the meta device. 0.40 is the caching allocator's share (see `millm/ml/working_memory.py`). The fit's plans at this run's free memory (11,767 / 23,976 MiB), computed with the committed code:
+- **OLMo-2-13B FP16 on Auto:** 2 passes, **13 / 27 layers**. cuda:0: 8,846 MiB of weights + 1,040 of KV + 1,151 of working memory + 500 of context, **230 MiB spare** (this run: 15 / 25 layers, 11 spare).
+- **OLMo-2-13B Q8 with `all`:** 2 passes, **19 / 21 layers**. cuda:0 counts 805 MiB of staging (the node landed 653 above the map on 26 layers), 634 MiB spare (this run: 26 / 14).
+- **Qwen2.5-7B FP16 with `all`:** 1 pass, **18 / 10 layers**, cuda:0 1,241 MiB spare (this run: 20 / 8). Item 3's layout will differ on a re-run.
+
+The fit's allowance against what this run measured on OLMo-2-13B's cuda:0 (overhead beyond weights and KV, CUDA context included): 650 / 946 / 1,245 MiB against 536 / 943 / 1,129 for the three successful requests (+21%, +0.3%, +10%), and 1,545 against the extrapolated ~1,300 at 4,096 tokens (+19%). This adds the smallest measured context (330 MiB) to the fit's working memory. It is never below the node. Qwen2.5-7B's steered request is +120% (1,153 against ~525, measured with an SAE attached), which is unexplained and errs toward refusing. A test pins the three OLMo figures.
+
+The idle cache release takes the request queue's slot, so it never runs during a request. It does not run while continuous batching is on, whose requests hold no queue slot (a defect found and fixed in review before commit). It reads memory only on the model's own cards.
+
+**`TRANSFORMERS_CUDA_CONTEXT_MB` stays 500.** The recommendation of 1,500 below is superseded: it was sized to also cover prefill activations and fragmentation, and those are now counted per card, so 1,500 would count them twice (about 1 GiB a card for OLMo-2-13B). Lowering it to 400 is not recommended either, for two reasons. The context grew from 250 to 400 MiB within this session with no ceiling observed. And at 2,077 tokens the fit's working memory plus the smallest measured context covers the node by only 3 MiB, so the setting's 100–170 MiB above the measured context is the real margin there.
+
+**Re-run on the node after deploying, in this order:**
+1. **Item 4.** OLMo-2-13B FP16 on Auto. Expect `transformers_fit_split_accepted` with 13 / 27 layers and 230 MiB planned spare on cuda:0 (at 11,767 / 23,976 free). Expect the same 3,879 + 217-token request to return 200. Then, 5 s after the last request, expect `idle_cache_released` and cuda:0 back near landed weights plus context in nvidia-smi.
+2. **Item 7.** Expect Qwen2.5-7B 32,699 + 512 and OLMo-2-13B 4,272 + 64 to return 400, non-streaming and streaming.
+3. **Item 10.** OLMo-2-13B Q8 with `all`. Expect 19 / 21 layers, landed memory within the map plus the counted staging, and the 3,879 + 16-token request to return 200.
+4. **Item 11.** Unload a split model with `/v1` requests arriving during the unload. Expect 503 `model_busy`, no 500, and memory returned.
 
 ## Failures
 
 ### Failure 1 — the per-card fit admits a context its card cannot run (items 4, 10)
+
+**Fixed in `6ce5c38` and `80a9aef`** (see Fixes).
 
 The fit accepts a card when `free ≥ weights + KV(TRANSFORMERS_MIN_CONTEXT) + TRANSFORMERS_CUDA_CONTEXT_MB`. On this node the 500 MB allowance is far below what a long prefill needs beyond the weights and the KV cache.
 
@@ -50,6 +77,8 @@ Every OOM was handled as designed (typed 503, memory released, the next request 
 
 ### Failure 2 — a request past the model's context is a 500, not a 400 (item 7)
 
+**Fixed in `2c84fe8`.**
+
 `InferenceService._check_context_length` (`millm/services/inference_service.py:2491`) raises a bare `ValueError`. The `ContextLengthExceededError` (400, `millm/core/errors.py:59`) exists and is used for llama.cpp, but not here. The function even imports `context_length_exceeded_error` and never uses it.
 
 - Non-streaming (`create_chat_completion`, line 3076) reaches the client as **500**.
@@ -58,6 +87,8 @@ Every OOM was handled as designed (typed 503, memory released, the next request 
 Log: `unhandled_exception ValueError "Context length exceeded: 32699 prompt + 512 max_tokens = 33211 > 32768"` at 17:07:14Z and 17:08:43Z, and `"4272 prompt + 64 max_tokens = 4336 > 4096"` at 17:14:07Z. The raise dates from `de474c63` (2026-02-07); round 5 (`7571cab`) changed only how the maximum is read. So this predates Phase 2, but the checklist item fails.
 
 ### Failure 3 — a `/v1` request during an unload runs on a half-moved model (item 11)
+
+**Fixed in `ee20b11`.**
 
 `ModelService.unload_model` keeps the row LOADED, and the loader reporting the model, until `_unload_worker` returns. Meanwhile `LoadedModelState.clear()` (`millm/ml/model_loader.py:303`, via `ModelLoader.unload` at 3659) moves the weights `.to("cpu")` first. accelerate logs "You shouldn't move a model that is dispatched using accelerate hooks." A chat arriving in that window passes the route's `model_info.name == request.model` check. It is dispatched into `generate()` and fails in `embed_tokens` with the device-mismatch `RuntimeError` above, reaching the client as 500.
 
@@ -74,7 +105,7 @@ Log: 17:24:14.146Z and 17:24:16.134Z, request lines at 17:24:14.094Z, `unload_st
 
 The CUDA context alone is ~330–400 MiB per card. The allowance also has to cover prefill activations and fragmentation, measured above at ~525 MiB (Qwen2.5-7B, ~4k) up to an extrapolated ~1,300 MiB (OLMo-2-13B, 4,096).
 
-**Recommendation: `TRANSFORMERS_CUDA_CONTEXT_MB=1500` on this node** while `TRANSFORMERS_MIN_CONTEXT` is 4096. At today's free memory:
+**Recommendation (superseded by the fix for Failure 1: keep 500, see Fixes): `TRANSFORMERS_CUDA_CONTEXT_MB=1500` on this node** while `TRANSFORMERS_MIN_CONTEXT` is 4096. At today's free memory:
 - OLMo-2-13B on Auto would need 12,756 MiB on cuda:0 against 11,767 free, so it would be re-planned with layers moved to the 3090 (5,370 MiB spare there today).
 - Qwen2.5-7B `all` would still be accepted (11,590 of 11,825).
 

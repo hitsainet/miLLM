@@ -101,11 +101,15 @@ A model that no single card can hold is **split across GPUs**. The cards with th
 
 ### How miLLM decides a transformers model fits
 
-A transformers model is judged **card by card**. From the checkpoint's configuration, without reading any weights, miLLM works out how much memory the weights take once loaded and, for a split, which layers transformers will put on each card. Each card the model uses must then have room for three things:
+A transformers model is judged **card by card**. From the checkpoint's configuration, without reading any weights, miLLM works out how much memory the weights take once loaded and, for a split, which layers transformers will put on each card. Each card the model uses must then have room for:
 
 - the weights on that card;
 - the **KV cache** of that card's layers at a minimum context, [`TRANSFORMERS_MIN_CONTEXT`](/reference/configuration#transformers-models) (4,096 tokens by default), or at the model's own maximum context if that is shorter, counted at bfloat16;
-- a **CUDA context**, [`TRANSFORMERS_CUDA_CONTEXT_MB`](/reference/configuration#transformers-models) (500 MB by default).
+- a request's **working memory** on that card. This is the most memory a request of that length holds at once while the card's part of the model runs: the activations of its prefill, beside the KV cache. miLLM measures it by running the model's own forward pass on the meta device, which allocates nothing, and following every tensor it creates. It adds room for what PyTorch's memory allocator keeps reserved and cannot hand back, 40% of that peak and of the card's KV cache. For OLMo-2-13B at 4,096 tokens this is about 1,100 to 1,600 MiB a card, and for Qwen2.5-7B on one card about 870 MiB;
+- for a bitsandbytes Q8 or Q4 load, what quantizing the weights as they load leaves stranded on the card: 7% of the bfloat16 size of the weights quantized there;
+- a **CUDA context**, [`TRANSFORMERS_CUDA_CONTEXT_MB`](/reference/configuration#transformers-models) (500 MB by default; 250 to 400 MiB measured on the node).
+
+A model whose forward pass cannot run on the meta device, such as one with FP8 kernels, a mixture of experts or custom remote code, gets a working-memory estimate instead. The estimate sits above every model that was measured, and miLLM logs an error naming the architecture when it uses one (`transformers_fit_working_memory_estimated`).
 
 A sliding-window layer is counted up to its window. In a hybrid model only the attention layers are counted; the fixed-size state of a Mamba or convolution layer is not. The minimum context is a floor for loading, not a limit on requests: a card with more room serves longer contexts. Requests are limited only by the model's own maximum context, so a request whose KV cache needs more than its cards have left runs out of GPU memory during generation. That request is refused with `503 insufficient_memory` (type `invalid_request_error`) on `/v1`, or `507 INSUFFICIENT_MEMORY` on the management API, naming the card torch ran out on, the prompt's tokens and `max_tokens`; a streamed response ends with the same error event and `[DONE]`. The failed request's memory is released and later requests are served. Raise `TRANSFORMERS_MIN_CONTEXT` to load only where the contexts you serve fit.
 
@@ -119,8 +123,10 @@ The same test decides everything: whether Auto puts the model on one card or spl
 
 Qwen2.5-14B at 32,768 tokens is refused on those cards: its weights, its cache and two CUDA contexts need 35,317 MiB of the 35,000 free, however the layers are divided.
 
-:::note The CUDA context allowance is a placeholder
-500 MB has not yet been measured on the node. Prefill activations and cuBLAS workspaces are not counted separately, so they must fit in it too.
+:::note The CUDA context and the memory a request leaves behind
+The 500 MB CUDA context allowance was measured on the node on 2026-09-14. A context holds 250 to 256 MiB idle, about 330 MiB after a first generation, and grows to about 400 MiB over a session, on both the RTX 3080 Ti and the RTX 3090. A request's prefill activations and the allocator's reserve are counted separately, as its working memory.
+
+When a request finishes, PyTorch keeps the memory it freed, and nvidia-smi shows that memory as used. Once a transformers model's request queue has been idle for [`TRANSFORMERS_IDLE_CACHE_RELEASE_S`](/reference/configuration#transformers-models) seconds (5 by default), miLLM returns it to the cards, so miStudio and other tenants of the node can place work there. This never happens while a request is running, and never while continuous batching is on, because its requests do not pass through the request queue.
 :::
 
 A model whose KV cache miLLM cannot work out from its configuration, such as one with DeepSeek's multi-head latent attention, or an encoder-decoder, is judged the older way instead: its weight estimate plus 20%, against each card's free memory. miLLM logs an error naming the architecture when it does this.

@@ -97,7 +97,31 @@ miLLM estimates memory before loading and warns (but does not block) when the es
 
 A model goes on **one card whenever one card holds it**: with **Auto**, the card with the most free memory. The free memory is read live, and nothing is held back for other applications on the node.
 
-A model that no single card can hold is **split across GPUs**. The cards with the most free memory are taken first, and only as many as the model needs. Each card of a split keeps 1 GB back for its CUDA context and for the activations of the layers it runs. Splitting costs a copy between cards at every layer boundary, and a split model is not compiled, so a model that fits one card is never split unless you ask.
+A model that no single card can hold is **split across GPUs**. The cards with the most free memory are taken first, and only as many as the model needs. Each card of a split keeps 1 GB out of the memory its weights may fill, so the model's layers are not packed into the room that card needs for its context. Splitting costs a copy between cards at every layer boundary, and a split model is not compiled, so a model that fits one card is never split unless you ask.
+
+### How miLLM decides a transformers model fits
+
+A transformers model is judged **card by card**. From the checkpoint's configuration, without reading any weights, miLLM works out how much memory the weights take once loaded and, for a split, which layers transformers will put on each card. Each card the model uses must then have room for three things:
+
+- the weights on that card;
+- the **KV cache** of that card's layers at a minimum context, [`TRANSFORMERS_MIN_CONTEXT`](/reference/configuration#transformers-models) (4,096 tokens by default), counted at bfloat16;
+- a **CUDA context**, [`TRANSFORMERS_CUDA_CONTEXT_MB`](/reference/configuration#transformers-models) (500 MB by default).
+
+A sliding-window layer is counted up to its window. In a hybrid model only the attention layers are counted; the fixed-size state of a Mamba or convolution layer is not. The minimum context is a floor for loading, not a limit on requests: a card with more room serves longer contexts.
+
+The same test decides everything: whether Auto puts the model on one card or splits it, whether a named card is accepted, and whether a split is accepted. A refusal lists every card the model would use, with its free memory, the weights, the KV cache and the context allowance, and how many MiB the short card is missing. For example, with an RTX 3080 Ti at 11,500 MB free and an RTX 3090 at 23,500 MB free:
+
+| Model (BF16) | At 4,096 tokens | At 8,192 tokens |
+|---|---|---|
+| Qwen2.5-14B | Split; 1,941 and 3,121 MiB to spare | Split; 1,717 and 2,577 MiB to spare |
+| OLMo-2-13B | Split; 430 and 4,210 MiB to spare | Refused: the RTX 3080 Ti is 690 MiB short |
+| Vicuna-13B | Split; 413 and 5,563 MiB to spare | Refused: the RTX 3080 Ti is 787 MiB short |
+
+:::note The CUDA context allowance is a placeholder
+500 MB has not yet been measured on the node. Prefill activations and cuBLAS workspaces are not counted separately, so they must fit in it too.
+:::
+
+A model whose KV cache miLLM cannot work out from its configuration, such as one with DeepSeek's multi-head latent attention, or an encoder-decoder, is judged the older way instead: its weight estimate plus 20%, against each card's free memory. miLLM logs an error naming the architecture when it does this.
 
 **A transformers model never runs from CPU memory or disk.** This covers FP16/BF16 and bitsandbytes Q8/Q4. If the cards together cannot hold it, the load is refused before anything is unloaded, and the refusal gives the figures for each card. A split is also checked layer by layer before anything is unloaded: miLLM works out where each layer of the model would go from the checkpoint's configuration, without reading any weights, and refuses a split that would put any layer on the CPU or disk. The refusal lists how much would land on each device. After loading, miLLM checks again where the weights actually landed.
 

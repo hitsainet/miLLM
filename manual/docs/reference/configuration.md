@@ -62,6 +62,15 @@ High-throughput batched inference via HuggingFace `ContinuousBatchingManager`. T
 | `CBM_DEFAULT_MAX_TOKENS` | `512` | Default generation length |
 | `CBM_FORCE_SERIAL_MONITORING` | `false` | Route monitored requests to the serial path for exact per-request activation attribution (trades throughput for fidelity) |
 
+## Transformers models
+
+Settings that decide whether a transformers (non-GGUF) model fits the GPUs. See [Hardware Requirements](/getting-started/hardware#how-millm-decides-a-transformers-model-fits) for how they are used.
+
+| Variable | Default | Notes |
+|---|---|---|
+| `TRANSFORMERS_MIN_CONTEXT` | `4096` | The context, in tokens, whose KV cache every card a model uses must have room for. A floor for loading, not a limit on requests. Raise it to refuse a model that would only fit with a short context. |
+| `TRANSFORMERS_CUDA_CONTEXT_MB` | `500` | Memory each card keeps for its CUDA context, in MB. A placeholder until it is measured on the node. Prefill activations and cuBLAS workspaces must fit in it too. |
+
 ## GGUF models
 
 Settings that apply only when the loaded model is a GGUF file. See [Hardware Requirements](/getting-started/hardware#kv-cache) for the measurements behind the defaults.

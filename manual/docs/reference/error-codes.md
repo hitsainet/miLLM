@@ -23,7 +23,7 @@ Machine-readable error codes returned by the management API in the [error envelo
 
 | Code | HTTP | Meaning |
 |------|------|---------|
-| `INSUFFICIENT_MEMORY` | 507 | Estimated VRAM exceeds what's free |
+| `INSUFFICIENT_MEMORY` | 507 | A card the model would use cannot hold its weights, its KV cache at `TRANSFORMERS_MIN_CONTEXT` tokens and its CUDA context. `details.per_card` gives each card's free, weights, KV and context MiB; `details.short_devices` names the short cards. For a model whose KV cache miLLM cannot size, the estimate exceeds what is free. A request on `/v1` that loads the model gets `503 insufficient_memory` |
 | `INSUFFICIENT_DISK` | 507 | Not enough disk for the download |
 | `UNSUPPORTED_QUANTIZATION` | 400 | The load asks for a quantization its engine cannot apply (Q2 on a transformers checkpoint that is not already quantized) |
 | `GPU_NOT_FOUND` | 404 | The `gpu` named in a load is not visible to miLLM |

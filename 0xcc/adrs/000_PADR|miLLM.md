@@ -1237,6 +1237,13 @@ SAE_CACHE_DIR=./data/saes
 **Trade-off:** Two fields travel where one signed number would do, and every new consumer must be told not to "helpfully" combine them.
 **Rationale:** This rule lived only in `_directional_budget`'s docstring while being depended on by every path that moves a member. Combining early applies the sign twice and silently inverts an intervention — a steering change that looks plausible and is backwards. Promoting it to architecture text makes it reviewable rather than discoverable, and F18's characterization gate now pins it: the flattening is asserted to carry `-3.0`/`sign=-1` verbatim.
 
+#### Multi-GPU placement (Phase 2, 2026-09-14)
+
+#### Fit per card vs a 20% slack on the weights (Decision 7)
+**Decision:** A transformers load is accepted only when each card it uses holds, beside the weights transformers' own device map puts there, a CUDA context (`TRANSFORMERS_CUDA_CONTEXT_MB`, ~500 MB until measured on the node) and the KV cache of its layers at `TRANSFORMERS_MIN_CONTEXT` tokens (4,096). One test decides a split, Auto's one-card-or-split choice and a named card. A model whose KV cache cannot be derived from its config keeps the 20% slack, logged as an error naming the architecture. GGUF keeps its own context prediction.
+**Trade-off:** Building the model on the meta device and computing transformers' map at plan time (tens of milliseconds a plan), and a KV formula per layer type to maintain, vs one multiplication.
+**Rationale:** The slack grew with the weights, not with what each card needs. On 11.5 + 23.5 GB free it refused Qwen2.5-14B at FP16, whose map leaves 1,941 / 3,121 MiB after a 4k cache and the context; it accepted OLMo-2-13B, whose cuda:0 is 690 MiB short of an 8k cache; and it split a 7B FP16 model that a 3090 with 17 GB free holds (weights 14,525 MiB, 17,395 with the slack). The KV formula mirrors transformers' `DynamicCache` (layer types, sliding windows, per-layer overrides) and does not guess what it cannot size. `SHARD_RESERVE_MB` stays only as the margin in a split's `max_memory`. Nothing re-plans a split to move layers off a short card: the refusal names that card and its figures.
+
 #### Circuit Runtime increment (v1.2, 2026-07-20)
 
 #### Relax `AttachedSAEState` singleton vs one-SAE swap-on-load

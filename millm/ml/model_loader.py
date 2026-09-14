@@ -1539,7 +1539,12 @@ def load_gguf_model(
         )
         kwargs: dict[str, Any] = {
             "model_path": str(path),
-            "n_gpu_layers": GGUF_GPU_LAYERS,
+            # A placement with no card offloads nothing. With CUDA and a
+            # GPU-capable build but an empty inventory (nvidia-smi absent or
+            # timed out), placement says CPU, and -1 here made llama.cpp spread
+            # every layer over every card, main_gpu 0, while the load recorded
+            # "cpu" with no per-card memory.
+            "n_gpu_layers": GGUF_GPU_LAYERS if placement.gpu_indices else 0,
             "n_ctx": start_ctx,
             "verbose": False,
             **kv_kwargs,

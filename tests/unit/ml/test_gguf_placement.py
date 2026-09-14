@@ -178,6 +178,35 @@ class TestLoad:
         assert llama.call_args.kwargs["main_gpu"] == 0
         assert loaded.placement["reason"] == "requested_card"
 
+    def test_a_cpu_placement_offloads_no_layers(self, tmp_path, offload):
+        """A placement that says CPU must RUN on the CPU.
+
+        CUDA and a GPU-capable llama.cpp build are present, but the inventory is
+        empty (nvidia-smi absent, failing or past its 5 s timeout), so placement
+        answers `cpu`. The kwargs still carried n_gpu_layers=-1 with no
+        split_mode/main_gpu, so llama.cpp spread every layer over every card
+        with its default main_gpu 0 while the load recorded device "cpu", no
+        gpu_indices and no per-card memory — the pre-Phase-1 defect, unreported.
+
+        MUTATION CONTROL (round 2, 2026-09-13): pass GGUF_GPU_LAYERS whatever
+        the placement -> this test fails.
+        """
+        with fake_gpus(*NODE, smi_available=False) as fake:
+            loaded, llama, _ = _load(tmp_path, SMALL_KV, fake=fake)
+        kwargs = llama.call_args.kwargs
+        assert loaded.placement["mode"] == MODE_CPU
+        assert loaded.device == "cpu"
+        assert kwargs["n_gpu_layers"] == 0, (
+            f"placement is cpu but llama.cpp was asked to offload "
+            f"n_gpu_layers={kwargs['n_gpu_layers']}"
+        )
+        assert "main_gpu" not in kwargs and "split_mode" not in kwargs
+
+    def test_a_card_placement_still_offloads_every_layer(self, tmp_path, offload):
+        with fake_gpus(*NODE) as fake:
+            _, llama, _ = _load(tmp_path, SMALL_KV, fake=fake)
+        assert llama.call_args.kwargs["n_gpu_layers"] == model_loader.GGUF_GPU_LAYERS
+
     def test_a_refused_card_reaches_the_caller_as_itself_and_nothing_loads(self, tmp_path, offload):
         with fake_gpus((TI_3080, 3_000, 12_288), (RTX_3090, 23_000, 24_576)) as fake:
             with pytest.raises(InsufficientMemoryError):

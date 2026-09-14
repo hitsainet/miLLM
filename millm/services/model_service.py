@@ -775,81 +775,95 @@ class ModelService:
                 details={"model_id": model_id},
             )
 
-        # The card, checked NOW: before any state below changes, and above all
-        # before the resident model is unloaded to make room. The load itself
-        # runs in the background, so a refusal found only there arrived as an
-        # ERROR status after the model being served was already gone.
-        try:
-            wanted = parse_gpu_request(gpu)
-        except ValueError as e:
-            raise GpuNotFoundError(str(e), details={"requested": gpu}) from e
-        self._precheck_placement(model, wanted)
-
-        if model.status == ModelStatus.ERROR:
-            # Allow retry from error state - reset to ready first
-            logger.info(
-                "retrying_errored_model",
-                model_id=model_id,
-                previous_error=model.error_message,
-            )
-            model = await self.repository.update_status(
-                model_id, status=ModelStatus.READY, error_message=None
-            )
-
-        # Check if another load is in progress
+        # One load at a time, and the slot is CLAIMED here, with no await
+        # between the check and the claim. It used to be set only after the
+        # resident model's unload was awaited (which drains pending inference
+        # for up to five seconds), so a second load arriving in that window —
+        # a double-clicked Switch, or two OpenAI requests naming different
+        # models — passed this same check. Both were submitted to the
+        # two-worker executor, ran at once, and the second replaced the first
+        # in LoadedModelState without unloading it.
         if self._loading_model_id is not None:
             raise ModelBusyError(
                 f"Another model ({self._loading_model_id}) is currently being loaded",
                 details={"loading_model_id": self._loading_model_id},
             )
-
-        # Unload any currently loaded model
-        if self.loader.is_loaded:
-            current_model_id = self.loader.loaded_model_id
-            logger.info(
-                "auto_unloading_model",
-                current_model_id=current_model_id,
-                new_model_id=model_id,
-            )
-            await self.unload_model(current_model_id)
-
-        # Update status to LOADING
-        model = await self.repository.update_status(model_id, status=ModelStatus.LOADING)
         self._loading_model_id = model_id
 
-        logger.info(
-            "load_started",
-            model_id=model_id,
-            cache_path=model.cache_path,
-            quantization=model.quantization.value,
-        )
+        try:
+            # The card, checked NOW: before any state below changes, and above
+            # all before the resident model is unloaded to make room. The load
+            # itself runs in the background, so a refusal found only there
+            # arrived as an ERROR status after the served model was gone.
+            try:
+                wanted = parse_gpu_request(gpu)
+            except ValueError as e:
+                raise GpuNotFoundError(str(e), details={"requested": gpu}) from e
+            self._precheck_placement(model, wanted)
 
-        # Emit progress event
-        if self.emitter:
-            await self.emitter.emit_load_progress(
+            if model.status == ModelStatus.ERROR:
+                # Allow retry from error state - reset to ready first
+                logger.info(
+                    "retrying_errored_model",
+                    model_id=model_id,
+                    previous_error=model.error_message,
+                )
+                model = await self.repository.update_status(
+                    model_id, status=ModelStatus.READY, error_message=None
+                )
+
+            # Unload any currently loaded model
+            if self.loader.is_loaded:
+                current_model_id = self.loader.loaded_model_id
+                logger.info(
+                    "auto_unloading_model",
+                    current_model_id=current_model_id,
+                    new_model_id=model_id,
+                )
+                await self.unload_model(current_model_id)
+
+            # Update status to LOADING
+            model = await self.repository.update_status(model_id, status=ModelStatus.LOADING)
+
+            logger.info(
+                "load_started",
                 model_id=model_id,
-                stage="initializing",
-                progress=0,
+                cache_path=model.cache_path,
+                quantization=model.quantization.value,
             )
 
-        # Start background load
-        # Store the main loop for thread-safe async operations
-        loop = asyncio.get_running_loop()
-        self._main_loop = loop
-        loop.run_in_executor(
-            self._executor,
-            self._load_worker,
-            model_id,
-            model.name,
-            model.cache_path,
-            model.quantization.value,
-            model.estimated_memory_mb or 0,
-            model.trust_remote_code,
-            # The chosen GGUF file, when this row is one. Its presence is what
-            # routes the load to llama.cpp instead of transformers.
-            (model.gguf_files or [None])[0],
-            wanted,
-        )
+            # Emit progress event
+            if self.emitter:
+                await self.emitter.emit_load_progress(
+                    model_id=model_id,
+                    stage="initializing",
+                    progress=0,
+                )
+
+            # Start background load
+            # Store the main loop for thread-safe async operations
+            loop = asyncio.get_running_loop()
+            self._main_loop = loop
+            loop.run_in_executor(
+                self._executor,
+                self._load_worker,
+                model_id,
+                model.name,
+                model.cache_path,
+                model.quantization.value,
+                model.estimated_memory_mb or 0,
+                model.trust_remote_code,
+                # The chosen GGUF file, when this row is one. Its presence is
+                # what routes the load to llama.cpp instead of transformers.
+                (model.gguf_files or [None])[0],
+                wanted,
+            )
+        except BaseException:
+            # Nothing was submitted, so no worker's `finally` will release the
+            # slot. Without this a refused or failed load left the service
+            # refusing every later load as busy.
+            self._loading_model_id = None
+            raise
 
         return model
 

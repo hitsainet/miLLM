@@ -1424,7 +1424,19 @@ class ModelService:
             )
 
         # Start loading (this returns immediately with status=LOADING)
-        await self.load_model(model_id)
+        try:
+            await self.load_model(model_id)
+        except ModelAlreadyLoadedError as exc:
+            # The row says LOADED and the loader does not hold it (checked
+            # above): an unload has cleared the loader and not yet written the
+            # row. As ModelAlreadyLoadedError the OpenAI routes answered 400
+            # invalid_request_error "already loaded" — telling the caller to
+            # change a request that will succeed on retry. Review round 4,
+            # 2026-09-14.
+            raise ModelBusyError(
+                f"Model {model_id} is still being unloaded; retry once it finishes",
+                details={"model_id": model_id},
+            ) from exc
 
         # Poll until loaded or error
         start = time.monotonic()

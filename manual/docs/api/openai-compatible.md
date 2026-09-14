@@ -205,7 +205,7 @@ miLLM detects a trailing assistant message and completes it instead: everything 
 | The named model has to be loaded and no card, or split across cards, holds it | 503 | `insufficient_memory` |
 | The named model has to be loaded and the load failed | 500 | `model_load_failed` |
 
-A request that names a model other than the one loaded loads it first. When that load is refused, the response carries the refusal's own status and message, with the figures for each card.
+A request that names a model other than the one loaded loads it first. When that load is refused before the loaded model is unloaded, the response carries the refusal's own status and message, with the figures for each card. A load that fails after the unload, for example because free memory changed in between, answers `500 model_load_failed` with the failure's message. A request that arrives while its model is still being unloaded is told to retry.
 
 ## Behavior under continuous batching
 

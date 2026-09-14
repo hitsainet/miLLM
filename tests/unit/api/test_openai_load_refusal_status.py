@@ -27,6 +27,10 @@ MUTATION CONTROLS (review round 3, 2026-09-14; mutate.py, restored and sha256-ve
          -> the 400 and 503 cases on every endpoint
   R3-M2  load_model_and_wait raises ModelBusyError for a failed load again
          -> test_a_load_that_failed_in_the_background_is_not_reported_as_busy
+Review round 4, 2026-09-14 (mutate.py; restored and sha256-verified):
+  R4-M5  load_model_and_wait lets ModelAlreadyLoadedError through (round 3's code,
+         answered 400 invalid_request_error mid-unload)
+         -> test_a_model_caught_mid_unload_is_busy_not_the_callers_mistake
 """
 
 from __future__ import annotations
@@ -151,3 +155,40 @@ def test_the_route_does_not_tell_the_caller_to_wait_for_a_load_that_failed():
 
     assert "already in progress" not in response.text
     assert "GPU 1 ran out of memory" in response.json()["error"]["message"]
+
+
+def test_a_model_caught_mid_unload_is_busy_not_the_callers_mistake():
+    """Review round 4, 2026-09-14. unload_model clears the loader in its worker and
+    only then marks the row READY. A request naming that model in between finds no
+    model loaded, so the route loads it; load_model_and_wait sees a row still
+    LOADED that the loader does not hold, and load_model raises
+    ModelAlreadyLoadedError. Round 3's mapping answered that 400
+    invalid_request_error "already loaded": an OpenAI client told to change a
+    request that was fine and would succeed on retry (before round 3, a 500).
+    Driven through the REAL ModelService.load_model_and_wait and load_model."""
+    from millm.api.dependencies import get_inference_service, get_model_service
+
+    row = make_model(id=3, name="wanted", status=ModelStatus.LOADED)
+    repo = MagicMock()
+    repo.find_by_name = AsyncMock(return_value=row)
+    repo.get_by_id = AsyncMock(return_value=row)
+    repo.get_locked_model = AsyncMock(return_value=None)
+    loader = MagicMock()
+    loader.loaded_model_id = None  # the unload worker has cleared it
+    loader.is_loaded = False
+    svc = ModelService(repository=repo, downloader=MagicMock(), loader=loader, emitter=None)
+    inference = MagicMock()
+    inference.get_loaded_model_info = lambda: None
+    app = create_app()
+    app.dependency_overrides[get_model_service] = lambda: svc
+    app.dependency_overrides[get_inference_service] = lambda: inference
+
+    response = TestClient(app).post(
+        "/v1/chat/completions", json={"model": "wanted", **BODIES["/v1/chat/completions"]}
+    )
+
+    body = response.json()["error"]
+    assert body["code"] != "model_already_loaded", response.text
+    assert body["type"] == "server_error"
+    assert "retry" in body["message"]
+    assert svc._loading_model_id is None, "the refusal must not hold the load slot"

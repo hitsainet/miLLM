@@ -15,6 +15,7 @@ import asyncio
 import contextvars
 import gc
 import math
+import re
 import uuid
 from datetime import datetime
 from threading import Event, Thread
@@ -41,6 +42,7 @@ from millm.api.schemas.openai import (
 from millm.core.errors import (
     ContextLengthExceededError,
     EngineUnsupportedError,
+    GenerationOutOfMemoryError,
     MiLLMError,
 )
 from millm.core.logging import get_logger
@@ -78,6 +80,63 @@ def _return_cached_draft_memory() -> None:
             torch.cuda.empty_cache()
     except Exception as e:  # noqa: BLE001 - a cleanup must not turn off speculation
         logger.warning("draft_memory_release_failed", error=str(e))
+
+#: torch names the card in its message: "... GPU 1 has a total capacity of ...".
+_OOM_GPU = re.compile(r"\bGPU (\d+)\b")
+
+
+def _generation_oom_error(exc: BaseException, generation_kwargs: dict) -> GenerationOutOfMemoryError:
+    """The typed refusal for a CUDA out-of-memory error raised by generate(): which card, and what to change.
+
+    Holds only strings and numbers, never the exception, so raising it does not
+    keep the failed pass's traceback (and the tensors its frames hold) alive.
+    """
+    text = str(exc)
+    match = _OOM_GPU.search(text)
+    device = f"cuda:{match.group(1)}" if match else None
+    name = None
+    if match is not None:
+        try:
+            name = torch.cuda.get_device_name(int(match.group(1)))
+        except Exception:  # noqa: BLE001 - the index alone still names the card
+            name = None
+    shape = getattr(generation_kwargs.get("input_ids"), "shape", None)
+    prompt_tokens = int(shape[-1]) if shape is not None and len(shape) >= 1 else None
+    rows = int(shape[0]) if shape is not None and len(shape) >= 2 else None
+    max_new_tokens = generation_kwargs.get("max_new_tokens")
+    where = f"{device} ({name})" if device and name else (device or "a GPU")
+    size = f"{prompt_tokens} prompt tokens" if prompt_tokens is not None else "its prompt"
+    if rows and rows > 1:
+        size += f" in each of {rows} rows"
+    return GenerationOutOfMemoryError(
+        f"Generation ran out of memory on {where}: this request ({size}, up to "
+        f"{max_new_tokens} new tokens) needed more room for its KV cache than the card "
+        "had left beside the model. Its memory has been released and the server keeps "
+        "serving. Send a shorter prompt or conversation, or ask for fewer max_tokens.",
+        details={
+            "device": device,
+            "device_name": name,
+            "prompt_tokens": prompt_tokens,
+            "batch_rows": rows,
+            "max_new_tokens": max_new_tokens,
+            "torch_message": text[:500],
+        },
+    )
+
+
+def _release_generation_memory() -> None:
+    """Give a failed generation's memory back: collect what its frames held, then empty torch's cache. Never raises.
+
+    Called only after the except block that caught the out-of-memory error has
+    exited: inside it, the traceback still references the frames holding the
+    partial KV cache and activations, so emptying the cache there frees nothing.
+    """
+    gc.collect()
+    try:
+        torch.cuda.empty_cache()  # a no-op when CUDA was never initialised
+    except Exception as e:  # noqa: BLE001 - a cleanup must not replace the refusal
+        logger.warning("generation_oom_release_failed", error=str(e))
+
 
 def _served_max_context(config: Any) -> Optional[int]:
     """The longest prompt + generation a transformers model is asked to serve; None when unknown.
@@ -3862,7 +3921,8 @@ class InferenceService:
                 # thread crashed, its captured activations may be incomplete.
                 if thread_error:
                     import json as _json
-                    error_msg = str(thread_error[0])
+                    failure = thread_error[0]
+                    error_msg = str(failure)
                     logger.error(
                         "generation_failed_during_stream",
                         error=error_msg,
@@ -3871,14 +3931,21 @@ class InferenceService:
                     # Signal the client with an SSE error event followed by [DONE].
                     # The HTTP status is already 200 at this point; this is the
                     # standard approach for signalling mid-stream errors over SSE.
-                    error_event = _json.dumps({
-                        "error": {
+                    if isinstance(failure, GenerationOutOfMemoryError):
+                        # The same envelope the non-streaming route answers with.
+                        error_body = {
+                            "message": failure.message,
+                            "type": failure.openai_error_type,
+                            "code": failure.code.lower(),
+                        }
+                    else:
+                        error_body = {
                             "message": "Generation failed during streaming. "
                                        "See server logs for details.",
                             "type": "server_error",
                             "code": "generation_error",
                         }
-                    })
+                    error_event = _json.dumps({"error": error_body})
                     yield f"data: {error_event}\n\n"
                     yield "data: [DONE]\n\n"
                     return
@@ -4560,9 +4627,22 @@ class InferenceService:
         This keeps the blocking GPU computation off the async event loop,
         allowing FastAPI to continue serving health checks, WebSocket
         connections, and other requests during inference.
+
+        A CUDA out-of-memory error is raised as GenerationOutOfMemoryError, after
+        the failed pass's memory is released (review round 6, 2026-09-14). It
+        reached clients as a bare 500, and the cache stayed held by the traceback
+        until the error handler had finished with it.
         """
-        with torch.no_grad():
-            return self._model.generate(**generation_kwargs)
+        try:
+            with torch.no_grad():
+                return self._model.generate(**generation_kwargs)
+        except torch.cuda.OutOfMemoryError as exc:
+            refusal = _generation_oom_error(exc, generation_kwargs)
+        # Outside the except block: the traceback holding the failed pass's
+        # tensors is gone before the cache is emptied.
+        _release_generation_memory()
+        logger.error("generation_out_of_memory", **refusal.details)
+        raise refusal
 
     def _generate_in_thread(
         self, generation_kwargs: dict, errors: Optional[list] = None
@@ -4572,14 +4652,38 @@ class InferenceService:
 
         Must be called in separate thread because generate() is blocking.
         Errors are captured in the errors list so the caller can check them.
+
+        On ANY failure the streamer is ended, after the error is recorded.
+        generate() ends the streamer only when it finishes (transformers 5.15.1
+        generation/utils.py:2944, not in a finally), and TextIteratorStreamer
+        waits with no timeout: a generation that raised left the consumer
+        blocked forever — no error event, no [DONE], the request queue slot held
+        until the client gave up, and one executor thread stranded for good.
+        Review round 6, 2026-09-14. A CUDA out-of-memory error is recorded as
+        GenerationOutOfMemoryError, after its memory is released.
         """
+        failure: Optional[Exception] = None
         try:
             with torch.no_grad():
                 self._model.generate(**generation_kwargs)
+        except torch.cuda.OutOfMemoryError as exc:
+            failure = _generation_oom_error(exc, generation_kwargs)
         except Exception as e:
             logger.error("generation_thread_error", error=str(e))
-            if errors is not None:
-                errors.append(e)
+            failure = e
+        if failure is None:
+            return
+        if isinstance(failure, GenerationOutOfMemoryError):
+            _release_generation_memory()
+            logger.error("generation_out_of_memory", **failure.details)
+        if errors is not None:
+            errors.append(failure)
+        streamer = generation_kwargs.get("streamer")
+        if streamer is not None:
+            try:
+                streamer.end()
+            except Exception as e:  # noqa: BLE001 - the error is already recorded
+                logger.warning("streamer_end_after_failure_failed", error=str(e))
 
 
     @staticmethod

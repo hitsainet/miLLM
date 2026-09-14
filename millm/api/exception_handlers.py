@@ -103,6 +103,9 @@ async def millm_error_handler(request: Request, exc: MiLLMError) -> JSONResponse
         status_code, error_type = ERROR_STATUS_MAP.get(
             exc.code, (exc.status_code, "server_error")
         )
+        # An error that knows its OpenAI type says so (GenerationOutOfMemoryError:
+        # the request is too large for the card, not a server fault to retry).
+        error_type = getattr(exc, "openai_error_type", None) or error_type
         return create_openai_error(
             message=exc.message,
             error_type=error_type,

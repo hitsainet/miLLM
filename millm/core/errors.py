@@ -175,6 +175,24 @@ class InsufficientMemoryError(MiLLMError):
     status_code = 507
 
 
+class GenerationOutOfMemoryError(InsufficientMemoryError):
+    """A request ran a card out of memory while generating.
+
+    Raised in place of torch's OutOfMemoryError, which reached a non-streaming
+    client as a bare 500 "An internal server error occurred." and left a
+    streaming one waiting forever (review round 6, 2026-09-14). The load's
+    per-card fit keeps each card room for a KV cache at TRANSFORMERS_MIN_CONTEXT;
+    a longer prompt, a larger batch or another tenant on the card can still
+    exhaust it. That is the size of the request, not a fault to retry unchanged,
+    so /v1 types it invalid_request_error (status 503, INSUFFICIENT_MEMORY's
+    row); the management API answers 507.
+    """
+
+    #: The OpenAI envelope's `type` for this error (exception_handlers and the
+    #: streaming error event both read it).
+    openai_error_type = "invalid_request_error"
+
+
 class GpuNotFoundError(MiLLMError):
     """Raised when a load names a GPU (index or UUID) that is not visible.
 

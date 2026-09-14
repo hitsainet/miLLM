@@ -186,6 +186,26 @@ class GpuNotFoundError(MiLLMError):
     status_code = 404
 
 
+class SplitNotHonouredError(MiLLMError):
+    """A split across every GPU ("all") would leave a card with none of the model.
+
+    transformers fills the cards of a split in index order with whole layers and
+    keeps room for the largest layer free on the lowest-index card, so a card's
+    share can hold nothing, or the first card can hold everything. The load would
+    then record "all" and run on fewer cards. Measured on transformers' own map
+    inference (review round 3, 2026-09-14): Qwen2.5-7B at Q4 on both cards idle
+    mapped entirely onto the 3090, and gemma-3-1b at FP16 with the 3080 Ti busy
+    entirely onto the 3080 Ti. "all" is honoured or refused, never swapped, so it
+    is refused — before anything is unloaded.
+
+    Not an INSUFFICIENT_MEMORY: the cards may have room to spare; it is the
+    request that cannot be met as asked.
+    """
+
+    code = "SPLIT_NOT_HONOURED"
+    status_code = 409
+
+
 class InsufficientDiskError(MiLLMError):
     """Raised when there's not enough disk space."""
 

@@ -27,6 +27,7 @@ Machine-readable error codes returned by the management API in the [error envelo
 | `INSUFFICIENT_DISK` | 507 | Not enough disk for the download |
 | `UNSUPPORTED_QUANTIZATION` | 400 | The load asks for a quantization its engine cannot apply (Q2 on a transformers checkpoint that is not already quantized) |
 | `GPU_NOT_FOUND` | 404 | The `gpu` named in a load is not visible to miLLM |
+| `SPLIT_NOT_HONOURED` | 409 | `"gpu": "all"` was requested, and the model's layers would leave at least one card with none of it; `details.mapped_mb_by_device` shows the layout |
 | `INVALID_GGUF_TENSOR_SPLIT` | 500 | `GGUF_TENSOR_SPLIT` does not name one proportion per card the GGUF split uses; only the setting fixes it |
 
 ## Download errors

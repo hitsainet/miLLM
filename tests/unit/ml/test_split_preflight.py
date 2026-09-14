@@ -78,6 +78,15 @@ capability 8.9). Mutation controls (mutate.py; restored and sha256-verified):
 test_a_bitsandbytes_checkpoint_gets_the_09_its_quantizer_applies now uses a
 52-layer checkpoint: round 2's 16-layer one had no weights and was sized from its
 row's 29,000; sized as it loads (12,643 MB) it no longer reached the 0.9 budgets.
+
+"all" could come out on ONE card of transformers' real map (TestAllIsHonouredOrRefused);
+the preflight now refuses that before anything is unloaded:
+  R3-M5  the "all" check disabled
+         -> the two refusal tests and test_the_pre_check_refuses_it_before_the_unload
+  R3-M5b the check widened to every split, Auto included
+         -> test_an_auto_split_that_lands_on_fewer_cards_is_not_refused
+  R3-M5c unused cards looked up in the map's own keys (so never any) -> the same three as R3-M5
+  R2-M6 re-run (the off-GPU refusal the new check follows) -> the disk-map, loader and pre-check tests
 """
 
 from __future__ import annotations
@@ -96,7 +105,7 @@ from transformers import BitsAndBytesConfig, LlamaConfig  # noqa: E402
 from transformers.integrations.accelerate import _get_device_map, compute_module_sizes  # noqa: E402
 from transformers.quantizers.auto import AutoHfQuantizer  # noqa: E402
 
-from millm.core.errors import InsufficientMemoryError  # noqa: E402
+from millm.core.errors import InsufficientMemoryError, SplitNotHonouredError  # noqa: E402
 from millm.db.models.model import ModelStatus, QuantizationType  # noqa: E402
 from millm.main import create_app  # noqa: E402
 from millm.ml.gpu_placement import MODE_SHARD, MODE_SINGLE, GpuInfo  # noqa: E402
@@ -491,3 +500,134 @@ class TestACheckpointTransformersDequantizesIsSizedAsItLoads:
             placement = _plan(self.CARDS, 19_660, cache_path=path)
         assert (placement.mode, placement.index) == (MODE_SINGLE, 1)
         assert 19_660 <= placement.required_mb < 23_500
+
+
+# Real configurations' shapes (config.json fields), built on the meta device only.
+QWEN25_7B = dict(
+    vocab_size=152_064, hidden_size=3_584, intermediate_size=18_944, num_hidden_layers=28,
+    num_attention_heads=28, num_key_value_heads=4, tie_word_embeddings=False,
+)
+GEMMA3_1B = dict(
+    vocab_size=262_144, hidden_size=1_152, intermediate_size=6_912, num_hidden_layers=26,
+    num_attention_heads=4, num_key_value_heads=1, head_dim=256, tie_word_embeddings=True,
+)
+LLAMA32_1B = dict(
+    vocab_size=128_256, hidden_size=2_048, intermediate_size=8_192, num_hidden_layers=16,
+    num_attention_heads=32, num_key_value_heads=8, tie_word_embeddings=True,
+)
+
+
+def _config_checkpoint(directory, config):
+    directory.mkdir(parents=True, exist_ok=True)
+    config.save_pretrained(directory)
+    return str(directory)
+
+
+class TestAllIsHonouredOrRefused:
+    """Review round 3, 2026-09-14. "all" promises a split across every card,
+    honoured or refused, never swapped. The plan divides MB; transformers places
+    whole layers, in index order, keeping room for the largest one free on the
+    lowest-index card. Swept on its real map inference, "all" came out on ONE card
+    for every small Q4 model even with both cards idle, and for Qwen2.5-7B FP16 —
+    the equivalence-check model — whenever the 3080 Ti was busy. Both of
+    plan_shard's "all" branches do it, including round 2's index-order one.
+
+    Plan figures, worked by hand (limits = free - 1,024):
+      Qwen2.5-7B Q4, cards 11,500 / 23,500, row estimate 4,348: bitsandbytes
+        budgets int(x 0.9) = 9,428 / 20,228; 4,348 <= 9,428, so proportional:
+        card 0 share ceil(4,348 x 9,428 / 29,656) = 1,383 -> max_memory
+        ceil(1,383 / 0.9) = 1,537. transformers gives 1,383 back; the untied
+        embedding stays bf16 at 152,064 x 3,584 x 2 B = 1,039 MiB and is held back
+        as the largest layer, so no layer fits card 0.
+      gemma-3-1b FP16, cards 3,000 / 23,500, row estimate 2,288: limits 1,976 /
+        22,476; 2,288 > 1,976, so round 2's index-order branch: card 0 whole
+        (1,976). The ~1,907 MiB of weights fit it, and card 1 gets nothing.
+    """
+
+    IDLE = ((TI_3080, 11_500, 12_288), (RTX_3090, 23_500, 24_576))
+    BUSY = ((TI_3080, 3_000, 12_288), (RTX_3090, 23_500, 24_576))
+
+    def test_a_card_whose_share_holds_no_layer_is_refused(self, tmp_path):
+        from transformers import Qwen2Config
+
+        path = _config_checkpoint(tmp_path, Qwen2Config(**QWEN25_7B))
+        placement = _plan(self.IDLE, 4_348, "Q4", requested="all", cache_path=path)
+        assert placement.transformers_max_memory() == {0: "1537MiB", 1: "22476MiB"}
+
+        with pytest.raises(SplitNotHonouredError) as raised:
+            preflight_split("qwen2.5-7b", path, "Q4", placement)
+
+        details = raised.value.details
+        assert details["unused_devices"] == ["cuda:0"]
+        assert set(details["mapped_mb_by_device"]) == {"cuda:1"}
+        assert details["before_loading"] is True
+
+    def test_a_first_card_that_holds_the_whole_model_is_refused(self, tmp_path):
+        from transformers import Gemma3TextConfig
+
+        path = _config_checkpoint(tmp_path, Gemma3TextConfig(**GEMMA3_1B))
+        placement = _plan(self.BUSY, 2_288, requested="all", cache_path=path)
+        assert placement.transformers_max_memory() == {0: "1976MiB", 1: "22476MiB"}
+
+        with pytest.raises(SplitNotHonouredError) as raised:
+            preflight_split("gemma-3-1b", path, "FP16", placement)
+
+        assert raised.value.details["unused_devices"] == ["cuda:1"]
+        assert set(raised.value.details["mapped_mb_by_device"]) == {"cuda:0"}
+
+    def test_a_split_that_reaches_every_card_is_honoured(self, tmp_path):
+        from transformers import LlamaConfig
+
+        path = _config_checkpoint(tmp_path, LlamaConfig(**LLAMA32_1B))
+        placement = _plan(self.IDLE, 2_746, requested="all", cache_path=path)
+
+        mapped = preflight_split("llama-3.2-1b", path, "FP16", placement)
+
+        assert set(mapped) == {"cuda:0", "cuda:1"}
+
+    def test_an_auto_split_that_lands_on_fewer_cards_is_not_refused(self, tmp_path):
+        """Only "all" promises every card. Llama at 7B widths, 26 layers, 32,000
+        vocab, untied, worked by hand: a layer 4 x 4,096^2 + 3 x 4,096 x 11,008 +
+        8,192 = 202,383,360 params = 386 MiB; embed_tokens + lm_head 2 x 250 MiB;
+        500 + 26 x 386.02 = 10,536 MiB. Row estimate x1.2 = 12,643, more than
+        either card has free (12,000 / 11,000), so Auto plans both
+        (max_memory 10,976 / 9,976) — and the weights fit the first card whole.
+        That load runs on one card and fits; refusing it would turn away a model
+        the node holds."""
+        from transformers import LlamaConfig
+
+        path = _config_checkpoint(tmp_path, LlamaConfig(
+            vocab_size=32_000, hidden_size=4_096, intermediate_size=11_008, num_hidden_layers=26,
+            num_attention_heads=32, num_key_value_heads=32, tie_word_embeddings=False,
+        ))
+        cards = ((TI_3080, 12_000, 12_288), (RTX_3090, 11_000, 24_576))
+        placement = _plan(cards, 12_643, cache_path=path)
+        assert placement.mode == MODE_SHARD
+        assert placement.transformers_max_memory() == {0: "10976MiB", 1: "9976MiB"}
+
+        assert preflight_split("llama-7b-widths-26", path, "FP16", placement) == {"cuda:0": 10_536}
+
+    def test_the_pre_check_refuses_it_before_the_unload(self, tmp_path):
+        """The resident model holds 16,000 MB of card 1: projected 3,000 / 23,500."""
+        from transformers import Gemma3TextConfig
+
+        from millm.api.dependencies import get_model_service
+
+        model = make_model(
+            id=3, status=ModelStatus.READY, quantization=QuantizationType.FP16,
+            estimated_memory_mb=2_288,
+            cache_path=_config_checkpoint(tmp_path, Gemma3TextConfig(**GEMMA3_1B)),
+        )
+        svc = TestThePreCheckRefusesBeforeTheUnload._service(model)
+        app = create_app()
+        app.dependency_overrides[get_model_service] = lambda: svc
+        with fake_gpus((TI_3080, 3_000, 12_288), (RTX_3090, 7_500, 24_576)):
+            response = TestClient(app).post("/api/models/3/load", json={"gpu": "all"})
+
+        assert response.status_code == 409, response.text
+        error = response.json()["error"]
+        assert error["code"] == "SPLIT_NOT_HONOURED"
+        assert error["details"]["unused_devices"] == ["cuda:1"]
+        assert "cuda:1" in error["message"]
+        assert not svc.unload_model.called
+        assert not svc._executor.method_calls and not svc._executor.called

@@ -95,6 +95,7 @@ from millm.core.errors import (
     GgufTensorSplitError,
     InsufficientMemoryError,
     ModelLoadError,
+    SplitNotHonouredError,
     UnsupportedQuantizationError,
 )
 from millm.ml.gguf_catalog import quant_label_from_path
@@ -104,6 +105,7 @@ from millm.ml.gpu_placement import (
     MODE_CPU,
     OFF_GPU_LABELS,
     REASON_NO_GPU,
+    REASON_REQUESTED_ALL,
     GpuInfo,
     GpuRequest,
     Placement,
@@ -692,8 +694,42 @@ def preflight_split(
             model_name, placement, off_gpu, sorted(mapped_mb),
             mapped_mb_by_device=mapped_mb, before_loading=True,
         )
+    if placement.reason == REASON_REQUESTED_ALL:
+        # "all" promises every card and is honoured or refused, never swapped.
+        # The plan divides MB; transformers places whole layers in index order,
+        # holding room for the largest on the lowest-index card, so a card's
+        # share can hold none of them, or the first card all of them. Loaded, it
+        # would have recorded "all" and run on fewer cards. Review round 3,
+        # 2026-09-14. An Auto split that lands on fewer cards is fine: it only
+        # ever promised to fit.
+        unused = [label for label in placement.device_labels if label not in mapped_mb]
+        if unused:
+            raise _split_not_honoured(model_name, placement, unused, mapped_mb)
     logger.info("split_preflight_mapped", model_name=model_name, mapped_mb_by_device=mapped_mb)
     return mapped_mb
+
+
+def _split_not_honoured(
+    model_name: str, placement: Placement, unused: list[str], mapped_mb: dict[str, int]
+) -> SplitNotHonouredError:
+    """The refusal for an "all" whose real device map leaves a card with none of the model."""
+    max_memory = placement.transformers_max_memory() or {}
+    layout = ", ".join(f"{label} {mb} MB" for label, mb in sorted(mapped_mb.items()))
+    return SplitNotHonouredError(
+        f"{model_name} cannot be split across every GPU as requested: transformers would put "
+        f"none of it on {', '.join(unused)} ({layout}). A split places whole layers in index "
+        "order and keeps room for the largest one free on the lowest-index card, so with this "
+        "much free memory at least one card takes nothing. Nothing was unloaded. Choose Auto "
+        "or a named card.",
+        details={
+            "requested": placement.requested,
+            "unused_devices": unused,
+            "mapped_mb_by_device": dict(sorted(mapped_mb.items())),
+            "max_memory": {f"cuda:{index}": value for index, value in sorted(max_memory.items())},
+            "placement": placement.to_dict(),
+            "before_loading": True,
+        },
+    )
 
 
 def _off_gpu_refusal(

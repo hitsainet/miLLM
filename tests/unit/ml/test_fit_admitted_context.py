@@ -95,9 +95,10 @@ def _accepted(path, context):
 
 class TestTheCacheIsSizedAtWhatTheModelServes:
     def test_a_model_that_serves_4096_is_sized_at_4096_under_an_8192_floor(self, tmp_path):
-        """cuda:0 holds 14 of 40 layers: 14 x 2 x 40 x 128 x 2 B x 4,096 = 1,120 MiB,
-        need 9,451 + 1,120 + 500 = 11,071 of 11,500. At 8,192 it was 2,240 and a
-        refusal, 690 short."""
+        """cuda:0 holds 12 of 40 layers: 12 x 2 x 40 x 128 x 2 B x 4,096 = 960 MiB, and a
+        4,096-token request's working memory 1,119 (test_per_card_fit.py); need 8,241 +
+        960 + 1,119 + 500 = 10,820 of 11,500. Sized at 8,192 the cache alone would be
+        twice that, for tokens no request can send."""
         path = _save(tmp_path, Olmo2Config(**OLMO2_13B))
 
         placement, logged = _accepted(path, 8_192)
@@ -105,18 +106,23 @@ class TestTheCacheIsSizedAtWhatTheModelServes:
         assert placement.mode == MODE_SHARD
         assert logged["min_context_tokens"] == 4_096
         cuda0 = next(card for card in logged["per_card"] if card["device"] == "cuda:0")
-        assert (cuda0["layers"], cuda0["kv_mb"], cuda0["need_mb"]) == (14, 1_120, 11_071)
+        assert (cuda0["layers"], cuda0["kv_mb"], cuda0["need_mb"]) == (12, 960, 10_820)
 
     def test_a_model_that_serves_more_is_sized_at_the_floor(self, tmp_path):
-        """Qwen2.5-14B serves 32,768: at an 8,192 floor, cuda:0's 15 layers hold
-        15 x 2 x 8 x 128 x 2 B x 8,192 = 480 MiB."""
+        """Qwen2.5-14B serves 32,768: at an 8,192 floor its cache is sized at 8,192. With an
+        8,192-token request's working memory counted it no longer fits these cards (cuda:1
+        362 MiB short), and the refusal says what it was sized at: cuda:0's 12 layers hold
+        12 x 2 x 8 x 128 x 2 B x 8,192 = 384 MiB."""
         path = _save(tmp_path, Qwen2Config(**QWEN25_14B))
 
-        _, logged = _accepted(path, 8_192)
+        with patch.object(settings, "TRANSFORMERS_MIN_CONTEXT", 8_192), fake_gpus(*NODE), \
+                pytest.raises(InsufficientMemoryError) as raised:
+            plan_transformers_load(0, "FP16", requested=None, gpus=list_gpus(), cache_path=path)
 
-        assert logged["min_context_tokens"] == 8_192
-        cuda0 = next(card for card in logged["per_card"] if card["device"] == "cuda:0")
-        assert cuda0["kv_mb"] == 480
+        details = raised.value.details
+        assert details["min_context_tokens"] == 8_192
+        cuda0 = next(card for card in details["per_card"] if card["device"] == "cuda:0")
+        assert (cuda0["layers"], cuda0["kv_mb"]) == (12, 384)
 
     def test_the_refusal_says_which_limit_sized_the_cache(self, tmp_path):
         """A 65,536 floor on a model that serves 32,768 is sized at 32,768, and the

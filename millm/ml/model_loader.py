@@ -8,7 +8,7 @@ import gc
 import math
 import threading
 from pathlib import Path
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import datetime
 from typing import Any, Callable, Iterable, Optional
 
@@ -101,6 +101,13 @@ from millm.core.errors import (
 )
 from millm.ml.gguf_catalog import quant_label_from_path
 from millm.ml.memory_utils import MEMORY_OVERHEAD_FACTOR
+from millm.ml.working_memory import (
+    ALLOCATOR_OVERHEAD_FRACTION,
+    WorkingMemory,
+    bnb_quantized_bytes_by_module,
+    bnb_staging_mb,
+    size_working_memory,
+)
 from millm.ml.gpu_placement import (
     ALL,
     BNB_MAX_MEMORY_FACTOR,
@@ -2757,10 +2764,17 @@ class CardFit:
     kv_mb: int
     context_mb: int
     layers: int
+    #: A request's working memory here: its prefill's transient peak and the caching
+    #: allocator's share (working_memory.WorkingMemory.card_mb). Hardware acceptance,
+    #: 2026-09-14: without it OLMo-2-13B was admitted with 11 MiB to spare and ran out.
+    working_mb: int = 0
+    #: What a bitsandbytes on-the-fly quantization leaves stranded on this card
+    #: (working_memory.bnb_staging_mb).
+    staging_mb: int = 0
 
     @property
     def need_mb(self) -> int:
-        return self.weights_mb + self.kv_mb + self.context_mb
+        return self.weights_mb + self.kv_mb + self.working_mb + self.staging_mb + self.context_mb
 
     @property
     def short_mb(self) -> int:
@@ -2775,10 +2789,16 @@ class CardFit:
             f"{self.short_mb} MiB short" if not self.fits
             else f"{self.free_mb - self.need_mb} MiB to spare"
         )
+        staging = (
+            f", {self.staging_mb} MiB left behind by quantizing its weights as they load"
+            if self.staging_mb
+            else ""
+        )
         return (
             f"cuda:{self.index} ({self.name}) has {self.free_mb} MiB free for {self.weights_mb} "
             f"MiB of weights, {self.kv_mb} MiB of KV cache at {tokens} tokens over its "
-            f"{self.layers} layers and a {self.context_mb} MiB CUDA context — {verdict}"
+            f"{self.layers} layers, {self.working_mb} MiB of working memory for a "
+            f"{tokens}-token request{staging} and a {self.context_mb} MiB CUDA context — {verdict}"
         )
 
     def to_dict(self) -> dict[str, Any]:
@@ -2788,6 +2808,8 @@ class CardFit:
             "free_mb": self.free_mb,
             "weights_mb": self.weights_mb,
             "kv_mb": self.kv_mb,
+            "working_mb": self.working_mb,
+            "staging_mb": self.staging_mb,
             "context_mb": self.context_mb,
             "layers": self.layers,
             "need_mb": self.need_mb,
@@ -2804,6 +2826,12 @@ class SplitLayout:
     off_gpu: tuple[str, ...] = ()
     #: bitsandbytes' own refusal of a map leaving the GPU, when it raised one.
     engine_message: Optional[str] = None
+    #: The devices running what comes before the decoder layers (the embeddings, and
+    #: generate's sampling on the input device) and after them (final norm, lm_head).
+    input_devices: frozenset[str] = frozenset()
+    output_devices: frozenset[str] = frozenset()
+    #: The bfloat16 bytes of the weights bitsandbytes quantizes as they load, per device.
+    quantized_bytes: dict[str, int] = field(default_factory=dict)
 
 
 def _device_map_label(device: Any) -> str:
@@ -2893,17 +2921,47 @@ class TransformersFit:
     model: Any = field(repr=False, compare=False)
     hf_quantizer: Any = field(repr=False, compare=False)
     sizes: dict[str, int] = field(repr=False, compare=False)
+    #: A request's transient peaks at `min_context` tokens (working_memory.size_working_memory).
+    working: Optional[WorkingMemory] = field(default=None, repr=False, compare=False)
+    #: The bfloat16 bytes of each weight bitsandbytes quantizes as it loads, by module name.
+    quantized_bytes: dict[str, int] = field(default_factory=dict, repr=False, compare=False)
 
     def kv_mb(self, layers: Optional[Iterable[int]] = None) -> int:
         return self.kv.mb(range(self.kv.num_layers) if layers is None else layers, self.min_context)
 
+    def working_mb(
+        self, layers: Iterable[int], *, holds_input: bool = True, holds_output: bool = True
+    ) -> int:
+        """A request's working memory on a card holding these layers (WorkingMemory.card_mb)."""
+        on_card = tuple(layers)
+        if self.working is None:
+            return 0
+        return self.working.card_mb(
+            on_card, holds_input=holds_input, holds_output=holds_output, kv_mb=self.kv_mb(on_card)
+        )
+
     @property
     def single_card_mb(self) -> int:
         """What one card holding the whole model needs."""
-        return self.weights_mb + self.kv_mb() + self.context_mb
+        everything = range(self.kv.num_layers)
+        return (
+            self.weights_mb + self.kv_mb() + self.working_mb(everything)
+            + bnb_staging_mb(self.quantized_bytes.values()) + self.context_mb
+        )
 
-    def card(self, gpu: GpuInfo, weights_mb: int, layers: Iterable[int]) -> CardFit:
+    def card(
+        self,
+        gpu: GpuInfo,
+        weights_mb: int,
+        layers: Iterable[int],
+        *,
+        holds_input: bool = True,
+        holds_output: bool = True,
+        quantized_bytes: Optional[int] = None,
+    ) -> CardFit:
+        """One card's figures. By default it holds the whole model: its input, output and every quantized weight."""
         on_card = tuple(layers)
+        staged = self.quantized_bytes.values() if quantized_bytes is None else [quantized_bytes]
         return CardFit(
             index=gpu.index,
             name=gpu.name,
@@ -2912,6 +2970,8 @@ class TransformersFit:
             kv_mb=self.kv_mb(on_card),
             context_mb=self.context_mb,
             layers=len(on_card),
+            working_mb=self.working_mb(on_card, holds_input=holds_input, holds_output=holds_output),
+            staging_mb=bnb_staging_mb(staged),
         )
 
     def layout(self, placement: Placement) -> Optional[SplitLayout]:
@@ -2960,10 +3020,31 @@ class TransformersFit:
             for label in sorted(devices):
                 layers.setdefault(label, []).append(index)
         allowed = set(placement.device_labels)
+        module_names = {id(module): name for name, module in self.model.named_modules()}
+
+        def devices_of(getter: str, fallback_layer: str) -> set[str]:
+            try:
+                module = getattr(self.model, getter)()
+            except Exception:  # noqa: BLE001 - a model without it: the layer beside it
+                module = None
+            name = module_names.get(id(module)) if module is not None else None
+            found = _layer_device_labels(name, mapped) if name is not None else set()
+            return found or _layer_device_labels(fallback_layer, mapped)
+
+        quantized: dict[str, int] = {}
+        for module_name, nbytes in self.quantized_bytes.items():
+            for label in _layer_device_labels(module_name, mapped):
+                quantized[label] = quantized.get(label, 0) + nbytes
         return SplitLayout(
             weights_mb=weights,
             layers={label: tuple(indices) for label, indices in layers.items()},
             off_gpu=tuple(sorted(label for label in weights if label not in allowed)),
+            input_devices=frozenset(devices_of("get_input_embeddings", names[0])),
+            # The final norm runs beside the last layer; the lm_head wherever it is mapped.
+            output_devices=frozenset(
+                devices_of("get_output_embeddings", names[-1]) | _layer_device_labels(names[-1], mapped)
+            ),
+            quantized_bytes=quantized,
         )
 
 
@@ -3048,15 +3129,35 @@ def transformers_fit(
     if weights_mb <= 0:
         _fit_falls_back(architecture, "its model sizes to no weights")
         return None
+    min_context = admitted_context(kv, int(settings.TRANSFORMERS_MIN_CONTEXT))
+    # What a request needs beside the weights and the KV cache: its prefill's
+    # activations and the caching allocator's share, traced from this model
+    # (millm/ml/working_memory.py). Hardware acceptance, 2026-09-14: without it
+    # OLMo-2-13B was admitted with 11 MiB to spare and a 3,879-token request ran
+    # cuda:0 out of memory.
+    try:
+        working = size_working_memory(
+            model,
+            config,
+            _decoder_layer_names(model, kv.num_layers),
+            min_context,
+            "FP16" if is_pre_quantized else quantization,
+            architecture,
+        )
+    except Exception as e:  # noqa: BLE001 - not even an estimate: the slack judges it
+        _fit_falls_back(architecture, "its working memory could not be sized", error=e, stage=_STAGE_ENGINE)
+        return None
     return TransformersFit(
         architecture=architecture,
         weights_mb=weights_mb,
         kv=kv,
-        min_context=admitted_context(kv, int(settings.TRANSFORMERS_MIN_CONTEXT)),
+        min_context=min_context,
         context_mb=int(settings.TRANSFORMERS_CUDA_CONTEXT_MB),
         model=model,
         hf_quantizer=hf_quantizer,
         sizes=dict(sizes),
+        working=working,
+        quantized_bytes=bnb_quantized_bytes_by_module(model, hf_quantizer),
     )
 
 
@@ -3084,6 +3185,7 @@ def per_card_fit_refusal(
         "min_context_tokens": fit.min_context,
         "model_max_context_tokens": fit.kv.max_context,
         "cuda_context_mb": fit.context_mb,
+        "working_memory": fit.working.to_dict() if fit.working is not None else None,
         "requested": requested,
         "gpus": [gpu.to_dict() for gpu in gpus],
         "before_loading": True,
@@ -3112,18 +3214,33 @@ FIT_REBALANCE_MAX_PASSES = 32
 def kv_aware_shard_rule(
     fit: TransformersFit, max_memory_factor: float, lowered_mb: Optional[dict[int, int]] = None
 ) -> ShardRule:
-    """How the per-card fit sizes a split: weights plus KV cache, each card's free memory less its CUDA context.
+    """How the per-card fit sizes a split: weights, KV cache and a request's working memory against each card's free memory.
 
     `lowered_mb` holds the limits the rebalance has cut for cards that were
-    short; every other card keeps free memory less TRANSFORMERS_CUDA_CONTEXT_MB.
-    The need includes the whole KV cache, so Auto takes enough cards for the
-    cache as well as the weights. The slack's rule (free less SHARD_RESERVE_MB,
-    need = weights) is kept for checkpoints the fit cannot size.
+    short; every other card keeps its free memory less its CUDA context and the
+    part of a request's working memory every card needs alike — the transient
+    peak of the phases it may run and the allocator's share of it — so
+    transformers' map does not pack weights into the room a prefill needs. The
+    need includes the whole KV cache with the allocator's share of it, and what a
+    bitsandbytes load leaves stranded, so Auto takes enough cards for all of it.
+    The slack's rule (free less SHARD_RESERVE_MB, need = weights) is kept for
+    checkpoints the fit cannot size.
     """
     lowered = dict(lowered_mb or {})
+    everything = range(fit.kv.num_layers)
+    transient = (
+        fit.working.transient_mb(everything, holds_input=True, holds_output=True)
+        if fit.working is not None
+        else 0
+    )
+    every_card_mb = fit.context_mb + transient + math.ceil(ALLOCATOR_OVERHEAD_FRACTION * transient)
+    kv_mb = fit.kv_mb()
+    allocator_kv_mb = math.ceil(ALLOCATOR_OVERHEAD_FRACTION * kv_mb) if fit.working is not None else 0
     return ShardRule(
-        need_mb=fit.weights_mb + fit.kv_mb(),
-        limit_mb=lambda gpu: lowered.get(gpu.index, max(gpu.free_mb - fit.context_mb, 0)),
+        need_mb=(
+            fit.weights_mb + kv_mb + allocator_kv_mb + bnb_staging_mb(fit.quantized_bytes.values())
+        ),
+        limit_mb=lambda gpu: lowered.get(gpu.index, max(gpu.free_mb - every_card_mb, 0)),
         max_memory_factor=max_memory_factor,
         fill_in_index_order=True,
     )
@@ -3190,7 +3307,14 @@ def _check_split_fit(
                 raise _split_not_honoured(fit.architecture, placement, unused, layout.weights_mb)
         by_index = {gpu.index: gpu for gpu in placement.gpus}
         cards = [
-            fit.card(by_index[index], layout.weights_mb[label], layout.layers.get(label, ()))
+            fit.card(
+                by_index[index],
+                layout.weights_mb[label],
+                layout.layers.get(label, ()),
+                holds_input=label in layout.input_devices,
+                holds_output=label in layout.output_devices,
+                quantized_bytes=layout.quantized_bytes.get(label, 0),
+            )
             for index in placement.gpu_indices
             if (label := f"cuda:{index}") in layout.weights_mb
         ]
@@ -3203,10 +3327,16 @@ def _check_split_fit(
                 architecture=fit.architecture,
                 per_card=[card.to_dict() for card in cards],
                 min_context_tokens=fit.min_context,
+                working_memory=fit.working.to_dict() if fit.working is not None else None,
                 passes=attempt,
                 lowered_limits_mb={f"cuda:{index}": mb for index, mb in sorted(lowered.items())},
             )
-            return placement
+            # Each card's working memory travels with the placement to the loaded
+            # model, so what attaches later leaves it free (sae_service).
+            return replace(
+                placement,
+                working_mb_by_device=tuple((f"cuda:{card.index}", card.working_mb) for card in cards),
+            )
 
         if off_gpu:
             if last_on_gpu is None:
@@ -3343,6 +3473,7 @@ def decide_transformers_fit(
             gpus=tuple(inventory),
             index=card.index,
             requested=wanted,
+            working_mb_by_device=((f"cuda:{card.index}", judged.working_mb),),
         )
 
     # Most free first; on a tie the lower index, so the choice is stable.
@@ -3355,6 +3486,7 @@ def decide_transformers_fit(
             required_mb=judged.need_mb,
             gpus=tuple(inventory),
             index=best.index,
+            working_mb_by_device=((f"cuda:{best.index}", judged.working_mb),),
         )
     return _check_split_fit(
         fit,

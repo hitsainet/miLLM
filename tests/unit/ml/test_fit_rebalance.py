@@ -153,67 +153,72 @@ def _by_device(logged):
 
 
 class TestAShortCardIsRebalanced:
-    def test_vicuna_13b_moves_a_layer_off_the_3080_ti(self, tmp_path):
-        """Pass 1, limits 11,000 / 23,000: cuda:0 takes 16 layers, 9,993 + 1,280 + 500 =
-        11,773 of 11,500, short 273. Pass 2 cuts its limit by 273 to 10,727: the map
-        does not move. Pass 3 cuts twice that, to 10,181: layer 15 moves, and cuda:0
-        holds 15 layers, 9,388 + 1,200 + 500 = 11,088; cuda:1 25, 15,438 + 2,000 + 500."""
+    def test_vicuna_13b_moves_layers_off_the_3080_ti(self, tmp_path):
+        """Each card's limit starts at its free memory less its 500 MB context and a
+        4,096-token request's transient peak with the allocator's share of it: 10,318 /
+        22,318. cuda:0 is short at first and is cut, doubling while its map does not move,
+        until pass 5 at 9,337: 13 layers there, 8,178 + 1,040 of KV + 1,098 of working
+        memory + 500 = 10,816; 27 on cuda:1, 16,649 + 2,160 + 1,546 + 500 = 20,855."""
         path = _save(tmp_path, LlamaConfig(**VICUNA_13B))
 
         placement, logged = _plan(NODE, path)
 
         assert placement.mode == MODE_SHARD
-        assert placement.transformers_max_memory() == {0: "10181MiB", 1: "23000MiB"}
-        assert (logged["passes"], logged["lowered_limits_mb"]) == (3, {"cuda:0": 10_181})
+        assert placement.transformers_max_memory() == {0: "9337MiB", 1: "22318MiB"}
+        assert (logged["passes"], logged["lowered_limits_mb"]) == (5, {"cuda:0": 9_337})
         assert _by_device(logged) == {
-            "cuda:0": (9_388, 15, 1_200, 11_088, 11_500),
-            "cuda:1": (15_438, 25, 2_000, 17_938, 23_500),
+            "cuda:0": (8_178, 13, 1_040, 10_816, 11_500),
+            "cuda:1": (16_649, 27, 2_160, 20_855, 23_500),
         }
 
-    def test_olmo2_13b_q4_that_round_4_refused_is_split_across_both_cards(self, tmp_path):
-        """10,000 / 9,000 MB free, Q4: 8,012 MiB of weights and a 3,200 MiB cache at 4,096.
-        Round 4 sized the plan on the weights, which cuda:0's budget ((10,000 - 1,024) x
-        0.9 = 8,078) covered, so it planned cuda:0 alone — all 40 layers, 8,012 + 3,200
-        + 500 = 11,712 of 10,000 — and refused, 1,712 short. Now the need includes the
-        cache, so both cards are planned; pass 1 (limits 9,500 / 8,500) still maps every
-        layer to cuda:0, short 1,712, and pass 2 cuts it to 7,788: 33 layers there,
-        5,973 + 2,640 + 500 = 9,113, and 7 on cuda:1, 2,040 + 560 + 500 = 3,100."""
+    def test_olmo2_13b_q4_is_split_across_both_cards_by_a_replan(self, tmp_path):
+        """11,000 / 9,000 MB free, Q4: 8,012 MiB of weights and a 3,200 MiB cache at 4,096.
+        Round 4 sized the plan on the weights alone and refused this shape, cuda:0 1,712
+        MiB short. Now pass 1 leaves cuda:0 short and pass 2 cuts it to 5,343: 18 layers
+        there, 3,704 + 1,440 of KV + 1,311 of working memory + 763 left by quantizing its
+        weights as they load + 500 = 7,718; 22 on cuda:1, 4,309 + 1,760 + 1,439 + 932 +
+        500 = 8,940. (On 10,000 / 9,000 it no longer fits: a request's working memory and
+        the staging put cuda:1 1,163 MiB short however the layers are divided.)"""
         path = _save(tmp_path, Olmo2Config(**OLMO2_13B))
-        cards = ((TI_3080, 10_000, 12_288), (RTX_3090, 9_000, 24_576))
+        cards = ((TI_3080, 11_000, 12_288), (RTX_3090, 9_000, 24_576))
 
         placement, logged = _plan(cards, path, quantization="Q4")
 
-        assert placement.transformers_max_memory() == {0: "7788MiB", 1: "8500MiB"}
-        assert (logged["passes"], logged["lowered_limits_mb"]) == (2, {"cuda:0": 7_788})
+        assert placement.transformers_max_memory() == {0: "5343MiB", 1: "7765MiB"}
+        assert (logged["passes"], logged["lowered_limits_mb"]) == (2, {"cuda:0": 5_343})
         assert _by_device(logged) == {
-            "cuda:0": (5_973, 33, 2_640, 9_113, 10_000),
-            "cuda:1": (2_040, 7, 560, 3_100, 9_000),
+            "cuda:0": (3_704, 18, 1_440, 7_718, 11_000),
+            "cuda:1": (4_309, 22, 1_760, 8_940, 9_000),
+        }
+        assert {c["device"]: (c["working_mb"], c["staging_mb"]) for c in logged["per_card"]} == {
+            "cuda:0": (1_311, 763), "cuda:1": (1_439, 932),
         }
 
-    def test_qwen25_7b_serves_32k_across_a_busy_3090(self, tmp_path):
-        """cuda:1 has 15,100 MB free. Pass 1: cuda:0 20 layers, 9,930 + 1,280 + 500 =
-        11,710, short 210. Pass 2, limit 10,790: 19 layers, 9,486 + 1,216 + 500 = 11,202;
-        cuda:1 9 layers, 5,041 + 576 + 500 = 6,117. (Round 4's flat 1,024 MB reserve
-        happened to plan these same 19 layers; the rebalance reaches them from a budget
-        that does not hold back room the card does not need.)"""
+    def test_qwen25_7b_at_32k_is_refused_where_a_long_requests_working_memory_does_not_fit(self, tmp_path):
+        """Round 5 served Qwen2.5-7B at 32,768 tokens across these cards with cuda:1 at
+        15,100 MB free. A 32,768-token request's transient peak is 142,864 B a token (8 x
+        3,584 + 6 x 18,944 + 528) = 4,465 MiB on each card before the allocator's share,
+        and no free memory up to 24,000 MB on cuda:1 holds that beside the model. On
+        11,500 / 17,800 it is re-planned once and refused: cuda:1 would need 10,820 +
+        1,408 of KV + 6,815 of working memory + 500 = 19,543, 1,743 short."""
         path = _save(tmp_path, Qwen2Config(**QWEN25_7B))
 
-        placement, logged = _plan(CARD_1_BUSY, path, context=32_768)
+        with pytest.raises(InsufficientMemoryError) as raised:
+            _plan(((TI_3080, 11_500, 12_288), (RTX_3090, 17_800, 24_576)), path, context=32_768)
 
-        assert placement.transformers_max_memory() == {0: "10790MiB", 1: "14600MiB"}
-        assert (logged["passes"], logged["min_context_tokens"]) == (2, 32_768)
-        assert _by_device(logged) == {
-            "cuda:0": (9_486, 19, 1_216, 11_202, 11_500),
-            "cuda:1": (5_041, 9, 576, 6_117, 15_100),
-        }
+        details = raised.value.details
+        assert (details["rebalance_passes"], details["short_devices"]) == (2, ["cuda:1"])
+        assert [(c["device"], c["weights_mb"], c["layers"], c["kv_mb"], c["working_mb"], c["short_mb"]) for c in details["per_card"]] == [
+            ("cuda:0", 3_707, 6, 384, 6_405, 0), ("cuda:1", 10_820, 22, 1_408, 6_815, 1_743),
+        ]
 
 
 class TestWhatNoReplanFits:
     def test_qwen25_14b_cannot_hold_32k_on_these_cards_however_it_is_split(self, tmp_path):
         """Weights 28,173 MiB + a 32,768-token cache of 6,144 + two 500 MB contexts =
-        35,317 against 35,000 free: no split holds it. Five passes: cuda:0 is cut to 14
-        layers and fits; cuda:1, then short 689, is cut until its tail goes to disk.
-        The refusal carries the last split that stayed on the GPUs."""
+        35,317 against 35,000 free, before a request's working memory: no split holds it.
+        With a 32,768-token request's transient peak kept on each card, transformers' map
+        puts 7,261 MiB on disk at the first pass, and it is refused there."""
         path = _save(tmp_path, Qwen2Config(**QWEN25_14B))
         fit = transformers_fit(path, "FP16", False)
         with patch.object(settings, "TRANSFORMERS_MIN_CONTEXT", 32_768):
@@ -225,11 +230,12 @@ class TestWhatNoReplanFits:
 
         details = raised.value.details
         assert details["short_devices"] == ["cuda:1"]
-        assert details["rebalance_passes"] == 5
+        assert "rebalance_passes" not in details, "refused at the first pass"
+        assert details["mapped_mb_by_device"]["disk"] == 7_261
         assert [(c["device"], c["weights_mb"], c["layers"], c["short_mb"]) for c in details["per_card"]] == [
-            ("cuda:0", 8_836, 14, 0), ("cuda:1", 19_337, 34, 689),
+            ("cuda:0", 3_586, 4, 0), ("cuda:1", 17_327, 33, 5_686),
         ]
-        assert "leaves the other cards without room" in raised.value.message
+        assert "never offloaded" in raised.value.message
 
     def test_the_search_is_bounded(self, tmp_path):
         """Vicuna-13B needs three passes; allowed two, it is refused, not accepted short."""
@@ -249,25 +255,28 @@ class TestTwoShortCardsInOnePass:
     def test_a_card_that_cannot_be_cut_beside_one_that_is_is_refused_not_a_key_error(
         self, tmp_path, requested
     ):
-        """Q8, 32,768 tokens, 3,000 / 16,000 MB free. Pass 1: cuda:0 holds 9 layers,
-        1,988 + 4,608 + 500 = 7,096 of 3,000, short 4,096 — more than its 2,500 MiB
-        limit, so it cannot be cut; cuda:1 holds 23, 4,690 + 11,776 + 500 = 16,966 of
-        16,000, short 966, and is cut without its map moving. Pass 2 finds cuda:0 short
-        at the same weights and doubles its step. The cards together are short (6,678
-        MiB of weights + 16,384 of cache + 1,000 of context against 19,000), so the
-        answer is a refusal with the last split's figures."""
+        """Q8, 32,768 tokens, 8,500 / 24,000 MB free. A 32,768-token request's working
+        memory is several GiB on each card, so both cards are short at the first pass:
+        cuda:0 holds 4 layers, 1,023 + 2,048 of KV + 7,296 of working memory + 109 of
+        staging + 500 = 10,976 of 8,500, short 2,476 — no smaller than its limit, so it
+        cannot be cut; cuda:1 holds 28, short 9,459, and is cut. Pass 2 finds cuda:0 short
+        at the same weights and doubles its step — the read round 6 found raising KeyError
+        — and neither card can give up any more, so the answer is a refusal with the
+        split's figures. (Before working memory was counted this shape was 3,000 / 16,000
+        MB; with it, that refusal comes at the first pass.)"""
         path = _save(tmp_path, LlamaConfig(**LLAMA2_7B_32K))
-        cards = ((TI_3080, 3_000, 12_288), (RTX_3090, 16_000, 24_576))
+        cards = ((TI_3080, 8_500, 12_288), (RTX_3090, 24_000, 24_576))
 
         with pytest.raises(InsufficientMemoryError) as raised:
             _plan(cards, path, context=32_768, requested=requested, quantization="Q8")
 
         details = raised.value.details
-        assert details["rebalance_passes"] == 5
+        assert details["rebalance_passes"] == 2
         assert details["short_devices"] == ["cuda:0", "cuda:1"]
         assert [(c["device"], c["weights_mb"], c["layers"], c["kv_mb"], c["short_mb"]) for c in details["per_card"]] == [
-            ("cuda:0", 1_988, 9, 4_608, 4_096), ("cuda:1", 4_690, 23, 11_776, 966),
+            ("cuda:0", 1_023, 4, 2_048, 2_476), ("cuda:1", 5_655, 28, 14_336, 9_459),
         ]
+        assert "cannot give up any more" in raised.value.message
 
 
 class TestTheSearchIsSafe:
@@ -329,8 +338,9 @@ class TestAutoTakesCardsForTheCache:
 
 class TestAllIsRefusedFromTheLayout:
     def test_a_card_whose_budget_holds_no_layer_is_refused_by_the_plan(self, tmp_path):
-        """cuda:0 has 900 MB free: a 400 MiB budget, less than llama-3.2-1b's 490 MiB
-        embedding. The map puts all 2,358 MiB on cuda:1."""
+        """cuda:0 has 900 MB free: less its 500 MB context and a 4,096-token request's
+        transient peak with the allocator's share of it (181 MiB), a 219 MiB budget — less
+        than llama-3.2-1b's 490 MiB embedding. The map puts all 2,358 MiB on cuda:1."""
         path = _save(tmp_path, LlamaConfig(**LLAMA32_1B))
         cards = ((TI_3080, 900, 12_288), (RTX_3090, 23_500, 24_576))
 
@@ -340,7 +350,7 @@ class TestAllIsRefusedFromTheLayout:
         details = raised.value.details
         assert details["unused_devices"] == ["cuda:0"]
         assert details["mapped_mb_by_device"] == {"cuda:1": 2_358}
-        assert details["max_memory"] == {"cuda:0": "400MiB", "cuda:1": "23000MiB"}
+        assert details["max_memory"] == {"cuda:0": "219MiB", "cuda:1": "22819MiB"}
 
 
 class TestAnUnknownLayoutFallsBackLoudly:

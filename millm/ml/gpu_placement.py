@@ -359,6 +359,10 @@ class Placement:
     #: before its own `max_memory_factor`.
     limits: tuple[tuple[int, int], ...] = ()
     max_memory_factor: float = 1.0
+    #: The per-card fit's working memory for a request, ("cuda:N", MiB): the room beside
+    #: the KV cache a request's prefill and the caching allocator need, which reads as free
+    #: between requests and which an SAE attach must leave (sae_service._working_reserve_mb).
+    working_mb_by_device: tuple[tuple[str, int], ...] = ()
 
     @property
     def is_single(self) -> bool:
@@ -514,6 +518,7 @@ class Placement:
             "budget_mb_by_device": {
                 f"cuda:{index}": mb for index, mb in sorted(self.budget_mb_by_index.items())
             },
+            "working_mb_by_device": dict(self.working_mb_by_device),
         }
 
 

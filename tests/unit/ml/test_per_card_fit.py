@@ -88,6 +88,7 @@ Controls re-run on lines Decision 7 moved into helpers:
 from __future__ import annotations
 
 import json
+import math
 from datetime import datetime
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -122,6 +123,7 @@ from millm.ml.model_loader import (  # noqa: E402
     kv_cache_spec,
     plan_transformers_load,
 )
+from millm.ml.working_memory import ALLOCATOR_OVERHEAD_FRACTION, WorkingMemory  # noqa: E402
 from millm.services.model_service import ModelService  # noqa: E402
 from tests.support.factories import make_model  # noqa: E402
 from tests.support.fake_gpus import RTX_3090, TI_3080, fake_gpus  # noqa: E402
@@ -173,6 +175,69 @@ def _accepted_cards(cards, path, **kwargs):
         placement = _plan(cards, path, **kwargs)
     [accepted] = [c for c in logger.info.call_args_list if c.args == ("transformers_fit_split_accepted",)]
     return placement, {card["device"]: card for card in accepted.kwargs["per_card"]}
+
+
+class TestACardOfASplitIsChargedOnlyThePhasesItRuns:
+    """A split's card holds a request's working memory for the phases that run on it: its decoder
+    layers, the embeddings and generate's sampling if it holds the input, the final norm and
+    lm_head if it holds the output (TransformersFit.layout's input_devices / output_devices).
+
+    In every real model traced here the decoder layer's peak is the largest, so charging every
+    card for every phase changed no figure, and a mutation doing exactly that survived (control
+    AF1-M9). A class that computes all the logits (none of the 9 transformers 5.15.1
+    *ForCausalLM classes without `logits_to_keep` is served here today) or a very large
+    vocabulary's sampling makes the output or input phase the largest, and the card that does
+    not run it must not be charged for it. The phases below differ on purpose, so a card's
+    figure says which phases it was charged for; the layout is transformers' own map of
+    OLMo-2-13B."""
+
+    MIB = 1024 * 1024
+    LAYER_MB, INPUT_MB, SAMPLING_MB, OUTPUT_MB = 100, 800, 100, 600
+
+    def _phases(self, tokens: int) -> WorkingMemory:
+        return WorkingMemory(
+            tokens=tokens,
+            layer_bytes=(self.LAYER_MB * self.MIB,) * 40,
+            input_bytes=self.INPUT_MB * self.MIB,
+            output_bytes=self.OUTPUT_MB * self.MIB,
+            sampling_bytes=self.SAMPLING_MB * self.MIB,
+            method="traced",
+        )
+
+    def _cards(self, cards, path, **kwargs):
+        with patch.object(model_loader, "size_working_memory", side_effect=lambda *a: self._phases(a[3])):
+            return _accepted_cards(cards, path, **kwargs)
+
+    @staticmethod
+    def _working(transient_mb: int, kv_mb: int) -> int:
+        return transient_mb + math.ceil(ALLOCATOR_OVERHEAD_FRACTION * (transient_mb + kv_mb))
+
+    def test_two_cards_the_first_runs_the_input_and_the_second_the_output(self, tmp_path):
+        path = _save(tmp_path, Olmo2Config(**OLMO2_13B))
+
+        placement, cards = self._cards(NODE, path)
+
+        assert placement.mode == MODE_SHARD
+        assert set(cards) == {"cuda:0", "cuda:1"}
+        first, second = cards["cuda:0"], cards["cuda:1"]
+        assert first["working_mb"] == self._working(self.INPUT_MB + self.SAMPLING_MB, first["kv_mb"])
+        assert second["working_mb"] == self._working(self.OUTPUT_MB, second["kv_mb"])
+        assert placement.to_dict()["working_mb_by_device"] == {
+            "cuda:0": first["working_mb"], "cuda:1": second["working_mb"],
+        }
+
+    def test_a_middle_card_runs_neither_and_is_charged_its_layers_alone(self, tmp_path):
+        path = _save(tmp_path, Olmo2Config(**OLMO2_13B))
+        three = ((TI_3080, 11_500, 12_288), (TI_3080, 11_500, 12_288), (RTX_3090, 23_500, 24_576))
+
+        placement, cards = self._cards(three, path, requested="all")
+
+        assert placement.mode == MODE_SHARD
+        assert set(cards) == {"cuda:0", "cuda:1", "cuda:2"}
+        assert all(card["layers"] for card in cards.values())
+        assert cards["cuda:0"]["working_mb"] == self._working(self.INPUT_MB + self.SAMPLING_MB, cards["cuda:0"]["kv_mb"])
+        assert cards["cuda:1"]["working_mb"] == self._working(self.LAYER_MB, cards["cuda:1"]["kv_mb"])
+        assert cards["cuda:2"]["working_mb"] == self._working(self.OUTPUT_MB, cards["cuda:2"]["kv_mb"])
 
 
 class TestTheKvCacheIsReadFromTheConfig:
@@ -228,19 +293,26 @@ class TestThePlacement:
         placement, cards = _accepted_cards(NODE, path)
 
         assert placement.mode == MODE_SHARD
-        assert placement.transformers_max_memory() == {0: "11000MiB", 1: "23000MiB"}
+        # Every card keeps its 500 MB context and a request's transient peak with the
+        # allocator's share of it: T = 124,432 B a token (8 x 5,120 + 6 x 13,824 + 528,
+        # test_working_memory.py) x 4,096 = 487 MiB, share ceil(0.4 x 487) = 195.
+        assert placement.transformers_max_memory() == {0: "10318MiB", 1: "22318MiB"}
         assert cards["cuda:0"] == {
-            "device": "cuda:0", "name": TI_3080, "free_mb": 11_500, "weights_mb": 9_361,
-            "kv_mb": 240, "context_mb": 500, "layers": 15, "need_mb": 10_101, "short_mb": 0,
-        }
-        assert (cards["cuda:1"]["weights_mb"], cards["cuda:1"]["layers"], cards["cuda:1"]["kv_mb"]) == (18_812, 33, 528)
-        assert cards["cuda:1"]["need_mb"] == 19_840
+            "device": "cuda:0", "name": TI_3080, "free_mb": 11_500, "weights_mb": 8_311,
+            "kv_mb": 208, "working_mb": 765, "staging_mb": 0, "context_mb": 500, "layers": 13,
+            "need_mb": 9_784, "short_mb": 0,
+        }, "working 487 + ceil(0.4 x (487 + 208))"
+        assert (cards["cuda:1"]["weights_mb"], cards["cuda:1"]["layers"], cards["cuda:1"]["kv_mb"]) == (19_862, 35, 560)
+        assert (cards["cuda:1"]["working_mb"], cards["cuda:1"]["need_mb"]) == (906, 21_828)
 
     def test_qwen25_14b_is_refused_where_cuda1_cannot_hold_a_32k_context(self, tmp_path):
-        """Qwen2.5-14B serves 32,768 tokens. cuda:1 needs 19,337 + 34 layers x 128 MiB
-        (4,352) + 500 = 24,189 of its 23,500: 689 short. cuda:0 needs 8,836 + 1,792 +
-        500 = 11,128 of 11,500, and fits. (Round 4 refused OLMo-2-13B at 8,192 here,
-        a context that model never serves: review round 5.)"""
+        """Qwen2.5-14B serves 32,768 tokens. A request that long has a transient peak of
+        124,432 B x 32,768 = 3,889 MiB on every card, so each card's limit is its free
+        memory less 500 + 3,889 + 1,556: 5,555 / 17,555. transformers' map then puts
+        7,261 MiB on disk, refused before any re-plan. cuda:1 would need 17,327 + 33
+        layers x 128 MiB (4,224) + 3,889 + ceil(0.4 x (3,889 + 4,224)) (7,135 in all) +
+        500 = 29,186 of its 23,500: 5,686 short. (Round 4 refused OLMo-2-13B at 8,192
+        here, a context that model never serves: review round 5.)"""
         path = _save(tmp_path, Qwen2Config(**QWEN25_14B))
 
         with patch.object(settings, "TRANSFORMERS_MIN_CONTEXT", 32_768), \
@@ -251,22 +323,33 @@ class TestThePlacement:
         assert details["short_devices"] == ["cuda:1"]
         assert (details["min_context_tokens"], details["model_max_context_tokens"]) == (32_768, 32_768)
         assert details["per_card"][1] == {
-            "device": "cuda:1", "name": RTX_3090, "free_mb": 23_500, "weights_mb": 19_337,
-            "kv_mb": 4_352, "context_mb": 500, "layers": 34, "need_mb": 24_189, "short_mb": 689,
+            "device": "cuda:1", "name": RTX_3090, "free_mb": 23_500, "weights_mb": 17_327,
+            "kv_mb": 4_224, "working_mb": 7_135, "staging_mb": 0, "context_mb": 500, "layers": 33,
+            "need_mb": 29_186, "short_mb": 5_686,
         }
-        assert (details["per_card"][0]["need_mb"], details["per_card"][0]["short_mb"]) == (11_128, 0)
+        assert (details["per_card"][0]["need_mb"], details["per_card"][0]["short_mb"]) == (10_248, 0)
+        assert details["mapped_mb_by_device"]["disk"] == 7_261
         message = raised.value.message
-        for figure in ("cuda:1", "23500 MiB free", "19337 MiB of weights", "4352 MiB of KV cache", "500 MiB CUDA context", "689 MiB short"):
+        for figure in (
+            "cuda:1", "23500 MiB free", "17327 MiB of weights", "4224 MiB of KV cache",
+            "7135 MiB of working memory", "500 MiB CUDA context", "5686 MiB short",
+        ):
             assert figure in message
 
     def test_olmo2_13b_is_accepted_at_the_default_4k_context(self, tmp_path):
-        """cuda:0: 9,451 + 1,120 + 500 = 11,071 of 11,500. The minimum context is read."""
+        """Re-planned until cuda:0 holds 12 layers: 8,241 + 960 of KV + 1,119 of working
+        memory (T 525 — OLMo-2's 134,152 B a token x 4,096 — + ceil(0.4 x (525 + 960))) +
+        500 = 10,820 of 11,500. The minimum context is read. (Before working memory was
+        counted it took 14 layers with 429 MiB to spare, and on the node, where the card
+        had 11,767 MiB free, 15 layers with 11 — and ran a 3,879-token request out of
+        memory: hardware acceptance, 2026-09-14.)"""
         path = _save(tmp_path, Olmo2Config(**OLMO2_13B))
 
         placement, cards = _accepted_cards(NODE, path)
 
         assert placement.mode == MODE_SHARD
-        assert (cards["cuda:0"]["kv_mb"], cards["cuda:0"]["need_mb"]) == (1_120, 11_071)
+        assert (cards["cuda:0"]["layers"], cards["cuda:0"]["kv_mb"], cards["cuda:0"]["working_mb"]) == (12, 960, 1_119)
+        assert cards["cuda:0"]["need_mb"] == 10_820
 
     def test_a_7b_width_model_that_fits_one_card_goes_on_it(self, tmp_path):
         """Card 1 has 17,000 free. The slack's 17,395 did not fit it and split the model."""
@@ -283,7 +366,10 @@ class TestThePlacement:
 
         placement = _plan(cards, path, estimate=row_estimate)
 
-        assert (placement.mode, placement.index, placement.required_mb) == (MODE_SINGLE, 1, 15_250)
+        # 14,526 of weights + 224 of KV + a 4,096-token request's working memory (T 559 —
+        # 142,864 B a token, test_working_memory.py — + ceil(0.4 x (559 + 224)) = 873) + 500.
+        assert (placement.mode, placement.index, placement.required_mb) == (MODE_SINGLE, 1, 16_123)
+        assert placement.to_dict()["working_mb_by_device"] == {"cuda:1": 873}
 
     def test_a_named_card_that_cannot_hold_its_context_is_refused_naming_it(self, tmp_path):
         path = _save(tmp_path, Qwen2Config(**QWEN25_7B))
@@ -295,14 +381,30 @@ class TestThePlacement:
         [card] = raised.value.details["per_card"]
         assert card == {
             "device": "cuda:0", "name": TI_3080, "free_mb": 15_000, "weights_mb": 14_526,
-            "kv_mb": 224, "context_mb": 500, "layers": 28, "need_mb": 15_250, "short_mb": 250,
+            "kv_mb": 224, "working_mb": 873, "staging_mb": 0, "context_mb": 500, "layers": 28,
+            "need_mb": 16_123, "short_mb": 1_123,
         }
         assert "not swapped for another one" in raised.value.message
+        assert "873 MiB of working memory for a 4096-token request" in raised.value.message
+
+    def test_a_named_card_that_holds_the_model_carries_its_working_memory(self, tmp_path):
+        """The placement a named card is accepted with carries that card's working memory, which
+        SAE attachment keeps free (sae_service._working_reserve_mb). Auto's one card did
+        (test_a_7b_width_model_that_fits_one_card_goes_on_it); a named card's placement
+        dropped it and nothing failed (control AF1-M13)."""
+        path = _save(tmp_path, Qwen2Config(**QWEN25_7B))
+        cards = ((TI_3080, 11_500, 12_288), (RTX_3090, 17_000, 24_576))
+
+        placement = _plan(cards, path, requested=1)
+
+        assert (placement.mode, placement.index, placement.required_mb) == (MODE_SINGLE, 1, 16_123)
+        assert placement.to_dict()["working_mb_by_device"] == {"cuda:1": 873}
 
     def test_the_cuda_context_allowance_is_read(self, tmp_path):
-        """With 3,000 MB a card, one card needs 14,526 + 224 + 3,000 = 17,750, more than
-        card 1's 17,000, so the model splits — and each card of the split keeps its
-        3,000: budgets 11,500 - 3,000 and 17,000 - 3,000."""
+        """With 3,000 MB a card, one card needs 14,526 + 224 + 873 + 3,000 = 18,623, more
+        than card 1's 17,000, so the model splits — and each card of the split keeps its
+        3,000 beside a request's transient peak and the allocator's share of it (559 + 224):
+        budgets 11,500 - 3,783 and 17,000 - 3,783."""
         path = _save(tmp_path, Qwen2Config(**QWEN25_7B))
         cards = ((TI_3080, 11_500, 12_288), (RTX_3090, 17_000, 24_576))
 
@@ -310,7 +412,7 @@ class TestThePlacement:
             placement, by_device = _accepted_cards(cards, path)
 
         assert placement.mode == MODE_SHARD
-        assert placement.transformers_max_memory() == {0: "8500MiB", 1: "14000MiB"}
+        assert placement.transformers_max_memory() == {0: "7717MiB", 1: "13217MiB"}
         assert [card["context_mb"] for card in by_device.values()] == [3_000, 3_000]
         assert all(card["need_mb"] <= card["free_mb"] for card in by_device.values())
 
@@ -389,7 +491,7 @@ class TestThePreCheckRefusesPerCardBeforeTheUnload:
         error = response.json()["error"]
         assert error["code"] == "INSUFFICIENT_MEMORY"
         assert error["details"]["short_devices"] == ["cuda:1"]
-        assert "689 MiB short" in error["message"]
+        assert "5686 MiB short" in error["message"]
         assert not svc.unload_model.called
         assert not svc._executor.method_calls and not svc._executor.called
 
@@ -413,5 +515,5 @@ class TestThePreCheckRefusesPerCardBeforeTheUnload:
         assert response.status_code == 503, response.text
         body = response.json()["error"]
         assert body["code"] == "insufficient_memory"
-        assert "cuda:1" in body["message"] and "689 MiB short" in body["message"]
+        assert "cuda:1" in body["message"] and "5686 MiB short" in body["message"]
         assert not svc.unload_model.called

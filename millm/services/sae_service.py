@@ -108,6 +108,23 @@ def _card_room_mb(device: Any) -> int:
     return int((free_bytes + max(cached, 0)) / (1024 * 1024))
 
 
+def _working_reserve_mb(model: Any, device: Any) -> int:
+    """The working memory the load's fit kept for a request on `device`, in MiB; 0 when it sized none.
+
+    The per-card fit admits each card with room, beside the KV cache, for a request's
+    prefill activations and the caching allocator's share (millm/ml/working_memory.py).
+    That room reads as free between requests, so an SAE attached there takes it and the
+    next long request runs the card out of memory (hardware acceptance, 2026-09-14). The
+    figures travel with the loaded model's placement (Placement.working_mb_by_device).
+    """
+    current = LoadedModelState().current
+    if current is None or getattr(current, "model", None) is not model:
+        return 0
+    by_device = dict((getattr(current, "placement", None) or {}).get("working_mb_by_device") or {})
+    label = f"cuda:{device}" if isinstance(device, int) and not isinstance(device, bool) else str(device)
+    return int(by_device.get(label, 0))
+
+
 def _resolve_attach_dtype(name: str) -> "torch.dtype":
     """Resolve a configured attach-dtype name to a torch dtype.
 
@@ -1989,21 +2006,26 @@ class SAEService:
         """
         room = _card_room_mb(device)
         reserve, tokens = self._kv_reserve_mb(model, device)
-        if projected_mb + reserve <= room:
+        working = _working_reserve_mb(model, device)
+        if projected_mb + reserve + working <= room:
             return
         cache = (
             f" and the model's KV cache for {tokens} tokens over its layers there needs "
             f"{reserve} MB" if tokens else ""
         )
+        activations = (
+            f", and a request's working memory there {working} MB" if working else ""
+        )
         raise InsufficientMemoryError(
-            f"{what} needs ~{projected_mb} MB on {device}{cache}, but only {room} MB is free "
-            "there. Detach an SAE on that card, lower TRANSFORMERS_MIN_CONTEXT and reload the "
-            "model, or free memory on the card.",
+            f"{what} needs ~{projected_mb} MB on {device}{cache}{activations}, but only {room} MB "
+            "is free there. Detach an SAE on that card, lower TRANSFORMERS_MIN_CONTEXT and reload "
+            "the model, or free memory on the card.",
             details={
                 "device": str(device),
                 "projected_mb": projected_mb,
                 "kv_reserve_mb": reserve,
                 "kv_context_tokens": tokens,
+                "working_reserve_mb": working,
                 "available_mb": room,
                 "free_mb": room,
             },

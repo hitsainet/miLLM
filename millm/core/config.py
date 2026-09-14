@@ -39,9 +39,11 @@ def parse_gguf_tensor_split(value: Optional[str]) -> Optional[list[float]]:
 TRANSFORMERS_MIN_CONTEXT_DEFAULT = 4096
 
 #: Memory, in MB, each card of a transformers load keeps for its CUDA context
-#: (TRANSFORMERS_CUDA_CONTEXT_MB). About 500 MB — TO BE MEASURED ON THE NODE: read
-#: a card's used memory before and after this process first touches it with no
-#: model loaded, on both the RTX 3080 Ti and the RTX 3090.
+#: (TRANSFORMERS_CUDA_CONTEXT_MB). Measured on the node (hardware acceptance,
+#: 2026-09-14): 250-256 MiB idle, ~330 MiB after a first generation, growing to
+#: ~400 MiB over a session, on both the RTX 3080 Ti and the RTX 3090. 500 covers it.
+#: A request's prefill activations and the caching allocator's share are sized per
+#: model and per card (millm/ml/working_memory.py), not taken from this.
 TRANSFORMERS_CUDA_CONTEXT_MB_DEFAULT = 500
 
 
@@ -290,9 +292,11 @@ class Settings(BaseSettings):
     TRANSFORMERS_MIN_CONTEXT: int = TRANSFORMERS_MIN_CONTEXT_DEFAULT
 
     # MEMORY EACH CARD OF A TRANSFORMERS LOAD KEEPS FOR ITS CUDA CONTEXT, in MB.
-    # The default is a placeholder, TO BE MEASURED ON THE NODE (see
-    # TRANSFORMERS_CUDA_CONTEXT_MB_DEFAULT). Prefill activations and cuBLAS
-    # workspaces are not counted separately; this is where they must fit.
+    # Measured on the node at 250-400 MiB a card (TRANSFORMERS_CUDA_CONTEXT_MB_DEFAULT).
+    # The context only: a request's prefill activations and the caching allocator's
+    # share are sized per model and per card (millm/ml/working_memory.py). Hardware
+    # acceptance, 2026-09-14: this was the only allowance, and OLMo-2-13B admitted
+    # with 11 MiB to spare ran a 3,879-token request out of memory.
     TRANSFORMERS_CUDA_CONTEXT_MB: int = TRANSFORMERS_CUDA_CONTEXT_MB_DEFAULT
 
     CBM_MAX_QUEUE_SIZE: int = 256

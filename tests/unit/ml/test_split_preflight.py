@@ -150,6 +150,7 @@ from millm.ml.model_loader import (  # noqa: E402
     pre_quantized_max_memory_factor,
     preflight_split,
 )
+from millm.core.config import settings  # noqa: E402
 from millm.services.model_service import ModelService  # noqa: E402
 from tests.support.factories import make_model  # noqa: E402
 from tests.support.fake_gpus import RTX_3090, TI_3080, fake_gpus  # noqa: E402
@@ -212,9 +213,13 @@ class TestThePreflightReadsTheRealMap:
         assert details["before_loading"] is True
 
     def test_the_same_split_with_room_for_lm_head_maps_onto_the_gpus(self, tmp_path):
+        """At a 512-token context: a request's working memory (167 / 174 MiB there) keeps
+        the limits at 10,836 / 23,836. At WIDE's own 2,048 its working memory leaves cuda:1
+        19 MiB short however the layers are divided; this test is about the map."""
         path = _checkpoint(tmp_path)
-        placement = _plan(ROOMY, cache_path=path)
-        assert placement.transformers_max_memory() == {0: "11000MiB", 1: "24000MiB"}
+        with patch.object(settings, "TRANSFORMERS_MIN_CONTEXT", 512):
+            placement = _plan(ROOMY, cache_path=path)
+        assert placement.transformers_max_memory() == {0: "10836MiB", 1: "23836MiB"}
 
         assert preflight_split("wide-16", path, "FP16", placement) == {
             "cuda:0": 8_533,
@@ -236,7 +241,7 @@ class TestThePreflightReadsTheRealMap:
 
     def test_the_preflight_creates_no_cuda_context(self, tmp_path):
         path = _checkpoint(tmp_path)
-        with fake_gpus(*ROOMY) as fake:
+        with fake_gpus(*ROOMY) as fake, patch.object(settings, "TRANSFORMERS_MIN_CONTEXT", 512):
             from millm.ml.gpu_placement import list_gpus
 
             placement = plan_transformers_load(
@@ -263,18 +268,22 @@ class TestTheLoaderRefusesBeforeReadingAWeight:
         assert not context.__enter__.called, "no weight may be read for a split the map refuses"
 
     def test_a_split_that_maps_onto_the_gpus_is_loaded_with_that_placement(self, tmp_path):
+        """At a 512-token context (see test_the_same_split_with_room_for_lm_head_maps_onto_the_gpus).
+        The placement the load gets carries each card's working memory for what attaches later."""
         path = _checkpoint(tmp_path)
         context = MagicMock()
         loader = ModelLoader()
         loader.state = MagicMock()
-        with fake_gpus(*ROOMY), patch("millm.ml.model_loader.ModelLoadContext", return_value=context):
+        with fake_gpus(*ROOMY), patch("millm.ml.model_loader.ModelLoadContext", return_value=context), \
+                patch.object(settings, "TRANSFORMERS_MIN_CONTEXT", 512):
             loader.load(
                 model_id=1, model_name="wide-16", cache_path=path,
                 quantization="FP16", estimated_memory_mb=ESTIMATE_MB,
             )
         assert context.__enter__.return_value.load.call_count == 1
         placement = context.__enter__.return_value.load.call_args.kwargs["placement"]
-        assert placement.transformers_max_memory() == {0: "11000MiB", 1: "24000MiB"}
+        assert placement.transformers_max_memory() == {0: "10836MiB", 1: "23836MiB"}
+        assert placement.to_dict()["working_mb_by_device"] == {"cuda:0": 167, "cuda:1": 174}
 
 
 class TestThePreCheckRefusesBeforeTheUnload:
@@ -486,8 +495,12 @@ class TestABitsandbytesMapIsRefusedByTheQuantizerItself:
         assert "dispatched on the CPU or the disk" in details["engine_message"]
 
     def test_the_same_model_with_room_maps_onto_both_cards(self, tmp_path):
+        """Judged per card, with a 512-token request's working memory (761 / 782 MiB) and what
+        quantizing its weights as they load leaves stranded (1,257 / 4,227 MiB) counted, the
+        48-layer model needs cuda:1 at 22,750 MB free rather than 20,000 to split onto both."""
         path = _checkpoint(tmp_path, layers=48)
-        placement = _plan(((TI_3080, 11_000, 12_288), (RTX_3090, 20_000, 24_576)), 24_719, "Q4", cache_path=path)
+        with patch.object(settings, "TRANSFORMERS_MIN_CONTEXT", 512):
+            placement = _plan(((TI_3080, 11_000, 12_288), (RTX_3090, 22_750, 24_576)), 24_719, "Q4", cache_path=path)
 
         mapped = preflight_split("wide-48-q4", path, "Q4", placement)
 
@@ -528,7 +541,9 @@ class TestACheckpointTransformersDequantizesIsSizedAsItLoads:
     (4,202,692,608 B) + final norm (16,384 B) = 17,896,783,872 B = 17,068 MiB (rounded up);
     + KV 128 MiB (16 layers x 2 x 8 x 128 x 2 B x 2,048 tokens — LlamaConfig's
     max_position_embeddings, below the 4,096 floor; review round 5) + 500 MiB
-    context = 17,696 on the 3090."""
+    context = 17,696 on the 3090, + a 2,048-token request's working memory, estimated
+    (FP8 kernels do not run on the meta device) at 1,396 MiB = 19,092 (hardware
+    acceptance, 2026-09-14)."""
 
     CARDS = ((TI_3080, 11_500, 12_288), (RTX_3090, 23_500, 24_576))
 
@@ -543,8 +558,11 @@ class TestACheckpointTransformersDequantizesIsSizedAsItLoads:
         import millm.ml.model_loader as module
 
         path = self._fp8_checkpoint(tmp_path)
+        # At a 512-token context: at WIDE's own 2,048 a request's working memory leaves
+        # lm_head no room on these cards, and this test is about how the checkpoint is sized.
         with patch("torch.cuda.get_device_capability", return_value=(8, 6)), \
-                patch.object(module, "logger") as logger:
+                patch.object(module, "logger") as logger, \
+                patch.object(settings, "TRANSFORMERS_MIN_CONTEXT", 512):
             placement = _plan(self.CARDS, 19_660, cache_path=path)
         assert placement.mode == MODE_SHARD
         [accepted] = [c for c in logger.info.call_args_list if c.args == ("transformers_fit_split_accepted",)]
@@ -553,12 +571,23 @@ class TestACheckpointTransformersDequantizesIsSizedAsItLoads:
 
     def test_kept_in_fp8_it_is_sized_by_what_it_stores(self, tmp_path):
         """On a card that runs FP8 the checkpoint is not refused for a bf16 size
-        it never takes: one card holds it."""
+        it never takes: one card holds it. Its FP8 linears have no kernel on the meta
+        device, so a request's working memory is ESTIMATED, and the fit says so as an
+        error naming the architecture: 32 x 8,192 + 8 x 28,672 = 491,520 B a token x
+        2,048 = 960 MiB, + ceil(0.4 x (960 + 128)) = 1,396."""
+        from millm.ml import working_memory
+
         path = self._fp8_checkpoint(tmp_path)
-        with patch("torch.cuda.get_device_capability", return_value=(8, 9)):
+        with patch("torch.cuda.get_device_capability", return_value=(8, 9)), \
+                patch.object(working_memory, "logger") as logger:
             placement = _plan(self.CARDS, 19_660, cache_path=path)
         assert (placement.mode, placement.index) == (MODE_SINGLE, 1)
-        assert placement.required_mb == 17_696
+        assert placement.required_mb == 17_068 + 128 + 1_396 + 500 == 19_092
+        estimated = [c for c in logger.error.call_args_list if c.args == ("transformers_fit_working_memory_estimated",)]
+        assert estimated and {c.kwargs["reason"] for c in estimated} == {
+            "its forward pass could not be traced on the meta device"
+        }
+        assert {c.kwargs["architecture"] for c in estimated} == {"llama"}
 
 
 # Real configurations' shapes (config.json fields), built on the meta device only.
@@ -593,16 +622,19 @@ class TestAllIsHonouredOrRefused:
 
     Plan figures, worked by hand:
       Qwen2.5-7B Q4, cards 11,500 / 23,500, sized as it loads (Decision 7) and
-        budgeted per card (review round 5: limits = free - the 500 MB CUDA context):
-        a layer's 4-bit linears 233,046,016 params x 0.5 B + bf16 biases and
-        norms 23,552 B = 116,546,560 B; 28 layers + bf16 embed_tokens and lm_head
-        1,089,994,752 B each + final norm 7,168 B = 5,443,300,352 B = 5,192 MiB
-        rounded up; need 5,192 + 224 MiB of KV = 5,416. bitsandbytes budgets
-        int(x 0.9) = 9,900 / 20,700; 5,416 <= 9,900, so proportional: card 0 share
-        ceil(5,416 x 9,900 / 30,600) = 1,753 -> max_memory ceil(1,753 / 0.9) = 1,948.
-        transformers gives 1,753 back and holds room for the largest layer, the
-        untied bf16 embedding (1,039 MiB), so the embedding — first in order — does
-        not fit card 0, and nothing lands there. (Round 3 planned the row's 4,348.)
+        budgeted per card: a layer's 4-bit linears 233,046,016 params x 0.5 B + bf16
+        biases and norms 23,552 B = 116,546,560 B; 28 layers + bf16 embed_tokens and
+        lm_head 1,089,994,752 B each + final norm 7,168 B = 5,443,300,352 B = 5,192 MiB
+        rounded up. Each card's limit is its free memory less the 500 MB context and a
+        4,096-token request's transient peak with the allocator's share of it (559 + 224,
+        millm/ml/working_memory.py): 10,217 / 22,217; bitsandbytes budgets int(x 0.9) =
+        9,195 / 19,995. The need — 5,192 + 224 of KV + its allocator share + what
+        quantizing the weights as they load leaves stranded — is under 9,195, so
+        proportional: card 0 gets 2,010 -> max_memory ceil(2,010 / 0.9) = 2,234.
+        transformers holds room for the largest layer, the untied bf16 embedding (1,039
+        MiB), so the embedding — first in order — does not fit card 0, and nothing lands
+        there. (Round 3 planned the row's 4,348; before working memory was counted,
+        1,948.)
       gemma-3-1b FP16, cards 3,000 / 23,500, row estimate 2,288: limits 1,976 /
         22,476; 2,288 > 1,976, so round 2's index-order branch: card 0 whole
         (1,976). The ~1,907 MiB of weights fit it, and card 1 gets nothing.
@@ -623,7 +655,7 @@ class TestAllIsHonouredOrRefused:
 
         details = raised.value.details
         assert details["unused_devices"] == ["cuda:0"]
-        assert details["max_memory"] == {"cuda:0": "1948MiB", "cuda:1": "23000MiB"}
+        assert details["max_memory"] == {"cuda:0": "2234MiB", "cuda:1": "22217MiB"}
         assert details["mapped_mb_by_device"] == {"cuda:1": 5_192}
         assert details["before_loading"] is True
 

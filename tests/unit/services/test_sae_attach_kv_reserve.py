@@ -187,6 +187,54 @@ class TestAttachSet:
         assert result["attached_count"] == 1
 
 
+class TestTheRequestsWorkingMemoryIsKeptFreeToo:
+    """Hardware acceptance, 2026-09-14. The per-card fit now also admits each card with room for
+    a request's working memory — its prefill's activations and the caching allocator's share
+    (millm/ml/working_memory.py) — and that room reads as free between requests as the KV
+    cache's does. The load's placement carries it per card (Placement.working_mb_by_device)."""
+
+    async def test_an_sae_that_fits_beside_the_cache_alone_is_refused_for_the_working_memory(self):
+        """The 16,384-latent attach above: 422 + 1,120 = 1,542 fits 1,550 MiB. With 400 MiB of
+        working memory kept on cuda:0, 422 + 1,120 + 400 = 1,942 does not."""
+        svc = _service(16_384)
+        patcher = _olmo_loaded()
+        state = patcher.kwargs["return_value"]
+        state.current.placement = {"working_mb_by_device": {"cuda:0": 400, "cuda:1": 900}}
+        with patcher, _cards({0: 1_550, 1: 6_000}):
+            with pytest.raises(InsufficientMemoryError) as raised:
+                await svc.attach_set([("sae-l10", 10)])
+
+        details = raised.value.details
+        assert (details["device"], details["projected_mb"], details["kv_reserve_mb"], details["working_reserve_mb"]) == (
+            "cuda:0", 422, 1_120, 400,
+        )
+        assert "working memory there 400 MB" in raised.value.message
+        assert svc._loader.load.call_count == 0
+
+    async def test_it_attaches_once_the_card_has_room_for_all_three(self):
+        svc = _service(16_384)
+        patcher = _olmo_loaded()
+        patcher.kwargs["return_value"].current.placement = {"working_mb_by_device": {"cuda:0": 400}}
+        with patcher, _cards({0: 1_942, 1: 6_000}):
+            assert (await svc.attach_set([("sae-l10", 10)]))["attached_count"] == 1
+
+    async def test_the_reserve_belongs_to_the_model_it_was_planned_for(self):
+        """A placement left on the state by another model does not reserve room for this one."""
+        svc = _service(16_384)
+        patcher = _olmo_loaded()
+        state = patcher.kwargs["return_value"]
+        state.current.placement = {"working_mb_by_device": {"cuda:0": 400}}
+        other = MagicMock()
+        other.config = state.current.model.config
+        other.dtype = torch.bfloat16
+        with patcher, _cards({0: 1_550, 1: 6_000}):
+            from millm.services.sae_service import _working_reserve_mb
+
+            assert _working_reserve_mb(other, torch.device("cuda", 0)) == 0
+            assert _working_reserve_mb(state.current.model, torch.device("cuda", 0)) == 400
+            assert _working_reserve_mb(state.current.model, 0) == 400
+
+
 class TestAttachSae:
     async def test_an_sae_without_room_is_refused_not_warned_about(self):
         """16,384 latents stored at float32: 640 MiB x 1.2 = 768. 768 + 1,120 > 1,550.

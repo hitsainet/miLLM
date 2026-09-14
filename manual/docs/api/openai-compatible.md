@@ -201,6 +201,11 @@ miLLM detects a trailing assistant message and completes it instead: everything 
 | Request queue full (backpressure) | 503 | `queue_full` |
 | Unknown `profile` | 404 | `profile_not_found` |
 | Invalid `steering_intensity` (outside 0–2 / unknown symbol) | 400 | `invalid_parameter` |
+| The named model has to be loaded and its quantization cannot be (a Q2 transformers checkpoint) | 400 | `unsupported_quantization` |
+| The named model has to be loaded and no card, or split across cards, holds it | 503 | `insufficient_memory` |
+| The named model has to be loaded and the load failed | 500 | `model_load_failed` |
+
+A request that names a model other than the one loaded loads it first. When that load is refused, the response carries the refusal's own status and message, with the figures for each card.
 
 ## Behavior under continuous batching
 

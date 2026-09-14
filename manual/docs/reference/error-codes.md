@@ -25,6 +25,9 @@ Machine-readable error codes returned by the management API in the [error envelo
 |------|------|---------|
 | `INSUFFICIENT_MEMORY` | 507 | Estimated VRAM exceeds what's free |
 | `INSUFFICIENT_DISK` | 507 | Not enough disk for the download |
+| `UNSUPPORTED_QUANTIZATION` | 400 | The load asks for a quantization its engine cannot apply (Q2 on a transformers checkpoint that is not already quantized) |
+| `GPU_NOT_FOUND` | 404 | The `gpu` named in a load is not visible to miLLM |
+| `INVALID_GGUF_TENSOR_SPLIT` | 500 | `GGUF_TENSOR_SPLIT` does not name one proportion per card the GGUF split uses; only the setting fixes it |
 
 ## Download errors
 

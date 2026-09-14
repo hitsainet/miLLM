@@ -2526,13 +2526,19 @@ _KV_WINDOWED_LAYERS = {
 #: in size and NOT counted: it cannot be derived exactly from every config.
 _KV_FREE_LAYERS = frozenset({"conv", "linear_attention", "mamba", "moe", "mlp"})
 #: Config fields meaning a token's cache is not 2 x key-value heads x head_dim a
-#: layer: multi-head latent attention, layers reusing another's cache,
-#: cross-attention to an encoder, and keys shared with values.
+#: layer: multi-head latent attention, layers reusing another's cache (whose
+#: donor layer also keeps a full-length copy outside the cache), and
+#: cross-attention to an encoder.
+#:
+#: NOT `attention_k_eq_v` (Gemma 4's global layers use their keys as values). The
+#: cache still stores keys and values as two tensors, shaped by the layer's own
+#: override (per_layer_config), so the formula holds; listed here, every
+#: checkpoint declaring it fell back to the slack. Measured against transformers
+#: 5.15.1's DynamicCache by test_kv_spec_against_real_cache. Review round 5.
 _KV_UNSIZED_FIELDS = (
     "kv_lora_rank",
     "num_kv_shared_layers",
     "cross_attention_layers",
-    "attention_k_eq_v",
 )
 
 

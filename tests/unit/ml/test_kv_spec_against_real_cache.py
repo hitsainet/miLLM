@@ -23,6 +23,15 @@ git diff clean):
   R5-M8  a windowed layer's cap not recorded (None)     -> qwen2-sliding, mistral-sliding,
          gemma2, gemma3, both gemma4 cases
   R5-M9  TRANSFORMERS_KV_BYTES = 4 (float32)            -> every case
+
+REVIEW ROUND 6 (2026-09-14): the cases were built inside the parametrize decorator, so
+a transformers without one class (every release before Gemma 4, LFM2 or
+GraniteMoeHybrid — pyproject pins only transformers>=4.47) raised AttributeError at
+COLLECTION and took the whole module down as an error. Classes are now looked up by
+name when a case runs, and a missing one skips that case.
+  R6-C1  collected under a transformers with no Gemma4* classes (millm-p2-review6/hide_gemma4.py):
+         before, "1 error during collection"; after, 12 passed, 2 skipped
+  R5-M6..M9 re-run against the rebuilt cases: all red again (see the round 6 review record)
 """
 
 from __future__ import annotations
@@ -46,51 +55,65 @@ GEMMA4 = dict(
 )
 
 
-def _cases():
-    return {
-        "llama-mha": (tf.LlamaConfig(num_hidden_layers=2, num_key_value_heads=4, **BASE), tf.LlamaForCausalLM),
-        "llama-gqa": (tf.LlamaConfig(num_hidden_layers=2, num_key_value_heads=2, **BASE), tf.LlamaForCausalLM),
-        "llama-explicit-head-dim": (
-            tf.LlamaConfig(num_hidden_layers=2, num_key_value_heads=2, head_dim=32, **BASE), tf.LlamaForCausalLM,
+#: name -> (config class, model class, config fields). Classes are looked up by NAME
+#: when a case runs, so a transformers without one (every release before Gemma 4, LFM2
+#: or GraniteMoeHybrid) skips that case. Built eagerly in the parametrize decorator,
+#: a missing class raised AttributeError at collection and took all 14 cases, and the
+#: suite, down with it. Review round 6, 2026-09-14.
+_SPECS = {
+    "llama-mha": ("LlamaConfig", "LlamaForCausalLM", dict(num_hidden_layers=2, num_key_value_heads=4, **BASE)),
+    "llama-gqa": ("LlamaConfig", "LlamaForCausalLM", dict(num_hidden_layers=2, num_key_value_heads=2, **BASE)),
+    "llama-explicit-head-dim": (
+        "LlamaConfig", "LlamaForCausalLM", dict(num_hidden_layers=2, num_key_value_heads=2, head_dim=32, **BASE),
+    ),
+    "qwen2": ("Qwen2Config", "Qwen2ForCausalLM", dict(num_hidden_layers=3, num_key_value_heads=2, **BASE)),
+    "qwen2-sliding": (
+        "Qwen2Config", "Qwen2ForCausalLM",
+        dict(num_hidden_layers=4, num_key_value_heads=2, use_sliding_window=True,
+             sliding_window=WINDOW, max_window_layers=2, **BASE),
+    ),
+    "olmo2": ("Olmo2Config", "Olmo2ForCausalLM", dict(num_hidden_layers=2, num_key_value_heads=4, **BASE)),
+    "mistral-sliding": (
+        "MistralConfig", "MistralForCausalLM",
+        dict(num_hidden_layers=2, num_key_value_heads=2, sliding_window=WINDOW, **BASE),
+    ),
+    "mistral-explicit-head-dim": (
+        "MistralConfig", "MistralForCausalLM",
+        dict(num_hidden_layers=2, num_key_value_heads=2, sliding_window=None, head_dim=24, **BASE),
+    ),
+    "gemma2": (
+        "Gemma2Config", "Gemma2ForCausalLM",
+        dict(num_hidden_layers=4, num_key_value_heads=2, head_dim=32, sliding_window=WINDOW, **BASE),
+    ),
+    "gemma3": (
+        "Gemma3TextConfig", "Gemma3ForCausalLM",
+        dict(num_hidden_layers=7, num_key_value_heads=2, head_dim=32, sliding_window=WINDOW, **BASE),
+    ),
+    "gemma4": ("Gemma4TextConfig", "Gemma4ForCausalLM", dict(GEMMA4)),
+    "gemma4-k_eq_v": ("Gemma4TextConfig", "Gemma4ForCausalLM", dict(attention_k_eq_v=True, **GEMMA4)),
+    "lfm2-hybrid": (
+        "Lfm2Config", "Lfm2ForCausalLM",
+        dict(num_hidden_layers=4, num_key_value_heads=2, full_attn_idxs=[1, 3], **BASE),
+    ),
+    "granitemoehybrid": (
+        "GraniteMoeHybridConfig", "GraniteMoeHybridForCausalLM",
+        dict(
+            num_hidden_layers=4, num_key_value_heads=2, layer_types=["mamba", "attention", "mamba", "attention"],
+            mamba_n_heads=4, mamba_d_head=32, mamba_d_state=8, mamba_n_groups=1, mamba_expand=2,
+            num_local_experts=0, shared_intermediate_size=128, **BASE,
         ),
-        "qwen2": (tf.Qwen2Config(num_hidden_layers=3, num_key_value_heads=2, **BASE), tf.Qwen2ForCausalLM),
-        "qwen2-sliding": (
-            tf.Qwen2Config(num_hidden_layers=4, num_key_value_heads=2, use_sliding_window=True,
-                           sliding_window=WINDOW, max_window_layers=2, **BASE),
-            tf.Qwen2ForCausalLM,
-        ),
-        "olmo2": (tf.Olmo2Config(num_hidden_layers=2, num_key_value_heads=4, **BASE), tf.Olmo2ForCausalLM),
-        "mistral-sliding": (
-            tf.MistralConfig(num_hidden_layers=2, num_key_value_heads=2, sliding_window=WINDOW, **BASE),
-            tf.MistralForCausalLM,
-        ),
-        "mistral-explicit-head-dim": (
-            tf.MistralConfig(num_hidden_layers=2, num_key_value_heads=2, sliding_window=None, head_dim=24, **BASE),
-            tf.MistralForCausalLM,
-        ),
-        "gemma2": (
-            tf.Gemma2Config(num_hidden_layers=4, num_key_value_heads=2, head_dim=32, sliding_window=WINDOW, **BASE),
-            tf.Gemma2ForCausalLM,
-        ),
-        "gemma3": (
-            tf.Gemma3TextConfig(num_hidden_layers=7, num_key_value_heads=2, head_dim=32, sliding_window=WINDOW, **BASE),
-            tf.Gemma3ForCausalLM,
-        ),
-        "gemma4": (tf.Gemma4TextConfig(**GEMMA4), tf.Gemma4ForCausalLM),
-        "gemma4-k_eq_v": (tf.Gemma4TextConfig(attention_k_eq_v=True, **GEMMA4), tf.Gemma4ForCausalLM),
-        "lfm2-hybrid": (
-            tf.Lfm2Config(num_hidden_layers=4, num_key_value_heads=2, full_attn_idxs=[1, 3], **BASE),
-            tf.Lfm2ForCausalLM,
-        ),
-        "granitemoehybrid": (
-            tf.GraniteMoeHybridConfig(
-                num_hidden_layers=4, num_key_value_heads=2, layer_types=["mamba", "attention", "mamba", "attention"],
-                mamba_n_heads=4, mamba_d_head=32, mamba_d_state=8, mamba_n_groups=1, mamba_expand=2,
-                num_local_experts=0, shared_intermediate_size=128, **BASE,
-            ),
-            tf.GraniteMoeHybridForCausalLM,
-        ),
-    }
+    ),
+}
+
+
+def _case(name):
+    """(config, model class) for a case; skipped when this transformers has no such class."""
+    config_name, model_name, fields = _SPECS[name]
+    config_class = getattr(tf, config_name, None)
+    model_class = getattr(tf, model_name, None)
+    if config_class is None or model_class is None:
+        pytest.skip(f"transformers {tf.__version__} has no {config_name} / {model_name}")
+    return config_class(**fields), model_class
 
 
 def _held(layer) -> tuple[int, int]:
@@ -104,9 +127,9 @@ def _held(layer) -> tuple[int, int]:
     return total, tokens
 
 
-@pytest.mark.parametrize("name", sorted(_cases()))
+@pytest.mark.parametrize("name", sorted(_SPECS))
 def test_the_spec_matches_what_generate_caches(name):
-    config, model_class = _cases()[name]
+    config, model_class = _case(name)
     spec, reason = kv_cache_spec(config)
     assert spec is not None, f"{name} is sizable from its config, but: {reason}"
 

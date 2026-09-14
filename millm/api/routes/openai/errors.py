@@ -83,6 +83,11 @@ ERROR_STATUS_MAP: dict[str, tuple[int, str]] = {
     # in openai_exception_handler below is (500, "server_error"), but that
     # handler is not the one registered in main.py.
     "ENGINE_UNSUPPORTED": (400, "invalid_request_error"),
+    # A request naming a Q2 transformers checkpoint auto-loads it, and the load
+    # is refused (bitsandbytes has no 2-bit mode). The same reasoning: the caller
+    # must name another model, so not a server fault to retry. Review round 2,
+    # 2026-09-14.
+    "UNSUPPORTED_QUANTIZATION": (400, "invalid_request_error"),
     # Resource errors
     "INSUFFICIENT_MEMORY": (503, "server_error"),
     "RATE_LIMIT_EXCEEDED": (429, "rate_limit_error"),

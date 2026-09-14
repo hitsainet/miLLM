@@ -27,6 +27,10 @@ MUTATION CONTROLS (review round 1, 2026-09-14; mutate.py, restored and sha256-ve
             pre-check's test_a_q2_transformers_checkpoint_is_refused_before_the_unload)
 The pre-unload check's half (R1-M3c, R1-M3d, R1-M5, R1-M5c) is recorded in
 tests/unit/api/test_load_refusal_keeps_resident_model.py.
+Review round 2 moved the reading into plan_transformers_load and re-ran R1-M3a there
+(it drops the checkpoint's quantization): 6 red — both tests named above, the
+pre-check's three, and the bitsandbytes-checkpoint test in
+tests/unit/ml/test_split_preflight.py, where round 2's factor and estimate controls live.
 """
 
 import json

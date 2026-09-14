@@ -17,7 +17,12 @@ ERROR_MESSAGES: dict[str, str] = {
     "MODEL_BUSY": "The model is currently busy with another operation. Please wait and try again.",
 
     # Resource errors
-    "INSUFFICIENT_MEMORY": "Not enough GPU memory available to load this model. Try a smaller model or quantization level (Q4/Q8), or free up memory by unloading other models.",
+    # INSUFFICIENT_MEMORY deliberately has NO generic entry, for the reason
+    # VALIDATION_ERROR has none: every raise site crafts its message with the
+    # figures and the fix — which card, how much each card of a split can hold,
+    # "choose a different card or Auto", "serve it as GGUF" — and this sentence
+    # replaced all of it in the Admin UI's toast with advice ("unloading other
+    # models") that cannot apply to a one-model server. Review round 2, 2026-09-14.
     "INSUFFICIENT_DISK": "Not enough disk space available to download this model. Free up some disk space and try again.",
 
     # Download errors

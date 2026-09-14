@@ -28,6 +28,15 @@ Review round 1, 2026-09-14 (mutate.py; restored and sha256-verified):
   (`<` -> `<=` SURVIVED and is an EQUIVALENT mutation: at the exact count the
   pre-check calls _gguf_tensor_split, which raises only when the lengths differ.
   R1-M5c is the variant that can change the answer.)
+Review round 2, 2026-09-14 (mutate.py; restored and sha256-verified):
+  R2-M10 a GGUF_TENSOR_SPLIT longer than every card that could take part is not refused
+         -> test_a_list_longer_than_every_card_that_could_take_part_is_refused_before_the_unload
+  R2-M12 _gguf_tensor_split raises ModelLoadError (MODEL_LOAD_FAILED) again
+         -> test_a_short_list_is_its_own_error_not_a_failed_load
+  R1-M3c re-run (the pre-check plans without the checkpoint) -> the same three tests (+ wiring)
+  R1-M5c re-run (`<` -> `!=`) -> test_a_list_longer_than_the_cards_it_found_is_left_to_the_loader
+  The split preflight's pre-check half (R2-M5, R2-M11) is recorded in
+  tests/unit/ml/test_split_preflight.py.
 """
 
 from concurrent.futures import Future
@@ -327,6 +336,32 @@ class TestAGgufTensorSplitIsCheckedBeforeTheUnload:
 
         assert response.status_code == 202, response.text
         svc.unload_model.assert_awaited_once_with(9)
+
+    def test_a_short_list_is_its_own_error_not_a_failed_load(self, tmp_path):
+        """Review round 2: as MODEL_LOAD_FAILED, the Admin UI's toast replaced
+        this with 'Please check that you have sufficient VRAM available'."""
+        _, response = self._post_with_split(tmp_path, "1")
+
+        error = response.json()["error"]
+        assert error["code"] == "INVALID_GGUF_TENSOR_SPLIT"
+        assert error["message"].startswith("GGUF_TENSOR_SPLIT has 1 value(s) but this load splits across 2 GPU(s)")
+
+    def test_a_list_longer_than_every_card_that_could_take_part_is_refused_before_the_unload(self, tmp_path):
+        """Review round 2: "1,1,1" on two GPUs matches no load, whatever the KV
+        cache adds. Both projected cards have room (limits 8,292 and 17,692 MB)."""
+        svc, response = self._post_with_split(tmp_path, "1,1,1")
+
+        assert response.status_code == 500, response.text
+        error = response.json()["error"]
+        assert error["code"] == "INVALID_GGUF_TENSOR_SPLIT"
+        assert error["message"] == (
+            "GGUF_TENSOR_SPLIT has 3 value(s), but at most 2 GPU(s) can take part in a split "
+            "here. Give one proportion per card used, in index order, or leave it empty to "
+            "split by free memory."
+        )
+        assert error["details"]["max_cards"] == 2
+        assert not svc.unload_model.called
+        assert svc._executor.calls == []
 
     def test_a_list_longer_than_the_cards_it_found_is_left_to_the_loader(self, tmp_path):
         """The pre-check's cards are a LOWER bound: sized without the KV cache,

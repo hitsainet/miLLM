@@ -92,12 +92,15 @@ except Exception as _offload_probe_error:  # noqa: BLE001 - optional symbol
 
 from millm.core.config import parse_gguf_tensor_split
 from millm.core.errors import (
+    GgufTensorSplitError,
     InsufficientMemoryError,
     ModelLoadError,
     UnsupportedQuantizationError,
 )
 from millm.ml.gguf_catalog import quant_label_from_path
+from millm.ml.memory_utils import MEMORY_OVERHEAD_FACTOR
 from millm.ml.gpu_placement import (
+    BNB_MAX_MEMORY_FACTOR,
     MODE_CPU,
     OFF_GPU_LABELS,
     REASON_NO_GPU,
@@ -347,6 +350,29 @@ def _is_offload_refusal(exc: BaseException) -> bool:
     return isinstance(exc, ValueError) and "dispatched on the CPU or the disk" in str(exc)
 
 
+def checkpoint_quantization_config(cache_path: Optional[str]) -> Optional[dict[str, Any]]:
+    """A checkpoint's own `quantization_config`, when its config.json holds one as an object.
+
+    None for a missing or unreadable config.json, a null value, or anything that
+    is not an object — the same reading as ModelLoadContext.load's config.json
+    fallback.
+    """
+    if not cache_path:
+        return None
+    import json
+    import os
+
+    try:
+        with open(os.path.join(cache_path, "config.json")) as handle:
+            raw = json.load(handle)
+    except (OSError, ValueError):
+        return None
+    if not isinstance(raw, dict):
+        return None
+    value = raw.get("quantization_config")
+    return value if isinstance(value, dict) else None
+
+
 def checkpoint_is_pre_quantized(cache_path: Optional[str]) -> bool:
     """Whether a checkpoint ships its own quantization (GPTQ, AWQ, BitNet, ...).
 
@@ -363,17 +389,257 @@ def checkpoint_is_pre_quantized(cache_path: Optional[str]) -> bool:
     A path with no readable config.json is not pre-quantized: the load would
     apply the row's quantization to it.
     """
-    if not cache_path:
-        return False
-    import json
-    import os
+    return checkpoint_quantization_config(cache_path) is not None
 
+
+def pre_quantized_max_memory_factor(quantization_config: Optional[dict[str, Any]]) -> float:
+    """What transformers multiplies `max_memory` by to load a checkpoint with this quantization.
+
+    Asked of the quantizer class transformers itself picks for the config
+    (`AUTO_QUANTIZER_MAPPING`, keyed the way `AutoQuantizationConfig.from_dict`
+    keys it). In transformers 5.15.1 the bitsandbytes, BitNet, torchao and quanto
+    quantizers take 0.9 (`adjust_max_memory`); AWQ, GPTQ, FP8 and the rest leave
+    it whole.
+
+    Review round 1 planned EVERY pre-quantized checkpoint at 1.0, on the belief
+    that only miLLM's own Q4/Q8 load meets bitsandbytes. A checkpoint uploaded
+    already quantized by bitsandbytes (the `-bnb-4bit` repos) or BitNet gets the
+    same quantizer class from its own config, so the plan promised 10% more than
+    transformers would place, and a split it accepted could map to disk. Review
+    round 2, 2026-09-14.
+
+    The class is asked WITHOUT being constructed: constructing one checks for its
+    kernel package (GPTQ needs optimum), which says nothing about memory. A
+    method transformers does not know gets no quantizer and loads unquantized:
+    1.0. A class that cannot answer is planned at bitsandbytes' 0.9 — refusing
+    early is the cheaper mistake.
+    """
+    if not quantization_config:
+        return 1.0
     try:
-        with open(os.path.join(cache_path, "config.json")) as handle:
-            raw = json.load(handle)
-    except (OSError, ValueError):
-        return False
-    return isinstance(raw, dict) and isinstance(raw.get("quantization_config"), dict)
+        from transformers.quantizers.auto import AUTO_QUANTIZER_MAPPING
+    except ImportError:
+        return 1.0
+    method = quantization_config.get("quant_method")
+    if quantization_config.get("load_in_8bit") or quantization_config.get("load_in_4bit"):
+        method = (
+            "bitsandbytes_4bit" if quantization_config.get("load_in_4bit") else "bitsandbytes_8bit"
+        )
+    quantizer_class = AUTO_QUANTIZER_MAPPING.get(method) if isinstance(method, str) else None
+    if quantizer_class is None:
+        return 1.0
+    probe = 1_000_000
+    try:
+        adjusted = quantizer_class.adjust_max_memory(object.__new__(quantizer_class), {0: probe})
+        return float(adjusted[0]) / probe
+    except Exception as e:  # noqa: BLE001 - a quantizer that needs its own state
+        logger.warning(
+            "pre_quantized_max_memory_factor_unknown", quant_method=method, error=str(e)[:200]
+        )
+        return BNB_MAX_MEMORY_FACTOR
+
+
+def checkpoint_weights_mb(cache_path: Optional[str]) -> int:
+    """The weights a checkpoint stores, in MB; 0 when none are found.
+
+    From the safetensors (or .bin) index's `total_size` when there is one, else
+    the size of the `model*.safetensors` files, else `pytorch_model*.bin`. Named
+    patterns, not every weight file: some repos ship a second copy of the same
+    tensors (`consolidated.safetensors`).
+    """
+    if not cache_path:
+        return 0
+    import json
+
+    root = Path(cache_path)
+    for index_name in ("model.safetensors.index.json", "pytorch_model.bin.index.json"):
+        try:
+            with open(root / index_name) as handle:
+                total = json.load(handle).get("metadata", {}).get("total_size")
+        except (OSError, ValueError, AttributeError):
+            continue
+        if isinstance(total, (int, float)) and not isinstance(total, bool) and total > 0:
+            return int(total / (1024 * 1024))
+    for pattern in ("model*.safetensors", "pytorch_model*.bin"):
+        try:
+            sizes = [path.stat().st_size for path in root.glob(pattern) if path.is_file()]
+        except OSError:
+            sizes = []
+        if sizes:
+            return int(sum(sizes) / (1024 * 1024))
+    return 0
+
+
+def transformers_estimate_mb(
+    row_estimate_mb: int,
+    cache_path: Optional[str],
+    pre_quantization: Optional[dict[str, Any]],
+) -> int:
+    """The memory a transformers load of this checkpoint is planned for, in MB.
+
+    A row's estimate is its parameter count at its quantization LABEL
+    (memory_utils.estimate_memory_mb). A pre-quantized checkpoint loads at its
+    own precision whatever the label says — and the troubleshooting guide tells
+    operators to download GPTQ/AWQ checkpoints as FP16 — so it is sized from the
+    weights it stores, with the same runtime overhead. Label-sized, a 4-bit GPTQ
+    checkpoint of a 32B model on an FP16 row was planned at ~74 GB against its
+    ~19 GB of weights, and refused on a node where one card holds it. Review
+    round 2, 2026-09-14.
+
+    Anything else, or a checkpoint whose weights cannot be measured, keeps the
+    row's estimate.
+    """
+    if pre_quantization is None:
+        return int(row_estimate_mb or 0)
+    weights_mb = checkpoint_weights_mb(cache_path)
+    if weights_mb <= 0:
+        return int(row_estimate_mb or 0)
+    return int(weights_mb * MEMORY_OVERHEAD_FACTOR)
+
+
+def _bitsandbytes_config(quantization: str) -> Any:
+    """The BitsAndBytesConfig miLLM loads a Q4 or Q8 checkpoint with; None otherwise.
+
+    ONE definition for the load and the split preflight, which must compute the
+    map with the quantizer the load will use.
+
+    Q8 carries no `llm_int8_enable_fp32_cpu_offload`. That flag is what lets a
+    bitsandbytes device map put modules on the CPU or disk; without it
+    transformers refuses such a map before reading a weight
+    (quantizer_bnb_8bit.validate_environment). A transformers model runs on GPUs
+    only (operator decision 3, 2026-09-13), and the flag was set on every Q8 load
+    while nothing needed it.
+    """
+    if quantization == "Q4":
+        return BitsAndBytesConfig(
+            load_in_4bit=True,
+            bnb_4bit_compute_dtype=torch.bfloat16,
+            bnb_4bit_use_double_quant=True,
+            bnb_4bit_quant_type="nf4",
+        )
+    if quantization == "Q8":
+        return BitsAndBytesConfig(load_in_8bit=True)
+    return None
+
+
+def _meta_model(config: Any, trust_remote_code: bool) -> Any:
+    """The skeleton the load would build, on the meta device: no weights, no GPU.
+
+    The same class choice as ModelLoadContext.load: the class the config names,
+    then AutoModelForCausalLM, then AutoModel.
+    """
+    from transformers import AutoModel
+
+    candidates: list[Any] = []
+    try:
+        candidates.append(_get_auto_model_class(config))
+    except Exception:  # noqa: BLE001 - fall through to the generic classes
+        pass
+    for generic in (AutoModelForCausalLM, AutoModel):
+        if generic not in candidates:
+            candidates.append(generic)
+    last_error: Optional[BaseException] = None
+    for model_class in candidates:
+        try:
+            with torch.device("meta"):
+                return model_class.from_config(
+                    config, dtype=torch.bfloat16, trust_remote_code=trust_remote_code
+                )
+        except Exception as e:  # noqa: BLE001
+            last_error = e
+    raise last_error if last_error is not None else ModelLoadError("no model class built")
+
+
+def preflight_split(
+    model_name: str,
+    cache_path: Optional[str],
+    quantization: str,
+    placement: Placement,
+    trust_remote_code: bool = False,
+) -> Optional[dict[str, int]]:
+    """Refuse a split transformers would map partly off its GPUs, before any weight is read.
+
+    The plan is sized in MB from an estimate. transformers then maps MODULES (its
+    copy of accelerate's infer_auto_device_map): it holds back room for the
+    largest layer on the lowest-index card and strands the tail of every card
+    but the last. The estimate's 20% overhead usually absorbs that, and nothing
+    guarantees it. Swept against that inference over meta-device models (review
+    round 2, 2026-09-14: 6 shapes x FP16/Q8/Q4 x 19 depths x 7 card sets, 2,394
+    plans per request type): an estimate 5% over the weights put a module on
+    disk under 4 accepted Auto splits and 9 "all" splits, and the production
+    estimate under one Q4 "all" split near capacity. plan_shard's "all" fix
+    removed that one and 7 of the 9; the rest is what a plan in MB cannot see
+    (with the exact weights as the estimate, 25 Auto and 16 "all"). Both surfaced only inside
+    the load — an FP16 map to disk after every weight had loaded, a bitsandbytes
+    one after the resident model was unloaded.
+
+    So the map itself is computed here, the way from_pretrained computes it: the
+    checkpoint's config on the meta device, the quantizer the load would use, and
+    exactly the `device_map` and `max_memory` the placement passes, through
+    transformers' own `_get_device_map`. Well under a second, no CUDA context.
+
+    Returns:
+        MB per device of the map ("cuda:N"), or None when it cannot be computed
+        here: not a split, no readable config, a class that will not build on
+        meta, a quantizer whose package is missing. None never refuses — the
+        load computes the map again and refuses a map off the GPU itself.
+
+    Raises:
+        InsufficientMemoryError: part of the model would map to the CPU or disk.
+    """
+    if not placement.is_shard or not placement.gpu_indices or not cache_path or AutoConfig is None:
+        return None
+    try:
+        from transformers.integrations.accelerate import _get_device_map, compute_module_sizes
+        from transformers.quantizers.auto import get_hf_quantizer
+
+        config = AutoConfig.from_pretrained(cache_path, trust_remote_code=trust_remote_code)
+        quantization_config = (
+            None if checkpoint_is_pre_quantized(cache_path) else _bitsandbytes_config(quantization)
+        )
+        device_map = placement.transformers_device_map()
+        hf_quantizer, config, device_map = get_hf_quantizer(
+            config, quantization_config, device_map, True, {}
+        )
+        model = _meta_model(config, trust_remote_code)
+        if hf_quantizer is not None:
+            hf_quantizer.preprocess_model(
+                model=model,
+                dtype=torch.bfloat16,
+                device_map=device_map,
+                checkpoint_files=None,
+                use_kernels=False,
+            )
+        max_memory = placement.transformers_max_memory()
+        mapped = _get_device_map(
+            model, device_map, dict(max_memory) if max_memory else None, hf_quantizer
+        )
+        sizes, _ = compute_module_sizes(model, hf_quantizer, only_modules=False)
+    except ValueError as e:
+        if _is_offload_refusal(e):
+            raise _off_gpu_refusal(
+                model_name, placement, ["cpu or disk"], [], engine_message=str(e),
+                before_loading=True,
+            ) from e
+        logger.warning("split_preflight_skipped", model_name=model_name, error=str(e)[:300])
+        return None
+    except Exception as e:  # noqa: BLE001 - unverifiable here; the load checks again
+        logger.warning("split_preflight_skipped", model_name=model_name, error=str(e)[:300])
+        return None
+
+    mapped_mb: dict[str, int] = {}
+    for name, device in mapped.items():
+        label = f"cuda:{device}" if isinstance(device, int) and not isinstance(device, bool) else str(device)
+        mapped_mb[label] = mapped_mb.get(label, 0) + int(sizes.get(name, 0) / (1024 * 1024))
+    allowed = set(placement.device_labels)
+    off_gpu = sorted(label for label in mapped_mb if label not in allowed)
+    if off_gpu:
+        raise _off_gpu_refusal(
+            model_name, placement, off_gpu, sorted(mapped_mb),
+            mapped_mb_by_device=mapped_mb, before_loading=True,
+        )
+    logger.info("split_preflight_mapped", model_name=model_name, mapped_mb_by_device=mapped_mb)
+    return mapped_mb
 
 
 def _off_gpu_refusal(
@@ -382,15 +648,25 @@ def _off_gpu_refusal(
     off_gpu: list[str],
     device_labels: list[str],
     engine_message: Optional[str] = None,
+    mapped_mb_by_device: Optional[dict[str, int]] = None,
+    before_loading: bool = False,
 ) -> InsufficientMemoryError:
-    """The refusal for a transformers load that would run partly off the GPU."""
+    """The refusal for a transformers load that would run partly off the GPU.
+
+    `before_loading` says the split preflight found it from the checkpoint's
+    config, with no weight read and (at the pre-check) the served model still
+    loaded; `mapped_mb_by_device` is the map it computed.
+    """
     details: dict[str, Any] = {
         "required_mb": placement.required_mb,
         "available_mb": placement.budget_mb,
         "off_gpu": off_gpu,
         "devices": device_labels,
         "placement": placement.to_dict(),
+        "before_loading": before_loading,
     }
+    if mapped_mb_by_device is not None:
+        details["mapped_mb_by_device"] = dict(sorted(mapped_mb_by_device.items()))
     if engine_message:
         details["engine_message"] = engine_message[:500]
     return InsufficientMemoryError(
@@ -650,23 +926,12 @@ class ModelLoadContext:
         if is_pre_quantized:
             # Model is already quantized (GPTQ/AWQ) — skip bitsandbytes
             logger.info("skipping_bnb_for_pre_quantized", quant_method=quant_method)
-        elif quantization == "Q4":
-            quantization_config = BitsAndBytesConfig(
-                load_in_4bit=True,
-                bnb_4bit_compute_dtype=torch.bfloat16,
-                bnb_4bit_use_double_quant=True,
-                bnb_4bit_quant_type="nf4",
-            )
-            quant_method = "bitsandbytes"
-        elif quantization == "Q8":
-            # No `llm_int8_enable_fp32_cpu_offload`. That flag is what lets a
-            # bitsandbytes device map put modules on the CPU or disk; without
-            # it transformers refuses such a map before reading a weight
-            # (quantizer_bnb_8bit.validate_environment). A transformers model
-            # runs on GPUs only (operator decision 3, 2026-09-13), and the flag
-            # was set on every Q8 load while nothing needed it.
-            quantization_config = BitsAndBytesConfig(load_in_8bit=True)
-            quant_method = "bitsandbytes"
+        else:
+            # Shared with preflight_split, which must compute the device map
+            # with the quantizer this load uses.
+            quantization_config = _bitsandbytes_config(quantization)
+            if quantization_config is not None:
+                quant_method = "bitsandbytes"
 
         # Load tokenizer first (small, quick)
         logger.debug("loading_tokenizer", model_id=self.model_id)
@@ -1444,10 +1709,13 @@ def plan_gguf_placement(
     Auto: the most-free card that holds the weights plus the KV cache at the
     context the loader is aiming for. When no card does, a layer split over the
     cards with the most free memory, as few as hold it, each counted with its own
-    runtime overhead. When even every card together does not, the split uses
-    every card and the context ladder shrinks the window (CPU spill stays
-    allowed for GGUF — operator decision 3); when no card has any room at all,
-    the CPU.
+    runtime overhead. When even every card together does not, the split still
+    names every card with room, every layer is offloaded (GGUF_GPU_LAYERS=-1)
+    and the context ladder shrinks the window; a model whose weights alone
+    exceed the cards does not load. There is NO partial CPU offload: operator
+    decision 3 allows one for GGUF and nothing implements it (this docstring said
+    the model "spills" to the CPU — review round 2, 2026-09-14). When no card has
+    any room at all, the whole model runs on the CPU.
 
     An explicit card, or "all", is sized at the SMALLEST usable context
     instead: the context ladder shrinks the window to what the cards hold, so
@@ -1537,7 +1805,7 @@ def _gguf_tensor_split(
         return []
     if configured is not None:
         if len(configured) != len(used):
-            raise ModelLoadError(
+            raise GgufTensorSplitError(
                 f"GGUF_TENSOR_SPLIT has {len(configured)} value(s) but this load "
                 f"splits across {len(used)} GPU(s) ({', '.join(placement.device_labels)}). "
                 "Give one proportion per card used, in index order, or leave it empty "
@@ -2029,8 +2297,12 @@ def decide_transformers_placement(
     requested: GpuRequest,
     gpus: list[GpuInfo],
     is_pre_quantized: bool = False,
+    pre_quantized_max_memory_factor: float = 1.0,
 ) -> Placement:
     """Where a transformers load goes, or why it cannot go anywhere.
+
+    Call sites that plan a real load go through `plan_transformers_load`, which
+    reads every checkpoint-dependent argument here from the checkpoint itself.
 
     ONE decision for both checks that run it: the pre-unload check in
     ModelService (against a projection of the cards with the resident model's
@@ -2052,8 +2324,11 @@ def decide_transformers_placement(
     load, after the resident model had been unloaded.
 
     `is_pre_quantized` must be `checkpoint_is_pre_quantized(<the checkpoint>)` at
-    BOTH call sites — the reading ModelLoadContext.load acts on. A GPTQ or AWQ
-    checkpoint gets no bitsandbytes, so it is not planned with bitsandbytes' 0.9.
+    BOTH call sites — the reading ModelLoadContext.load acts on — and
+    `pre_quantized_max_memory_factor` what that checkpoint's own quantizer
+    applies: 1.0 for GPTQ or AWQ, but 0.9 for a checkpoint quantized by
+    bitsandbytes or BitNet, which meets the same quantizer class miLLM's own Q4/Q8
+    load does (review round 2, 2026-09-14). `plan_transformers_load` reads both.
 
     Q2 on a checkpoint that is not already quantized is REFUSED (review round 1,
     2026-09-14). bitsandbytes has no 2-bit mode, so ModelLoadContext.load gives
@@ -2085,13 +2360,19 @@ def decide_transformers_placement(
             },
         )
     # Only Q4 and Q8 get a BitsAndBytesConfig in ModelLoadContext.load, and only
-    # for a checkpoint that is not already quantized.
-    bitsandbytes = not is_pre_quantized and quantization.upper() in ("Q4", "Q8")
+    # for a checkpoint that is not already quantized. A pre-quantized checkpoint
+    # gets the quantizer its own config names, with that quantizer's factor.
+    if is_pre_quantized:
+        max_memory_factor = pre_quantized_max_memory_factor
+    elif quantization.upper() in ("Q4", "Q8"):
+        max_memory_factor = BNB_MAX_MEMORY_FACTOR
+    else:
+        max_memory_factor = 1.0
     placement = choose_gpu(
         estimated_memory_mb,
         requested=requested,
         gpus=gpus,
-        shard=transformers_shard_rule(estimated_memory_mb, bitsandbytes=bitsandbytes),
+        shard=transformers_shard_rule(estimated_memory_mb, max_memory_factor=max_memory_factor),
     )
     if placement.is_shard and placement.required_mb > 0 and placement.budget_mb < estimated_memory_mb:
         raise shard_refusal(
@@ -2108,6 +2389,41 @@ def decide_transformers_placement(
             "No GPU has memory to spare for a model of unknown size.",
         )
     return placement
+
+
+def plan_transformers_load(
+    estimated_memory_mb: int,
+    quantization: str,
+    requested: GpuRequest,
+    gpus: list[GpuInfo],
+    cache_path: Optional[str],
+    is_pre_quantized: bool = False,
+) -> Placement:
+    """`decide_transformers_placement` for a real checkpoint, with what it needs read from it.
+
+    THE entry point for both checks that plan a transformers load — the
+    pre-unload check in ModelService and the authoritative one in
+    ModelLoader.load — so they read the checkpoint the same way. Three readings
+    go into the decision: whether it ships its own quantization
+    (`checkpoint_is_pre_quantized`), the `max_memory` factor that quantization's
+    transformers quantizer applies (`pre_quantized_max_memory_factor`), and the
+    memory it is sized at (`transformers_estimate_mb`). Round 1 made the two
+    call sites share the first; the other two would otherwise have needed that
+    care twice more.
+
+    `cache_path` must be the resolved path the load opens
+    (ModelService.resolve_cache_path). `is_pre_quantized` lets a caller that
+    already knows say so; the checkpoint is read either way.
+    """
+    pre_quantization = checkpoint_quantization_config(cache_path)
+    return decide_transformers_placement(
+        transformers_estimate_mb(estimated_memory_mb, cache_path, pre_quantization),
+        quantization,
+        requested=requested,
+        gpus=gpus,
+        is_pre_quantized=is_pre_quantized or pre_quantization is not None,
+        pre_quantized_max_memory_factor=pre_quantized_max_memory_factor(pre_quantization),
+    )
 
 
 class ModelLoader:
@@ -2232,14 +2548,15 @@ class ModelLoader:
         # is authoritative: free memory can change between the two. Reading
         # GPU 0 alone refused a model needing more than 12 GB while the 3090
         # had 24 GB free.
-        placement = decide_transformers_placement(
+        placement = plan_transformers_load(
             estimated_memory_mb,
             quantization,
             requested=gpu,
             gpus=list_gpus(),
-            # The checkpoint's own answer, the one ModelLoadContext.load acts on.
-            # The pre-unload check reads the same file.
-            is_pre_quantized=is_pre_quantized or checkpoint_is_pre_quantized(cache_path),
+            # The checkpoint's own answers, the ones ModelLoadContext.load acts
+            # on. The pre-unload check reads the same file the same way.
+            cache_path=cache_path,
+            is_pre_quantized=is_pre_quantized,
         )
         logger.info(
             "model_placement",
@@ -2250,6 +2567,10 @@ class ModelLoader:
             required_mb=placement.required_mb,
             capacity_mb=placement.capacity_mb,
         )
+        # A split's real device map, before a weight is read: an FP16 map to
+        # disk was otherwise found only after every weight had loaded. Review
+        # round 2, 2026-09-14.
+        preflight_split(model_name, cache_path, quantization, placement, trust_remote_code)
 
         # Load with context manager for cleanup on failure
         with ModelLoadContext(model_id, model_name) as ctx:

@@ -201,3 +201,49 @@ class TestErrorStatusMap:
         assert status_code == 503
         assert error_type == "server_error"
 
+
+class TestLoadRefusalsAsTheCallerSeesThem:
+    """Review round 2, 2026-09-14: what a refused load looks like on each surface.
+
+    MUTATION CONTROLS (mutate.py; restored and sha256-verified):
+      R2-M11 a generic INSUFFICIENT_MEMORY message is back in ERROR_MESSAGES
+             -> test_an_insufficient_memory_refusal_reaches_the_admin_ui_as_written
+      R2-M13 the UNSUPPORTED_QUANTIZATION row is removed from ERROR_STATUS_MAP
+             -> test_an_unsupported_quantization_on_an_openai_route_is_the_callers_to_change
+    """
+
+    @pytest.mark.asyncio
+    async def test_an_unsupported_quantization_on_an_openai_route_is_the_callers_to_change(self):
+        """A request naming a Q2 transformers checkpoint auto-loads it and is
+        refused. Without a row it went out as a 400 typed server_error, which an
+        OpenAI client retries instead of naming another model."""
+        import json
+
+        from millm.core.errors import UnsupportedQuantizationError
+
+        response = await millm_error_handler(
+            _make_request("/v1/chat/completions", "POST"),
+            UnsupportedQuantizationError("Q2 cannot be loaded as a transformers model"),
+        )
+        body = json.loads(response.body)
+        assert response.status_code == 400
+        assert body["error"]["type"] == "invalid_request_error"
+        assert body["error"]["code"] == "unsupported_quantization"
+
+    @pytest.mark.asyncio
+    async def test_an_insufficient_memory_refusal_reaches_the_admin_ui_as_written(self):
+        """The Admin UI toasts `error.message`. A generic INSUFFICIENT_MEMORY
+        sentence replaced every refusal's figures and fix with advice to unload
+        'other models' on a server that holds one."""
+        import json
+
+        from millm.core.errors import InsufficientMemoryError
+
+        message = "Not enough GPU memory. Need ~40000 MB; split across GPUs this can hold 31952 MB."
+        response = await millm_error_handler(
+            _make_request("/api/models/3/load", "POST"), InsufficientMemoryError(message)
+        )
+        body = json.loads(response.body)
+        assert response.status_code == 507
+        assert body["error"]["message"] == message
+

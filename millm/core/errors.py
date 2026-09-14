@@ -107,6 +107,21 @@ class ModelLoadError(MiLLMError):
     status_code = 500
 
 
+class GgufTensorSplitError(ModelLoadError):
+    """GGUF_TENSOR_SPLIT does not name one proportion per card a GGUF split uses.
+
+    A configuration error, not a failed load, and only the setting fixes it.
+    Raised as MODEL_LOAD_FAILED, the Admin UI replaced its message with that
+    code's generic text — "Please check that you have sufficient VRAM available"
+    — and the refusal round 1 moved before the unload read as a memory problem.
+    A subclass of ModelLoadError, so every handler of that still catches it.
+    Review round 2, 2026-09-14.
+    """
+
+    code = "INVALID_GGUF_TENSOR_SPLIT"
+    status_code = 500
+
+
 class UnsupportedQuantizationError(MiLLMError):
     """Raised when a load asks for a quantization its engine cannot apply.
 
@@ -504,6 +519,9 @@ ERROR_CLASSES: dict[str, type[MiLLMError]] = {
     "MODEL_NOT_FOUND": ModelNotFoundError,
     "MODEL_ALREADY_EXISTS": ModelAlreadyExistsError,
     "MODEL_LOAD_FAILED": ModelLoadError,
+    "INVALID_GGUF_TENSOR_SPLIT": GgufTensorSplitError,
+    "UNSUPPORTED_QUANTIZATION": UnsupportedQuantizationError,
+    "GPU_NOT_FOUND": GpuNotFoundError,
     "MODEL_NOT_LOADED": ModelNotLoadedError,
     "MODEL_ALREADY_LOADED": ModelAlreadyLoadedError,
     "MODEL_BUSY": ModelBusyError,

@@ -1,0 +1,415 @@
+"""A split is judged by the device map transformers will compute, before any weight is read.
+
+Review round 2, 2026-09-14. Round 1 made a split fill its cards in index order,
+so accelerate's held-back largest layer lands on memory that exists. That holds
+only while the estimate carries enough slack over the weights: transformers maps
+MODULES, holding back room for the largest layer on the lowest-index card and
+stranding the tail of every card but the last. Run over meta-device models of
+six shapes, an estimate within 5% of the weights put lm_head on disk under
+accepted plans, and the production estimate did for a Q4 "all" split near
+capacity. An FP16 map to disk was found only after every weight had loaded; a
+bitsandbytes one after the resident model had been unloaded.
+
+Everything here runs transformers' REAL map inference over a meta-device model
+built from a real config.json (no weights, no GPU). Expected figures were worked
+out by hand from the shapes, as follows.
+
+Llama, 70B widths, 16 layers, untied, bf16 (the FIXTURE below):
+  embed_tokens = lm_head = 128,256 x 8,192 x 2 B = 2,004 MiB, the largest layer
+  one decoder layer = 855,752,704 params x 2 B = 1,632.2 MiB (int 1,632)
+  row estimate 31,626 MB (5% over the weights) on cards of 11,500 / 23,500 free:
+    no card holds it; the split fills index 0 first -> max_memory 10,476 / 22,476
+    card 0 holds back 2,004 -> embed + 3 layers = 6,900; the 4th would be 8,533
+    card 1 takes 13 layers = 21,216; 1,260 left, lm_head needs 2,004 -> disk
+  with 1,000 MB more on card 1 (24,500 free): 2,260 left -> lm_head fits (23,220)
+
+MUTATION CONTROLS (review round 2, 2026-09-14; mutate.py: one replacement, the 11
+placement/load/inference test files run, file restored and its sha256 verified):
+  R2-M1  plan_shard's "all" index-order rule disabled
+         -> both TestAllNearCapacityMapsOntoTheGpus tests
+            (+ test_gpu_placement::test_a_model_the_lower_cards_cannot_hold_is_filled_like_auto)
+  R2-M2  decide_transformers_placement ignores the pre-quantized factor
+         -> test_a_bitsandbytes_checkpoint_gets_the_09_its_quantizer_applies
+  R2-M2b the factor lookup drops bitsandbytes' _4bit/_8bit suffix
+         -> the two bitsandbytes factor cases and the same checkpoint test
+  R2-M2c plan_transformers_load does not pass the factor
+         -> the same checkpoint test (+ the wiring test)
+  R2-M3  a pre-quantized checkpoint keeps the row's estimate
+         -> test_sized_from_its_weights_not_its_rows_label
+  R2-M3b the weights are counted from every weight file
+         -> test_sharded_files_without_an_index_are_summed
+  R2-M4  ModelLoader.load skips the preflight
+         -> test_model_loader_load_runs_the_preflight (+ the wiring test)
+  R2-M5  the pre-check skips the preflight
+         -> test_a_split_that_would_map_to_disk_is_refused_and_the_served_model_kept (+ wiring)
+  R2-M6  the preflight never finds a device off the GPU
+         -> the disk-map test, the loader test and the pre-check test
+  R2-M6b the preflight skips bitsandbytes' own refusal
+         -> test_refused_from_the_quantizers_own_refusal
+  R2-M11 the generic INSUFFICIENT_MEMORY message is back in error_messages
+         -> the pre-check test (+ test_exception_handlers)
+Round 1 controls re-run on lines this round moved:
+  R1-M1  transformers splits fill most-free-first again -> 17 red, 7 of them in this file
+  M16    the highest-index card capped at its share     -> 20 red, 9 of them in this file
+
+The sweep behind this file (a scratch script, not a test: 6 shapes x FP16/Q8/Q4 x 19
+depths x 7 card sets, real map inference). Accepted plans that mapped a module off
+their GPUs, of 2,394 per cell, before -> after this round's plan_shard fix:
+  production estimate   Auto 0 -> 0     "all" 1 -> 0
+  weights + 5%          Auto 4 -> 4     "all" 9 -> 2
+  exact weights         Auto 25 -> 25   "all" 43 -> 16
+What remains is invisible to a plan in MB; the preflight computes the map itself.
+"""
+
+from __future__ import annotations
+
+import json
+from datetime import datetime
+from unittest.mock import AsyncMock, MagicMock, patch
+
+import pytest
+import torch
+
+pytest.importorskip("transformers")
+pytest.importorskip("bitsandbytes")
+from fastapi.testclient import TestClient  # noqa: E402
+from transformers import BitsAndBytesConfig, LlamaConfig  # noqa: E402
+from transformers.integrations.accelerate import _get_device_map, compute_module_sizes  # noqa: E402
+from transformers.quantizers.auto import AutoHfQuantizer  # noqa: E402
+
+from millm.core.errors import InsufficientMemoryError  # noqa: E402
+from millm.db.models.model import ModelStatus, QuantizationType  # noqa: E402
+from millm.main import create_app  # noqa: E402
+from millm.ml.gpu_placement import MODE_SHARD, MODE_SINGLE, GpuInfo  # noqa: E402
+from millm.ml.model_loader import (  # noqa: E402
+    LoadedModel,
+    ModelLoader,
+    checkpoint_weights_mb,
+    decide_transformers_placement,
+    plan_transformers_load,
+    pre_quantized_max_memory_factor,
+    preflight_split,
+)
+from millm.services.model_service import ModelService  # noqa: E402
+from tests.support.factories import make_model  # noqa: E402
+from tests.support.fake_gpus import RTX_3090, TI_3080, fake_gpus  # noqa: E402
+
+MIB = 1024 * 1024
+WIDE = dict(
+    vocab_size=128_256, hidden_size=8_192, intermediate_size=28_672,
+    num_attention_heads=64, num_key_value_heads=8, tie_word_embeddings=False,
+)
+ESTIMATE_MB = 31_626
+SHORT = ((TI_3080, 11_500, 12_288), (RTX_3090, 23_500, 24_576))
+ROOMY = ((TI_3080, 11_500, 12_288), (RTX_3090, 24_500, 24_576))
+
+
+def _checkpoint(directory, layers=16, quantization_config=None):
+    directory.mkdir(parents=True, exist_ok=True)
+    LlamaConfig(num_hidden_layers=layers, **WIDE).save_pretrained(directory)
+    if quantization_config is not None:
+        path = directory / "config.json"
+        config = json.loads(path.read_text())
+        config["quantization_config"] = quantization_config
+        path.write_text(json.dumps(config))
+    return str(directory)
+
+
+def _plan(cards, estimate=ESTIMATE_MB, quantization="FP16", requested=None, cache_path=None):
+    with fake_gpus(*cards):
+        from millm.ml.gpu_placement import list_gpus
+
+        return plan_transformers_load(
+            estimate, quantization, requested=requested, gpus=list_gpus(), cache_path=cache_path
+        )
+
+
+class TestThePreflightReadsTheRealMap:
+    def test_a_split_whose_lm_head_would_go_to_disk_is_refused_with_the_map(self, tmp_path):
+        path = _checkpoint(tmp_path)
+        placement = _plan(SHORT, cache_path=path)
+        assert placement.mode == MODE_SHARD
+        assert placement.transformers_max_memory() == {0: "10476MiB", 1: "22476MiB"}
+        assert placement.budget_mb >= ESTIMATE_MB, "the estimate alone accepts this split"
+
+        with pytest.raises(InsufficientMemoryError) as raised:
+            preflight_split("wide-16", path, "FP16", placement)
+
+        details = raised.value.details
+        assert details["off_gpu"] == ["disk"]
+        assert details["mapped_mb_by_device"] == {"cuda:0": 6_900, "cuda:1": 21_216, "disk": 2_004}
+        assert details["before_loading"] is True
+
+    def test_the_same_split_with_room_for_lm_head_maps_onto_the_gpus(self, tmp_path):
+        path = _checkpoint(tmp_path)
+        placement = _plan(ROOMY, cache_path=path)
+        assert placement.transformers_max_memory() == {0: "10476MiB", 1: "23476MiB"}
+
+        assert preflight_split("wide-16", path, "FP16", placement) == {
+            "cuda:0": 6_900,
+            "cuda:1": 23_220,
+        }
+
+    def test_nothing_to_compute_is_not_a_refusal(self, tmp_path):
+        """No config, or one no class builds, leaves the check to the load."""
+        placement = _plan(SHORT)
+        assert preflight_split("m", str(tmp_path / "missing"), "FP16", placement) is None
+        (tmp_path / "config.json").write_text(json.dumps({"model_type": "not-a-real-model"}))
+        assert preflight_split("m", str(tmp_path), "FP16", placement) is None
+
+    def test_a_single_card_is_not_mapped(self, tmp_path):
+        path = _checkpoint(tmp_path)
+        placement = _plan(SHORT, estimate=8_000, cache_path=path)
+        assert placement.mode == MODE_SINGLE
+        assert preflight_split("wide-16", path, "FP16", placement) is None
+
+    def test_the_preflight_creates_no_cuda_context(self, tmp_path):
+        path = _checkpoint(tmp_path)
+        with fake_gpus(*ROOMY) as fake:
+            from millm.ml.gpu_placement import list_gpus
+
+            placement = plan_transformers_load(
+                ESTIMATE_MB, "FP16", requested=None, gpus=list_gpus(), cache_path=path
+            )
+            fake.forbid(0, 1)
+            assert preflight_split("wide-16", path, "FP16", placement) is not None
+        assert fake.calls == []
+
+
+class TestTheLoaderRefusesBeforeReadingAWeight:
+    def test_model_loader_load_runs_the_preflight(self, tmp_path):
+        path = _checkpoint(tmp_path)
+        context = MagicMock()
+        loader = ModelLoader()
+        loader.state = MagicMock()
+        with fake_gpus(*SHORT), patch("millm.ml.model_loader.ModelLoadContext", return_value=context):
+            with pytest.raises(InsufficientMemoryError) as raised:
+                loader.load(
+                    model_id=1, model_name="wide-16", cache_path=path,
+                    quantization="FP16", estimated_memory_mb=ESTIMATE_MB,
+                )
+        assert raised.value.details["mapped_mb_by_device"]["disk"] == 2_004
+        assert not context.__enter__.called, "no weight may be read for a split the map refuses"
+
+    def test_a_split_that_maps_onto_the_gpus_is_loaded_with_that_placement(self, tmp_path):
+        path = _checkpoint(tmp_path)
+        context = MagicMock()
+        loader = ModelLoader()
+        loader.state = MagicMock()
+        with fake_gpus(*ROOMY), patch("millm.ml.model_loader.ModelLoadContext", return_value=context):
+            loader.load(
+                model_id=1, model_name="wide-16", cache_path=path,
+                quantization="FP16", estimated_memory_mb=ESTIMATE_MB,
+            )
+        assert context.__enter__.return_value.load.call_count == 1
+        placement = context.__enter__.return_value.load.call_args.kwargs["placement"]
+        assert placement.transformers_max_memory() == {0: "10476MiB", 1: "23476MiB"}
+
+
+class TestThePreCheckRefusesBeforeTheUnload:
+    """The resident model holds 16,000 MB of card 1; projected, card 1 has 23,500."""
+
+    CARDS = ((TI_3080, 11_500, 12_288), (RTX_3090, 7_500, 24_576))
+
+    @staticmethod
+    def _service(model):
+        repo = MagicMock()
+        repo.get_by_id = AsyncMock(return_value=model)
+        repo.update_status = AsyncMock(return_value=model)
+        loader = MagicMock()
+        loader.is_loaded = True
+        loader.loaded_model_id = 9
+        loader.state.current = LoadedModel(
+            9, "resident", MagicMock(), MagicMock(), datetime.utcnow(),
+            memory_used_mb=16_000, device="cuda:1", gpu_indices=[1],
+            memory_by_device_mb={"cuda:1": 16_000},
+        )
+        svc = ModelService(repository=repo, downloader=MagicMock(), loader=loader, emitter=None)
+        svc.unload_model = AsyncMock()
+        svc._executor = MagicMock()
+        return svc
+
+    def _post(self, tmp_path):
+        from millm.api.dependencies import get_model_service
+
+        model = make_model(
+            id=3, status=ModelStatus.READY, quantization=QuantizationType.FP16,
+            estimated_memory_mb=ESTIMATE_MB, cache_path=_checkpoint(tmp_path),
+        )
+        svc = self._service(model)
+        app = create_app()
+        app.dependency_overrides[get_model_service] = lambda: svc
+        with fake_gpus(*self.CARDS):
+            response = TestClient(app).post("/api/models/3/load", json={})
+        return svc, response
+
+    def test_a_split_that_would_map_to_disk_is_refused_and_the_served_model_kept(self, tmp_path):
+        svc, response = self._post(tmp_path)
+
+        assert response.status_code == 507, response.text
+        error = response.json()["error"]
+        assert error["code"] == "INSUFFICIENT_MEMORY"
+        assert error["details"]["mapped_mb_by_device"] == {
+            "cuda:0": 6_900, "cuda:1": 21_216, "disk": 2_004,
+        }
+        assert "would run from disk" in error["message"], "the toast shows the refusal, not a generic sentence"
+        assert not svc.unload_model.called
+        assert not svc._executor.method_calls and not svc._executor.called
+
+
+class TestAllNearCapacityMapsOntoTheGpus:
+    """Q4, 70B widths, 48 layers, on cards of 11,000 / 20,000 free, estimated as
+    miLLM estimates it (params x 0.5 B x 1.2 = 24,719 MB).
+
+    Limits 9,976 / 18,976; bitsandbytes budgets int(x 0.9) = 8,978 / 17,078. The
+    card below the highest index holds 8,978 < 24,719, so filling in index order
+    already reaches card 1: card 0 is planned whole (8,978 -> max_memory
+    ceil(8,978 / 0.9) = 9,976) and card 1 keeps its whole limit. Proportional,
+    card 0 was capped at ceil(ceil(24,719 x 8,978 / 26,056) / 0.9) = 9,465 and
+    lm_head (bf16, 2,004 MiB) went to disk."""
+
+    def test_the_plan_gives_each_card_its_whole_limit(self):
+        cards = [
+            GpuInfo(index=0, name=TI_3080, uuid=None, total_mb=12_288, free_mb=11_000),
+            GpuInfo(index=1, name=RTX_3090, uuid=None, total_mb=24_576, free_mb=20_000),
+        ]
+        placement = decide_transformers_placement(24_719, "Q4", requested="all", gpus=cards)
+        assert placement.planned_mb_by_index == {0: 8_978, 1: 15_741}
+        assert placement.transformers_max_memory() == {0: "9976MiB", 1: "18976MiB"}
+
+    def test_the_real_map_uses_both_cards_and_nothing_else(self):
+        cards = [
+            GpuInfo(index=0, name=TI_3080, uuid=None, total_mb=12_288, free_mb=11_000),
+            GpuInfo(index=1, name=RTX_3090, uuid=None, total_mb=24_576, free_mb=20_000),
+        ]
+        placement = decide_transformers_placement(24_719, "Q4", requested="all", gpus=cards)
+        with torch.device("meta"):
+            from transformers import AutoModelForCausalLM
+
+            model = AutoModelForCausalLM.from_config(
+                LlamaConfig(num_hidden_layers=48, **WIDE), dtype=torch.bfloat16
+            )
+        quantizer = AutoHfQuantizer.from_config(
+            BitsAndBytesConfig(
+                load_in_4bit=True, bnb_4bit_compute_dtype=torch.bfloat16,
+                bnb_4bit_use_double_quant=True, bnb_4bit_quant_type="nf4",
+            ),
+            pre_quantized=False,
+        )
+        quantizer.preprocess_model(
+            model=model, dtype=torch.bfloat16, device_map="sequential",
+            checkpoint_files=None, use_kernels=False,
+        )
+        with patch("torch.cuda.device_count", return_value=2):
+            device_map = _get_device_map(
+                model, placement.transformers_device_map(),
+                dict(placement.transformers_max_memory()), quantizer,
+            )
+        sizes, _ = compute_module_sizes(model, quantizer)
+        assert sizes["lm_head"] / MIB == pytest.approx(2_004, abs=1), "the fixture's largest layer"
+        assert set(device_map.values()) == {0, 1}
+
+
+class TestAPreQuantizedCheckpointIsPlannedWithItsOwnQuantizer:
+    @pytest.mark.parametrize(
+        "config, factor",
+        [
+            ({"quant_method": "bitsandbytes", "load_in_4bit": True}, 0.9),
+            ({"quant_method": "bitsandbytes", "load_in_8bit": True}, 0.9),
+            ({"quant_method": "bitnet"}, 0.9),
+            ({"quant_method": "awq", "bits": 4}, 1.0),
+            # GPTQ's quantizer cannot even be constructed here (optimum is not
+            # installed): the factor is read from the class, not an instance.
+            ({"quant_method": "gptq", "bits": 4}, 1.0),
+            ({"quant_method": "made-up"}, 1.0),
+            (None, 1.0),
+        ],
+    )
+    def test_the_factor_is_what_transformers_quantizer_applies(self, config, factor):
+        assert pre_quantized_max_memory_factor(config) == pytest.approx(factor)
+
+    def test_a_bitsandbytes_checkpoint_gets_the_09_its_quantizer_applies(self, tmp_path):
+        """29,000 MB on NODE budgets: 9,976 + 21,976 = 31,952 whole; with 0.9,
+        8,978 + 19,778 = 28,756. The row says FP16; the checkpoint says bitsandbytes."""
+        path = _checkpoint(tmp_path, quantization_config={
+            "quant_method": "bitsandbytes", "load_in_4bit": True, "bnb_4bit_quant_type": "nf4",
+        })
+        with pytest.raises(InsufficientMemoryError) as raised:
+            _plan(((TI_3080, 11_000, 12_288), (RTX_3090, 23_000, 24_576)), 29_000, cache_path=path)
+        assert raised.value.details["available_mb"] == 28_756
+
+    def test_an_awq_checkpoint_keeps_its_whole_budget(self, tmp_path):
+        path = _checkpoint(tmp_path, quantization_config={"quant_method": "awq", "bits": 4})
+        placement = _plan(((TI_3080, 11_000, 12_288), (RTX_3090, 23_000, 24_576)), 29_000, cache_path=path)
+        assert placement.budget_mb == 31_952
+
+
+class TestAPreQuantizedCheckpointIsSizedByWhatItStores:
+    def test_sized_from_its_weights_not_its_rows_label(self, tmp_path):
+        """A 4-bit GPTQ checkpoint on an FP16 row: 18 GiB stored -> 18,432 x 1.2
+        = 22,118 MB, which the 3090's 23,000 holds. At the row's label (74,387 MB
+        for 32.5B params) it was refused outright."""
+        path = _checkpoint(tmp_path, quantization_config={"quant_method": "gptq", "bits": 4})
+        with open(tmp_path / "model.safetensors", "wb") as handle:
+            handle.truncate(18 * 1024 ** 3)  # sparse
+        placement = _plan(((TI_3080, 11_000, 12_288), (RTX_3090, 23_000, 24_576)), 74_387, cache_path=path)
+        assert (placement.mode, placement.index, placement.required_mb) == (MODE_SINGLE, 1, 22_118)
+
+    def test_a_checkpoint_that_is_not_pre_quantized_keeps_the_rows_estimate(self, tmp_path):
+        path = _checkpoint(tmp_path)
+        with open(tmp_path / "model.safetensors", "wb") as handle:
+            handle.truncate(18 * 1024 ** 3)
+        with pytest.raises(InsufficientMemoryError) as raised:
+            _plan(((TI_3080, 11_000, 12_288), (RTX_3090, 23_000, 24_576)), 74_387, cache_path=path)
+        assert raised.value.details["required_mb"] == 74_387
+
+    def test_the_index_total_is_used_and_a_second_copy_is_not_counted(self, tmp_path):
+        (tmp_path / "model.safetensors.index.json").write_text(
+            json.dumps({"metadata": {"total_size": 5 * 1024 ** 3}, "weight_map": {}})
+        )
+        with open(tmp_path / "consolidated.safetensors", "wb") as handle:
+            handle.truncate(5 * 1024 ** 3)
+        assert checkpoint_weights_mb(str(tmp_path)) == 5_120
+
+    def test_sharded_files_without_an_index_are_summed(self, tmp_path):
+        for shard in ("model-00001-of-00002.safetensors", "model-00002-of-00002.safetensors"):
+            with open(tmp_path / shard, "wb") as handle:
+                handle.truncate(3 * 1024 ** 3)
+        with open(tmp_path / "consolidated.safetensors", "wb") as handle:
+            handle.truncate(6 * 1024 ** 3)
+        assert checkpoint_weights_mb(str(tmp_path)) == 6_144
+        assert checkpoint_weights_mb(str(tmp_path / "missing")) == 0
+
+
+class TestABitsandbytesMapIsRefusedByTheQuantizerItself:
+    """transformers' bitsandbytes quantizer refuses a map with a CPU or disk entry
+    inside `_get_device_map` (validate_environment), before any weight. The
+    preflight must turn that into the placement refusal, not a skipped check.
+
+    Q4, 70B widths, 48 layers: a layer is 855.7M params x 0.5 B = 408 MiB,
+    embed_tokens and lm_head stay bf16 at 2,004 MiB each. Row estimate 24,719 MB.
+      cards 11,000 / 18,700 free: budgets 8,978 + 15,908 = 24,886, the plan accepts;
+        card 0: 8,978 - 2,004 held back - 2,004 embed -> 12 layers
+        card 1: 36 layers = 14,677 of 15,908 -> 1,231 left, lm_head 2,004 -> disk
+      cards 11,000 / 20,000 free: card 1 has 17,078 -> lm_head fits"""
+
+    def test_refused_from_the_quantizers_own_refusal(self, tmp_path):
+        path = _checkpoint(tmp_path, layers=48)
+        placement = _plan(((TI_3080, 11_000, 12_288), (RTX_3090, 18_700, 24_576)), 24_719, "Q4", cache_path=path)
+        assert placement.budget_mb == 24_886
+
+        with pytest.raises(InsufficientMemoryError) as raised:
+            preflight_split("wide-48-q4", path, "Q4", placement)
+
+        details = raised.value.details
+        assert details["off_gpu"] == ["cpu or disk"]
+        assert details["before_loading"] is True
+        assert "dispatched on the CPU or the disk" in details["engine_message"]
+
+    def test_the_same_model_with_room_maps_onto_both_cards(self, tmp_path):
+        path = _checkpoint(tmp_path, layers=48)
+        placement = _plan(((TI_3080, 11_000, 12_288), (RTX_3090, 20_000, 24_576)), 24_719, "Q4", cache_path=path)
+
+        mapped = preflight_split("wide-48-q4", path, "Q4", placement)
+
+        assert set(mapped) == {"cuda:0", "cuda:1"}

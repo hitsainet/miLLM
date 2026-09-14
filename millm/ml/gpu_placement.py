@@ -26,7 +26,8 @@ Policy (operator decisions, 2026-09-13):
   * A model no single card can hold is SPLIT across GPUs: the cards with the
     most free memory first, and only as many as it needs. A transformers model
     never spills to the CPU or disk — a split that cannot hold it is refused.
-    Only GGUF may run (partly) on the CPU.
+    Only GGUF may run on the CPU, and today only wholly, when no card has room:
+    a partial CPU offload is allowed for GGUF and not implemented.
 """
 
 from __future__ import annotations
@@ -315,12 +316,22 @@ class ShardRule:
     fill_in_index_order: bool = False
 
 
-def transformers_shard_rule(need_mb: int, bitsandbytes: bool = False) -> ShardRule:
-    """A split for `from_pretrained`: each card's free memory less SHARD_RESERVE_MB."""
+def transformers_shard_rule(
+    need_mb: int, bitsandbytes: bool = False, max_memory_factor: Optional[float] = None
+) -> ShardRule:
+    """A split for `from_pretrained`: each card's free memory less SHARD_RESERVE_MB.
+
+    `max_memory_factor` is what transformers' quantizer multiplies `max_memory`
+    by for this load (`adjust_max_memory`). `bitsandbytes` is the shorthand for
+    miLLM's own Q4/Q8 load; a checkpoint that ships its own quantization passes
+    the factor its quantizer asks for (model_loader.pre_quantized_max_memory_factor).
+    """
+    if max_memory_factor is None:
+        max_memory_factor = BNB_MAX_MEMORY_FACTOR if bitsandbytes else 1.0
     return ShardRule(
         need_mb=need_mb,
         limit_mb=lambda gpu: max(gpu.free_mb - SHARD_RESERVE_MB, 0),
-        max_memory_factor=BNB_MAX_MEMORY_FACTOR if bitsandbytes else 1.0,
+        max_memory_factor=max_memory_factor,
         fill_in_index_order=True,
     )
 
@@ -458,9 +469,12 @@ class Placement:
         memory that exists. Pinned on real map inference by
         tests/unit/ml/test_shard_plan_against_accelerate.py.
 
-        A share below the limit is left only where a split must divide a model
-        the first card could hold ("all"). The highest-index card always keeps
-        its whole limit, so that spill has somewhere to go.
+        A share below the limit is left only where "all" must divide a model the
+        cards below the highest index could hold between them (see plan_shard).
+        The highest-index card always keeps its whole limit, so that spill has
+        somewhere to go. Whether it is enough depends on the model's layer
+        sizes, which a plan in MB cannot see: model_loader.preflight_split runs
+        the real map inference before anything is loaded.
 
         A share is divided by `max_memory_factor` because transformers
         multiplies it back (bitsandbytes' 0.9), so the planned share is what the
@@ -519,14 +533,20 @@ def plan_shard(
     accelerate (`ShardRule.fill_in_index_order`; the highest-index card chosen
     gets the remainder).
 
-    `every_card` (an explicit "all") uses every card with any budget and gives
-    each a share in proportion to its budget, so a small model is actually
-    divided rather than landing whole on the first card.
+    `every_card` (an explicit "all") uses every card with any budget. A model
+    the cards below the highest index could hold between them gets a share on
+    each card in proportion to its budget, so it is actually divided rather than
+    landing whole on the first card. A larger one, for an engine that fills in
+    index order, is planned exactly as Auto plans it — each card but the last
+    to its whole budget — because that fill already reaches every card, and a
+    proportional cap below a card's budget only gave accelerate's held-back
+    layer nowhere to go (review round 2, 2026-09-14).
 
     An unmeasured model (need 0) gets every card's whole budget. When every card
     together is short, the split still names every usable card with its whole
-    budget and the caller decides: a transformers load is refused, and GGUF may
-    spill to the CPU. A card with no budget at all is never part of a split.
+    budget and the caller decides: a transformers load is refused, and a GGUF
+    load is attempted on those cards with every layer offloaded. A card with no
+    budget at all is never part of a split.
     """
     # Most free first; on a tie the lower index, matching the single-card choice.
     ordered = sorted(inventory, key=lambda gpu: (-gpu.free_mb, gpu.index))
@@ -536,7 +556,25 @@ def plan_shard(
     need = max(int(rule.need_mb), 0)
 
     shares: dict[int, int] = {}
-    if need > 0 and every_card:
+    by_index = sorted(gpu.index for gpu in usable)
+    if (
+        need > 0
+        and every_card
+        and rule.fill_in_index_order
+        and need > sum(budgets[index] for index in by_index[:-1])
+    ):
+        # "all" for a model the cards below the highest index cannot hold between
+        # them: filling in index order already reaches every card, so no card is
+        # capped below its budget. Proportional caps here gave accelerate's
+        # held-back layer and stranded tails nowhere to go near capacity —
+        # measured on transformers 5.15.1's map inference (a 70B-shaped Q4 model,
+        # cards of 11 and 20 GB free): lm_head mapped to disk under a plan with
+        # 1.3 GB to spare. Review round 2, 2026-09-14.
+        remaining = need
+        for index in by_index:
+            shares[index] = min(budgets[index], remaining)
+            remaining -= shares[index]
+    elif need > 0 and every_card:
         total = sum(budgets[gpu.index] for gpu in usable)
         shares = {
             gpu.index: min(budgets[gpu.index], math.ceil(need * budgets[gpu.index] / total))

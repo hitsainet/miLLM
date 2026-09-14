@@ -52,6 +52,13 @@ Review round 1, 2026-09-14 (mutate.py; restored and sha256-verified):
          test_three_cards_takes_only_the_most_free_two and 4 GGUF tensor-split tests
   M16 re-run (the highest-index card capped at its share too)      -> 10 red, incl.
          test_all_divides_a_model_one_card_could_hold on real map inference
+Review round 2, 2026-09-14 (mutate.py; restored and sha256-verified):
+  R2-M1  plan_shard's "all" index-order rule disabled
+         -> test_a_model_the_lower_cards_cannot_hold_is_filled_like_auto
+            (and both real-map tests in test_split_preflight.py)
+  R2-M1b its boundary `>` -> `>=`
+         -> test_a_model_the_lower_cards_could_hold_exactly_stays_proportional
+  R1-M1 re-run -> 17 red, 4 here; M16 re-run -> 20 red, 6 here
 """
 
 from types import SimpleNamespace
@@ -275,6 +282,24 @@ class TestAllCardsOnRequest:
         assert placement.planned_mb_by_index == {1: 1_974, 0: 897}
         assert placement.transformers_device_map() == "sequential"
         assert placement.transformers_max_memory() == {0: "897MiB", 1: "21976MiB"}
+
+    def test_a_model_the_lower_cards_cannot_hold_is_filled_like_auto(self):
+        """Review round 2. 30,000 MB is more than card 0's 9,976 budget, so filling
+        in index order reaches card 1 anyway: card 0 whole, card 1 the remainder.
+        The proportional plan capped card 0 at ceil(30,000 x 9,976 / 31,952) =
+        9,367, and the layer accelerate holds back on card 0 had nowhere to go."""
+        placement = choose_gpu(30_000, requested="all", gpus=_cards(*self.NODE))
+        assert (placement.reason, placement.gpu_indices) == (REASON_REQUESTED_ALL, [0, 1])
+        assert placement.planned_mb_by_index == {0: 9_976, 1: 20_024}
+        assert placement.transformers_max_memory() == {0: "9976MiB", 1: "21976MiB"}
+
+    def test_a_model_the_lower_cards_could_hold_exactly_stays_proportional(self):
+        """At exactly card 0's budget (9,976) card 0 could hold it alone, so it
+        is divided: ceil(9,976 x 9,976 / 31,952) = 3,115 and
+        ceil(9,976 x 21,976 / 31,952) = 6,862. Filled in index order it would
+        leave card 1 with nothing — not a split across every card."""
+        placement = choose_gpu(9_976, requested="all", gpus=_cards(*self.NODE))
+        assert placement.planned_mb_by_index == {0: 3_115, 1: 6_862}
 
     def test_refused_when_every_card_together_lacks_room(self):
         with pytest.raises(InsufficientMemoryError) as raised:

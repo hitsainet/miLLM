@@ -32,6 +32,7 @@ from millm.core.errors import (
     ModelNotFoundError,
     ModelNotLoadedError,
 )
+from millm.core.errors import GgufTensorSplitError
 from millm.db.models.model import Model, ModelSource, ModelStatus, QuantizationType
 from millm.db.repositories.model_repository import ModelRepository
 from millm.ml.memory_utils import estimate_memory_mb
@@ -44,11 +45,13 @@ from millm.ml.gpu_placement import (
 from millm.ml.gguf_catalog import coarse_quantization
 from millm.ml.model_downloader import ModelDownloader, _safe_variant
 from millm.ml.model_loader import (
+    GGUF_MIN_CONTEXT,
     ModelLoader,
+    _gguf_shard_rule,
     _gguf_tensor_split,
-    checkpoint_is_pre_quantized,
-    decide_transformers_placement,
     plan_gguf_placement,
+    plan_transformers_load,
+    preflight_split,
 )
 from millm.sockets.progress import ProgressEmitter
 
@@ -954,12 +957,14 @@ class ModelService:
         Raises:
             GpuNotFoundError: the named card is not visible.
             InsufficientMemoryError: the named card cannot hold the model, a
-                requested split across every card ('all') cannot, or no split
-                across the cards can hold a transformers model.
+                requested split across every card ('all') cannot, no split
+                across the cards can hold a transformers model, or the split's
+                real device map (preflight_split) puts part of it on the CPU or
+                disk.
             UnsupportedQuantizationError: Q2 on a transformers checkpoint that
                 is not pre-quantized.
-            ModelLoadError: GGUF_TENSOR_SPLIT names fewer cards than the GGUF
-                split must use.
+            GgufTensorSplitError: GGUF_TENSOR_SPLIT names fewer cards than the
+                GGUF split must use, or more than could take part in any split.
         """
         from millm.core.config import parse_gguf_tensor_split, settings
 
@@ -972,7 +977,11 @@ class ModelService:
 
         gguf_file = (model.gguf_files or [None])[0]
         if gguf_file:
-            # GGUF on Auto never refuses: CPU spill is allowed. A named card is
+            # GGUF on Auto is refused here only for a GGUF_TENSOR_SPLIT no split
+            # could match. With no card that has room it runs on the CPU; a
+            # model every card together is short of is still attempted with
+            # every layer on the GPUs (there is no partial CPU offload — the
+            # claim that it "spills" was wrong; review round 2). A named card is
             # sized on weights and overhead at the smallest context with no KV
             # term — a lower bound on what the loader asks for, so this cannot
             # refuse a card the loader would accept. Reading the KV size would
@@ -984,22 +993,49 @@ class ModelService:
                     weights_mb = int(path.stat().st_size / (1024 * 1024))
             placement = plan_gguf_placement(weights_mb, None, 0, requested=wanted, gpus=gpus)
             configured = parse_gguf_tensor_split(settings.GGUF_TENSOR_SPLIT)
-            if configured is not None and len(configured) < len(placement.gpu_indices):
+            if configured is not None and placement.is_shard:
                 # The loader sizes its split with the KV cache on top of these
-                # weights, so it spans at least these cards — and it refuses a
-                # GGUF_TENSOR_SPLIT shorter than the cards it spans. Found there,
-                # the served model was already unloaded. A LONGER list is not
-                # refused here: the loader may take more cards than this lower
-                # bound. Review round 1, 2026-09-14.
-                _gguf_tensor_split(placement, configured)
+                # weights, so it spans at least these cards and at most every
+                # card with any room — and it refuses a GGUF_TENSOR_SPLIT whose
+                # length differs from the cards it spans. Found there, the served
+                # model was already unloaded. Review round 1 refused a list
+                # SHORTER than the lower bound; a list LONGER than every card
+                # that could take part ("1,1,1" on two GPUs) matches no load
+                # either. Between the bounds the loader decides. Review round 2.
+                card_limit_mb = _gguf_shard_rule(weights_mb, None, GGUF_MIN_CONTEXT).limit_mb
+                most_cards = sum(1 for gpu in gpus if card_limit_mb(gpu) > 0)
+                if len(configured) > most_cards:
+                    raise GgufTensorSplitError(
+                        f"GGUF_TENSOR_SPLIT has {len(configured)} value(s), but at most "
+                        f"{most_cards} GPU(s) can take part in a split here. Give one "
+                        "proportion per card used, in index order, or leave it empty to "
+                        "split by free memory.",
+                        details={
+                            "tensor_split": configured,
+                            "max_cards": most_cards,
+                            "placement": placement.to_dict(),
+                        },
+                    )
+                if len(configured) < len(placement.gpu_indices):
+                    _gguf_tensor_split(placement, configured)
             return
 
-        decide_transformers_placement(
+        placement = plan_transformers_load(
             model.estimated_memory_mb or 0,
             model.quantization.value,
             requested=wanted,
             gpus=gpus,
-            is_pre_quantized=checkpoint_is_pre_quantized(cache_path),
+            cache_path=cache_path,
+        )
+        # The map itself, computed from the checkpoint's config with no weight
+        # read: a split the estimate accepts can still map to disk, and the load
+        # would find that only after the unload. Review round 2, 2026-09-14.
+        preflight_split(
+            model.name,
+            cache_path,
+            model.quantization.value,
+            placement,
+            trust_remote_code=bool(getattr(model, "trust_remote_code", False)),
         )
 
     def _load_worker(

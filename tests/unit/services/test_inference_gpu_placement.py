@@ -19,6 +19,18 @@ Phase 2, 2026-09-14 (mutate.py; restored and sha256-verified):
 Review round 1, 2026-09-14 (mutate.py; restored and sha256-verified):
   R1-M2 on_model_loaded starts continuous batching on a split model again (guard -> False)
       -> test_a_split_model_does_not_start_the_manager
+Review round 2, 2026-09-14 (mutate.py; restored and sha256-verified):
+  R2-M7  the draft always goes on the input device
+      -> test_goes_on_the_split_card_with_the_most_free_memory, test_a_tie_goes_to_the_lower_index
+  R2-M8  on_model_unloading does not suspend the draft
+      -> test_no_draft_is_loaded_between_the_unload_and_the_next_load,
+         test_a_draft_that_finishes_loading_after_the_unload_began_is_not_kept
+  R2-M9  a draft that finishes loading after the unload began is kept
+      -> test_a_draft_that_finishes_loading_after_the_unload_began_is_not_kept
+  R2-M9b on_model_loaded does not lift the suspension
+      -> both unload tests and test_a_model_change_releases_the_draft_so_the_next_lands_beside_the_new_model
+  M9 re-run (_release_draft_model keeps the draft)
+      -> test_a_model_change_releases_the_draft_..., test_no_draft_is_loaded_between_the_unload_...
 """
 
 from types import SimpleNamespace
@@ -178,3 +190,74 @@ class TestContinuousBatchingOnASplitModel:
         current = svc._model_state.current
         assert svc._cbm_backend.start.call_count == 1
         assert svc._cbm_backend.start.call_args.args == (current.model, current.tokenizer)
+
+
+class TestTheDraftOnASplitModel:
+    """Review round 2, 2026-09-14. A split fills its cards in index order, each
+    but the last to its whole budget, and the lowest-index card holds the input
+    embeddings: the input device is the FULLEST card of the split. The draft goes
+    on whichever of the model's cards has the most free memory."""
+
+    # The input embeddings on card 0, the fuller card here.
+    SPLIT = {"model.embed_tokens": 0, "model.layers.0": 0, "model.layers.1": 1, "lm_head": 1}
+
+    def test_goes_on_the_split_card_with_the_most_free_memory(self):
+        svc = _service(SimpleNamespace(hf_device_map=self.SPLIT), [0, 1])
+        assert svc._get_input_device() == "cuda:0", "the fixture must put the input device on the fuller card"
+        with fake_gpus((TI_3080, 900, 12_288), (RTX_3090, 5_000, 24_576)), \
+                patch("transformers.AutoModelForCausalLM") as factory:
+            svc._get_draft_model()
+        assert factory.from_pretrained.call_count == 1
+        assert factory.from_pretrained.call_args.kwargs["device_map"] == {"": "cuda:1"}
+
+    def test_a_tie_goes_to_the_lower_index(self):
+        split = {"model.embed_tokens": 1, "model.layers.0": 1, "lm_head": 0}
+        svc = _service(SimpleNamespace(hf_device_map=split), [0, 1])
+        with fake_gpus((TI_3080, 5_000, 12_288), (RTX_3090, 5_000, 24_576)), \
+                patch("transformers.AutoModelForCausalLM") as factory:
+            svc._get_draft_model()
+        assert factory.from_pretrained.call_args.kwargs["device_map"] == {"": "cuda:0"}
+
+    def test_cards_that_cannot_be_read_leave_it_on_the_input_device(self):
+        svc = _service(SimpleNamespace(hf_device_map=self.SPLIT), [0, 1])
+        with fake_gpus((TI_3080, 900, 12_288), (RTX_3090, 5_000, 24_576)) as fake, \
+                patch("transformers.AutoModelForCausalLM") as factory:
+            fake.forbid(0, 1)
+            svc._get_draft_model()
+        assert factory.from_pretrained.call_args.kwargs["device_map"] == {"": "cuda:0"}
+
+
+class TestTheDraftDuringAnUnload:
+    """Review round 2, 2026-09-14. on_model_unloading released the draft and then
+    ModelService drained pending requests for up to five seconds; each asked for
+    the draft and loaded it again, beside the model being removed, holding its
+    memory through the next load's placement."""
+
+    def test_no_draft_is_loaded_between_the_unload_and_the_next_load(self):
+        svc = _service(SimpleNamespace(hf_device_map={"model.embed_tokens": 1}), [1])
+        with patch("transformers.AutoModelForCausalLM") as factory:
+            assert svc._get_draft_model() is not None
+            svc.on_model_unloading()
+            assert svc._get_draft_model() is None, "a request drained during the unload loaded the draft again"
+            assert factory.from_pretrained.call_count == 1
+            svc.on_model_loaded()
+            assert svc._get_draft_model() is not None
+        assert factory.from_pretrained.call_count == 2
+        assert svc._speculative_model_id == "draft/model", "suspension must not disable speculation"
+
+    def test_a_draft_that_finishes_loading_after_the_unload_began_is_not_kept(self):
+        svc = _service(SimpleNamespace(hf_device_map={"model.embed_tokens": 1}), [1])
+        late = MagicMock(name="late draft")
+
+        def _load_while_the_model_unloads(*args, **kwargs):
+            svc.on_model_unloading()
+            return late
+
+        with patch("transformers.AutoModelForCausalLM") as factory:
+            factory.from_pretrained.side_effect = _load_while_the_model_unloads
+            assert svc._get_draft_model() is None
+            assert svc._draft_model is None
+            factory.from_pretrained.side_effect = None
+            svc.on_model_loaded()
+            assert svc._get_draft_model() is factory.from_pretrained.return_value
+        assert not late.eval.called

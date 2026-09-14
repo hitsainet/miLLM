@@ -7,8 +7,10 @@ split_mode=NONE and main_gpu=<that card>. One that does not is split over the
 most-free cards, only as many as hold it — each counted with its own runtime
 overhead — and `tensor_split` names those cards and no other, because a layer
 split with no list uses every visible card. When even every card together is
-short, the split uses every card and the context ladder shrinks the window
-(CPU spill stays allowed for GGUF — operator decision 3).
+short, the split uses every card and the context ladder shrinks the window.
+Nothing is left on the CPU: operator decision 3 allows a partial CPU offload for
+GGUF, and none is implemented (review round 2 corrected a claim here that it
+"spills").
 
 The context-window prediction is budgeted against the card(s) actually used,
 with the runtime overhead counted once per card.

@@ -344,6 +344,9 @@ class InferenceService:
         # practically impossible. If max_concurrent is ever raised above 1, add
         # a threading.Lock here before reading/writing _draft_model.
         self._draft_model: Any = None
+        # Set while a model is unloading, cleared when the next one is loaded:
+        # no draft is loaded, or kept, in between (see on_model_unloading).
+        self._draft_suspended = False
         self._cbm_force_serial_monitoring = cbm_force_serial_monitoring
 
         # Continuous Batching backend. Initialised once in __init__ when
@@ -664,6 +667,7 @@ class InferenceService:
 
     def on_model_loaded(self) -> None:
         """Called after model is loaded. Drops any old draft; starts CBM if enabled."""
+        self._draft_suspended = False
         self._release_draft_model()
         if self._cbm_backend is not None and self._model_state.is_loaded:
             # Continuous batching is transformers' ContinuousBatchingManager. It
@@ -700,10 +704,47 @@ class InferenceService:
                 logger.warning("cbm_start_failed", error=str(e))
 
     def on_model_unloading(self) -> None:
-        """Called before model unload. Drops the draft; stops CBM if running."""
+        """Called before model unload. Drops the draft and keeps it dropped; stops CBM if running.
+
+        The draft stays suspended until the next model is loaded. ModelService
+        drains pending requests for up to five seconds AFTER this call, and each
+        of them asked for the draft: released here, it was loaded again beside
+        the model being unloaded and held its memory through the next load,
+        whose placement read those cards as free. Review round 2, 2026-09-14.
+        """
+        self._draft_suspended = True
         self._release_draft_model()
         if self._cbm_backend is not None and self._cbm_backend.is_running:
             self._cbm_backend.stop()
+
+    def _draft_device(self) -> str:
+        """The card the speculative draft goes on, whole.
+
+        A model on one card: its input device, beside the embeddings. A model
+        split across cards: the one of its cards with the most free memory, read
+        live. The planner fills a split's cards in index order, each but the
+        last to its whole budget, and the lowest-index card holds the input
+        embeddings — so the input device is the FULLEST card of the split. A
+        bf16 draft there either failed to load, silently switching speculation
+        off, or took the room kept back for that card's activations and KV
+        cache. Assisted generation moves token ids between the draft's card and
+        the model's (transformers generation/utils.py, candidate_generator.py).
+        Review round 2, 2026-09-14.
+
+        Free memory is read only on the model's own cards (free_mb_by_index
+        creates a CUDA context on each card it asks); a card that cannot be read
+        is not chosen, and when none can be, the input device.
+        """
+        indices = self._loaded_gpu_indices() if self._model_state.is_loaded else []
+        if len(indices) > 1:
+            from millm.ml.gpu_placement import free_mb_by_index
+
+            free = free_mb_by_index(indices)
+            if free:
+                # On a tie, the lower index: max() keeps the first it meets.
+                best = max(sorted(free), key=lambda index: free[index])
+                return f"cuda:{best}"
+        return self._get_input_device()
 
     def _is_sae_attached(self) -> bool:
         """Check if an SAE is currently attached (steering active)."""
@@ -1793,24 +1834,37 @@ class InferenceService:
         """
         if self._speculative_model_id is None:
             return None
+        if getattr(self, "_draft_suspended", False):
+            # The model is unloading. A request drained during the unload would
+            # otherwise load the draft again, beside the model being removed,
+            # and hold its memory while the next load reads the cards as free.
+            # Generation without a draft is the same text, only slower.
+            return None
 
         if self._draft_model is None:
             try:
                 from transformers import AutoModelForCausalLM
 
+                device = self._draft_device()
                 logger.info(
                     "loading_draft_model",
                     model_id=self._speculative_model_id,
+                    device=device,
                 )
-                # On the main model's input device, whole. device_map="auto"
-                # spread the draft over every card, so each proposed token
-                # crossed cards before the main model could verify it.
-                self._draft_model = AutoModelForCausalLM.from_pretrained(
+                # Whole, on one card. device_map="auto" spread the draft over
+                # every card, so each proposed token crossed cards before the
+                # main model could verify it.
+                draft = AutoModelForCausalLM.from_pretrained(
                     self._speculative_model_id,
                     torch_dtype=torch.bfloat16,
-                    device_map={"": self._get_input_device()},
+                    device_map={"": device},
                 )
-                self._draft_model.eval()
+                if getattr(self, "_draft_suspended", False):
+                    # The unload began while this draft was loading.
+                    logger.info("draft_model_discarded_model_unloading")
+                    return None
+                draft.eval()
+                self._draft_model = draft
                 logger.info("draft_model_loaded", model_id=self._speculative_model_id)
             except Exception as e:
                 logger.warning(

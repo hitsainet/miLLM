@@ -20,6 +20,15 @@ Phase 2, 2026-09-14 (mutate.py; restored and sha256-verified):
       -> test_kv_sizing_asks_the_models_cards
   M23 the compile warm-up keeps its own input-device lookup
       -> test_the_compile_warm_up_asks_the_shared_input_device
+Review round 2, 2026-09-14: three call sites moved (plan_transformers_load, the
+preflight, _draft_device). Each retargeted test pins BOTH links of the new chain,
+not only the call that moved (mutate.py; restored and sha256-verified):
+  R2-M2c plan_transformers_load does not pass the factor
+      -> test_model_loader_resolves_with_the_request_against_live_memory
+  R2-M4  ModelLoader.load skips the preflight   -> test_the_split_preflight_runs_before_the_load
+  R2-M5  the pre-check skips the preflight       -> test_the_precheck_runs_the_split_preflight_on_its_plan
+  R1-M3c re-run (pre-check plans without the checkpoint)
+      -> test_the_precheck_projects_the_resident_models_memory_back
 """
 
 from __future__ import annotations
@@ -86,13 +95,38 @@ def _is_attr(node: ast.AST | None, owner: str, attr: str) -> bool:
 
 class TestTransformersLoad:
     def test_model_loader_resolves_with_the_request_against_live_memory(self):
-        """The authoritative check, after the unload: live inventory, not a projection."""
+        """The authoritative check, after the unload: live inventory, not a projection.
+
+        Review round 2 moved the decision behind plan_transformers_load, which
+        reads the checkpoint. BOTH links are pinned: retargeting only the first
+        would leave a hole the size of the refactor."""
         fn = _function(model_loader, "ModelLoader.load")
-        [call] = _calls(fn, "decide_transformers_placement")
+        [call] = _calls(fn, "plan_transformers_load")
         assert _is_name(call.args[0], "estimated_memory_mb")
         assert _is_name(_kw(call, "requested"), "gpu")
         gpus = _kw(call, "gpus")
         assert isinstance(gpus, ast.Call) and _is_name(gpus.func, "list_gpus")
+        assert _is_name(_kw(call, "cache_path"), "cache_path")
+
+        plan = _function(model_loader, "plan_transformers_load")
+        [decide] = _calls(plan, "decide_transformers_placement")
+        assert _is_name(_kw(decide, "requested"), "requested")
+        assert _is_name(_kw(decide, "gpus"), "gpus")
+        estimate = decide.args[0]
+        assert isinstance(estimate, ast.Call) and _is_name(estimate.func, "transformers_estimate_mb")
+        factor = _kw(decide, "pre_quantized_max_memory_factor")
+        assert isinstance(factor, ast.Call) and _is_name(factor.func, "pre_quantized_max_memory_factor")
+
+    def test_the_split_preflight_runs_before_the_load(self):
+        """preflight_split computes the real device map before any weight is
+        read; it must run on the placement the load uses, and before it."""
+        fn = _function(model_loader, "ModelLoader.load")
+        [preflight] = _calls(fn, "preflight_split")
+        assert [_is_name(arg, name) for arg, name in zip(
+            preflight.args, ("model_name", "cache_path", "quantization", "placement", "trust_remote_code")
+        )] == [True] * 5
+        [load] = [c for c in _calls(fn, "load") if _kw(c, "placement") is not None]
+        assert preflight.lineno < load.lineno
 
     def test_the_shared_decision_is_choose_gpu(self):
         fn = _function(model_loader, "decide_transformers_placement")
@@ -101,7 +135,7 @@ class TestTransformersLoad:
         assert _is_name(_kw(call, "gpus"), "gpus")
         shard = _kw(call, "shard")
         assert isinstance(shard, ast.Call) and _is_name(shard.func, "transformers_shard_rule")
-        assert _is_name(_kw(shard, "bitsandbytes"), "bitsandbytes")
+        assert _is_name(_kw(shard, "max_memory_factor"), "max_memory_factor")
 
     def test_the_decision_is_handed_to_the_context(self):
         fn = _function(model_loader, "ModelLoader.load")
@@ -234,10 +268,23 @@ class TestServiceAndRoute:
         fn = _function(model_service, "ModelService._precheck_placement")
         [project] = _calls(fn, "project_free_after_unload")
         assert isinstance(project.args[0], ast.Call) and _is_name(project.args[0].func, "list_gpus")
-        [decide] = _calls(fn, "decide_transformers_placement")
-        assert _is_name(_kw(decide, "gpus"), "gpus")
+        [plan] = _calls(fn, "plan_transformers_load")
+        assert _is_name(_kw(plan, "gpus"), "gpus")
+        assert _is_name(_kw(plan, "cache_path"), "cache_path")
         [gguf] = _calls(fn, "plan_gguf_placement")
         assert _is_name(_kw(gguf, "gpus"), "gpus")
+
+    def test_the_precheck_runs_the_split_preflight_on_its_plan(self):
+        """Review round 2: the pre-check computes the split's real device map
+        before the unload, on the placement it just planned."""
+        fn = _function(model_service, "ModelService._precheck_placement")
+        [plan] = _calls(fn, "plan_transformers_load")
+        [assign] = [n for n in ast.walk(fn) if isinstance(n, ast.Assign) and n.value is plan]
+        assert _is_name(assign.targets[0], "placement")
+        [preflight] = _calls(fn, "preflight_split")
+        assert _is_name(preflight.args[1], "cache_path")
+        assert _is_name(preflight.args[3], "placement")
+        assert plan.lineno < preflight.lineno
 
     def test_worker_forwards_the_card(self):
         fn = _function(model_service, "ModelService._load_worker")
@@ -246,13 +293,25 @@ class TestServiceAndRoute:
 
 
 class TestInference:
-    def test_draft_model_on_the_input_device(self):
+    def test_draft_model_on_the_card_draft_device_chooses(self):
+        """Review round 2 put a split model's draft on its most-free card
+        (`_draft_device`), not the input device. Both links pinned: the load
+        uses the chosen device, and the choice reads the model's own cards and
+        falls back to the input device."""
         fn = _function(inference_service, "InferenceService._get_draft_model")
         [call] = _calls(fn, "from_pretrained")
         device_map = _kw(call, "device_map")
         assert isinstance(device_map, ast.Dict)
         [value] = device_map.values
-        assert isinstance(value, ast.Call) and value.func.attr == "_get_input_device"
+        assert _is_name(value, "device")
+        [chosen] = _calls(fn, "_draft_device")
+        [assign] = [n for n in ast.walk(fn) if isinstance(n, ast.Assign) and n.value is chosen]
+        assert _is_name(assign.targets[0], "device")
+
+        choose = _function(inference_service, "InferenceService._draft_device")
+        [free] = _calls(choose, "free_mb_by_index")
+        assert _is_name(free.args[0], "indices")
+        assert len(_calls(choose, "_get_input_device")) == 1
 
     def test_kv_sizing_asks_the_models_cards(self):
         fn = _function(inference_service, "InferenceService._chunk_batch_for_memory")

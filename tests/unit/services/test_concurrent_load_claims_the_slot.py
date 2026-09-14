@@ -124,3 +124,48 @@ class TestTheSlotIsClaimedBeforeTheUnload:
             asyncio.run(svc.load_model(3))
         assert len(svc._executor.calls) == 1
         assert svc._loading_model_id == 3, "the background worker's finally owns the release"
+
+
+class TestTheSlotIsSharedAcrossRequests:
+    """`get_model_service` builds a NEW ModelService for every request.
+
+    Round 3, 2026-09-14: the round-2 slot lived on `self`, so the tests above
+    (one instance, two coroutines) passed while two HTTP requests — two
+    instances — both saw an empty slot and both loads ran. These tests use one
+    instance per request, as production does.
+
+    MUTATION CONTROLS (round 3), each verified red then restored:
+      * the slot back on the instance (`self.__dict__`)  -> both tests red
+      * `__init__` resetting the shared slot again       -> both tests red
+    """
+
+    def test_a_second_request_is_refused_while_the_first_loads(self):
+        first = _service(_yield)
+        second = _service(_yield)
+        second.loader = first.loader
+
+        async def two_requests():
+            return await asyncio.gather(
+                first.load_model(3), second.load_model(4), return_exceptions=True
+            )
+
+        with fake_gpus(*NODE):
+            results = asyncio.run(two_requests())
+
+        busy = [r for r in results if isinstance(r, ModelBusyError)]
+        submitted = len(first._executor.calls) + len(second._executor.calls)
+        assert len(busy) == 1 and submitted == 1, (
+            f"two requests submitted {submitted} background loads ({results!r}); "
+            "the slot must be shared by every ModelService, since each request gets one"
+        )
+
+    def test_a_request_constructed_mid_load_does_not_release_it(self):
+        loading = _service(_yield)
+        with fake_gpus(*NODE):
+            asyncio.run(loading.load_model(3))
+        # A later request (e.g. a status poll) constructs another service.
+        later = _service(_yield)
+        with fake_gpus(*NODE):
+            with pytest.raises(ModelBusyError):
+                asyncio.run(later.load_model(4))
+        assert later._executor.calls == []

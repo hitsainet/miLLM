@@ -72,6 +72,16 @@ logger = structlog.get_logger()
 _DOWNLOAD_PROGRESS: dict[int, int] = {}
 
 
+#: The model whose load is in progress, SHARED ACROSS SERVICE INSTANCES, for the
+#: reason `_DOWNLOAD_PROGRESS` is: `get_model_service` builds a new ModelService
+#: per request. The one-load-at-a-time slot lived on `self`, so it was only ever
+#: seen by the request that claimed it. A double-clicked Switch, or two OpenAI
+#: requests naming different models, each got a fresh instance whose slot was
+#: empty, both passed the busy check and both loads ran at once. Review round 3,
+#: 2026-09-14. Read and written only through `ModelService._loading_model_id`.
+_LOAD_SLOT: dict[str, Optional[int]] = {"model_id": None}
+
+
 class ModelService:
     """
     Orchestration layer for model operations.
@@ -115,8 +125,9 @@ class ModelService:
         self._active_downloads: dict[int, Future[str]] = {}
         self._cancelled_downloads: set[int] = set()
 
-        # Track active loads
-        self._loading_model_id: Optional[int] = None
+        # Active loads are tracked in the module-level `_LOAD_SLOT` (see
+        # `_loading_model_id`). NOT reset here: every request constructs a
+        # service, so resetting in __init__ would release a load in progress.
 
         # Reference to main event loop for thread-safe async operations
         self._main_loop: Optional[asyncio.AbstractEventLoop] = None
@@ -124,6 +135,20 @@ class ModelService:
         # Progress lives in the module-level `_DOWNLOAD_PROGRESS`, not here —
         # see the note on that dict. An instance attribute is invisible to the
         # next request, which gets a different ModelService.
+
+    @property
+    def _loading_model_id(self) -> Optional[int]:
+        """The model whose load is in progress, in ANY service instance."""
+        return _LOAD_SLOT["model_id"]
+
+    @_loading_model_id.setter
+    def _loading_model_id(self, model_id: Optional[int]) -> None:
+        _LOAD_SLOT["model_id"] = model_id
+
+    def _release_load_slot(self, model_id: int) -> None:
+        """Release the slot only if `model_id` still holds it."""
+        if _LOAD_SLOT["model_id"] == model_id:
+            _LOAD_SLOT["model_id"] = None
 
     def _run_async_from_thread(self, coro: Any) -> Any:
         """
@@ -862,7 +887,7 @@ class ModelService:
             # Nothing was submitted, so no worker's `finally` will release the
             # slot. Without this a refused or failed load left the service
             # refusing every later load as busy.
-            self._loading_model_id = None
+            self._release_load_slot(model_id)
             raise
 
         return model
@@ -1020,7 +1045,7 @@ class ModelService:
             )
 
         finally:
-            self._loading_model_id = None
+            self._release_load_slot(model_id)
 
     async def _update_load_complete(
         self,

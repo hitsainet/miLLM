@@ -26,6 +26,18 @@ def _compile_jsonb_as_json_on_sqlite(element, compiler, **kw):  # noqa: ANN001
     return "JSON"
 
 
+@pytest.fixture(autouse=True)
+def _release_model_load_slot() -> Generator[None, None, None]:
+    """The one-load-at-a-time slot is process-wide, so a test that leaves a
+    load 'in progress' (a stubbed executor never runs the worker's finally)
+    must not make every later test's load busy."""
+    from millm.services import model_service
+
+    model_service._LOAD_SLOT["model_id"] = None
+    yield
+    model_service._LOAD_SLOT["model_id"] = None
+
+
 @pytest.fixture(scope="session")
 def event_loop() -> Generator[asyncio.AbstractEventLoop, None, None]:
     """Create an event loop for the test session."""

@@ -16,6 +16,7 @@ from millm.api.routes.openai.errors import (
     embedding_model_error,
     is_embedding_only,
     load_refused_error,
+    model_busy_error,
     model_locked_error,
     model_not_found_error,
     model_not_loaded_error,
@@ -108,10 +109,9 @@ async def create_completion(
                 locked = await service.get_locked_model()
                 locked_name = locked.name if locked else "unknown"
             return model_locked_error(request.model, locked_name)
-        except ModelBusyError:
-            return server_error(
-                f"Another model load is already in progress; "
-                f"retry once it finishes before requesting '{request.model}'."
+        except ModelBusyError as exc:
+            return model_busy_error(
+                f"{exc}. Retry once it finishes before requesting '{request.model}'."
             )
         except asyncio.TimeoutError:
             return server_error(

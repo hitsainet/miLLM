@@ -64,6 +64,10 @@ ERROR_STATUS_MAP: dict[str, tuple[int, str]] = {
     "MODEL_NOT_FOUND": (404, "invalid_request_error"),
     "MODEL_ALREADY_LOADED": (400, "invalid_request_error"),
     "MODEL_LOADING": (503, "server_error"),
+    # A load is in progress, or the model the request names is being unloaded:
+    # retry once it finishes. Hardware acceptance, 2026-09-14 (item 11): a request
+    # during an unload ran on a half-moved model and answered 500.
+    "MODEL_BUSY": (503, "server_error"),
     # Validation errors
     "VALIDATION_ERROR": (400, "invalid_request_error"),
     # Steering profile / dial errors (Feature 8/10): unknown resource and
@@ -282,6 +286,23 @@ def load_refused_error(model_id: str, exc: MiLLMError) -> JSONResponse:
         error_type=error_type,
         code=exc.code.lower() if exc.code else None,
         status_code=status_code,
+    )
+
+
+def model_busy_error(message: str) -> JSONResponse:
+    """A request that will succeed once a load or unload in progress finishes: 503 model_busy.
+
+    The same answer millm_error_handler gives a ModelBusyError raised past the
+    route (ERROR_STATUS_MAP), so "busy, retry" reads one way whichever layer
+    found it. It was a 500 server_error from the route and, for a request that
+    caught its model mid-unload, a 500 device-mismatch error (hardware
+    acceptance, 2026-09-14, item 11).
+    """
+    return create_openai_error(
+        message=message,
+        error_type="server_error",
+        code="model_busy",
+        status_code=503,
     )
 
 

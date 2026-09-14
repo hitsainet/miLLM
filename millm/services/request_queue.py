@@ -69,6 +69,9 @@ class RequestQueue:
         self._max_pending = max_pending
         self._max_concurrent = max_concurrent
         self._lock = asyncio.Lock()
+        #: Set while no request holds or waits for a slot (wait_idle).
+        self._idle = asyncio.Event()
+        self._idle.set()
 
     @asynccontextmanager
     async def acquire(
@@ -112,6 +115,7 @@ class RequestQueue:
                     f"Request queue full ({self._pending} pending). Try again later."
                 )
             self._pending += 1
+            self._idle.clear()
             logger.debug(
                 "request_queued",
                 pending=self._pending,
@@ -157,10 +161,26 @@ class RequestQueue:
                 self._semaphore.release()
             async with self._lock:
                 self._pending -= 1
+                if self._pending == 0:
+                    self._idle.set()
                 logger.debug(
                     "request_slot_released",
                     pending=self._pending,
                 )
+
+    async def wait_idle(self, timeout: Optional[float] = None) -> bool:
+        """Wait until no request holds or waits for a slot. False if `timeout` passes first.
+
+        The unload's drain (ModelService.unload_model): woken by the last request
+        leaving, not by polling.
+        """
+        if self._pending == 0:
+            return True
+        try:
+            await asyncio.wait_for(self._idle.wait(), timeout=timeout)
+        except asyncio.TimeoutError:
+            return False
+        return True
 
     @property
     def pending_count(self) -> int:

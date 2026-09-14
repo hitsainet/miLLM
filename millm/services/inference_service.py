@@ -17,9 +17,10 @@ import gc
 import math
 import re
 import uuid
+from contextlib import asynccontextmanager
 from datetime import datetime
 from threading import Event, Thread
-from typing import TYPE_CHECKING, Any, AsyncGenerator, Optional
+from typing import TYPE_CHECKING, Any, AsyncGenerator, AsyncIterator, Optional
 
 import torch
 
@@ -44,6 +45,7 @@ from millm.core.errors import (
     EngineUnsupportedError,
     GenerationOutOfMemoryError,
     MiLLMError,
+    ModelBusyError,
 )
 from millm.core.logging import get_logger
 from millm.ml.generation_config import GenerationConfig
@@ -490,6 +492,61 @@ class InferenceService:
         """Get the request queue."""
         return self._request_queue
 
+    def _unloading_refusal(self) -> Optional[ModelBusyError]:
+        """The refusal for a request while the loaded model is being unloaded; None otherwise."""
+        state = getattr(self, "_model_state", None)
+        if getattr(state, "is_unloading", False) is not True:
+            return None
+        current = state.current
+        return ModelBusyError(
+            f"The model '{getattr(current, 'model_name', None)}' is being unloaded; retry once "
+            "the unload finishes.",
+            details={"model_id": getattr(current, "model_id", None), "unloading": True},
+        )
+
+    def refuse_if_unloading(self) -> None:
+        """Refuse a request for the loaded model while it is being unloaded.
+
+        Raises:
+            ModelBusyError: the model is being unloaded (503 model_busy on /v1).
+        """
+        refusal = self._unloading_refusal()
+        if refusal is not None:
+            raise refusal
+
+    @asynccontextmanager
+    async def _admit(
+        self, raise_refusal: bool = True
+    ) -> AsyncIterator[Optional[ModelBusyError]]:
+        """A request-queue slot for work on the loaded model, or a refusal while that model unloads.
+
+        THE way work takes a slot (test_unload_admission asserts no other caller
+        of the queue's acquire). Hardware acceptance, 2026-09-14, item 11: an
+        unload moves the weights to the CPU while the model still reports as
+        loaded, and a request arriving 1-3 s in ran on the half-moved model and
+        answered 500 ("index is on cuda:0, different from other tensors on cpu").
+
+        Checked twice. Before queueing, so a request arriving during an unload
+        is told to retry at once instead of waiting behind the requests the
+        unload is draining. And again once the slot is held, because an unload
+        can begin while a request waits: ModelService.unload_model marks the
+        model before it drains the queue, and the drain waits for this slot, so
+        a request that finds no mark here runs before any weight moves.
+
+        With `raise_refusal` False the refusal is yielded instead of raised, for
+        a stream whose 200 is already committed.
+        """
+        refusal = self._unloading_refusal()
+        if refusal is None:
+            async with self._request_queue.acquire():
+                refusal = self._unloading_refusal()
+                if refusal is None or not raise_refusal:
+                    yield refusal
+                    return
+        if raise_refusal:
+            raise refusal
+        yield refusal
+
     def is_model_loaded(self) -> bool:
         """Check if a model is currently loaded."""
         return self._model_state.is_loaded
@@ -711,6 +768,10 @@ class InferenceService:
         request ID in CBM, so monitoring data would be inexact otherwise).
         """
         if not self._use_cbm():
+            return False
+        if self._unloading_refusal() is not None:
+            # The manager holds no queue slot, so nothing there refuses a model
+            # being unloaded: the serial path does (_admit).
             return False
         matches = self._cbm_backend.sampling_params_match(temperature, top_p)
         if not matches:
@@ -2554,10 +2615,15 @@ class InferenceService:
         llama.cpp is skipped: it measures its own window and its refusal is
         translated where it is raised.
 
+        A model being unloaded is refused here too (503 model_busy), before its
+        tokenizer is touched: an unload deletes it (hardware acceptance, item 11).
+
         Raises:
+            ModelBusyError: the model is being unloaded.
             ContextLengthExceededError: prompt tokens plus max_tokens exceed the
                 model's context.
         """
+        self.refuse_if_unloading()
         if not self._model_state.is_loaded or self._engine_is_llamacpp():
             return
         prompt = self._format_chat_messages(request.messages, request.chat_template_kwargs)
@@ -2929,7 +2995,7 @@ class InferenceService:
         total_prompt_tokens = 0
         total_completion_tokens = 0
 
-        async with self._request_queue.acquire():
+        async with self._admit():
             _saved_steering = None
             if request.profile or request.steering_intensity is not None:
                 _saved_steering = await self._apply_request_steering(
@@ -3095,7 +3161,7 @@ class InferenceService:
         total_prompt_tokens = 0
         total_completion_tokens = 0
 
-        async with self._request_queue.acquire():
+        async with self._admit():
             # Per-request profile override: applied inside the semaphore so that
             # concurrent requests cannot race on the global steering state.
             # The previous state is restored in the finally block below.
@@ -3436,7 +3502,7 @@ class InferenceService:
         params = self._llamacpp_params(gen_config, request)
         messages = self._llamacpp_messages(request)
 
-        async with self._request_queue.acquire():
+        async with self._admit():
             try:
                 raw = await asyncio.to_thread(self._llamacpp_sync, messages, params)
             except Exception as exc:  # noqa: BLE001
@@ -3529,7 +3595,11 @@ class InferenceService:
         # HELD FOR THE WHOLE GENERATOR, not just the first chunk. `Llama` is not
         # thread-safe and owns a single C++ context; releasing between chunks
         # would let a second request interleave into it.
-        async with self._request_queue.acquire():
+        async with self._admit(raise_refusal=False) as refusal:
+            if refusal is not None:
+                yield _stream_error_event(refusal)
+                yield "data: [DONE]\n\n"
+                return
             stream = None
             token_count = 0
             finish_reason = "stop"
@@ -3698,7 +3768,7 @@ class InferenceService:
         def _complete(text: str) -> dict:
             return self._model.create_completion(prompt=text, **params)
 
-        async with self._request_queue.acquire():
+        async with self._admit():
             for index, prompt_text in enumerate(prompts):
                 raw = await asyncio.to_thread(_complete, prompt_text)
                 choice_raw = (raw.get("choices") or [{}])[0]
@@ -3790,7 +3860,14 @@ class InferenceService:
             self._prompt_opened_think(prompt)
         )
 
-        async with self._request_queue.acquire():
+        async with self._admit(raise_refusal=False) as refusal:
+            if refusal is not None:
+                # The model is being unloaded. The route refuses this before the
+                # 200 (check_stream_admission); an unload that began since ends
+                # the stream with the refusal and [DONE].
+                yield _stream_error_event(refusal)
+                yield "data: [DONE]\n\n"
+                return
             # Per-request profile override (same logic as non-streaming path)
             _saved_steering = None
             if request.profile or request.steering_intensity is not None:
@@ -4209,7 +4286,7 @@ class InferenceService:
         total_prompt_tokens = 0
         total_completion_tokens = 0
 
-        async with self._request_queue.acquire():
+        async with self._admit():
             gen_config = GenerationConfig.from_request(request)
 
             # Sensing boundary (011 R1: this endpoint was silently unsensed
@@ -4342,7 +4419,7 @@ class InferenceService:
 
         attached_sae = self._get_attached_sae()
 
-        async with self._request_queue.acquire():
+        async with self._admit():
             for i, text in enumerate(inputs):
                 # Tokenize
                 encoded = self._tokenizer(
@@ -4436,7 +4513,7 @@ class InferenceService:
             used = int((raw.get("usage") or {}).get("prompt_tokens", 0))
             return vector, used
 
-        async with self._request_queue.acquire():
+        async with self._admit():
             for index, text in enumerate(inputs):
                 try:
                     vector, used = await asyncio.to_thread(_embed, text)

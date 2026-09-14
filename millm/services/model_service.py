@@ -840,6 +840,18 @@ class ModelService:
         marked_loading = False
 
         try:
+            if self.loader.is_unloading is True:
+                # The resident model is already being unloaded: a second unload
+                # would race the first. Retry once it finishes. Hardware
+                # acceptance, 2026-09-14, item 11.
+                raise ModelBusyError(
+                    f"Model {self.loader.loaded_model_id} is being unloaded; retry once the "
+                    "unload finishes",
+                    details={
+                        "loading_model_id": model_id,
+                        "unloading_model_id": self.loader.loaded_model_id,
+                    },
+                )
             # The card, checked NOW: before any state below changes, and above
             # all before the resident model is unloaded to make room. The load
             # itself runs in the background, so a refusal found only there
@@ -1203,50 +1215,84 @@ class ModelService:
                 details={"model_id": model_id},
             )
 
+        if self.loader.is_unloading is True:
+            raise ModelBusyError(
+                f"Model {model_id} is already being unloaded",
+                details={"model_id": model_id},
+            )
+
         logger.info("unload_started", model_id=model_id, timeout=timeout)
 
-        # Stop CBM before unloading model
+        # Refuse new work on the model BEFORE anything moves. The worker below
+        # moves the weights to the CPU while the loader still reports the model
+        # as loaded, and a /v1 request arriving in that window passed the route's
+        # "is it loaded?" check and ran on a half-moved model: 500, "index is on
+        # cuda:0, different from other tensors on cpu" (hardware acceptance,
+        # 2026-09-14, item 11). InferenceService._admit reads this mark.
+        self.loader.begin_unload()
+        moving = False
         try:
-            svc = self._inference_service
-            if svc is None:
-                from millm.api.dependencies import get_inference_service
-                svc = get_inference_service()
-            svc.on_model_unloading()
-        except Exception:
-            pass
+            # Stop CBM before unloading model
+            try:
+                svc = self._inference_service
+                if svc is None:
+                    from millm.api.dependencies import get_inference_service
+                    svc = get_inference_service()
+                svc.on_model_unloading()
+            except Exception:
+                pass
 
-        # Wait for pending inference requests to drain
-        try:
-            svc = self._inference_service
-            if svc is None:
-                from millm.api.dependencies import get_inference_service
-                svc = get_inference_service()
-            inference_svc = svc
-            queue = inference_svc.request_queue
-            if queue.pending_count > 0:
-                logger.info("waiting_for_pending_inference", pending=queue.pending_count)
-                for _ in range(50):  # Wait up to 5 seconds
-                    if queue.pending_count == 0:
-                        break
-                    await asyncio.sleep(0.1)
-        except Exception:
-            pass  # Don't block unload if queue check fails
+            # Wait for the requests already admitted to finish. No request is
+            # admitted after the mark above, so this only ever waits for fewer.
+            # GRACEFUL_UNLOAD_TIMEOUT was documented for exactly this and read by
+            # nothing; the drain was a hard-coded five-second poll, after which
+            # the weights moved under a generation still running.
+            try:
+                from millm.core.config import settings
 
-        # Unload from GPU with timeout
-        try:
-            loop = asyncio.get_running_loop()
-            await asyncio.wait_for(
-                loop.run_in_executor(self._executor, self._unload_worker, model_id),
-                timeout=timeout,
-            )
-        except asyncio.TimeoutError:
-            logger.warning(
-                "unload_timeout",
-                model_id=model_id,
-                timeout=timeout,
-            )
-            # Force unload anyway
-            self.loader.unload()
+                svc = self._inference_service
+                if svc is None:
+                    from millm.api.dependencies import get_inference_service
+                    svc = get_inference_service()
+                queue = svc.request_queue
+                if queue.pending_count > 0:
+                    grace = float(settings.GRACEFUL_UNLOAD_TIMEOUT)
+                    logger.info(
+                        "waiting_for_pending_inference", pending=queue.pending_count, timeout=grace
+                    )
+                    if not await queue.wait_idle(grace):
+                        logger.warning(
+                            "unload_drain_timeout",
+                            model_id=model_id,
+                            pending=queue.pending_count,
+                            timeout=grace,
+                        )
+            except Exception:
+                pass  # Don't block unload if queue check fails
+
+            # Unload from GPU with timeout
+            moving = True
+            try:
+                loop = asyncio.get_running_loop()
+                await asyncio.wait_for(
+                    loop.run_in_executor(self._executor, self._unload_worker, model_id),
+                    timeout=timeout,
+                )
+            except asyncio.TimeoutError:
+                logger.warning(
+                    "unload_timeout",
+                    model_id=model_id,
+                    timeout=timeout,
+                )
+                # Force unload anyway
+                self.loader.unload()
+        except BaseException:
+            # An unload that stopped before its worker started (cancelled while
+            # draining) leaves the model serving. Once the worker has started the
+            # weights may be moving, and the mark stays until clear() ends it.
+            if not moving and self.loader.loaded_model_id == model_id:
+                self.loader.cancel_unload()
+            raise
 
         # Auto-unlock on unload
         model = await self.repository.update(

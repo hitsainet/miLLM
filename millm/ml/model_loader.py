@@ -278,6 +278,7 @@ class LoadedModelState:
                 if cls._instance is None:
                     cls._instance = super().__new__(cls)
                     cls._instance._loaded: Optional[LoadedModel] = None
+                    cls._instance._unloading = False
         return cls._instance
 
     @property
@@ -291,14 +292,36 @@ class LoadedModelState:
         return self._loaded is not None
 
     @property
+    def is_unloading(self) -> bool:
+        """Whether the loaded model is being unloaded: no request may start on it.
+
+        Set by `begin_unload` BEFORE anything is moved. `clear()` moves the weights
+        to the CPU while `current` still names the model, so a request that asked
+        only "is it loaded?" ran on a half-moved model and failed with a device
+        mismatch (hardware acceptance, 2026-09-14, item 11).
+        """
+        return self._loaded is not None and bool(getattr(self, "_unloading", False))
+
+    @property
     def loaded_model_id(self) -> Optional[int]:
         """Get the ID of the currently loaded model."""
         return self._loaded.model_id if self._loaded else None
+
+    def begin_unload(self) -> None:
+        """Mark the loaded model as being unloaded, before any of it moves."""
+        with self._lock:
+            self._unloading = self._loaded is not None
+
+    def cancel_unload(self) -> None:
+        """Take the mark back: an unload that did not happen leaves the model serving."""
+        with self._lock:
+            self._unloading = False
 
     def set(self, model: LoadedModel) -> None:
         """Set the currently loaded model."""
         with self._lock:
             self._loaded = model
+            self._unloading = False
 
     def clear(self) -> None:
         """Clear the currently loaded model and free GPU memory."""
@@ -3503,6 +3526,19 @@ class ModelLoader:
     def loaded_model_id(self) -> Optional[int]:
         """Get the ID of the currently loaded model."""
         return self.state.loaded_model_id
+
+    @property
+    def is_unloading(self) -> bool:
+        """Whether the loaded model is being unloaded (LoadedModelState.is_unloading)."""
+        return self.state.is_unloading
+
+    def begin_unload(self) -> None:
+        """Refuse new work on the loaded model from now on; call before anything moves."""
+        self.state.begin_unload()
+
+    def cancel_unload(self) -> None:
+        """Serve the loaded model again after an unload that did not happen."""
+        self.state.cancel_unload()
 
     @property
     def current_model(self) -> Optional[LoadedModel]:

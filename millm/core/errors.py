@@ -150,10 +150,18 @@ class ModelAlreadyLoadedError(MiLLMError):
 
 
 class ModelBusyError(MiLLMError):
-    """Raised when model is busy with another operation."""
+    """Raised when model is busy with another operation.
+
+    On /v1 it is 503 server_error `model_busy`: the request is fine and succeeds
+    once the other operation — a load, or an unload of the model it names —
+    finishes, so a client is told to retry, not to change it. The management API
+    answers 409.
+    """
 
     code = "MODEL_BUSY"
     status_code = 409
+    #: The OpenAI envelope's `type` (exception_handlers and a stream's error event read it).
+    openai_error_type = "server_error"
 
 
 class ModelLockedError(MiLLMError):

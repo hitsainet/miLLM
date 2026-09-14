@@ -16,7 +16,7 @@ Machine-readable error codes returned by the management API in the [error envelo
 | `MODEL_LOAD_FAILED` | 500 | Load crashed — see server logs |
 | `MODEL_NOT_LOADED` | 400 | Operation needs a loaded model |
 | `MODEL_ALREADY_LOADED` | 400 | Load called on the loaded model |
-| `MODEL_BUSY` | 409 | Operation conflicts with one in progress |
+| `MODEL_BUSY` | 409 | Operation conflicts with one in progress: a load is running, or the model is being unloaded (a second unload, or a load that would unload it again). On `/v1` it is `503 model_busy`, typed `server_error`: the request is fine and succeeds once the other operation finishes, including a request for a model that is being unloaded |
 | `MODEL_LOCKED` | 409 | Unload/delete refused; detach the SAE or unlock first |
 
 ## Resource errors

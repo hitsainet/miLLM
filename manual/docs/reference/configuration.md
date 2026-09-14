@@ -36,7 +36,7 @@ miLLM is configured entirely through environment variables (with `.env` file sup
 | `MAX_PENDING_REQUESTS` | `10` | Queue depth beyond the concurrent slots; overflow returns `503` (`QUEUE_FULL`, backpressure) |
 | `MAX_DOWNLOAD_WORKERS` | `2` | Parallel model/SAE downloads |
 | `MAX_LOAD_WORKERS` | `1` | Parallel model loads (keep at 1) |
-| `GRACEFUL_UNLOAD_TIMEOUT` | `30.0` | Seconds to wait for in-flight requests before unloading a model |
+| `GRACEFUL_UNLOAD_TIMEOUT` | `30.0` | Seconds an unload waits for the requests already running on the model before it moves any weight. Requests that arrive once the unload has begun are refused with `503 model_busy` rather than waited for. If the running requests outlast this, the unload goes ahead and they fail. (Until 2026-09-14 this setting was read by nothing and the wait was a fixed 5 s.) |
 | `DOWNLOAD_TIMEOUT` | `3600.0` | Max seconds for a single download |
 
 ## Performance

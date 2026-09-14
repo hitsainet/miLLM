@@ -204,9 +204,12 @@ miLLM detects a trailing assistant message and completes it instead: everything 
 | The named model has to be loaded and its quantization cannot be (a Q2 transformers checkpoint) | 400 | `unsupported_quantization` |
 | The named model has to be loaded and no card, or split across cards, holds it | 503 | `insufficient_memory` |
 | The named model has to be loaded and the load failed | 500 | `model_load_failed` |
+| The named model is being unloaded, or another load is in progress: retry once it finishes. Type `server_error`; a streamed request is refused before its stream starts | 503 | `model_busy` |
 | Generation runs a card out of memory (the prompt and its KV cache do not fit beside the model); type `invalid_request_error`, the message names the card. A stream ends with this error event and `[DONE]` | 503 | `insufficient_memory` |
 
-A request that names a model other than the one loaded loads it first. When that load is refused before the loaded model is unloaded, the response carries the refusal's own status and message, with the figures for each card. A load that fails after the unload, for example because free memory changed in between, answers `500 model_load_failed` with the failure's message. A request that arrives while its model is still being unloaded is told to retry.
+A request that names a model other than the one loaded loads it first. When that load is refused before the loaded model is unloaded, the response carries the refusal's own status and message, with the figures for each card. A load that fails after the unload, for example because free memory changed in between, answers `500 model_load_failed` with the failure's message.
+
+**Requests during an unload.** From the moment an unload begins, before any weight is moved, a request for that model is refused with `503 model_busy` and told to retry. Requests already running when the unload begins finish first: the unload waits for them for up to [`GRACEFUL_UNLOAD_TIMEOUT`](/reference/configuration) seconds before it moves anything. A request for a different model is refused the same way while the unload runs, rather than starting a second one. Unloading a split model takes several seconds (8.5 s for Qwen2.5-7B, 15 s for OLMo-2-13B on the node), and before this a request in that window ran on a half-moved model and answered `500`.
 
 ## Behavior under continuous batching
 

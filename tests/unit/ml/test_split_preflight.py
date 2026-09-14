@@ -525,8 +525,9 @@ class TestACheckpointTransformersDequantizesIsSizedAsItLoads:
     4,096; k, v 512; gate, up, down 14,336 -> 52,224 x 4 B) and two bf16 norms
     (32,768 B) = 855,879,680 B; 16 layers + bf16 embed_tokens and lm_head
     (4,202,692,608 B) + final norm (16,384 B) = 17,896,783,872 B = 17,067 MiB;
-    + KV 256 MiB (16 layers x 2 x 8 x 128 x 2 B x 4,096 tokens) + 500 MiB context
-    = 17,823 on the 3090."""
+    + KV 128 MiB (16 layers x 2 x 8 x 128 x 2 B x 2,048 tokens — LlamaConfig's
+    max_position_embeddings, below the 4,096 floor; review round 5) + 500 MiB
+    context = 17,695 on the 3090."""
 
     CARDS = ((TI_3080, 11_500, 12_288), (RTX_3090, 23_500, 24_576))
 
@@ -554,7 +555,7 @@ class TestACheckpointTransformersDequantizesIsSizedAsItLoads:
         with patch("torch.cuda.get_device_capability", return_value=(8, 9)):
             placement = _plan(self.CARDS, 19_660, cache_path=path)
         assert (placement.mode, placement.index) == (MODE_SINGLE, 1)
-        assert placement.required_mb == 17_823
+        assert placement.required_mb == 17_695
 
 
 # Real configurations' shapes (config.json fields), built on the meta device only.

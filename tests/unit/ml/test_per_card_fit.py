@@ -48,13 +48,14 @@ preflight, load, API and wiring test files run, 323 tests):
   F-M5  the fields that change a token's cost ignored  -> 12 red: test_latent_attention_is_not_sized, the
         fallback test, and every test that plans an unsizable checkpoint on purpose
   F-M6  an unmodelled layer type sized as attention    -> test_a_layer_type_miLLM_does_not_model_is_not_sized
-  F-M7  a split's cards not checked (off-GPU part only) -> the OLMo 8k refusal, the context setting,
+  F-M7  a split's cards not checked (off-GPU part only) -> the Qwen2.5-14B 32k refusal (was OLMo-2 8k
+        until review round 5), the context setting,
         both route tests
   F-M8  Auto's one card chosen on its weights alone     -> test_the_cuda_context_allowance_is_read
   F-M9  a named card not checked                        -> test_a_named_card_that_cannot_hold_its_context_is_refused_naming_it
   F-M10 the plan never uses the per-card fit            -> 12 red (every placement test here, both
         FP8 tests, two "all" tests in test_split_preflight.py)
-  F-M11 TRANSFORMERS_MIN_CONTEXT not read               -> the OLMo 8k refusal, both route tests
+  F-M11 TRANSFORMERS_MIN_CONTEXT not read               -> the Qwen2.5-14B 32k refusal, both route tests
   F-M12 TRANSFORMERS_CUDA_CONTEXT_MB not read           -> test_the_cuda_context_allowance_is_read
   F-M13 every decoder layer put on the split's first card -> the Qwen2.5-14B and both OLMo tests,
         both route tests
@@ -222,25 +223,27 @@ class TestThePlacement:
         assert (cards["cuda:1"]["weights_mb"], cards["cuda:1"]["layers"], cards["cuda:1"]["kv_mb"]) == (19_335, 34, 544)
         assert cards["cuda:1"]["need_mb"] == 20_379
 
-    def test_olmo2_13b_is_refused_where_cuda0_cannot_hold_an_8k_context(self, tmp_path):
-        """cuda:0 needs 9,450 + 2,240 + 500 = 12,190 of its 11,500: 690 short.
-        cuda:1 needs 16,710 + 4,160 + 500 = 21,370 of 23,500, and fits."""
-        path = _save(tmp_path, Olmo2Config(**OLMO2_13B))
+    def test_qwen25_14b_is_refused_where_cuda1_cannot_hold_a_32k_context(self, tmp_path):
+        """Qwen2.5-14B serves 32,768 tokens. cuda:1 needs 19,335 + 34 layers x 128 MiB
+        (4,352) + 500 = 24,187 of its 23,500: 687 short. cuda:0 needs 8,835 + 1,792 +
+        500 = 11,127 of 11,500, and fits. (Round 4 refused OLMo-2-13B at 8,192 here,
+        a context that model never serves: review round 5.)"""
+        path = _save(tmp_path, Qwen2Config(**QWEN25_14B))
 
-        with patch.object(settings, "TRANSFORMERS_MIN_CONTEXT", 8_192), \
+        with patch.object(settings, "TRANSFORMERS_MIN_CONTEXT", 32_768), \
                 pytest.raises(InsufficientMemoryError) as raised:
             _plan(NODE, path)
 
         details = raised.value.details
-        assert details["short_devices"] == ["cuda:0"]
-        assert details["min_context_tokens"] == 8_192
-        assert details["per_card"][0] == {
-            "device": "cuda:0", "name": TI_3080, "free_mb": 11_500, "weights_mb": 9_450,
-            "kv_mb": 2_240, "context_mb": 500, "layers": 14, "need_mb": 12_190, "short_mb": 690,
+        assert details["short_devices"] == ["cuda:1"]
+        assert (details["min_context_tokens"], details["model_max_context_tokens"]) == (32_768, 32_768)
+        assert details["per_card"][1] == {
+            "device": "cuda:1", "name": RTX_3090, "free_mb": 23_500, "weights_mb": 19_335,
+            "kv_mb": 4_352, "context_mb": 500, "layers": 34, "need_mb": 24_187, "short_mb": 687,
         }
-        assert (details["per_card"][1]["need_mb"], details["per_card"][1]["short_mb"]) == (21_370, 0)
+        assert (details["per_card"][0]["need_mb"], details["per_card"][0]["short_mb"]) == (11_127, 0)
         message = raised.value.message
-        for figure in ("cuda:0", "11500 MiB free", "9450 MiB of weights", "2240 MiB of KV cache", "500 MiB CUDA context", "690 MiB short"):
+        for figure in ("cuda:1", "23500 MiB free", "19335 MiB of weights", "4352 MiB of KV cache", "500 MiB CUDA context", "687 MiB short"):
             assert figure in message
 
     def test_olmo2_13b_is_accepted_at_the_default_4k_context(self, tmp_path):
@@ -353,8 +356,8 @@ class TestThePreCheckRefusesPerCardBeforeTheUnload:
 
     def _model(self, tmp_path):
         return make_model(
-            id=3, name="olmo-2-13b", status=ModelStatus.READY, quantization=QuantizationType.FP16,
-            estimated_memory_mb=31_356, cache_path=_save(tmp_path, Olmo2Config(**OLMO2_13B)),
+            id=3, name="qwen2.5-14b", status=ModelStatus.READY, quantization=QuantizationType.FP16,
+            estimated_memory_mb=33_874, cache_path=_save(tmp_path, Qwen2Config(**QWEN25_14B)),
         )
 
     def test_the_management_route_answers_507_naming_the_card(self, tmp_path):
@@ -363,14 +366,14 @@ class TestThePreCheckRefusesPerCardBeforeTheUnload:
         svc = self._service(self._model(tmp_path))
         app = create_app()
         app.dependency_overrides[get_model_service] = lambda: svc
-        with fake_gpus(*self.CARDS), patch.object(settings, "TRANSFORMERS_MIN_CONTEXT", 8_192):
+        with fake_gpus(*self.CARDS), patch.object(settings, "TRANSFORMERS_MIN_CONTEXT", 32_768):
             response = TestClient(app).post("/api/models/3/load", json={})
 
         assert response.status_code == 507, response.text
         error = response.json()["error"]
         assert error["code"] == "INSUFFICIENT_MEMORY"
-        assert error["details"]["short_devices"] == ["cuda:0"]
-        assert "690 MiB short" in error["message"]
+        assert error["details"]["short_devices"] == ["cuda:1"]
+        assert "687 MiB short" in error["message"]
         assert not svc.unload_model.called
         assert not svc._executor.method_calls and not svc._executor.called
 
@@ -385,14 +388,14 @@ class TestThePreCheckRefusesPerCardBeforeTheUnload:
         app = create_app()
         app.dependency_overrides[get_model_service] = lambda: svc
         app.dependency_overrides[get_inference_service] = lambda: inference
-        with fake_gpus(*self.CARDS), patch.object(settings, "TRANSFORMERS_MIN_CONTEXT", 8_192):
+        with fake_gpus(*self.CARDS), patch.object(settings, "TRANSFORMERS_MIN_CONTEXT", 32_768):
             response = TestClient(app).post(
                 "/v1/chat/completions",
-                json={"model": "olmo-2-13b", "messages": [{"role": "user", "content": "hi"}]},
+                json={"model": "qwen2.5-14b", "messages": [{"role": "user", "content": "hi"}]},
             )
 
         assert response.status_code == 503, response.text
         body = response.json()["error"]
         assert body["code"] == "insufficient_memory"
-        assert "cuda:0" in body["message"] and "690 MiB short" in body["message"]
+        assert "cuda:1" in body["message"] and "687 MiB short" in body["message"]
         assert not svc.unload_model.called

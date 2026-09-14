@@ -79,6 +79,33 @@ def _return_cached_draft_memory() -> None:
     except Exception as e:  # noqa: BLE001 - a cleanup must not turn off speculation
         logger.warning("draft_memory_release_failed", error=str(e))
 
+def _served_max_context(config: Any) -> Optional[int]:
+    """The longest prompt + generation a transformers model is asked to serve; None when unknown.
+
+    Read from the TEXT config. A multimodal checkpoint (Gemma3ForConditionalGeneration
+    and its kind) keeps `max_position_embeddings` in its text config only, so the
+    top-level read found nothing and every request was accepted at any length,
+    to run out of memory or past the model's positions. The per-card fit sizes
+    the KV cache against the same field (model_loader.admitted_context). Review
+    round 5, 2026-09-14.
+    """
+    if config is None:
+        return None
+    candidates = []
+    get_text_config = getattr(config, "get_text_config", None)
+    if callable(get_text_config):
+        try:
+            candidates.append(get_text_config(decoder=True))
+        except Exception:  # noqa: BLE001 - fall back to the config itself
+            pass
+    candidates.append(config)
+    for candidate in candidates:
+        value = getattr(candidate, "max_position_embeddings", None)
+        if isinstance(value, int) and not isinstance(value, bool) and value > 0:
+            return value
+    return None
+
+
 #: Per-request memo for "which circuit is actually steering". A ContextVar
 #: because the InferenceService is a process singleton (see _steering_circuit).
 #: Reset at the top of each chat request by reset_steering_memo().
@@ -2409,9 +2436,7 @@ class InferenceService:
         Raises:
             ValueError: If context length would be exceeded.
         """
-        max_length = getattr(
-            getattr(self._model, "config", None), "max_position_embeddings", None
-        )
+        max_length = _served_max_context(getattr(self._model, "config", None))
         if max_length is None:
             return  # Can't validate without config
 

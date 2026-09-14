@@ -2597,6 +2597,10 @@ class KvCacheSpec:
     architecture: str
     bytes_per_token: tuple[int, ...]
     token_cap: tuple[Optional[int], ...]
+    #: The longest context the model serves: its text config's
+    #: `max_position_embeddings`, which InferenceService._check_context_length
+    #: enforces on every request. None when the config does not say.
+    max_context: Optional[int] = None
 
     @property
     def num_layers(self) -> int:
@@ -2692,7 +2696,28 @@ def kv_cache_spec(config: Any) -> tuple[Optional[KvCacheSpec], str]:
             cap = int(window)
         bytes_per_token.append(2 * int(kv_heads) * int(head_dim) * TRANSFORMERS_KV_BYTES)
         token_cap.append(cap)
-    return KvCacheSpec(architecture, tuple(bytes_per_token), tuple(token_cap)), ""
+    max_context = getattr(text, "max_position_embeddings", None)
+    return KvCacheSpec(
+        architecture,
+        tuple(bytes_per_token),
+        tuple(token_cap),
+        max_context=int(max_context) if _positive_int(max_context) else None,
+    ), ""
+
+
+def admitted_context(spec: KvCacheSpec, configured: int) -> int:
+    """The context a load's KV cache is sized at: TRANSFORMERS_MIN_CONTEXT, or less.
+
+    Never more than the model serves. Every request is refused past the text
+    config's `max_position_embeddings` (InferenceService._check_context_length),
+    so a cache sized beyond it holds tokens no request can send. Sized at the
+    setting, OLMo-2-13B and Vicuna-13B (4,096 each) were refused at 8,192 for
+    memory their 8k cache would need, on cards that serve everything they can
+    take. Review round 5, 2026-09-14.
+    """
+    if spec.max_context is not None:
+        return min(int(configured), spec.max_context)
+    return int(configured)
 
 
 @dataclass(frozen=True)
@@ -2966,7 +2991,7 @@ def transformers_fit(
         architecture=architecture,
         weights_mb=weights_mb,
         kv=kv,
-        min_context=int(settings.TRANSFORMERS_MIN_CONTEXT),
+        min_context=admitted_context(kv, int(settings.TRANSFORMERS_MIN_CONTEXT)),
         context_mb=int(settings.TRANSFORMERS_CUDA_CONTEXT_MB),
         model=model,
         hf_quantizer=hf_quantizer,
@@ -2996,6 +3021,7 @@ def per_card_fit_refusal(
         "weights_mb": fit.weights_mb,
         "kv_mb": fit.kv_mb(),
         "min_context_tokens": fit.min_context,
+        "model_max_context_tokens": fit.kv.max_context,
         "cuda_context_mb": fit.context_mb,
         "requested": requested,
         "gpus": [gpu.to_dict() for gpu in gpus],

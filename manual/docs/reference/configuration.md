@@ -69,6 +69,7 @@ Settings that apply only when the loaded model is a GGUF file. See [Hardware Req
 | Variable | Default | Notes |
 |---|---|---|
 | `GGUF_CONTEXT_LENGTH` | `32768` | **A ceiling, not a target.** miLLM reads what the file declares and loads the largest window that fits under this. `0` means "whatever the file declares", bounded only by what fits. |
+| `GGUF_TENSOR_SPLIT` | *(empty)* | How a GGUF model that needs more than one GPU divides its layers. Empty divides them in proportion to each used card's free memory. Otherwise give one proportion per card the split uses, in index order (`1,3` puts a quarter on the lower-index card). A value with the wrong number of entries for a load is refused, not stretched. It has no effect on a model that fits one card. |
 | `GGUF_KV_CACHE_TYPE` | `q8_0` | KV-cache precision — the biggest lever on how much context fits. `q8_0` is near-lossless and roughly triples the window over `f16`. `q4_0` buys another third at a real accuracy cost. `f16` restores llama.cpp's default behaviour. |
 | `GGUF_FLASH_ATTENTION` | `true` | **Required** by a quantized KV cache, not merely an optimisation. The loader refuses to pair the two with this off. |
 | `GGUF_ENABLE_EMBEDDINGS` | `true` | Loads with embedding output so `/v1/embeddings` works without a second load. Costs ~6.7% generation throughput, measured. Must be decided at load time — it cannot be switched on later. |

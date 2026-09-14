@@ -95,4 +95,14 @@ miLLM estimates memory before loading and warns (but does not block) when the es
 
 ## Multi-GPU
 
-Models load with `device_map="auto"`, so a model larger than one GPU spreads across available GPUs automatically. The SAE attaches to a single layer and lives on the device that hosts that layer. Steering and monitoring work unchanged.
+A model goes on **one card whenever one card holds it**: with **Auto**, the card with the most free memory. The free memory is read live, and nothing is held back for other applications on the node.
+
+A model that no single card can hold is **split across GPUs**. The cards with the most free memory are taken first, and only as many as the model needs. Each card of a split keeps 1 GB back for its CUDA context and for the activations of the layers it runs. Splitting costs a copy between cards at every layer boundary, and a split model is not compiled, so a model that fits one card is never split unless you ask.
+
+**A transformers model never runs from CPU memory or disk.** This covers FP16/BF16 and bitsandbytes Q8/Q4. If the cards together cannot hold it, the load is refused before anything is unloaded, and the refusal gives the figures for each card. miLLM also checks where the weights actually landed, and refuses the load if any part ended up on the CPU or disk. Only GGUF models may run partly on the CPU.
+
+Choose **All GPUs (split)** in the GPU selector, or send `"gpu": "all"`, to split a model across every card even when one card could hold it. This is useful for checking that a split model generates what the single-card model does. Like a named card, "all" is honoured or refused, never swapped.
+
+A GGUF model that needs more than one card uses a llama.cpp layer split over the cards the plan chose, and the other cards get none of it. By default, layers are divided in proportion to each card's free memory. [`GGUF_TENSOR_SPLIT`](/reference/configuration#gguf-models) sets the proportions yourself.
+
+SAEs attach on the device that hosts their layer, and steering and monitoring work unchanged on a split model.

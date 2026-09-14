@@ -97,25 +97,27 @@ miLLM estimates memory before loading and warns (but does not block) when the es
 
 A model goes on **one card whenever one card holds it**: with **Auto**, the card with the most free memory. The free memory is read live, and nothing is held back for other applications on the node.
 
-A model that no single card can hold is **split across GPUs**. The cards with the most free memory are taken first, and only as many as the model needs. Each card of a split keeps 1 GB out of the memory its weights may fill, so the model's layers are not packed into the room that card needs for its context. Splitting costs a copy between cards at every layer boundary, and a split model is not compiled, so a model that fits one card is never split unless you ask.
+A model that no single card can hold is **split across GPUs**. The cards with the most free memory are taken first, and only as many as the model and its KV cache need. Each card's share of the weights is its free memory less its CUDA context and the KV cache of the layers it holds, so the layers are not packed into the room that card needs for its context. Splitting costs a copy between cards at every layer boundary, and a split model is not compiled, so a model that fits one card is never split unless you ask.
 
 ### How miLLM decides a transformers model fits
 
 A transformers model is judged **card by card**. From the checkpoint's configuration, without reading any weights, miLLM works out how much memory the weights take once loaded and, for a split, which layers transformers will put on each card. Each card the model uses must then have room for three things:
 
 - the weights on that card;
-- the **KV cache** of that card's layers at a minimum context, [`TRANSFORMERS_MIN_CONTEXT`](/reference/configuration#transformers-models) (4,096 tokens by default), counted at bfloat16;
+- the **KV cache** of that card's layers at a minimum context, [`TRANSFORMERS_MIN_CONTEXT`](/reference/configuration#transformers-models) (4,096 tokens by default), or at the model's own maximum context if that is shorter, counted at bfloat16;
 - a **CUDA context**, [`TRANSFORMERS_CUDA_CONTEXT_MB`](/reference/configuration#transformers-models) (500 MB by default).
 
-A sliding-window layer is counted up to its window. In a hybrid model only the attention layers are counted; the fixed-size state of a Mamba or convolution layer is not. The minimum context is a floor for loading, not a limit on requests: a card with more room serves longer contexts.
+A sliding-window layer is counted up to its window. In a hybrid model only the attention layers are counted; the fixed-size state of a Mamba or convolution layer is not. The minimum context is a floor for loading, not a limit on requests: a card with more room serves longer contexts. Requests are limited only by the model's own maximum context, so a request whose KV cache needs more than its cards have left runs out of GPU memory during generation and fails with a `500 server_error` (a streamed response ends with an error event). Raise `TRANSFORMERS_MIN_CONTEXT` to load only where the contexts you serve fit.
 
-The same test decides everything: whether Auto puts the model on one card or splits it, whether a named card is accepted, and whether a split is accepted. A refusal lists every card the model would use, with its free memory, the weights, the KV cache and the context allowance, and how many MiB the short card is missing. For example, with an RTX 3080 Ti at 11,500 MB free and an RTX 3090 at 23,500 MB free:
+The same test decides everything: whether Auto puts the model on one card or splits it, whether a named card is accepted, and whether a split is accepted. When a split leaves one card short while another has room, miLLM moves layers off the short card and works out the layout again, until every card fits or no arrangement can. A refusal lists every card the model would use, with its free memory, the weights, the KV cache and the context allowance, and how many MiB the short card is missing. For example, with an RTX 3080 Ti at 11,500 MB free and an RTX 3090 at 23,500 MB free:
 
 | Model (BF16) | At 4,096 tokens | At 8,192 tokens |
 |---|---|---|
-| Qwen2.5-14B | Split; 1,941 and 3,121 MiB to spare | Split; 1,717 and 2,577 MiB to spare |
-| OLMo-2-13B | Split; 430 and 4,210 MiB to spare | Refused: the RTX 3080 Ti is 690 MiB short |
-| Vicuna-13B | Split; 413 and 5,563 MiB to spare | Refused: the RTX 3080 Ti is 787 MiB short |
+| Qwen2.5-14B | Split; 1,399 and 3,660 MiB to spare | Split; 1,159 and 3,132 MiB to spare |
+| OLMo-2-13B | Split; 429 and 4,208 MiB to spare | The same: the model serves at most 4,096 tokens |
+| Vicuna-13B | Split, one layer moved off the RTX 3080 Ti; 412 and 5,562 MiB to spare | The same: the model serves at most 4,096 tokens |
+
+Qwen2.5-14B at 32,768 tokens is refused on those cards: its weights, its cache and two CUDA contexts need 35,317 MiB of the 35,000 free, however the layers are divided.
 
 :::note The CUDA context allowance is a placeholder
 500 MB has not yet been measured on the node. Prefill activations and cuBLAS workspaces are not counted separately, so they must fit in it too.
@@ -131,4 +133,4 @@ Choose **All GPUs (split)** in the GPU selector, or send `"gpu": "all"`, to spli
 
 A GGUF model that needs more than one card uses a llama.cpp layer split over the cards the plan chose, and the other cards get none of it. By default, layers are divided in proportion to each card's free memory. [`GGUF_TENSOR_SPLIT`](/reference/configuration#gguf-models) sets the proportions yourself.
 
-SAEs attach on the device that hosts their layer, and steering and monitoring work unchanged on a split model. Continuous batching (`ENABLE_CONTINUOUS_BATCHING`) is not started for a split model: its paged KV cache lives on one card, so requests are served one at a time instead.
+SAEs attach on the device that hosts their layer, and steering and monitoring work unchanged on a split model. An SAE is refused (`507 INSUFFICIENT_MEMORY`) when its card cannot hold it and still keep room for the KV cache the model was loaded with; the refusal names the card, the SAE's size, the cache it keeps and what is free there. Continuous batching (`ENABLE_CONTINUOUS_BATCHING`) is not started for a split model: its paged KV cache lives on one card, so requests are served one at a time instead.

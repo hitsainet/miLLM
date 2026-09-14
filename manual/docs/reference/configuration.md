@@ -68,8 +68,8 @@ Settings that decide whether a transformers (non-GGUF) model fits the GPUs. See 
 
 | Variable | Default | Notes |
 |---|---|---|
-| `TRANSFORMERS_MIN_CONTEXT` | `4096` | The context, in tokens, whose KV cache every card a model uses must have room for. A floor for loading, not a limit on requests. Raise it to refuse a model that would only fit with a short context. |
-| `TRANSFORMERS_CUDA_CONTEXT_MB` | `500` | Memory each card keeps for its CUDA context, in MB. A placeholder until it is measured on the node. Prefill activations and cuBLAS workspaces must fit in it too. |
+| `TRANSFORMERS_MIN_CONTEXT` | `4096` | The context, in tokens, whose KV cache every card a model uses must have room for, or the model's own maximum context if that is shorter. A floor for loading, not a limit on requests. SAE attachment keeps the same room free. Raise it to refuse a model that would only fit with a short context. |
+| `TRANSFORMERS_CUDA_CONTEXT_MB` | `500` | Memory each card keeps for its CUDA context, in MB. A card's share of a split's weights is its free memory less this and its layers' KV cache. A placeholder until it is measured on the node. Prefill activations and cuBLAS workspaces must fit in it too. |
 
 ## GGUF models
 

@@ -470,10 +470,54 @@ def checkpoint_weights_mb(cache_path: Optional[str]) -> int:
     return 0
 
 
+def checkpoint_materialised_mb(cache_path: Optional[str], trust_remote_code: bool = False) -> int:
+    """What a pre-quantized checkpoint occupies once transformers has loaded it, in MB; 0 when unknown.
+
+    The weights a checkpoint stores are not always what is loaded. transformers'
+    quantizer decides in `validate_environment` whether to keep the stored
+    precision, and some DEQUANTIZE to bf16: FineGrainedFP8 on a card below
+    compute capability 8.9 (the RTX 3090 and 3080 Ti are 8.6), MXFP4 without the
+    `kernels` package or Triton (transformers 5.15.1). So the checkpoint's config
+    is built on the meta device with the quantizer the load constructs, and its
+    modules are sized the way transformers sizes them for a device map
+    (`compute_module_sizes`) — no weight read, no CUDA context.
+
+    0 means unknown, never empty: no config, a method with no transformers
+    quantizer, or a quantizer that cannot be constructed here (GPTQ without
+    optimum — the load fails the same way). Review round 3, 2026-09-14.
+    """
+    if not cache_path or AutoConfig is None:
+        return 0
+    try:
+        from transformers.integrations.accelerate import compute_module_sizes
+        from transformers.quantizers.auto import get_hf_quantizer
+
+        config = AutoConfig.from_pretrained(cache_path, trust_remote_code=trust_remote_code)
+        hf_quantizer, config, device_map = get_hf_quantizer(config, None, "sequential", True, {})
+        if hf_quantizer is None:
+            return 0
+        model = _meta_model(config, trust_remote_code)
+        hf_quantizer.preprocess_model(
+            model=model,
+            dtype=torch.bfloat16,
+            device_map=device_map,
+            checkpoint_files=None,
+            use_kernels=False,
+        )
+        sizes, _ = compute_module_sizes(model, hf_quantizer)
+    except Exception as e:  # noqa: BLE001 - unknown here; what the checkpoint stores is the floor
+        logger.warning(
+            "checkpoint_materialised_size_unknown", cache_path=cache_path, error=str(e)[:300]
+        )
+        return 0
+    return int(sizes.get("", 0) / (1024 * 1024))
+
+
 def transformers_estimate_mb(
     row_estimate_mb: int,
     cache_path: Optional[str],
     pre_quantization: Optional[dict[str, Any]],
+    trust_remote_code: bool = False,
 ) -> int:
     """The memory a transformers load of this checkpoint is planned for, in MB.
 
@@ -486,12 +530,22 @@ def transformers_estimate_mb(
     ~19 GB of weights, and refused on a node where one card holds it. Review
     round 2, 2026-09-14.
 
-    Anything else, or a checkpoint whose weights cannot be measured, keeps the
+    What it stores is a FLOOR, not the answer: transformers dequantizes some
+    methods on these cards (checkpoint_materialised_mb). An FP8 checkpoint of a
+    14B model stores ~15 GB and loads as 28 GB of bf16; sized from its files it
+    was planned whole onto the 3090 and would run out of memory mid-load, after
+    the resident model was unloaded. It is sized at the larger of the two.
+    Review round 3, 2026-09-14.
+
+    Anything else, or a checkpoint that cannot be measured either way, keeps the
     row's estimate.
     """
     if pre_quantization is None:
         return int(row_estimate_mb or 0)
-    weights_mb = checkpoint_weights_mb(cache_path)
+    weights_mb = max(
+        checkpoint_weights_mb(cache_path),
+        checkpoint_materialised_mb(cache_path, trust_remote_code),
+    )
     if weights_mb <= 0:
         return int(row_estimate_mb or 0)
     return int(weights_mb * MEMORY_OVERHEAD_FACTOR)
@@ -2398,6 +2452,7 @@ def plan_transformers_load(
     gpus: list[GpuInfo],
     cache_path: Optional[str],
     is_pre_quantized: bool = False,
+    trust_remote_code: bool = False,
 ) -> Placement:
     """`decide_transformers_placement` for a real checkpoint, with what it needs read from it.
 
@@ -2417,7 +2472,9 @@ def plan_transformers_load(
     """
     pre_quantization = checkpoint_quantization_config(cache_path)
     return decide_transformers_placement(
-        transformers_estimate_mb(estimated_memory_mb, cache_path, pre_quantization),
+        transformers_estimate_mb(
+            estimated_memory_mb, cache_path, pre_quantization, trust_remote_code=trust_remote_code
+        ),
         quantization,
         requested=requested,
         gpus=gpus,
@@ -2557,6 +2614,7 @@ class ModelLoader:
             # on. The pre-unload check reads the same file the same way.
             cache_path=cache_path,
             is_pre_quantized=is_pre_quantized,
+            trust_remote_code=trust_remote_code,
         )
         logger.info(
             "model_placement",

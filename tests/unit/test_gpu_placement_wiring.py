@@ -29,6 +29,14 @@ not only the call that moved (mutate.py; restored and sha256-verified):
   R2-M5  the pre-check skips the preflight       -> test_the_precheck_runs_the_split_preflight_on_its_plan
   R1-M3c re-run (pre-check plans without the checkpoint)
       -> test_the_precheck_projects_the_resident_models_memory_back
+Review round 3, 2026-09-14: a pre-quantized checkpoint is sized by building its
+model with its quantizer, which needs the row's trust_remote_code at both call
+sites (mutate.py; restored and sha256-verified):
+  R3-M4  the estimate uses the stored weights only
+      -> test_a_pre_quantized_checkpoint_is_sized_as_transformers_will_load_it
+  R3-M4d plan_transformers_load drops trust_remote_code -> test_model_loader_resolves_...
+  R3-M4e ModelLoader.load drops it                     -> test_model_loader_resolves_...
+  R3-M4f the pre-check drops it                        -> test_the_precheck_projects_...
 """
 
 from __future__ import annotations
@@ -107,6 +115,7 @@ class TestTransformersLoad:
         gpus = _kw(call, "gpus")
         assert isinstance(gpus, ast.Call) and _is_name(gpus.func, "list_gpus")
         assert _is_name(_kw(call, "cache_path"), "cache_path")
+        assert _is_name(_kw(call, "trust_remote_code"), "trust_remote_code")
 
         plan = _function(model_loader, "plan_transformers_load")
         [decide] = _calls(plan, "decide_transformers_placement")
@@ -114,8 +123,20 @@ class TestTransformersLoad:
         assert _is_name(_kw(decide, "gpus"), "gpus")
         estimate = decide.args[0]
         assert isinstance(estimate, ast.Call) and _is_name(estimate.func, "transformers_estimate_mb")
+        assert _is_name(_kw(estimate, "trust_remote_code"), "trust_remote_code")
         factor = _kw(decide, "pre_quantized_max_memory_factor")
         assert isinstance(factor, ast.Call) and _is_name(factor.func, "pre_quantized_max_memory_factor")
+
+    def test_a_pre_quantized_checkpoint_is_sized_as_transformers_will_load_it(self):
+        """Review round 3: what a checkpoint stores is a floor; the estimate also
+        asks what transformers materialises (it dequantizes FP8 on these cards)."""
+        fn = _function(model_loader, "transformers_estimate_mb")
+        [materialised] = _calls(fn, "checkpoint_materialised_mb")
+        assert _is_name(materialised.args[0], "cache_path")
+        assert _is_name(materialised.args[1], "trust_remote_code")
+        [stored] = _calls(fn, "checkpoint_weights_mb")
+        [larger] = _calls(fn, "max")
+        assert materialised in larger.args and stored in larger.args
 
     def test_the_split_preflight_runs_before_the_load(self):
         """preflight_split computes the real device map before any weight is
@@ -271,6 +292,10 @@ class TestServiceAndRoute:
         [plan] = _calls(fn, "plan_transformers_load")
         assert _is_name(_kw(plan, "gpus"), "gpus")
         assert _is_name(_kw(plan, "cache_path"), "cache_path")
+        # Review round 3: sizing a pre-quantized checkpoint builds its model, and a
+        # remote-code architecture only builds with the row's trust_remote_code.
+        trust = _kw(plan, "trust_remote_code")
+        assert isinstance(trust, ast.Call) and _is_name(trust.func, "bool")
         [gguf] = _calls(fn, "plan_gguf_placement")
         assert _is_name(_kw(gguf, "gpus"), "gpus")
 

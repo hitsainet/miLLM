@@ -1027,6 +1027,7 @@ class ModelService:
             requested=wanted,
             gpus=gpus,
             cache_path=cache_path,
+            trust_remote_code=bool(getattr(model, "trust_remote_code", False)),
         )
         # The map itself, computed from the checkpoint's config with no weight
         # read: a split the estimate accepts can still map to disk, and the load

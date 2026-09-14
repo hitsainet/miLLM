@@ -59,6 +59,25 @@ their GPUs, of 2,394 per cell, before -> after this round's plan_shard fix:
   weights + 5%          Auto 4 -> 4     "all" 9 -> 2
   exact weights         Auto 25 -> 25   "all" 43 -> 16
 What remains is invisible to a plan in MB; the preflight computes the map itself.
+
+REVIEW ROUND 3, 2026-09-14. The preflight's map was checked against the map
+from_pretrained itself computes (its `_get_device_map` wrapped to record and abort,
+tied and untied checkpoints, three budgets each): identical in all six cases.
+
+Round 2's sizing of a pre-quantized checkpoint from the weights it stores was
+wrong for a quantizer that DEQUANTIZES on these cards (FP8 below compute
+capability 8.9). Mutation controls (mutate.py; restored and sha256-verified):
+  R3-M4  the estimate uses the stored weights only — round 2's code
+         -> test_dequantized_on_these_cards_it_is_not_placed_on_one,
+            test_a_bitsandbytes_checkpoint_gets_the_09_its_quantizer_applies (+ the wiring test)
+  R3-M4b the materialised size skips the quantizer's module replacement
+         -> test_kept_in_fp8_it_is_sized_by_what_it_stores, the bitsandbytes factor test
+  R3-M4c the materialised size is computed without the quantizer -> the bitsandbytes factor test
+  R3-M4g the quantizer is dropped after it decided (AttributeError, swallowed as unknown)
+         -> the dequantized test, the bitsandbytes factor test
+test_a_bitsandbytes_checkpoint_gets_the_09_its_quantizer_applies now uses a
+52-layer checkpoint: round 2's 16-layer one had no weights and was sized from its
+row's 29,000; sized as it loads (12,643 MB) it no longer reached the 0.9 budgets.
 """
 
 from __future__ import annotations
@@ -329,14 +348,22 @@ class TestAPreQuantizedCheckpointIsPlannedWithItsOwnQuantizer:
         assert pre_quantized_max_memory_factor(config) == pytest.approx(factor)
 
     def test_a_bitsandbytes_checkpoint_gets_the_09_its_quantizer_applies(self, tmp_path):
-        """29,000 MB on NODE budgets: 9,976 + 21,976 = 31,952 whole; with 0.9,
-        8,978 + 19,778 = 28,756. The row says FP16; the checkpoint says bitsandbytes."""
-        path = _checkpoint(tmp_path, quantization_config={
+        """Budgets on these cards: 9,976 + 21,976 = 31,952 whole; with 0.9,
+        8,978 + 19,778 = 28,756. The row says FP16; the checkpoint says bitsandbytes.
+
+        Sized as transformers loads it (review round 3 — round 2's fixture had no
+        weights and was sized from its row's 29,000): WIDE at 52 layers, 4-bit.
+          a layer's linears 855,638,016 params x 0.5 B + two bf16 norms 32,768 B
+            = 427,851,776 B; embed_tokens + lm_head stay bf16 = 4,202,692,608 B
+          4,202,692,608 + 52 x 427,851,776 + 16,384 = 26,451,001,344 B = 25,225 MiB
+          x1.2 = 30,270 MB: inside the whole budgets, outside the 0.9 ones."""
+        path = _checkpoint(tmp_path, layers=52, quantization_config={
             "quant_method": "bitsandbytes", "load_in_4bit": True, "bnb_4bit_quant_type": "nf4",
         })
         with pytest.raises(InsufficientMemoryError) as raised:
             _plan(((TI_3080, 11_000, 12_288), (RTX_3090, 23_000, 24_576)), 29_000, cache_path=path)
         assert raised.value.details["available_mb"] == 28_756
+        assert raised.value.details["required_mb"] == 30_270
 
     def test_an_awq_checkpoint_keeps_its_whole_budget(self, tmp_path):
         path = _checkpoint(tmp_path, quantization_config={"quant_method": "awq", "bits": 4})
@@ -413,3 +440,54 @@ class TestABitsandbytesMapIsRefusedByTheQuantizerItself:
         mapped = preflight_split("wide-48-q4", path, "Q4", placement)
 
         assert set(mapped) == {"cuda:0", "cuda:1"}
+
+
+FP8 = {"quant_method": "fp8", "activation_scheme": "dynamic", "fmt": "e4m3", "weight_block_size": [128, 128]}
+
+
+class TestACheckpointTransformersDequantizesIsSizedAsItLoads:
+    """Review round 3, 2026-09-14. Round 2 sized a pre-quantized checkpoint from
+    the weights it stores. transformers does not always load them that way: the
+    FineGrainedFP8 quantizer DEQUANTIZES to bf16 on a card below compute
+    capability 8.9, and both of this node's cards are 8.6. Measured on a
+    Qwen2.5-14B-shaped FP8 checkpoint: 15,575 MiB kept, 28,171 MiB dequantized,
+    so sized from its files (x1.2 = 18,690 MB) it was planned whole onto the
+    3090 and would run out of memory mid-load, after the resident model left.
+
+    The FIXTURE: Llama, 70B widths, 16 layers, untied (WIDE). Dequantized it is
+    plain bf16, worked by hand:
+      embed_tokens = lm_head = 128,256 x 8,192 = 1,050,673,152 params each
+      one decoder layer: q, o 8,192 x 8,192 = 67,108,864 each; k, v 8,192 x 1,024
+      = 8,388,608 each; gate, up, down 8,192 x 28,672 = 234,881,024 each; two
+      norms 8,192 each -> 855,654,400 params; final norm 8,192
+      total 2,101,346,304 + 16 x 855,654,400 + 8,192 = 15,791,824,896 params
+      x 2 B = 31,583,649,792 B = 30,120 MiB -> x1.2 = 36,144 MB
+    Stored: a sparse 16 GiB model.safetensors -> x1.2 = 19,660 MB, which the
+    3090's 23,500 MB free holds whole. Dequantized, no single card and no split
+    of these cards (budgets 10,476 + 22,476 = 32,952 MB) holds it."""
+
+    CARDS = ((TI_3080, 11_500, 12_288), (RTX_3090, 23_500, 24_576))
+
+    @staticmethod
+    def _fp8_checkpoint(tmp_path):
+        path = _checkpoint(tmp_path, quantization_config=FP8)
+        with open(tmp_path / "model.safetensors", "wb") as handle:
+            handle.truncate(16 * 1024 ** 3)  # sparse
+        return path
+
+    def test_dequantized_on_these_cards_it_is_not_placed_on_one(self, tmp_path):
+        path = self._fp8_checkpoint(tmp_path)
+        with patch("torch.cuda.get_device_capability", return_value=(8, 6)):
+            with pytest.raises(InsufficientMemoryError) as raised:
+                _plan(self.CARDS, 19_660, cache_path=path)
+        assert raised.value.details["required_mb"] == 36_144
+        assert raised.value.details["available_mb"] == 32_952
+
+    def test_kept_in_fp8_it_is_sized_by_what_it_stores(self, tmp_path):
+        """On a card that runs FP8 the checkpoint is not refused for a bf16 size
+        it never takes: one card holds it."""
+        path = self._fp8_checkpoint(tmp_path)
+        with patch("torch.cuda.get_device_capability", return_value=(8, 9)):
+            placement = _plan(self.CARDS, 19_660, cache_path=path)
+        assert (placement.mode, placement.index) == (MODE_SINGLE, 1)
+        assert 19_660 <= placement.required_mb < 23_500

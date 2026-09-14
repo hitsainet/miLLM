@@ -42,7 +42,7 @@ from typing import Any, Callable, Optional, Union
 import structlog
 import torch
 
-from millm.core.errors import GpuNotFoundError, InsufficientMemoryError
+from millm.core.errors import GpuNotFoundError, InsufficientMemoryError, SplitNotHonouredError
 from millm.ml import nvidia_smi
 
 logger = structlog.get_logger()
@@ -633,6 +633,30 @@ def shard_refusal(placement: Placement, need_mb: int, detail: str) -> Insufficie
     )
 
 
+def all_cards_refusal(
+    placement: Placement, left_out: list[GpuInfo], rule: ShardRule
+) -> SplitNotHonouredError:
+    """The refusal for "all" when a visible card has no room to take any share of it."""
+    cards = ", ".join(
+        f"cuda:{gpu.index} ({gpu.name}) has {gpu.free_mb} MB free" for gpu in left_out
+    )
+    return SplitNotHonouredError(
+        f"A split across every GPU was requested, but {cards}: not enough to take any of "
+        "the model once the room each card keeps free is set aside. \"all\" is not "
+        "narrowed to the other cards. Free memory on that card, or choose Auto or a "
+        "named card.",
+        details={
+            "requested": placement.requested,
+            "unused_devices": [f"cuda:{gpu.index}" for gpu in left_out],
+            "limit_mb_by_device": {
+                f"cuda:{gpu.index}": max(int(rule.limit_mb(gpu)), 0) for gpu in placement.gpus
+            },
+            "gpus": [gpu.to_dict() for gpu in placement.gpus],
+            "placement": placement.to_dict(),
+        },
+    )
+
+
 def choose_gpu(
     required_mb: int,
     requested: GpuRequest = None,
@@ -684,6 +708,14 @@ def choose_gpu(
                 "A split across every GPU was requested; it is not swapped for "
                 "one card or for the CPU.",
             )
+        left_out = [gpu for gpu in inventory if gpu.index not in placement.gpu_indices]
+        if left_out:
+            # plan_shard names only the cards with a budget, so a card too full
+            # to take any share (the 3080 Ti with a miStudio job on it) was left
+            # out, and "all" became a split over the rest — one card, on this
+            # node — that every later check accepted, since they look for an
+            # unused card among the planned ones. Review round 4, 2026-09-14.
+            raise all_cards_refusal(placement, left_out, rule)
         return placement
 
     if wanted is not None:

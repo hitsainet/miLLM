@@ -30,6 +30,11 @@ Review round 1, 2026-09-14 (mutate.py; restored and sha256-verified):
   R1-M7 the CausalLM fallback retries an offload refusal as AutoModel again
                                                        -> test_a_refusal_from_the_causal_lm_fallback_is_not_retried_as_auto_model
   M3a re-run (the first class's short-circuit dropped) -> test_bitsandbytes_refusing_the_map_is_a_placement_refusal_not_retried
+Review round 4, 2026-09-14 (mutate.py; restored and sha256-verified). An "all" is
+checked where the model landed, for when the preflight could not compute the map:
+  R4-M2  the load does not check where an "all" landed -> test_all_that_landed_on_one_card_is_refused_and_released
+  R4-M2b the check widened to every split, Auto included -> test_an_auto_split_that_landed_on_one_card_loads
+  R4-M2c the check compares the plan with itself       -> test_all_that_landed_on_one_card_is_refused_and_released
 """
 
 from datetime import datetime
@@ -39,7 +44,7 @@ from unittest.mock import MagicMock, call, patch
 import pytest
 import torch
 
-from millm.core.errors import InsufficientMemoryError
+from millm.core.errors import InsufficientMemoryError, SplitNotHonouredError
 from millm.ml import model_loader
 from millm.ml.gpu_placement import (
     MODE_SHARD,
@@ -264,6 +269,53 @@ class TestNothingRunsOffTheGpu:
         assert causal_lm.from_pretrained.call_count == 1
         assert auto_model.from_pretrained.call_count == 0
         assert "dispatched on the CPU" in raised.value.details["engine_message"]
+
+
+class TestAllIsCheckedWhereTheModelLanded:
+    """Review round 4, 2026-09-14. Round 3 refused an "all" whose map leaves a card
+    with nothing only inside preflight_split, and preflight_split SKIPS whenever
+    it cannot compute the map ahead: no readable config, a class that will not
+    build on the meta device, a quantizer whose package is missing. The load then
+    checked where the model landed for the CPU and disk (the class above), never
+    for "all" — so a skipped preflight let "all" run on fewer cards with nothing
+    said, the defect round 3 closed, one door over. The fixture's AutoConfig
+    raises, so the preflight cannot have run here."""
+
+    def test_all_that_landed_on_one_card_is_refused_and_released(self):
+        model = FakeModel(
+            [CUDA1], hf_device_map={"model.embed_tokens": 1, "model.layers.0": 1, "lm_head": 1}
+        )
+        with fake_gpus(*NODE) as fake, _cleanup_mocks():
+            placement = decide_transformers_placement(8_000, "FP16", requested="all", gpus=list_gpus())
+            assert placement.gpu_indices == [0, 1]
+            with pytest.raises(SplitNotHonouredError) as raised:
+                _load(fake, placement, model=model)
+            assert torch.cuda.synchronize.call_args_list == [call(0), call(1)], (
+                "what was loaded before the refusal must be released"
+            )
+        details = raised.value.details
+        assert details["unused_devices"] == ["cuda:0"]
+        assert details["before_loading"] is False
+        assert "cuda:0" in raised.value.message
+        assert LoadedModelState().current is None
+
+    def test_all_that_landed_on_every_card_loads(self):
+        model = FakeModel(
+            [CUDA0, CUDA1], hf_device_map={"model.embed_tokens": 0, "model.layers.0": 1, "lm_head": 1}
+        )
+        with fake_gpus(*NODE) as fake, _cleanup_mocks():
+            placement = decide_transformers_placement(8_000, "FP16", requested="all", gpus=list_gpus())
+            loaded, _ = _load(fake, placement, model=model)
+        assert loaded.gpu_indices == [0, 1]
+
+    def test_an_auto_split_that_landed_on_one_card_loads(self):
+        """Only "all" promises every card; Auto promised to fit."""
+        model = FakeModel([CUDA1], hf_device_map={"model.embed_tokens": 1, "lm_head": 1})
+        with fake_gpus(*NODE) as fake, _cleanup_mocks():
+            placement = _decide(30_000)
+            assert placement.mode == MODE_SHARD and placement.gpu_indices == [0, 1]
+            loaded, _ = _load(fake, placement, model=model)
+        assert loaded.gpu_indices == [1]
 
 
 class TestWhatTheLoadRecords:

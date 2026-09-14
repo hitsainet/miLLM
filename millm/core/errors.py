@@ -200,6 +200,11 @@ class SplitNotHonouredError(MiLLMError):
 
     Not an INSUFFICIENT_MEMORY: the cards may have room to spare; it is the
     request that cannot be met as asked.
+
+    Also raised (review round 4, 2026-09-14) when a visible card is too full to
+    take any share — the plan used to leave it out and split over the rest — and
+    by the load itself when the preflight could not compute the map ahead and the
+    model landed on fewer cards (`details.before_loading` False).
     """
 
     code = "SPLIT_NOT_HONOURED"

@@ -87,6 +87,15 @@ the preflight now refuses that before anything is unloaded:
          -> test_an_auto_split_that_lands_on_fewer_cards_is_not_refused
   R3-M5c unused cards looked up in the map's own keys (so never any) -> the same three as R3-M5
   R2-M6 re-run (the off-GPU refusal the new check follows) -> the disk-map, loader and pre-check tests
+
+REVIEW ROUND 4, 2026-09-14. Round 3's check looked for an unused card among the
+PLANNED cards, and "all" planned only cards with a budget: a card too full to take
+a share was left out and "all" ran on the rest (TestAllNamesEveryVisibleCard).
+Mutation controls (mutate.py; restored and sha256-verified):
+  R4-M1  decide_placement accepts an "all" that leaves a visible card out
+         -> both TestAllNamesEveryVisibleCard tests (+ the GGUF case in test_gguf_placement.py)
+  R3-M5 re-run (the preflight's own check, now reached only with every card planned)
+         -> the two refusal tests and test_the_pre_check_refuses_it_before_the_unload
 """
 
 from __future__ import annotations
@@ -629,5 +638,50 @@ class TestAllIsHonouredOrRefused:
         assert error["code"] == "SPLIT_NOT_HONOURED"
         assert error["details"]["unused_devices"] == ["cuda:1"]
         assert "cuda:1" in error["message"]
+        assert not svc.unload_model.called
+        assert not svc._executor.method_calls and not svc._executor.called
+
+
+class TestAllNamesEveryVisibleCard:
+    """Review round 4, 2026-09-14. Round 3's check looks for a card with nothing
+    among the cards the PLAN named. plan_shard's "all" uses "every card with any
+    budget", so a card with less than the 1,024 MB overhead free — the 3080 Ti
+    while a miStudio job holds it — was never named: the plan was the 3090 alone,
+    the map filled it, and nothing was unused. Probed on llama-3.2-1b FP16 with
+    card 0 at 900 MB free: planned [1], mapped {"cuda:1": 2,357}, accepted as
+    "all". At 1,100 MB free the same request was refused by round 3's check."""
+
+    BUSY_CARD_0 = ((TI_3080, 900, 12_288), (RTX_3090, 23_500, 24_576))
+
+    def test_a_card_with_no_room_to_take_part_is_refused_not_left_out(self, tmp_path):
+        path = _config_checkpoint(tmp_path, LlamaConfig(**LLAMA32_1B))
+
+        with pytest.raises(SplitNotHonouredError) as raised:
+            _plan(self.BUSY_CARD_0, 2_746, requested="all", cache_path=path)
+
+        details = raised.value.details
+        assert details["unused_devices"] == ["cuda:0"]
+        assert details["requested"] == "all"
+        assert "cuda:0" in raised.value.message and "900 MB" in raised.value.message
+
+    def test_the_pre_check_refuses_it_before_the_unload(self, tmp_path):
+        """The resident model holds 16,000 MB of card 1: projected 900 / 23,500."""
+        from millm.api.dependencies import get_model_service
+
+        model = make_model(
+            id=3, status=ModelStatus.READY, quantization=QuantizationType.FP16,
+            estimated_memory_mb=2_746,
+            cache_path=_config_checkpoint(tmp_path, LlamaConfig(**LLAMA32_1B)),
+        )
+        svc = TestThePreCheckRefusesBeforeTheUnload._service(model)
+        app = create_app()
+        app.dependency_overrides[get_model_service] = lambda: svc
+        with fake_gpus((TI_3080, 900, 12_288), (RTX_3090, 7_500, 24_576)):
+            response = TestClient(app).post("/api/models/3/load", json={"gpu": "all"})
+
+        assert response.status_code == 409, response.text
+        error = response.json()["error"]
+        assert error["code"] == "SPLIT_NOT_HONOURED"
+        assert error["details"]["unused_devices"] == ["cuda:0"]
         assert not svc.unload_model.called
         assert not svc._executor.method_calls and not svc._executor.called

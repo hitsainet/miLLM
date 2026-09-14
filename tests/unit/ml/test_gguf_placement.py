@@ -35,6 +35,11 @@ Phase 2, 2026-09-14 (mutate.py; restored and sha256-verified):
                                                              (and 3 more)
   M29 no CPU fallback when no card has room for its overhead
                                                           -> test_no_card_with_room_for_its_overhead_is_the_cpu
+Review round 4, 2026-09-14 (mutate.py; restored and sha256-verified). "all" left
+out a card with no budget and was accepted over the rest (one card, on this node):
+  R4-M1 decide_placement accepts an "all" that leaves a visible card out
+                                                          -> test_all_with_a_card_that_has_no_room_for_its_overhead_is_refused_not_left_out
+                                                             (and TestAllNamesEveryVisibleCard in test_split_preflight.py)
 """
 
 from unittest.mock import MagicMock, patch
@@ -42,7 +47,12 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from millm.core.config import settings
-from millm.core.errors import GpuNotFoundError, InsufficientMemoryError, ModelLoadError
+from millm.core.errors import (
+    GpuNotFoundError,
+    InsufficientMemoryError,
+    ModelLoadError,
+    SplitNotHonouredError,
+)
 from millm.ml import model_loader
 from millm.ml.gpu_placement import MODE_CPU, MODE_SHARD, MODE_SINGLE
 from tests.support.fake_gpus import RTX_3090, TI_3080, fake_gpus
@@ -108,6 +118,15 @@ class TestPlan:
             with pytest.raises(InsufficientMemoryError) as raised:
                 model_loader.plan_gguf_placement(4_000, SMALL_KV, 32_768, requested="all")
         assert raised.value.details["requested"] == "all"
+
+    def test_all_with_a_card_that_has_no_room_for_its_overhead_is_refused_not_left_out(self, offload):
+        """Review round 4, 2026-09-14. int(1,500 x 0.94) - 2,048 < 0: the 3080 Ti has
+        no budget, and "all" was planned on the 3090 alone and accepted — "all"
+        swapped for one card."""
+        with fake_gpus((TI_3080, 1_500, 12_288), (RTX_3090, 23_000, 24_576)):
+            with pytest.raises(SplitNotHonouredError) as raised:
+                model_loader.plan_gguf_placement(4_000, SMALL_KV, 32_768, requested="all")
+        assert raised.value.details["unused_devices"] == ["cuda:0"]
 
     def test_no_card_with_room_for_its_overhead_is_the_cpu(self, offload):
         with fake_gpus((TI_3080, 2_000, 12_288), (RTX_3090, 2_000, 24_576)):

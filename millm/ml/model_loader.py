@@ -710,26 +710,49 @@ def preflight_split(
 
 
 def _split_not_honoured(
-    model_name: str, placement: Placement, unused: list[str], mapped_mb: dict[str, int]
+    model_name: str,
+    placement: Placement,
+    unused: list[str],
+    mapped_mb: Optional[dict[str, int]] = None,
+    landed_on: Optional[list[str]] = None,
 ) -> SplitNotHonouredError:
-    """The refusal for an "all" whose real device map leaves a card with none of the model."""
+    """The refusal for an "all" that leaves a card with none of the model.
+
+    With `mapped_mb`, found by the preflight from the map before any weight was
+    read; with `landed_on` instead, found where the loaded model actually is,
+    because the preflight could not compute the map ahead (review round 4).
+    """
     max_memory = placement.transformers_max_memory() or {}
-    layout = ", ".join(f"{label} {mb} MB" for label, mb in sorted(mapped_mb.items()))
-    return SplitNotHonouredError(
-        f"{model_name} cannot be split across every GPU as requested: transformers would put "
-        f"none of it on {', '.join(unused)} ({layout}). A split places whole layers in index "
-        "order and keeps room for the largest one free on the lowest-index card, so with this "
-        "much free memory at least one card takes nothing. Nothing was unloaded. Choose Auto "
-        "or a named card.",
-        details={
-            "requested": placement.requested,
-            "unused_devices": unused,
-            "mapped_mb_by_device": dict(sorted(mapped_mb.items())),
-            "max_memory": {f"cuda:{index}": value for index, value in sorted(max_memory.items())},
-            "placement": placement.to_dict(),
-            "before_loading": True,
-        },
+    details: dict[str, Any] = {
+        "requested": placement.requested,
+        "unused_devices": unused,
+        "max_memory": {f"cuda:{index}": value for index, value in sorted(max_memory.items())},
+        "placement": placement.to_dict(),
+        "before_loading": mapped_mb is not None,
+    }
+    why = (
+        "A split places whole layers in index order and keeps room for the largest one free "
+        "on the lowest-index card, so with this much free memory at least one card takes "
+        "nothing."
     )
+    if mapped_mb is not None:
+        layout = ", ".join(f"{label} {mb} MB" for label, mb in sorted(mapped_mb.items()))
+        details["mapped_mb_by_device"] = dict(sorted(mapped_mb.items()))
+        message = (
+            f"{model_name} cannot be split across every GPU as requested: transformers would "
+            f"put none of it on {', '.join(unused)} ({layout}). {why} Nothing was unloaded. "
+            "Choose Auto or a named card."
+        )
+    else:
+        details["landed_on_devices"] = sorted(landed_on or [])
+        message = (
+            f"{model_name} was loaded to split across every GPU as requested, and transformers "
+            f"put none of it on {', '.join(unused)} (it landed on "
+            f"{', '.join(sorted(landed_on or [])) or 'no GPU'}). {why} The layout could not be "
+            "worked out before loading, so the model served before this one was already "
+            "unloaded; this load has been released. Choose Auto or a named card."
+        )
+    return SplitNotHonouredError(message, details=details)
 
 
 def _off_gpu_refusal(
@@ -1246,6 +1269,19 @@ class ModelLoadContext:
         off_gpu = [label for label in device_labels if label in OFF_GPU_LABELS]
         if off_gpu and placement.mode != MODE_CPU:
             raise _off_gpu_refusal(self.model_name, placement, off_gpu, device_labels)
+
+        # REFUSE an "all" that landed on fewer cards than it names. preflight_split
+        # refuses that before any weight is read, but it SKIPS whenever it cannot
+        # compute the map (no readable config, a class that will not build on the
+        # meta device, a quantizer whose package is missing), and nothing here
+        # checked for "all": such a load recorded "all" and ran on fewer cards.
+        # Review round 4, 2026-09-14. Auto is not checked: it only promised to fit.
+        if placement.reason == REASON_REQUESTED_ALL:
+            unused = [label for label in placement.device_labels if label not in device_labels]
+            if unused:
+                raise _split_not_honoured(
+                    self.model_name, placement, unused, landed_on=device_labels
+                )
 
         # Memory used, per card: the drop in free memory (mem_get_info sees
         # bitsandbytes allocations too) on every card the model now occupies.

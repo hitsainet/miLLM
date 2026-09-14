@@ -31,6 +31,8 @@ Review round 2, 2026-09-14 (mutate.py; restored and sha256-verified):
       -> both unload tests and test_a_model_change_releases_the_draft_so_the_next_lands_beside_the_new_model
   M9 re-run (_release_draft_model keeps the draft)
       -> test_a_model_change_releases_the_draft_..., test_no_draft_is_loaded_between_the_unload_...
+  R1-M2 re-run (on_model_loaded was edited; its split guard -> False)
+      -> test_a_split_model_does_not_start_the_manager
 """
 
 from types import SimpleNamespace

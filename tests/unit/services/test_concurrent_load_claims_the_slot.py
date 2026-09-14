@@ -169,3 +169,79 @@ class TestTheSlotIsSharedAcrossRequests:
             with pytest.raises(ModelBusyError):
                 asyncio.run(later.load_model(4))
         assert later._executor.calls == []
+
+
+class TestThePrecheckDoesNotBlockTheEventLoop:
+    """The pre-check reads the cards through nvidia-smi (up to a 5 s timeout).
+
+    Review round 3, 2026-09-14: it ran inline in the async request, stalling the
+    event loop — and every request with it — on each load.
+
+    MUTATION CONTROL, verified red then restored:
+      * `await asyncio.to_thread(_precheck)` -> `_precheck()` -> this test fails
+    """
+
+    def test_the_precheck_runs_off_the_event_loop_thread(self):
+        import threading
+
+        svc = _service(_yield)
+        seen = {}
+
+        def record_thread(_model, _wanted):
+            seen["precheck"] = threading.get_ident()
+
+        svc._precheck_placement = record_thread
+
+        async def load():
+            seen["loop"] = threading.get_ident()
+            await svc.load_model(3)
+
+        with fake_gpus(*NODE):
+            asyncio.run(load())
+
+        assert "precheck" in seen, "the pre-check never ran"
+        assert seen["precheck"] != seen["loop"], "the pre-check ran on the event loop thread"
+
+
+class TestAStartThatFailsAfterLoadingPutsTheRowBack:
+    """A failure between LOADING and submitting the background load.
+
+    Review round 3, 2026-09-14: the slot was released but the row stayed
+    LOADING, and `load_model` refuses a LOADING model as busy — so that model
+    could not be loaded again until miLLM restarted.
+
+    MUTATION CONTROL, verified red then restored:
+      * drop the restore in the except block -> both tests fail
+    """
+
+    def _failing_emitter(self, svc, error):
+        svc.emitter = MagicMock()
+        svc.emitter.emit_load_progress = AsyncMock(side_effect=error)
+
+    def _statuses(self, svc):
+        return [c.kwargs.get("status") for c in svc.repository.update_status.await_args_list]
+
+    def test_an_error_leaves_the_row_in_error_not_loading(self):
+        svc = _service(_yield)
+        self._failing_emitter(svc, RuntimeError("socket down"))
+
+        with fake_gpus(*NODE):
+            with pytest.raises(RuntimeError, match="socket down"):
+                asyncio.run(svc.load_model(3))
+
+        statuses = self._statuses(svc)
+        assert statuses[-2:] == [ModelStatus.LOADING, ModelStatus.ERROR], statuses
+        assert svc._loading_model_id is None
+        assert svc._executor.calls == []
+
+    def test_a_cancelled_start_leaves_the_row_ready(self):
+        svc = _service(_yield)
+        self._failing_emitter(svc, asyncio.CancelledError())
+
+        with fake_gpus(*NODE):
+            with pytest.raises(asyncio.CancelledError):
+                asyncio.run(svc.load_model(3))
+
+        statuses = self._statuses(svc)
+        assert statuses[-2:] == [ModelStatus.LOADING, ModelStatus.READY], statuses
+        assert svc._loading_model_id is None

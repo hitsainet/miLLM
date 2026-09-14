@@ -814,6 +814,9 @@ class ModelService:
                 details={"loading_model_id": self._loading_model_id},
             )
         self._loading_model_id = model_id
+        # Whether this request has set the row to LOADING, so a failure before
+        # the background load is submitted can put it back (see the except).
+        marked_loading = False
 
         try:
             # The card, checked NOW: before any state below changes, and above
@@ -824,7 +827,15 @@ class ModelService:
                 wanted = parse_gpu_request(gpu)
             except ValueError as e:
                 raise GpuNotFoundError(str(e), details={"requested": gpu}) from e
-            self._precheck_placement(model, wanted)
+
+            def _precheck() -> None:
+                self._precheck_placement(model, wanted)
+
+            # IN A WORKER THREAD. The pre-check reads the cards through
+            # nvidia-smi, which can take up to its five-second timeout; called
+            # inline it stalled the event loop, and every request with it, on
+            # each load. Review round 3, 2026-09-14.
+            await asyncio.to_thread(_precheck)
 
             if model.status == ModelStatus.ERROR:
                 # Allow retry from error state - reset to ready first
@@ -849,6 +860,7 @@ class ModelService:
 
             # Update status to LOADING
             model = await self.repository.update_status(model_id, status=ModelStatus.LOADING)
+            marked_loading = True
 
             logger.info(
                 "load_started",
@@ -883,11 +895,29 @@ class ModelService:
                 (model.gguf_files or [None])[0],
                 wanted,
             )
-        except BaseException:
+        except BaseException as exc:
             # Nothing was submitted, so no worker's `finally` will release the
             # slot. Without this a refused or failed load left the service
             # refusing every later load as busy.
             self._release_load_slot(model_id)
+            if marked_loading:
+                # ...and no worker will move the row off LOADING, which this
+                # method refuses as busy: that model could not be loaded again
+                # until miLLM restarted. A cancelled start is not a failure.
+                # Review round 3, 2026-09-14.
+                cancelled = isinstance(exc, (asyncio.CancelledError, KeyboardInterrupt))
+                try:
+                    await self.repository.update_status(
+                        model_id,
+                        status=ModelStatus.READY if cancelled else ModelStatus.ERROR,
+                        error_message=None if cancelled else f"Load did not start: {exc}",
+                    )
+                except Exception as restore_error:  # noqa: BLE001 - never mask the original error
+                    logger.warning(
+                        "load_status_restore_failed",
+                        model_id=model_id,
+                        error=str(restore_error),
+                    )
             raise
 
         return model

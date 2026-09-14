@@ -16,6 +16,9 @@ Phase 2, 2026-09-14 (mutate.py; restored and sha256-verified):
       -> test_the_batch_sizing_reads_the_layer_split_from_the_model
   M14 drop the embedding leaf-name match
       -> test_a_nested_multimodal_model_sends_inputs_to_its_embedding_card
+Review round 1, 2026-09-14 (mutate.py; restored and sha256-verified):
+  R1-M2 on_model_loaded starts continuous batching on a split model again (guard -> False)
+      -> test_a_split_model_does_not_start_the_manager
 """
 
 from types import SimpleNamespace
@@ -148,3 +151,30 @@ class TestKvCacheFit:
             (300, 0),
             (900, 1),
         ]
+
+
+class TestContinuousBatchingOnASplitModel:
+    """transformers' PagedAttentionCache puts every layer's KV blocks on
+    `model.device` (5.15.1 continuous_api.py:1001, cache.py:257). The layers of a
+    split model on the other card would use a cache that is not on their card, so
+    the manager is not started and requests take the serial path."""
+
+    @staticmethod
+    def _svc(gpu_indices):
+        svc = _service(MagicMock(name="model"), gpu_indices)
+        svc._model_state.current.supports_hooks = True
+        svc._model_state.current.engine = "transformers"
+        svc._cbm_backend = MagicMock(name="cbm")
+        return svc
+
+    def test_a_split_model_does_not_start_the_manager(self):
+        svc = self._svc([0, 1])
+        svc.on_model_loaded()
+        assert svc._cbm_backend.start.call_count == 0
+
+    def test_a_single_card_model_still_starts_it_with_that_model(self):
+        svc = self._svc([1])
+        svc.on_model_loaded()
+        current = svc._model_state.current
+        assert svc._cbm_backend.start.call_count == 1
+        assert svc._cbm_backend.start.call_args.args == (current.model, current.tokenizer)

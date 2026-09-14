@@ -58,6 +58,7 @@ Requests acquire a slot in a semaphore-guarded queue (`MAX_CONCURRENT_REQUESTS`,
 | Per-request profiles | Not supported in batch — such requests **fall back to serial** |
 | Monitoring attribution | Batch slots ≠ request IDs; set `CBM_FORCE_SERIAL_MONITORING=true` for exact attribution |
 | Steering | Applies to the whole batch (it's global state) |
+| Model split across GPUs | The manager is **not started**; every request is served serially. Its paged KV cache lives on one device, which the layers on the other cards cannot use |
 
 `GET /api/health/inference` reports which backend is active and its capabilities.
 

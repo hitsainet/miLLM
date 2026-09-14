@@ -105,4 +105,4 @@ Choose **All GPUs (split)** in the GPU selector, or send `"gpu": "all"`, to spli
 
 A GGUF model that needs more than one card uses a llama.cpp layer split over the cards the plan chose, and the other cards get none of it. By default, layers are divided in proportion to each card's free memory. [`GGUF_TENSOR_SPLIT`](/reference/configuration#gguf-models) sets the proportions yourself.
 
-SAEs attach on the device that hosts their layer, and steering and monitoring work unchanged on a split model.
+SAEs attach on the device that hosts their layer, and steering and monitoring work unchanged on a split model. Continuous batching (`ENABLE_CONTINUOUS_BATCHING`) is not started for a split model: its paged KV cache lives on one card, so requests are served one at a time instead.

@@ -678,6 +678,20 @@ class InferenceService:
                     engine=self._model_state.current.engine,
                 )
                 return
+            gpu_indices = list(getattr(self._model_state.current, "gpu_indices", None) or [])
+            if len(gpu_indices) > 1:
+                # transformers' PagedAttentionCache puts every layer's KV blocks
+                # on ONE device, `model.device` (transformers 5.15.1
+                # continuous_api.py:1001, cache.py:257). The layers of a split
+                # model that live on another card would write and read a cache
+                # that is not on their card, so every request through the
+                # manager fails inside its background thread. The serial path
+                # runs through accelerate's dispatch hooks and serves a split
+                # model correctly. Review round 1, 2026-09-14.
+                logger.info(
+                    "cbm_skipped", reason="model_split_across_gpus", gpu_indices=gpu_indices
+                )
+                return
             try:
                 model = self._model_state.current.model
                 tokenizer = self._model_state.current.tokenizer

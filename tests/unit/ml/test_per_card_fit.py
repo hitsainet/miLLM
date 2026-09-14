@@ -33,10 +33,11 @@ Weights, by hand:
                       28 x 2 x 4 x 128 x 2 B x 4,096 = 224 MiB. One card needs
                       14,526 + 224 + 500 = 15,250; the slack's row estimate was
                       7.6B x 2 B x 1.2 = 17,395.
-The per-card layouts of Qwen2.5-14B and OLMo-2-13B are transformers' own map over
-max_memory 10,476 / 22,476 (free less SHARD_RESERVE_MB), the map review round 3
-measured: Qwen2.5-14B 8,836 MiB and 14 layers on cuda:0, 19,337 and 34 on cuda:1;
-OLMo-2-13B 9,451 and 14 / 16,712 and 26 (MiB rounded up once per card, review round 5).
+The per-card layouts are transformers' own map over max_memory 11,000 / 23,000: each
+card's free memory less its 500 MB CUDA context (review round 5 replaced SHARD_RESERVE_MB
+in a sized split's budget, and re-plans a split whose card is short; test_fit_rebalance.py).
+Qwen2.5-14B: 9,361 MiB and 15 layers on cuda:0, 18,812 and 33 on cuda:1. OLMo-2-13B:
+9,451 and 14 / 16,712 and 26 (MiB rounded up once per card).
 
 MUTATION CONTROLS (mutate.py; each restored and its sha256 verified; the placement,
 preflight, load, API and wiring test files run, 323 tests):
@@ -215,13 +216,13 @@ class TestThePlacement:
         placement, cards = _accepted_cards(NODE, path)
 
         assert placement.mode == MODE_SHARD
-        assert placement.transformers_max_memory() == {0: "10476MiB", 1: "22476MiB"}
+        assert placement.transformers_max_memory() == {0: "11000MiB", 1: "23000MiB"}
         assert cards["cuda:0"] == {
-            "device": "cuda:0", "name": TI_3080, "free_mb": 11_500, "weights_mb": 8_836,
-            "kv_mb": 224, "context_mb": 500, "layers": 14, "need_mb": 9_560, "short_mb": 0,
+            "device": "cuda:0", "name": TI_3080, "free_mb": 11_500, "weights_mb": 9_361,
+            "kv_mb": 240, "context_mb": 500, "layers": 15, "need_mb": 10_101, "short_mb": 0,
         }
-        assert (cards["cuda:1"]["weights_mb"], cards["cuda:1"]["layers"], cards["cuda:1"]["kv_mb"]) == (19_337, 34, 544)
-        assert cards["cuda:1"]["need_mb"] == 20_381
+        assert (cards["cuda:1"]["weights_mb"], cards["cuda:1"]["layers"], cards["cuda:1"]["kv_mb"]) == (18_812, 33, 528)
+        assert cards["cuda:1"]["need_mb"] == 19_840
 
     def test_qwen25_14b_is_refused_where_cuda1_cannot_hold_a_32k_context(self, tmp_path):
         """Qwen2.5-14B serves 32,768 tokens. cuda:1 needs 19,337 + 34 layers x 128 MiB
@@ -287,16 +288,19 @@ class TestThePlacement:
         assert "not swapped for another one" in raised.value.message
 
     def test_the_cuda_context_allowance_is_read(self, tmp_path):
-        """With 3,000 MB a card, 14,526 + 224 + 3,000 = 17,750 no longer fits card 1's 17,000."""
+        """With 3,000 MB a card, one card needs 14,526 + 224 + 3,000 = 17,750, more than
+        card 1's 17,000, so the model splits — and each card of the split keeps its
+        3,000: budgets 11,500 - 3,000 and 17,000 - 3,000."""
         path = _save(tmp_path, Qwen2Config(**QWEN25_7B))
         cards = ((TI_3080, 11_500, 12_288), (RTX_3090, 17_000, 24_576))
 
-        with patch.object(settings, "TRANSFORMERS_CUDA_CONTEXT_MB", 3_000), \
-                pytest.raises(InsufficientMemoryError) as raised:
-            _plan(cards, path)
+        with patch.object(settings, "TRANSFORMERS_CUDA_CONTEXT_MB", 3_000):
+            placement, by_device = _accepted_cards(cards, path)
 
-        assert raised.value.details["cuda_context_mb"] == 3_000
-        assert all(card["context_mb"] == 3_000 for card in raised.value.details["per_card"])
+        assert placement.mode == MODE_SHARD
+        assert placement.transformers_max_memory() == {0: "8500MiB", 1: "14000MiB"}
+        assert [card["context_mb"] for card in by_device.values()] == [3_000, 3_000]
+        assert all(card["need_mb"] <= card["free_mb"] for card in by_device.values())
 
     def test_an_architecture_whose_cache_cannot_be_sized_keeps_the_slack_loudly(self, tmp_path):
         config = DeepseekV3Config(num_hidden_layers=4, kv_lora_rank=128)

@@ -214,11 +214,11 @@ class TestThePreflightReadsTheRealMap:
     def test_the_same_split_with_room_for_lm_head_maps_onto_the_gpus(self, tmp_path):
         path = _checkpoint(tmp_path)
         placement = _plan(ROOMY, cache_path=path)
-        assert placement.transformers_max_memory() == {0: "10476MiB", 1: "23476MiB"}
+        assert placement.transformers_max_memory() == {0: "11000MiB", 1: "24000MiB"}
 
         assert preflight_split("wide-16", path, "FP16", placement) == {
-            "cuda:0": 6_901,
-            "cuda:1": 23_221,
+            "cuda:0": 8_533,
+            "cuda:1": 21_589,
         }
 
     def test_nothing_to_compute_is_not_a_refusal(self, tmp_path):
@@ -274,7 +274,7 @@ class TestTheLoaderRefusesBeforeReadingAWeight:
             )
         assert context.__enter__.return_value.load.call_count == 1
         placement = context.__enter__.return_value.load.call_args.kwargs["placement"]
-        assert placement.transformers_max_memory() == {0: "10476MiB", 1: "23476MiB"}
+        assert placement.transformers_max_memory() == {0: "11000MiB", 1: "24000MiB"}
 
 
 class TestThePreCheckRefusesBeforeTheUnload:
@@ -519,8 +519,9 @@ class TestACheckpointTransformersDequantizesIsSizedAsItLoads:
     of these cards (budgets 10,476 + 22,476 = 32,952 MB) holds it.
 
     Since Decision 7 (2026-09-14) the plan sizes it as it loads and judges it per
-    card, with no x1.2. Dequantized: 30,121 MiB, which no card holds, and the
-    split's map is WIDE's FP16 map, lm_head on disk. Kept in FP8: each layer's
+    card, with no x1.2. Dequantized: 30,121 MiB, which no card holds, so it splits
+    (round 4's 1,024 MB reserve per card put lm_head on disk; review round 5 budgets
+    each card at free less its CUDA context, and the split holds it). Kept in FP8: each layer's
     linears 855,638,016 B at 1 B, their block scales (128 x 128 blocks: q, o
     4,096; k, v 512; gate, up, down 14,336 -> 52,224 x 4 B) and two bf16 norms
     (32,768 B) = 855,879,680 B; 16 layers + bf16 embed_tokens and lm_head
@@ -539,14 +540,16 @@ class TestACheckpointTransformersDequantizesIsSizedAsItLoads:
         return path
 
     def test_dequantized_on_these_cards_it_is_not_placed_on_one(self, tmp_path):
+        import millm.ml.model_loader as module
+
         path = self._fp8_checkpoint(tmp_path)
-        with patch("torch.cuda.get_device_capability", return_value=(8, 6)):
-            with pytest.raises(InsufficientMemoryError) as raised:
-                _plan(self.CARDS, 19_660, cache_path=path)
-        details = raised.value.details
-        assert details["weights_mb"] == 30_121
-        assert details["off_gpu"] == ["disk"]
-        assert details["mapped_mb_by_device"] == {"cuda:0": 6_901, "cuda:1": 21_217, "disk": 2_004}
+        with patch("torch.cuda.get_device_capability", return_value=(8, 6)), \
+                patch.object(module, "logger") as logger:
+            placement = _plan(self.CARDS, 19_660, cache_path=path)
+        assert placement.mode == MODE_SHARD
+        [accepted] = [c for c in logger.info.call_args_list if c.args == ("transformers_fit_split_accepted",)]
+        weights = {card["device"]: card["weights_mb"] for card in accepted.kwargs["per_card"]}
+        assert weights == {"cuda:0": 8_533, "cuda:1": 21_589}, "30,122 MiB of bf16 across both cards"
 
     def test_kept_in_fp8_it_is_sized_by_what_it_stores(self, tmp_path):
         """On a card that runs FP8 the checkpoint is not refused for a bf16 size
@@ -588,16 +591,18 @@ class TestAllIsHonouredOrRefused:
     the equivalence-check model — whenever the 3080 Ti was busy. Both of
     plan_shard's "all" branches do it, including round 2's index-order one.
 
-    Plan figures, worked by hand (limits = free - 1,024):
-      Qwen2.5-7B Q4, cards 11,500 / 23,500, sized as it loads (Decision 7):
+    Plan figures, worked by hand:
+      Qwen2.5-7B Q4, cards 11,500 / 23,500, sized as it loads (Decision 7) and
+        budgeted per card (review round 5: limits = free - the 500 MB CUDA context):
         a layer's 4-bit linears 233,046,016 params x 0.5 B + bf16 biases and
         norms 23,552 B = 116,546,560 B; 28 layers + bf16 embed_tokens and lm_head
-        1,089,994,752 B each + final norm 7,168 B = 5,443,300,352 B = 5,191 MiB.
-        bitsandbytes budgets int(x 0.9) = 9,428 / 20,228; 5,191 <= 9,428, so
-        proportional: card 0 share ceil(5,191 x 9,428 / 29,656) = 1,651 ->
-        max_memory ceil(1,651 / 0.9) = 1,835. transformers gives 1,651 back; the
-        untied embedding stays bf16 at 1,039 MiB and is held back as the largest
-        layer, so no layer fits card 0. (Round 3 planned the row's 4,348: 1,537.)
+        1,089,994,752 B each + final norm 7,168 B = 5,443,300,352 B = 5,192 MiB
+        rounded up; need 5,192 + 224 MiB of KV = 5,416. bitsandbytes budgets
+        int(x 0.9) = 9,900 / 20,700; 5,416 <= 9,900, so proportional: card 0 share
+        ceil(5,416 x 9,900 / 30,600) = 1,753 -> max_memory ceil(1,753 / 0.9) = 1,948.
+        transformers gives 1,753 back and holds room for the largest layer, the
+        untied bf16 embedding (1,039 MiB), so the embedding — first in order — does
+        not fit card 0, and nothing lands there. (Round 3 planned the row's 4,348.)
       gemma-3-1b FP16, cards 3,000 / 23,500, row estimate 2,288: limits 1,976 /
         22,476; 2,288 > 1,976, so round 2's index-order branch: card 0 whole
         (1,976). The ~1,907 MiB of weights fit it, and card 1 gets nothing.
@@ -607,18 +612,19 @@ class TestAllIsHonouredOrRefused:
     BUSY = ((TI_3080, 3_000, 12_288), (RTX_3090, 23_500, 24_576))
 
     def test_a_card_whose_share_holds_no_layer_is_refused(self, tmp_path):
+        """Refused by the plan itself, from the layout the per-card fit computes
+        (review round 5); the preflight refused it one step later before."""
         from transformers import Qwen2Config
 
         path = _config_checkpoint(tmp_path, Qwen2Config(**QWEN25_7B))
-        placement = _plan(self.IDLE, 4_348, "Q4", requested="all", cache_path=path)
-        assert placement.transformers_max_memory() == {0: "1835MiB", 1: "22476MiB"}
 
         with pytest.raises(SplitNotHonouredError) as raised:
-            preflight_split("qwen2.5-7b", path, "Q4", placement)
+            _plan(self.IDLE, 4_348, "Q4", requested="all", cache_path=path)
 
         details = raised.value.details
         assert details["unused_devices"] == ["cuda:0"]
-        assert set(details["mapped_mb_by_device"]) == {"cuda:1"}
+        assert details["max_memory"] == {"cuda:0": "1948MiB", "cuda:1": "23000MiB"}
+        assert details["mapped_mb_by_device"] == {"cuda:1": 5_192}
         assert details["before_loading"] is True
 
     def test_a_first_card_that_holds_the_whole_model_is_refused(self, tmp_path):
@@ -684,9 +690,12 @@ class TestAllIsHonouredOrRefused:
 
     def test_the_pre_check_refuses_it_before_the_unload(self, tmp_path):
         """The resident model holds 16,000 MB of card 1: projected 3,000 / 23,500.
-        Sized as it loads (Decision 7), gemma-3-1b is 1,907 MiB: limits 1,976 /
-        22,476, 1,907 <= 1,976, so proportional: card 0 share ceil(1,907 x 1,976
-        / 24,452) = 155, under its 576 MiB embedding — card 0 takes nothing."""
+        Sized as it loads (Decision 7), gemma-3-1b is 1,908 MiB of weights and 104 of
+        KV cache at 4,096 tokens; budgeted per card (review round 5) the limits are
+        free less the 500 MB context, 2,500 / 23,000, and 2,012 <= 2,500, so
+        proportional: card 0 share ceil(2,012 x 2,500 / 25,500) = 198, under its
+        576 MiB embedding — card 0 takes nothing, and the plan refuses it from the
+        layout."""
         from transformers import Gemma3TextConfig
 
         from millm.api.dependencies import get_model_service
@@ -718,9 +727,14 @@ class TestAllNamesEveryVisibleCard:
     while a miStudio job holds it — was never named: the plan was the 3090 alone,
     the map filled it, and nothing was unused. Probed on llama-3.2-1b FP16 with
     card 0 at 900 MB free: planned [1], mapped {"cuda:1": 2,357}, accepted as
-    "all". At 1,100 MB free the same request was refused by round 3's check."""
+    "all". At 1,100 MB free the same request was refused by round 3's check.
 
-    BUSY_CARD_0 = ((TI_3080, 900, 12_288), (RTX_3090, 23_500, 24_576))
+    Since review round 5 a sized split budgets each card at its free memory less
+    its 500 MB CUDA context, so a card too full to take any share is one with 500 MB
+    free or less: 400 MB here. A card whose budget is too small for any layer (900 MB)
+    is refused from the layout instead (TestAllIsHonouredOrRefused)."""
+
+    BUSY_CARD_0 = ((TI_3080, 400, 12_288), (RTX_3090, 23_500, 24_576))
 
     def test_a_card_with_no_room_to_take_part_is_refused_not_left_out(self, tmp_path):
         path = _config_checkpoint(tmp_path, LlamaConfig(**LLAMA32_1B))
@@ -731,10 +745,10 @@ class TestAllNamesEveryVisibleCard:
         details = raised.value.details
         assert details["unused_devices"] == ["cuda:0"]
         assert details["requested"] == "all"
-        assert "cuda:0" in raised.value.message and "900 MB" in raised.value.message
+        assert "cuda:0" in raised.value.message and "400 MB" in raised.value.message
 
     def test_the_pre_check_refuses_it_before_the_unload(self, tmp_path):
-        """The resident model holds 16,000 MB of card 1: projected 900 / 23,500."""
+        """The resident model holds 16,000 MB of card 1: projected 400 / 23,500."""
         from millm.api.dependencies import get_model_service
 
         model = make_model(
@@ -745,7 +759,7 @@ class TestAllNamesEveryVisibleCard:
         svc = TestThePreCheckRefusesBeforeTheUnload._service(model)
         app = create_app()
         app.dependency_overrides[get_model_service] = lambda: svc
-        with fake_gpus((TI_3080, 900, 12_288), (RTX_3090, 7_500, 24_576)):
+        with fake_gpus((TI_3080, 400, 12_288), (RTX_3090, 7_500, 24_576)):
             response = TestClient(app).post("/api/models/3/load", json={"gpu": "all"})
 
         assert response.status_code == 409, response.text

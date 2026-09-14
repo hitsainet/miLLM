@@ -10,7 +10,7 @@ import threading
 from pathlib import Path
 from dataclasses import dataclass, field
 from datetime import datetime
-from typing import Any, Iterable, Optional
+from typing import Any, Callable, Iterable, Optional
 
 import structlog
 import torch
@@ -3079,58 +3079,169 @@ def per_card_fit_refusal(
     )
 
 
-def _check_split_fit(fit: TransformersFit, placement: Placement) -> Placement:
-    """Accept a split only when transformers' own map leaves each used card room for its context."""
-    if not placement.gpu_indices:
-        raise shard_refusal(placement, fit.weights_mb, "No GPU has memory to spare for it.")
-    layout = fit.layout(placement)
-    if layout is None:
-        # The map could not be computed here, and it was logged as an error:
-        # this split is judged by the slack it replaced.
-        need = int(fit.weights_mb * MEMORY_OVERHEAD_FACTOR)
-        if placement.budget_mb < need:
-            raise shard_refusal(
-                placement,
-                need,
-                "Its layout could not be worked out here, so it was judged by the 20% slack. "
-                "A transformers model is never offloaded to the CPU or disk.",
-            )
-        return placement
-    if layout.engine_message is not None:
-        raise _off_gpu_refusal(
-            fit.architecture, placement, list(layout.off_gpu), [],
-            engine_message=layout.engine_message, before_loading=True,
-        )
-    by_index = {gpu.index: gpu for gpu in placement.gpus}
-    cards = [
-        fit.card(by_index[index], layout.weights_mb[label], layout.layers.get(label, ()))
-        for index in placement.gpu_indices
-        if (label := f"cuda:{index}") in layout.weights_mb
-    ]
-    off_gpu_mb = {label: layout.weights_mb[label] for label in layout.off_gpu}
-    if off_gpu_mb or not all(card.fits for card in cards):
-        where = (
-            f"{sum(off_gpu_mb.values())} MiB would be placed on {', '.join(off_gpu_mb)}, and a "
-            "transformers model is never offloaded. " if off_gpu_mb else ""
-        )
-        raise per_card_fit_refusal(
-            fit,
-            cards,
-            where + "Free memory on the cards, lower TRANSFORMERS_MIN_CONTEXT, choose a smaller "
-            "quantization, or serve it as GGUF.",
-            requested=placement.requested,
-            gpus=placement.gpus,
-            placement=placement,
-            off_gpu_mb=off_gpu_mb,
-            mapped_mb_by_device=layout.weights_mb,
-        )
-    logger.info(
-        "transformers_fit_split_accepted",
-        architecture=fit.architecture,
-        per_card=[card.to_dict() for card in cards],
-        min_context_tokens=fit.min_context,
+#: How many times a split may be re-planned around its KV cache before it is refused.
+#: Each pass is one map inference on the meta model (milliseconds). A card's limit
+#: only ever falls, so a map never repeats and the search ends on its own; this
+#: bounds it anyway. Review round 5, 2026-09-14.
+FIT_REBALANCE_MAX_PASSES = 32
+
+
+def kv_aware_shard_rule(
+    fit: TransformersFit, max_memory_factor: float, lowered_mb: Optional[dict[int, int]] = None
+) -> ShardRule:
+    """How the per-card fit sizes a split: weights plus KV cache, each card's free memory less its CUDA context.
+
+    `lowered_mb` holds the limits the rebalance has cut for cards that were
+    short; every other card keeps free memory less TRANSFORMERS_CUDA_CONTEXT_MB.
+    The need includes the whole KV cache, so Auto takes enough cards for the
+    cache as well as the weights. The slack's rule (free less SHARD_RESERVE_MB,
+    need = weights) is kept for checkpoints the fit cannot size.
+    """
+    lowered = dict(lowered_mb or {})
+    return ShardRule(
+        need_mb=fit.weights_mb + fit.kv_mb(),
+        limit_mb=lambda gpu: lowered.get(gpu.index, max(gpu.free_mb - fit.context_mb, 0)),
+        max_memory_factor=max_memory_factor,
+        fill_in_index_order=True,
     )
-    return placement
+
+
+def _check_split_fit(
+    fit: TransformersFit,
+    plan: Callable[[ShardRule], Placement],
+    max_memory_factor: float = 1.0,
+) -> Placement:
+    """A split whose every card holds its weights, its layers' KV cache and its CUDA context — re-planned until it does.
+
+    Each pass plans the split (`plan`, the Auto or "all" planner) under
+    kv_aware_shard_rule and computes transformers' own map for it. When every
+    card fits, that placement is the answer. When a card is short, its limit is
+    cut by its shortfall — doubled while the map does not move on that card —
+    and the split is planned again, so layers move to the cards with room.
+    Review round 5, 2026-09-14: round 4 refused OLMo-2-13B-shaped splits with
+    cuda:0 hundreds of MiB short while cuda:1 had gigabytes spare.
+
+    Deterministic, bounded and never overcommitting: limits only fall, so the
+    search cannot cycle; it stops after FIT_REBALANCE_MAX_PASSES; and a placement
+    is returned only when transformers' map for exactly that placement fits every
+    card. A split that moving layers cannot fix — the cards together are short, or
+    a cut would leave a card nothing — is refused with the last on-GPU figures.
+    """
+    lowered: dict[int, int] = {}
+    steps: dict[int, int] = {}
+    seen_weights: dict[int, int] = {}
+    last_on_gpu: Optional[tuple[Placement, list[CardFit]]] = None
+    for attempt in range(1, FIT_REBALANCE_MAX_PASSES + 1):
+        placement = plan(kv_aware_shard_rule(fit, max_memory_factor, lowered))
+        if not placement.gpu_indices:
+            raise shard_refusal(placement, fit.weights_mb, "No GPU has memory to spare for it.")
+        layout = fit.layout(placement)
+        if layout is None:
+            # The map could not be computed here (logged by layout): this split is
+            # judged by the slack Decision 7 replaced, and says so.
+            _fit_falls_back(fit.architecture, "the layout of its split could not be worked out here")
+            need = int(fit.weights_mb * MEMORY_OVERHEAD_FACTOR)
+            if placement.budget_mb < need:
+                raise shard_refusal(
+                    placement,
+                    need,
+                    "Its layout could not be worked out here, so it was judged by the 20% slack. "
+                    "A transformers model is never offloaded to the CPU or disk.",
+                )
+            return placement
+        if layout.engine_message is not None and last_on_gpu is None:
+            raise _off_gpu_refusal(
+                fit.architecture, placement, list(layout.off_gpu), [],
+                engine_message=layout.engine_message, before_loading=True,
+            )
+        if placement.reason == REASON_REQUESTED_ALL and not layout.off_gpu:
+            # "all" is honoured or refused, never narrowed. A card the map leaves
+            # empty — its budget holds no layer, or a cut left it none — is refused
+            # here from the layout, rather than accepted and caught by the preflight.
+            unused = [label for label in placement.device_labels if label not in layout.weights_mb]
+            if unused:
+                raise _split_not_honoured(fit.architecture, placement, unused, layout.weights_mb)
+        by_index = {gpu.index: gpu for gpu in placement.gpus}
+        cards = [
+            fit.card(by_index[index], layout.weights_mb[label], layout.layers.get(label, ()))
+            for index in placement.gpu_indices
+            if (label := f"cuda:{index}") in layout.weights_mb
+        ]
+        off_gpu_mb = {label: layout.weights_mb.get(label, 0) for label in layout.off_gpu}
+        off_gpu = bool(off_gpu_mb) or layout.engine_message is not None
+        short = [card for card in cards if not card.fits]
+        if not off_gpu and not short:
+            logger.info(
+                "transformers_fit_split_accepted",
+                architecture=fit.architecture,
+                per_card=[card.to_dict() for card in cards],
+                min_context_tokens=fit.min_context,
+                passes=attempt,
+                lowered_limits_mb={f"cuda:{index}": mb for index, mb in sorted(lowered.items())},
+            )
+            return placement
+
+        if off_gpu:
+            if last_on_gpu is None:
+                where = (
+                    f"{sum(off_gpu_mb.values())} MiB would be placed on {', '.join(off_gpu_mb)}, "
+                    "and a transformers model is never offloaded. "
+                )
+                raise per_card_fit_refusal(
+                    fit, cards, where + _FIT_REFUSAL_ADVICE, requested=placement.requested,
+                    gpus=placement.gpus, placement=placement, off_gpu_mb=off_gpu_mb,
+                    mapped_mb_by_device=layout.weights_mb,
+                )
+            # Moving layers off a short card left the others no room: the cards
+            # together are short. The figures are the last split that stayed on them.
+            previous, previous_cards = last_on_gpu
+            raise _rebalance_refusal(
+                fit, previous, previous_cards, attempt,
+                "Moving layers off the short card leaves the other cards without room for them.",
+            )
+
+        last_on_gpu = (placement, cards)
+        limits = dict(placement.limits)
+        progress = False
+        for card in short:
+            if seen_weights.get(card.index) == card.weights_mb:
+                step = steps[card.index] * 2  # the map did not move on this card
+            else:
+                step = card.short_mb
+            seen_weights[card.index] = card.weights_mb
+            cut = limits[card.index] - step
+            if cut > 0:
+                lowered[card.index] = cut
+                steps[card.index] = step
+                progress = True
+        if not progress:
+            raise _rebalance_refusal(
+                fit, placement, cards, attempt,
+                "A short card cannot give up any more of the model.",
+            )
+    previous, previous_cards = last_on_gpu  # type: ignore[misc]
+    raise _rebalance_refusal(
+        fit, previous, previous_cards, FIT_REBALANCE_MAX_PASSES,
+        f"The split did not settle within {FIT_REBALANCE_MAX_PASSES} re-plans.",
+    )
+
+
+_FIT_REFUSAL_ADVICE = (
+    "Free memory on the cards, lower TRANSFORMERS_MIN_CONTEXT, choose a smaller "
+    "quantization, or serve it as GGUF."
+)
+
+
+def _rebalance_refusal(
+    fit: TransformersFit, placement: Placement, cards: list[CardFit], passes: int, why: str
+) -> InsufficientMemoryError:
+    """The refusal of a split no re-plan fits, with the figures of the last split that stayed on the GPUs."""
+    refusal = per_card_fit_refusal(
+        fit, cards, f"{why} {_FIT_REFUSAL_ADVICE}", requested=placement.requested,
+        gpus=placement.gpus, placement=placement,
+    )
+    refusal.details["rebalance_passes"] = passes
+    return refusal
 
 
 def decide_transformers_fit(
@@ -3154,8 +3265,10 @@ def decide_transformers_fit(
     23,500 MB free it refused Qwen2.5-14B at FP16, whose map leaves both cards
     room for about 8k tokens, and accepted OLMo-2-13B, whose cuda:0 cannot hold
     an 8k cache — and it split models one card holds (a 7B at FP16 on a card with
-    17 GB free: weights 14.5 GB x 1.2 > 17 GB). Nothing is re-planned to make a
-    card fit: a card that is short is named, with its figures, in the refusal.
+    17 GB free: weights 14.5 GB x 1.2 > 17 GB). A split with a short card is
+    re-planned with that card's limit cut, so layers move to cards with room
+    (review round 5; _check_split_fit); a split no re-plan fits is refused naming
+    the short card and its figures.
     """
     inventory = list(gpus)
     wanted = parse_gpu_request(requested)
@@ -3165,15 +3278,18 @@ def decide_transformers_fit(
             details={"required_mb": fit.single_card_mb, "available_mb": 0, "gpus": []},
         )
     everything = range(fit.kv.num_layers)
-    rule = transformers_shard_rule(fit.weights_mb, max_memory_factor=max_memory_factor)
 
     if wanted == ALL:
-        placement = plan_shard(
-            inventory, rule, REASON_REQUESTED_ALL, fit.single_card_mb, requested=ALL,
-            every_card=True,
-        )
-        refuse_cards_left_out_of_all(placement, inventory, rule)
-        return _check_split_fit(fit, placement)
+
+        def plan_all(rule: ShardRule) -> Placement:
+            placement = plan_shard(
+                inventory, rule, REASON_REQUESTED_ALL, fit.single_card_mb, requested=ALL,
+                every_card=True,
+            )
+            refuse_cards_left_out_of_all(placement, inventory, rule)
+            return placement
+
+        return _check_split_fit(fit, plan_all, max_memory_factor)
 
     if wanted is not None:
         card = find_gpu(inventory, wanted)
@@ -3208,7 +3324,9 @@ def decide_transformers_fit(
             index=best.index,
         )
     return _check_split_fit(
-        fit, plan_shard(inventory, rule, REASON_NO_SINGLE_CARD, fit.single_card_mb)
+        fit,
+        lambda rule: plan_shard(inventory, rule, REASON_NO_SINGLE_CARD, fit.single_card_mb),
+        max_memory_factor,
     )
 
 

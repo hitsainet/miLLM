@@ -108,15 +108,15 @@ class TestTheCacheIsSizedAtWhatTheModelServes:
         assert (cuda0["layers"], cuda0["kv_mb"], cuda0["need_mb"]) == (14, 1_120, 11_071)
 
     def test_a_model_that_serves_more_is_sized_at_the_floor(self, tmp_path):
-        """Qwen2.5-14B serves 32,768: at an 8,192 floor, cuda:0's 14 layers hold
-        14 x 2 x 8 x 128 x 2 B x 8,192 = 448 MiB."""
+        """Qwen2.5-14B serves 32,768: at an 8,192 floor, cuda:0's 15 layers hold
+        15 x 2 x 8 x 128 x 2 B x 8,192 = 480 MiB."""
         path = _save(tmp_path, Qwen2Config(**QWEN25_14B))
 
         _, logged = _accepted(path, 8_192)
 
         assert logged["min_context_tokens"] == 8_192
         cuda0 = next(card for card in logged["per_card"] if card["device"] == "cuda:0")
-        assert cuda0["kv_mb"] == 448
+        assert cuda0["kv_mb"] == 480
 
     def test_the_refusal_says_which_limit_sized_the_cache(self, tmp_path):
         """A 65,536 floor on a model that serves 32,768 is sized at 32,768, and the

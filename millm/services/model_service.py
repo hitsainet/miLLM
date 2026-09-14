@@ -45,12 +45,29 @@ from millm.ml.gguf_catalog import coarse_quantization
 from millm.ml.model_downloader import ModelDownloader, _safe_variant
 from millm.ml.model_loader import (
     ModelLoader,
+    _gguf_tensor_split,
+    checkpoint_is_pre_quantized,
     decide_transformers_placement,
     plan_gguf_placement,
 )
 from millm.sockets.progress import ProgressEmitter
 
 logger = structlog.get_logger()
+
+
+def resolve_cache_path(cache_path: str) -> str:
+    """A model row's cache path as the loader opens it.
+
+    The database stores either an absolute path or one relative to
+    MODEL_CACHE_DIR, depending on when the model was downloaded. The pre-unload
+    check and the background load must read the SAME checkpoint, so both resolve
+    it here.
+    """
+    from millm.core.config import settings
+
+    if os.path.isabs(cache_path):
+        return cache_path
+    return f"{settings.MODEL_CACHE_DIR}/{cache_path}"
 
 
 #: Download progress, keyed by model id, SHARED ACROSS SERVICE INSTANCES.
@@ -939,13 +956,19 @@ class ModelService:
             InsufficientMemoryError: the named card cannot hold the model, a
                 requested split across every card ('all') cannot, or no split
                 across the cards can hold a transformers model.
+            UnsupportedQuantizationError: Q2 on a transformers checkpoint that
+                is not pre-quantized.
+            ModelLoadError: GGUF_TENSOR_SPLIT names fewer cards than the GGUF
+                split must use.
         """
-        from millm.core.config import settings
+        from millm.core.config import parse_gguf_tensor_split, settings
 
         resident = self.loader.state.current if self.loader.is_loaded else None
         gpus = project_free_after_unload(
             list_gpus(), getattr(resident, "memory_by_device_mb", None)
         )
+        # The checkpoint the background load will open, resolved the same way.
+        cache_path = resolve_cache_path(model.cache_path) if model.cache_path else None
 
         gguf_file = (model.gguf_files or [None])[0]
         if gguf_file:
@@ -955,16 +978,20 @@ class ModelService:
             # refuse a card the loader would accept. Reading the KV size would
             # load the file's metadata inside the request.
             weights_mb = 0
-            if model.cache_path:
-                base = (
-                    model.cache_path
-                    if os.path.isabs(model.cache_path)
-                    else f"{settings.MODEL_CACHE_DIR}/{model.cache_path}"
-                )
-                path = Path(base) / gguf_file
+            if cache_path:
+                path = Path(cache_path) / gguf_file
                 if path.is_file():
                     weights_mb = int(path.stat().st_size / (1024 * 1024))
-            plan_gguf_placement(weights_mb, None, 0, requested=wanted, gpus=gpus)
+            placement = plan_gguf_placement(weights_mb, None, 0, requested=wanted, gpus=gpus)
+            configured = parse_gguf_tensor_split(settings.GGUF_TENSOR_SPLIT)
+            if configured is not None and len(configured) < len(placement.gpu_indices):
+                # The loader sizes its split with the KV cache on top of these
+                # weights, so it spans at least these cards — and it refuses a
+                # GGUF_TENSOR_SPLIT shorter than the cards it spans. Found there,
+                # the served model was already unloaded. A LONGER list is not
+                # refused here: the loader may take more cards than this lower
+                # bound. Review round 1, 2026-09-14.
+                _gguf_tensor_split(placement, configured)
             return
 
         decide_transformers_placement(
@@ -972,6 +999,7 @@ class ModelService:
             model.quantization.value,
             requested=wanted,
             gpus=gpus,
+            is_pre_quantized=checkpoint_is_pre_quantized(cache_path),
         )
 
     def _load_worker(
@@ -994,12 +1022,9 @@ class ModelService:
             # Load the model
             from millm.core.config import settings
 
-            # Handle both absolute and relative cache paths
-            # (database may store either depending on when model was downloaded)
-            if os.path.isabs(cache_path):
-                full_cache_path = cache_path
-            else:
-                full_cache_path = f"{settings.MODEL_CACHE_DIR}/{cache_path}"
+            # Absolute or relative to MODEL_CACHE_DIR; the pre-unload check
+            # resolves it the same way, so both read the same checkpoint.
+            full_cache_path = resolve_cache_path(cache_path)
 
             # Resolve TORCH_COMPILE=None (auto-detect) to a concrete bool.
             # Auto: enable for CUDA + non-bitsandbytes models; disable otherwise.

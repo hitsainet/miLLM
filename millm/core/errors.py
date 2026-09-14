@@ -107,6 +107,19 @@ class ModelLoadError(MiLLMError):
     status_code = 500
 
 
+class UnsupportedQuantizationError(MiLLMError):
+    """Raised when a load asks for a quantization its engine cannot apply.
+
+    Q2 on a transformers checkpoint that is not already quantized: bitsandbytes
+    has no 2-bit mode, so the load ran unquantized in bfloat16 — eight times the
+    memory its 2-bit estimate planned for, under a label that still said Q2.
+    A wrong request, not a failed load, so it is a 400.
+    """
+
+    code = "UNSUPPORTED_QUANTIZATION"
+    status_code = 400
+
+
 class ModelNotLoadedError(MiLLMError):
     """Raised when operation requires a loaded model but none is loaded."""
 

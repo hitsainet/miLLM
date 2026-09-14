@@ -91,7 +91,11 @@ except Exception as _offload_probe_error:  # noqa: BLE001 - optional symbol
     )
 
 from millm.core.config import parse_gguf_tensor_split
-from millm.core.errors import InsufficientMemoryError, ModelLoadError
+from millm.core.errors import (
+    InsufficientMemoryError,
+    ModelLoadError,
+    UnsupportedQuantizationError,
+)
 from millm.ml.gguf_catalog import quant_label_from_path
 from millm.ml.gpu_placement import (
     MODE_CPU,
@@ -341,6 +345,35 @@ def _is_offload_refusal(exc: BaseException) -> bool:
     raised while the device map is computed, before any weight is read.
     """
     return isinstance(exc, ValueError) and "dispatched on the CPU or the disk" in str(exc)
+
+
+def checkpoint_is_pre_quantized(cache_path: Optional[str]) -> bool:
+    """Whether a checkpoint ships its own quantization (GPTQ, AWQ, BitNet, ...).
+
+    Read from its config.json: a `quantization_config` OBJECT. This is what
+    ModelLoadContext.load reads before it decides against bitsandbytes — its
+    AutoConfig reading, and its config.json fallback, which treats a null or
+    non-object value as not quantized — and the placement decision must read the
+    SAME thing. Until review round 1
+    (2026-09-14) no caller passed `is_pre_quantized` to it at all, so a GPTQ or
+    AWQ checkpoint on a Q4 or Q8 row was planned with bitsandbytes' 0.9, which
+    transformers never applies to it, and a split that fits was refused — before
+    the unload and again at load.
+
+    A path with no readable config.json is not pre-quantized: the load would
+    apply the row's quantization to it.
+    """
+    if not cache_path:
+        return False
+    import json
+    import os
+
+    try:
+        with open(os.path.join(cache_path, "config.json")) as handle:
+            raw = json.load(handle)
+    except (OSError, ValueError):
+        return False
+    return isinstance(raw, dict) and isinstance(raw.get("quantization_config"), dict)
 
 
 def _off_gpu_refusal(
@@ -808,7 +841,13 @@ class ModelLoadContext:
                             cache_path,
                             **load_kwargs,
                         )
-                    except Exception:
+                    except Exception as causal_lm_error:
+                        if _is_offload_refusal(causal_lm_error):
+                            # The same refusal one class later: AutoModel would
+                            # compute the same map. And when AutoModel fails for
+                            # its own reason, that error replaced this one.
+                            # Review round 1, 2026-09-14.
+                            raise
                         from transformers import AutoModel
                         logger.warning(
                             "model_class_fallback_to_auto_model",
@@ -2012,13 +2051,41 @@ def decide_transformers_placement(
     (operator decision 3), so a skipped check only moved the refusal into the
     load, after the resident model had been unloaded.
 
+    `is_pre_quantized` must be `checkpoint_is_pre_quantized(<the checkpoint>)` at
+    BOTH call sites — the reading ModelLoadContext.load acts on. A GPTQ or AWQ
+    checkpoint gets no bitsandbytes, so it is not planned with bitsandbytes' 0.9.
+
+    Q2 on a checkpoint that is not already quantized is REFUSED (review round 1,
+    2026-09-14). bitsandbytes has no 2-bit mode, so ModelLoadContext.load gives
+    it no quantization config and it loads in bfloat16: 2 bytes a parameter
+    against the 0.25 its estimate (memory_utils.BYTES_PER_PARAM) was sized for.
+    Planned at 0.25 it went whole onto a card with an eighth of the room it
+    needs and ran out of memory mid-load, after the unload. Planned at bf16 it
+    would load — under a row label, a size estimate and a UI badge that all say
+    2-bit. Neither is honest, so it stops here, before the unload. A
+    pre-quantized checkpoint on a Q2 row (BitNet and the like) loads at its own
+    precision and is not refused.
+
     Raises:
         GpuNotFoundError: the requested card is not visible.
         InsufficientMemoryError: the requested card lacks room, no GPU is
             visible, or no split across the cards holds the model.
+        UnsupportedQuantizationError: Q2 on a checkpoint that is not pre-quantized.
     """
-    # Only Q4 and Q8 get a BitsAndBytesConfig in ModelLoadContext.load; Q2 has
-    # none and loads unquantized, so it is not planned with bitsandbytes' factor.
+    if quantization.upper() == "Q2" and not is_pre_quantized:
+        raise UnsupportedQuantizationError(
+            "Q2 cannot be loaded as a transformers model: bitsandbytes has no 2-bit "
+            "mode, so this checkpoint would load unquantized in bfloat16, eight times "
+            "the memory its Q2 estimate assumes. Load it as Q4, Q8 or FP16, or serve a "
+            "Q2 GGUF of the model.",
+            details={
+                "quantization": quantization,
+                "estimated_memory_mb": estimated_memory_mb,
+                "loads_as": "bfloat16",
+            },
+        )
+    # Only Q4 and Q8 get a BitsAndBytesConfig in ModelLoadContext.load, and only
+    # for a checkpoint that is not already quantized.
     bitsandbytes = not is_pre_quantized and quantization.upper() in ("Q4", "Q8")
     placement = choose_gpu(
         estimated_memory_mb,
@@ -2170,7 +2237,9 @@ class ModelLoader:
             quantization,
             requested=gpu,
             gpus=list_gpus(),
-            is_pre_quantized=is_pre_quantized,
+            # The checkpoint's own answer, the one ModelLoadContext.load acts on.
+            # The pre-unload check reads the same file.
+            is_pre_quantized=is_pre_quantized or checkpoint_is_pre_quantized(cache_path),
         )
         logger.info(
             "model_placement",

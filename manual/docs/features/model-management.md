@@ -23,6 +23,10 @@ Everything starts with a loaded model. miLLM downloads models from HuggingFace (
 | **Q4** | 4 | ~75% | Moderate loss | Consumer GPUs |
 | **Q2** | 2 | ~87% | Significant loss | Maximum compression |
 
+:::warning Q2 needs a pre-quantized checkpoint or a GGUF file
+bitsandbytes has no 2-bit mode. A Q2 transformers checkpoint that is not already quantized (one whose `config.json` carries no `quantization_config`) is **refused at load** with `UNSUPPORTED_QUANTIZATION`, before the served model is unloaded — it would otherwise load unquantized in bfloat16, eight times the memory its Q2 estimate assumes. Choose Q4, Q8 or FP16 for it, or serve a Q2 GGUF of the model.
+:::
+
 5. Optionally enter a **HuggingFace Token** for gated models (Gemma and Llama are gated — accept the license on the model page first)
 6. Check **Trust Remote Code** only if the model requires custom code (explicit opt-in, per download)
 7. Click **Download & Load Model**

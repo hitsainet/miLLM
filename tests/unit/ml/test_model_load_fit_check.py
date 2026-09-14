@@ -101,7 +101,9 @@ class TestAModelThatFitsNoSingleCard:
             with pytest.raises(InsufficientMemoryError):
                 _load("FP16", 33_000)
 
-    @pytest.mark.parametrize("quantization", ["Q4", "Q8", "Q2"])
+    # Q2 is refused before the memory check unless the checkpoint is
+    # pre-quantized (review round 1): tests/unit/ml/test_placement_reads_the_checkpoint.py.
+    @pytest.mark.parametrize("quantization", ["Q4", "Q8"])
     def test_every_quantization_is_checked_against_gpu_memory(self, quantization):
         with fake_gpus(*NODE):
             with pytest.raises(InsufficientMemoryError):

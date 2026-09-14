@@ -26,6 +26,10 @@ Phase 2, 2026-09-14 (mutate.py; restored and sha256-verified):
   M3b drop the conversion of that refusal              -> the same test
   M6  put llm_int8_enable_fp32_cpu_offload=True back   -> test_q8_no_longer_permits_cpu_offload
   M8  hand transformers the factor-discounted limits   -> test_a_bitsandbytes_split_passes_its_limits_undiscounted
+Review round 1, 2026-09-14 (mutate.py; restored and sha256-verified):
+  R1-M7 the CausalLM fallback retries an offload refusal as AutoModel again
+                                                       -> test_a_refusal_from_the_causal_lm_fallback_is_not_retried_as_auto_model
+  M3a re-run (the first class's short-circuit dropped) -> test_bitsandbytes_refusing_the_map_is_a_placement_refusal_not_retried
 """
 
 from datetime import datetime
@@ -231,6 +235,34 @@ class TestNothingRunsOffTheGpu:
         assert not fallback.from_pretrained.called, (
             "another model class computes the same map; retrying only repeats the refusal"
         )
+        assert "dispatched on the CPU" in raised.value.details["engine_message"]
+
+    def test_a_refusal_from_the_causal_lm_fallback_is_not_retried_as_auto_model(self):
+        """The chosen class fails for its own reason, then AutoModelForCausalLM
+        computes the map and is refused. AutoModel computes the same map, so
+        trying it only repeats the refusal — and when AutoModel fails differently
+        (it does not take every config), its error REPLACED the memory refusal.
+        Review round 1, 2026-09-14."""
+        refusal = ValueError(
+            "Some modules are dispatched on the CPU or the disk. Make sure you have "
+            "enough GPU RAM to fit the quantized model."
+        )
+        primary = MagicMock(__name__="Gemma4ForConditionalGeneration")
+        primary.from_pretrained.side_effect = RuntimeError("this class cannot take the checkpoint")
+        causal_lm = MagicMock()
+        causal_lm.from_pretrained.side_effect = refusal
+        auto_model = MagicMock()
+        auto_model.from_pretrained.side_effect = ValueError("Unrecognized configuration class")
+        with fake_gpus(*NODE) as fake, _cleanup_mocks(), patch.object(
+            model_loader, "_get_auto_model_class", return_value=primary
+        ), patch("transformers.AutoModel", auto_model):
+            with pytest.raises(InsufficientMemoryError) as raised:
+                _load(
+                    fake, _decide(25_000, "Q8"), quantization="Q8", factory=causal_lm,
+                    config=SimpleNamespace(quantization_config=None),
+                )
+        assert causal_lm.from_pretrained.call_count == 1
+        assert auto_model.from_pretrained.call_count == 0
         assert "dispatched on the CPU" in raised.value.details["engine_message"]
 
 

@@ -13,6 +13,21 @@ MUTATION CONTROLS (each must turn this file red):
   * drop the resident-usage add-back   -> "fits once the resident memory is counted back" fails
   * remove the pre-check call          -> both refusal tests see the model unloaded and a 202
 Phase 2, 2026-09-14: M7 (Q4 skips the check again) -> test_a_quantized_model_no_split_holds_is_refused_before_the_unload
+Review round 1, 2026-09-14 (mutate.py; restored and sha256-verified):
+  R1-M3c the pre-check stops passing the checkpoint's is_pre_quantized
+         -> test_a_pre_quantized_checkpoint_is_not_planned_with_bitsandbytes_factor,
+            test_a_relative_cache_path_is_read_under_the_model_cache_dir,
+            test_a_pre_quantized_q2_checkpoint_still_loads
+  R1-M3d the pre-check reads the row's raw cache_path, not the resolved one
+         -> test_a_relative_cache_path_is_read_under_the_model_cache_dir
+  R1-M4  drop the Q2 refusal -> test_a_q2_transformers_checkpoint_is_refused_before_the_unload
+  R1-M5  drop the GGUF_TENSOR_SPLIT pre-check
+         -> test_a_list_shorter_than_the_cards_it_needs_is_refused_before_the_unload
+  R1-M5c refuse any length that differs (`!=`), not only a shorter list
+         -> test_a_list_longer_than_the_cards_it_found_is_left_to_the_loader
+  (`<` -> `<=` SURVIVED and is an EQUIVALENT mutation: at the exact count the
+  pre-check calls _gguf_tensor_split, which raises only when the lengths differ.
+  R1-M5c is the variant that can change the answer.)
 """
 
 from concurrent.futures import Future
@@ -186,3 +201,145 @@ class TestAValidSwitchStillHappens:
             fake.forbid(0, 1)
             _post(svc, {"gpu": 1})
         assert fake.calls == []
+
+
+def _checkpoint(directory, quantization_config):
+    import json
+
+    directory.mkdir(parents=True, exist_ok=True)
+    config = {"model_type": "llama"}
+    if quantization_config is not None:
+        config["quantization_config"] = quantization_config
+    (directory / "config.json").write_text(json.dumps(config))
+    return directory
+
+
+class TestThePrecheckReadsTheCheckpoint:
+    """Review round 1, 2026-09-14: the pre-check planned every Q4/Q8 row with
+    bitsandbytes' 0.9, including a GPTQ/AWQ checkpoint that gets no bitsandbytes.
+
+    Projected budgets: 9,976 + 19,976 = 29,952 MB; with bitsandbytes' 0.9,
+    8,978 + 17,978 = 26,956 MB. A 28,000 MB Q8 row fits the first, not the second.
+    """
+
+    @staticmethod
+    def _q8(cache_path):
+        return make_model(
+            id=3, status=ModelStatus.READY, quantization=QuantizationType.Q8,
+            estimated_memory_mb=28_000, cache_path=str(cache_path),
+        )
+
+    def test_a_pre_quantized_checkpoint_is_not_planned_with_bitsandbytes_factor(self, tmp_path):
+        model = self._q8(_checkpoint(tmp_path, {"quant_method": "gptq", "bits": 8}))
+        svc, _ = _service(model)
+        with fake_gpus(*NODE):
+            response = _post(svc, {})
+
+        assert response.status_code == 202, response.text
+        svc.unload_model.assert_awaited_once_with(9)
+
+    def test_the_same_row_on_a_plain_checkpoint_is_refused_before_the_unload(self, tmp_path):
+        svc, _ = _service(self._q8(_checkpoint(tmp_path, None)))
+        with fake_gpus(*NODE):
+            response = _post(svc, {})
+
+        assert response.status_code == 507, response.text
+        assert "26956" in response.text
+        assert not svc.unload_model.called
+
+    def test_a_relative_cache_path_is_read_under_the_model_cache_dir(self, tmp_path):
+        """The row may store the path relative to MODEL_CACHE_DIR; the pre-check
+        must open the checkpoint the background load will open."""
+        from millm.core.config import settings
+
+        _checkpoint(tmp_path / "org--gptq-model", {"quant_method": "gptq", "bits": 8})
+        svc, _ = _service(self._q8("org--gptq-model"))
+        with fake_gpus(*NODE), patch.object(settings, "MODEL_CACHE_DIR", str(tmp_path)):
+            response = _post(svc, {})
+
+        assert response.status_code == 202, response.text
+
+
+class TestQ2IsNotLoadedAsSomethingElse:
+    def test_a_q2_transformers_checkpoint_is_refused_before_the_unload(self, tmp_path):
+        model = make_model(
+            id=3, status=ModelStatus.READY, quantization=QuantizationType.Q2,
+            estimated_memory_mb=3_600, cache_path=str(_checkpoint(tmp_path, None)),
+        )
+        svc, repo = _service(model)
+        with fake_gpus(*NODE):
+            response = _post(svc, {})
+
+        assert response.status_code == 400, response.text
+        assert "UNSUPPORTED_QUANTIZATION" in response.text
+        assert "bfloat16" in response.text
+        assert not svc.unload_model.called
+        assert not repo.update_status.called
+        assert svc._executor.calls == []
+
+    def test_a_pre_quantized_q2_checkpoint_still_loads(self, tmp_path):
+        model = make_model(
+            id=3, status=ModelStatus.READY, quantization=QuantizationType.Q2,
+            estimated_memory_mb=3_600,
+            cache_path=str(_checkpoint(tmp_path, {"quant_method": "bitnet"})),
+        )
+        svc, _ = _service(model)
+        with fake_gpus(*NODE):
+            response = _post(svc, {})
+
+        assert response.status_code == 202, response.text
+
+
+class TestAGgufTensorSplitIsCheckedBeforeTheUnload:
+    """Projected GGUF limits: 11,000 x 0.94 - 2,048 = 8,292 MB and
+    21,000 x 0.94 - 2,048 = 17,692 MB. 22 GB of weights fit neither card alone
+    ((22,528 + 2,048) / 0.94 = 26,145 MB > 21,000), so the split takes both."""
+
+    @staticmethod
+    def _gguf(tmp_path):
+        gguf = tmp_path / "big-Q4_K_M.gguf"
+        with open(gguf, "wb") as handle:
+            handle.truncate(22 * 1024 ** 3)  # sparse
+        return make_model(
+            id=3, status=ModelStatus.READY, quantization=QuantizationType.Q4,
+            gguf_label="Q4_K_M", gguf_files=["big-Q4_K_M.gguf"], cache_path=str(tmp_path),
+        )
+
+    def _post_with_split(self, tmp_path, tensor_split):
+        from millm.core.config import settings
+
+        svc, _ = _service(self._gguf(tmp_path))
+        with fake_gpus(*NODE), \
+                patch.object(model_loader, "llama_supports_gpu_offload", lambda: True), \
+                patch.object(settings, "GGUF_TENSOR_SPLIT", tensor_split):
+            return svc, _post(svc, {})
+
+    def test_a_list_shorter_than_the_cards_it_needs_is_refused_before_the_unload(self, tmp_path):
+        svc, response = self._post_with_split(tmp_path, "1")
+
+        assert response.status_code == 500, response.text
+        assert "GGUF_TENSOR_SPLIT has 1 value(s)" in response.text
+        assert not svc.unload_model.called
+        assert svc._executor.calls == []
+
+    def test_one_value_per_card_is_accepted(self, tmp_path):
+        svc, response = self._post_with_split(tmp_path, "1,3")
+
+        assert response.status_code == 202, response.text
+        svc.unload_model.assert_awaited_once_with(9)
+
+    def test_a_list_longer_than_the_cards_it_found_is_left_to_the_loader(self, tmp_path):
+        """The pre-check's cards are a LOWER bound: sized without the KV cache,
+        the loader may take a third card. Here it finds two (limits 17,692 and
+        16,752 MB cover 22,528) while the list names three — not a refusal
+        here; only a list SHORTER than the cards found is."""
+        from millm.core.config import settings
+
+        svc, _ = _service(self._gguf(tmp_path))
+        three_cards = NODE + (("RTX A5000", 20_000, 24_576),)
+        with fake_gpus(*three_cards), \
+                patch.object(model_loader, "llama_supports_gpu_offload", lambda: True), \
+                patch.object(settings, "GGUF_TENSOR_SPLIT", "1,1,1"):
+            response = _post(svc, {})
+
+        assert response.status_code == 202, response.text

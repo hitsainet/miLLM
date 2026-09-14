@@ -69,7 +69,7 @@ curl -X POST http://localhost:8000/api/models \
 | `source` | `huggingface` or `local` |
 | `repo_id` | Required for `huggingface` |
 | `local_path` | Required for `local`; system directories are rejected |
-| `quantization` | `FP16`, `Q8`, `Q4`, `Q2` — applied at download time, weights saved quantized |
+| `quantization` | `FP16`, `Q8`, `Q4`, `Q2` — applied at download time, weights saved quantized. A `Q2` transformers checkpoint that is not already quantized is refused at load (`400 UNSUPPORTED_QUANTIZATION`): bitsandbytes has no 2-bit mode |
 | `trust_remote_code` | Explicit opt-in per download |
 | `hf_token` | Never logged or persisted |
 | `gguf_label` | The exact GGUF quantization to fetch, e.g. `IQ4_XS`. Names the model `repo:LABEL` so several quantizations of one repository can coexist — see [Model Management](/features/model-management#gguf-models-and-quantization). |

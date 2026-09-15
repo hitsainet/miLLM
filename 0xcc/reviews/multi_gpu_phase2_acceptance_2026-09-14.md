@@ -25,7 +25,7 @@
 | 11 | Unload and switch | **FAIL** | Switch OLMo FP16 → Q8 at 1:22 PM: `gpu_memory_cleanup` freed 10,074 / 16,124 MiB, down to 391 / 397. Every unload returned both cards to context only. **A `/v1` request during an unload is not told to retry**: while the Q8 split unloaded (17:24:13–17:24:21Z), requests at +1 s and +3 s both got **HTTP 500 `server_error`**, `RuntimeError: Expected all tensors to be on the same device, but got index is on cuda:0, different from other tensors on cpu` in `embed_tokens`. See Failure 3. Health stayed 200 and memory still returned. |
 | 12 | Logs | **PASS** (unchanged by the fixes below) | Sweep of the whole session (6,016 lines): **no** `transformers_fit_falls_back_to_slack`, **no** `*_engine_failed`, **no** `split_preflight_skipped`. Also no `torch_compile_*`, `cbm_*` or `draft_*` (disabled). There were 6 `generation_out_of_memory`: 4 deliberate (item 9), plus the item 4 and item 10 failures. There were 5 `unhandled_exception`: 3 from item 7 and 2 from item 11. |
 
-## Fixes (2026-09-14, after this run; on local `main`, not yet deployed or re-run on the node)
+## Fixes (2026-09-14, after this run; deployed as `58082c7` and re-run on the node — see "Re-run on the node" below)
 
 | Finding | Commits | Fix |
 |---|---|---|
@@ -49,6 +49,26 @@ The idle cache release takes the request queue's slot, so it never runs during a
 2. **Item 7.** Expect Qwen2.5-7B 32,699 + 512 and OLMo-2-13B 4,272 + 64 to return 400, non-streaming and streaming.
 3. **Item 10.** OLMo-2-13B Q8 with `all`. Expect 19 / 21 layers, landed memory within the map plus the counted staging, and the 3,879 + 16-token request to return 200.
 4. **Item 11.** Unload a split model with `/v1` requests arriving during the unload. Expect 503 `model_busy`, no 500, and memory returned.
+
+## Re-run on the node: items 4, 7, 10 and 11 PASS
+
+**When:** 2026-09-14, 20:41–20:49 UTC (4:41–4:49 PM ET), after `58082c7` deployed through GitOps (CI green on both repos).
+**Image:** `hitsai/millm-backend@sha256:ecc509d3113d1dfd1318da1813441aa883050b12686b035ee697a8de903e305a`, pod started 4:40 PM ET. The miStudio SAE training on the 3090 had finished at 4:28 PM, and no GPU lease or job was active.
+**Method:** as in the first run. The request bodies are the first run's files, with the same prompt token counts (the server's `prompt_tokens` matched: 3,879, 4,272, 32,699). A 200 ms `nvidia-smi` poller ran on the host for the whole re-run.
+
+| # | Check | Result | Evidence (ET) |
+|---|---|---|---|
+| 4 | Capacity, OLMo-2-13B bf16 on Auto | **PASS** | At 4:41 PM, free 12,156 / 23,978 MiB (the new pod held no context yet): `no_single_card_fits`, `transformers_fit_split_accepted` **13 / 27 layers**, 4 passes, `lowered_limits_mb {cuda:0: 10235}`. cuda:0: 8,846 weights + 1,040 KV + 1,151 working memory (`method traced`) + 500 context = 11,537 of 12,156, **619 MiB spare**. The planned 230 assumed 11,767 free. Landed 8,848 / 17,320 MiB. **The 3,879 + 217-token request returned 200** in 16.5 s (217 tokens). Poller peak **10,982 MiB** on cuda:0 (first run: 12,106 and out of memory) and 21,491 on cuda:1. `idle_cache_released` at 20:42:54.8Z, **5.8 s after the response**, freed 1,800 / 3,438 MiB. nvidia-smi went back to 9,182 / 18,053 MiB, 78 MiB above the loaded state on each card. |
+| 7 | Context cap → 400 | **PASS** | OLMo 4,272 + 64 > 4,096 at 4:43 PM: **400 `invalid_request_error` `context_length_exceeded`**, both non-streaming and streaming. The stream was refused before a 200 was sent. Qwen2.5-7B (`all`) 32,699 + 512 > 32,768 at 4:48 PM: **400 `context_length_exceeded`**, both non-streaming and streaming. A short Qwen request right after returned 200. |
+| 10 | bitsandbytes split | **PASS** | A local Q8 row over OLMo's FP16 files (id 5), `gpu: all`, at 4:45 PM: **19 / 21 layers**, 2 passes, `bitsandbytes: true`, no staging refusal. The fit counted 805 / 890 MiB of staging, and cuda:0 need was 11,133 of 11,825. Map 6,729 / 7,334 MiB; **landed 7,132 / 7,940**, which is 403 / 606 above the map and inside the counted staging (first run: 653 above the map with none counted). **The 3,879 + 16-token request returned 200** in 3.0 s. Poller peak **9,792 MiB** on cuda:0 (first run: 12,136 and out of memory). The row was deleted afterwards; the directory is intact (26,172 MB, 6 shards). |
+| 11 | Unload and switch | **PASS** | Unloading the OLMo FP16 split at 4:43:49 PM: requests at +1 s and +3 s both got **503 `server_error` `model_busy`** ("being unloaded; retry once the unload finishes") in 10–20 ms. No 500, no `unhandled_exception`. The unload returned 200 after 15.8 s. `gpu_memory_cleanup` freed 8,848 / 17,320 MiB, and the poller shows **334 / 733 MiB** at 20:44:04.9Z, which is context only (733 on cuda:1 includes miStudio's worker context). A request 3 s after the unload loaded the model again on demand (`load_started` 20:44:08Z, same 13 / 27 fit, complete at 20:44:16Z) and returned 200. |
+
+**Also seen:**
+- **A log field reported the wrong status.** The `api_error` line for each `model_busy` refusal said `status_code: 409`, while the client got 503. `millm_error_handler` logged the exception's management-API status before mapping it for `/v1`. That affects every mapped `/v1` error (MODEL_NOT_LOADED logged 400 for a 503, for example). The log now carries the status sent. Guard: `tests/unit/api/test_exception_handlers.py::TestTheLoggedStatusIsTheOneSent`. Control LOG-M1 (log `exc.status_code` again) failed both parameters; the file was restored and sha256-verified.
+- **Qwen2.5-7B with `all`** placed **19 / 9 layers** at 11,817 / 23,633 MiB free, with 835 MiB spare on cuda:0 (1 pass). The plan above predicted 18 / 10 and 1,241 spare at 11,767 / 23,976. Item 3 was not re-run, so this layout was not compared against a 3090-only load.
+- The unload of the FP16 split took 15.8 s. The switches in the first run took about 8 s.
+
+**Final node state (4:50 PM ET):** LFM2.5-1.2B-Instruct loaded by UUID on the 3080 Ti (2,224 MiB, `requested_card`). nvidia-smi showed 2,568 / 741 MiB, both idle. Qwen2.5-7B (id 2) and OLMo-2-13B FP16 (id 3) were ready and not loaded.
 
 ## Failures
 

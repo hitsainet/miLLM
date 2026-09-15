@@ -64,8 +64,9 @@ jobs:
           # Tracked (still excluded): ml/test_memory_utils, ml/test_model_loader,
           #          ml/test_model_downloader, ml/test_sae_downloader,
           #          ml/test_sae_hooker, ml/test_sae_wrapper,
-          #          services/test_profile_service, services/test_request_queue,
-          #          api/test_exception_handlers
+          #          services/test_profile_service, services/test_request_queue
+          # api/test_exception_handlers was un-ignored 2026-09-15: it passes, and
+          # it guards the status the api_error log line records.
           python -m pytest tests/unit/ \
             --ignore=tests/unit/ml/test_memory_utils.py \
             --ignore=tests/unit/ml/test_model_loader.py \
@@ -75,7 +76,6 @@ jobs:
             --ignore=tests/unit/ml/test_sae_wrapper.py \
             --ignore=tests/unit/services/test_profile_service.py \
             --ignore=tests/unit/services/test_request_queue.py \
-            --ignore=tests/unit/api/test_exception_handlers.py \
             -m "not slow" \
             -v --no-cov --tb=short
 

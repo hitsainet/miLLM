@@ -12,6 +12,7 @@ from millm.api.exception_handlers import (
 from millm.api.routes.openai.errors import ERROR_STATUS_MAP
 from millm.core.errors import (
     MiLLMError,
+    ModelBusyError,
     ModelNotFoundError,
     ModelNotLoadedError,
     SAENotAttachedError,
@@ -114,6 +115,44 @@ class TestMillmErrorHandler:
         response = await millm_error_handler(request, exc)
 
         assert response.status_code == 400
+
+
+class TestTheLoggedStatusIsTheOneSent:
+    """Hardware acceptance re-run, 2026-09-14: a /v1 request refused during an
+    unload got 503 while the `api_error` log line said 409, because the handler
+    logged the exception's management-API status before mapping it.
+
+    MUTATION CONTROL (restored and sha256-verified; re-run 2026-09-15 against this final file):
+      LOG-M1 the log line's status_code is exc.status_code again
+             -> test_an_openai_route_logs_the_mapped_status (both parameters)
+
+    This file was excluded from CI from 2026-04-09 (stale tests at the time). It passes and is
+    run by CI again from 2026-09-15.
+    """
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("error", "sent"),
+        [
+            (lambda: ModelBusyError("unloading"), 503),
+            (lambda: ModelNotLoadedError("No model is loaded"), 503),
+        ],
+        ids=["model_busy", "model_not_loaded"],
+    )
+    async def test_an_openai_route_logs_the_mapped_status(self, error, sent):
+        with patch("millm.api.exception_handlers.logger") as logger:
+            response = await millm_error_handler(_make_request("/v1/chat/completions", "POST"), error())
+        assert response.status_code == sent
+        logger.warning.assert_called_once()
+        assert logger.warning.call_args.kwargs["status_code"] == sent
+
+    @pytest.mark.asyncio
+    async def test_a_management_route_logs_its_own_status(self):
+        with patch("millm.api.exception_handlers.logger") as logger:
+            response = await millm_error_handler(_make_request("/api/models/3/load", "POST"), ModelBusyError("busy"))
+        assert response.status_code == 409
+        logger.warning.assert_called_once()
+        assert logger.warning.call_args.kwargs["status_code"] == 409
 
 
 class TestGenericExceptionHandler:

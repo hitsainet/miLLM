@@ -88,21 +88,30 @@ async def millm_error_handler(request: Request, exc: MiLLMError) -> JSONResponse
     Returns:
         JSONResponse with the appropriate error format.
     """
+    openai_route = _is_openai_route(request)
+    if openai_route:
+        status_code, error_type = ERROR_STATUS_MAP.get(
+            exc.code, (exc.status_code, "server_error")
+        )
+    else:
+        status_code = exc.status_code
+
+    # The status logged is the one the caller receives. It logged exc.status_code,
+    # the management API's status, so a /v1 request refused during an unload read
+    # 409 in the log while the client got 503 (hardware acceptance re-run,
+    # 2026-09-14).
     logger.warning(
         "api_error",
         error_code=exc.code,
         error_message=exc.message,
-        status_code=exc.status_code,
+        status_code=status_code,
         path=request.url.path,
         method=request.method,
         details=exc.details,
     )
 
     # Use OpenAI format for /v1/* endpoints
-    if _is_openai_route(request):
-        status_code, error_type = ERROR_STATUS_MAP.get(
-            exc.code, (exc.status_code, "server_error")
-        )
+    if openai_route:
         # An error that knows its OpenAI type says so (GenerationOutOfMemoryError:
         # the request is too large for the card, not a server fault to retry).
         error_type = getattr(exc, "openai_error_type", None) or error_type

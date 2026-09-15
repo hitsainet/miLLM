@@ -2153,7 +2153,14 @@ class TestR3TheDialSerialisationDEPENDENCYIsPinned:
     operator steering.
 
     This is recorded as a finding because an unstated load-bearing assumption
-    is a defect in the same way an unpinned fix is."""
+    is a defect in the same way an unpinned fix is.
+
+    The other half of the assumption, that the dial runs while its request
+    holds the queue slot, is checked by behaviour on every path that applies it
+    in tests/unit/services/test_steering_dial_serialised.py, which CI runs. It
+    used to be scraped here from create_chat_completion's source; ee20b11 moved
+    admission into InferenceService._admit, the scraped text disappeared, and
+    that guard failed while the dial was still serialised (2026-09-15)."""
 
     def test_the_dial_relies_on_serialisation_the_config_currently_provides(self):
         from millm.core.config import settings
@@ -2168,23 +2175,6 @@ class TestR3TheDialSerialisationDEPENDENCYIsPinned:
             "distinguish 'someone wrote after me' from 'someone saved the "
             "state I was midway through clearing'."
         )
-
-    def test_the_dial_still_runs_inside_the_request_queue(self):
-        """The other half of the assumption: the semaphore only helps if the
-        dial is actually inside it."""
-        import inspect
-
-        from millm.services.inference_service import InferenceService
-
-        src = inspect.getsource(InferenceService.create_chat_completion)
-        acquire = src.index("self._request_queue.acquire()")
-        apply_call = src.index("_apply_request_steering(")
-        assert acquire < apply_call, (
-            "the per-request steering apply moved OUTSIDE the request-queue "
-            "semaphore — concurrent dials can now race on global steering "
-            "state regardless of MAX_CONCURRENT_REQUESTS"
-        )
-
 
 class TestR3TheNaNInvariantIsENFORCEDNotDocumented:
     """F18 R3-20. `has_intensity`'s docstring said "a consumer that is about to

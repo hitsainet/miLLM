@@ -90,7 +90,16 @@ checkpoints/<run_id>/latest -> step-<NNNNNN>
 
 **R-01.11** Save is performed while quiesced, or miLLM quiesces internally for the duration of the write. Save is refused unless `weights_state` is `clean` (`409 WEIGHTS_NOT_CLEAN`). Checkpointing a `writing` or `torn` parameter set would persist a model that never existed at any step, breaking R-01.14's verification and BRD-02's R-02.21.
 
-**R-01.12** The caller supplies the manifest fields it knows (`run_id`, `step`, `domain`, `signal_source`, `parent`, optimizer identity). miLLM adds `weights_sha256`, `base_model`, timestamp, and the fully qualified name `<base>:<run_id>:step-<N>`.
+**R-01.12** The manifest's field list is defined by `docs/schemas/checkpoint-manifest-v1.json`, vendored byte-identical into this repo and miForge's. That schema is normative; this requirement does not restate it. Each field is marked as written by the caller or written by miLLM, and miLLM rejects a save whose caller-supplied fields do not validate against it.
+
+*Why a schema rather than a sentence:* this requirement previously listed the caller's fields in prose, and BRD-02 R-02.20 listed them in prose too. The lists disagreed — BRD-02 sent `selector_hash`, `grader_hash`, `test` and `retention`, which this requirement did not accept, while this requirement expected an optimizer identity BRD-02 did not send. Two prose descriptions of one wire format drift silently. One file that both repos vendor can be diffed in CI.
+
+**R-01.24** The step number is a single canonical integer, carried in the manifest as `step`. Every rendered form derives from it:
+
+- **Checkpoint and trainer-state paths** use `step-` plus the integer zero-padded to six digits (`step-000500`), so that directories sort lexicographically.
+- **The fully qualified name** `<base_model>:<run_id>:step-<step>` uses the integer unpadded (`step-500`). This is the display and API form — what `/v1/models` lists under R-01.15 and what a completion reports as its resolved model.
+
+Padding is a path convention, not part of the step's identity. Nothing carries the step as a string of its own.
 
 **R-01.13** Writes are atomic: temporary directory, fsync, rename, then update `latest`.
 

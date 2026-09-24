@@ -105,6 +105,16 @@ Padding is a path convention, not part of the step's identity. Nothing carries t
 
 ### 4.4 Checkpoint load with lineage
 
+**R-01.25** `POST /api/weights/load` loads a checkpoint directory into the resident model.
+
+- It verifies `weights_sha256` per R-01.14 **before touching a resident tensor**, and on mismatch refuses having changed nothing.
+- **When the checkpoint matches the resident architecture** — same `base_model`, identical parameter shapes — the values are written into the existing tensors **in place**. Addresses do not move, so an attachment's CUDA IPC handles stay valid across the load (R-01.5). This is the case torn-set recovery uses.
+- **Otherwise** it is a full reload, which reallocates and therefore invalidates every handle an attached process holds. It is refused while an attachment is active (`409 ALREADY_ATTACHED`); the attached process detaches first.
+- A load is itself a multi-tensor write, so it runs inside the same barrier as any other: miLLM quiesces, marks the state `writing`, and returns it to `clean` on success. **A load that fails partway leaves the set `torn`,** exactly like an interrupted commit — the recovery path is not exempt from the rule it exists to serve.
+- It is permitted while the state is `torn`; that is its recovery role (R-01.23b). It is refused while another process holds an open commit (`409 WEIGHTS_NOT_CLEAN`), because two writers to one parameter set is what the barrier exists to prevent.
+
+*Why this is called out:* R-01.14 described what a load verifies without defining a call that loads, and this section's title promised the capability. R-01.23's only trainer-independent recovery path, BRD-02 R-02.21, R-02.22 and R-02.30, and the mockup's "Load in miLLM" all route through it.
+
 **R-01.14** Loading a checkpoint directory verifies `weights_sha256` against `model.safetensors` and refuses on mismatch.
 
 **R-01.15** `/v1/models` lists the resident model under its fully qualified name. Every completion response includes the resolved name in its metadata so a test run always knows which step it queried.
@@ -113,7 +123,7 @@ Padding is a path convention, not part of the step's identity. Nothing carries t
 
 ### 4.5 Identity
 
-**R-01.17** `attach`, `detach`, `quiesce`, `commit-begin`, `commit-end`, `resume`, `save` require a `trainer` or `operator` identity. `/v1/*` is unaffected. `commit-begin` and `commit-end` are further restricted to the holding attachment (R-01.21): an identity that is merely valid cannot close another process's commit.
+**R-01.17** `attach`, `detach`, `quiesce`, `commit-begin`, `commit-end`, `resume`, `save`, `load` require a `trainer` or `operator` identity. `/v1/*` is unaffected. `commit-begin` and `commit-end` are further restricted to the holding attachment (R-01.21): an identity that is merely valid cannot close another process's commit.
 
 **R-01.18** Every call in 4.1 through 4.3 is logged with identity, timestamp, resident model name, and (for save) the resulting checkpoint hash.
 
@@ -135,6 +145,8 @@ Padding is a path convention, not part of the step's identity. Nothing carries t
 8. A commit that overruns the watchdog but completes: the late `commit-end` is accepted, the state returns to `clean`, and the overrun is recorded.
 9. `save` is refused while `writing` or `torn`.
 10. No completion is ever served from a parameter set that is not `clean` — verified by driving a commit that never ends and confirming every `/v1/*` call is refused rather than answered.
+11. `load` of a checkpoint with matching architecture, while a process is attached, writes in place: the attached process's CUDA IPC handles remain valid, and a forward pass in that process after the load matches miLLM's logits for the same prompt. `load` of a differently-shaped checkpoint while attached is refused.
+12. A `load` interrupted partway leaves the state `torn` and serving refused — the recovery path obeys the same rule as a commit.
 
 ## 6. Non-goals
 

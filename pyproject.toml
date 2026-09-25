@@ -88,7 +88,18 @@ cuda = [
 ]
 dev = [
     # Testing
-    "pytest>=8.3.0",
+    # 9.0+, which is what is actually exercised: the installed version is 9.1.1
+    # and the suite runs 3,016 passing tests on it (measured 2026-09-25). The
+    # floor said 8.3 while nobody had run 8.x for months, so it documented a
+    # configuration that was neither used nor tested.
+    #
+    # The 21 remaining non-passing tests are ENVIRONMENTAL, not version-related,
+    # and are expected to fail outside their environment: 17 in
+    # tests/e2e/test_model_workflow.py need a Postgres with this project's test
+    # credentials (they raise InvalidPasswordError otherwise), and 4 in
+    # tests/performance/test_api_performance.py expect the container's /app
+    # layout (PermissionError on a workstation checkout).
+    "pytest>=9.0",
     "pytest-asyncio>=0.25.0",
     "pytest-cov>=6.0.0",
     "pytest-mock>=3.14.0",

@@ -2,10 +2,10 @@
 
 ## Mechanistic Interpretability LLM Server
 
-**Document Version:** 1.3
+**Document Version:** 1.4
 **Created:** January 30, 2026
 **Status:** Draft
-**Reference:** BRD v1.0 (January 29, 2026) · BRD-MILLM-CLUSTERS-001 (July 16, 2026) · BRD-MILLM-CIRCUITS-001 (July 20, 2026) · BRD-MILLM-CIRCUITS-002 (July 20, 2026)
+**Reference:** BRD v1.0 (January 29, 2026) · BRD-MILLM-CLUSTERS-001 (July 16, 2026) · BRD-MILLM-CIRCUITS-001 (July 20, 2026) · BRD-MILLM-CIRCUITS-002 (July 20, 2026) · BRD-MILLM-PROBES-001
 
 ### Document Revision History
 
@@ -15,6 +15,7 @@
 | 1.1 | 2026-07-16 | Cluster Runtime increment (BRD-MILLM-CLUSTERS-001): Features 8–11 (Cluster Import, Unified MCP, OWUI Cluster Dial, Co-Activation Sensing), FR-8.x–FR-11.x, NFR-1.4, matrix extension; former future stubs renumbered 12–14 |
 | 1.2 | 2026-07-20 | Circuit Runtime increment (BRD-MILLM-CIRCUITS-001): Features 12–15 (Multi-SAE Attach & Circuit Serving, Circuit Import + Slice-Fallback + Evidence Ladder, Circuit-Aware OWUI Dial, Circuit Edge Sensing), FR-12.x–FR-15.x, NFR-1.5, matrix extension; retired the former "Multi-SAE Support" future stub (now specified as Feature 12); remaining future stubs renumbered 16+ |
 | 1.3 | July 20, 2026 | Circuit Consolidation increment (BRD-MILLM-CIRCUITS-002): Features 16-20 (steering epoch, request-scoped sensing context, single serving derivation, concurrent circuit serving, MCP circuit surface + reachability assurance), FR-16.x-20.x, matrix columns; future stubs renumbered 21/22. |
+| 1.4 | 2026-09-25 | Probe Monitor Runtime increment (BRD-MILLM-PROBES-001): Feature 24 — import `mistudio.probe-definition/v1` (file / HF tag / MCP), strict model-identity check, parity gate on the definition's test vectors, prepended read hook independent of SAE attachment, dense and k-sparse SAE probes (private encoder copy), per-request scoring on the sensing lifecycle, verdicts in an `X-miLLM-Probe-Verdicts` header and a final stream chunk, `probe_events` with a privacy-stripped live feed, Probe Monitors page (the old "Probe" page renamed "Feature Monitor"), MCP `millm_probes` (contract v1.6). Specified in the planning workspace (ENH-001). |
 
 ---
 
@@ -395,6 +396,24 @@ Organized by logical workflow (matching UI structure):
 - FR-20.5: `docs/mcp-contract.md` SHALL move to v1.2, additive-only.
 
 ### Non-Functional Requirements
+
+#### Probe Monitor Runtime (FR-24.x) — Increment: Probe Monitors
+
+- **FR-24.1:** The system SHALL import a `mistudio.probe-definition/v1` from a file, from HF (tag `mistudio-probe-definition`, manifest-first) or through MCP, refusing unknown kinds and payloads over 2 MB.
+- **FR-24.2:** The system SHALL browse and import probe definitions from HF with the cluster hub's cache and circuit breaker.
+- **FR-24.3:** The system SHALL refuse to arm a probe whose model identity (HF id, d_model, layer count, chat-template hash, revision) differs from the loaded model, naming every mismatch; an unverifiable revision SHALL be a recorded warning, not a pass.
+- **FR-24.4:** The system SHALL run a definition's test vectors through the live model before arming and SHALL refuse to arm when any score differs beyond tolerance, reporting tokenization drift separately.
+- **FR-24.5:** The system SHALL read probe activations through a read-only, prepended forward hook that does not depend on SAE attachment and never modifies the residual.
+- **FR-24.6:** The system SHALL score each request on the probe's scope (all / prompt / response) with its combining rule, with one device-to-host copy per forward pass.
+- **FR-24.7:** The system SHALL return verdicts in an `X-miLLM-Probe-Verdicts` header on non-streaming responses and in a final chunk before `[DONE]` on streaming responses, only when a probe is armed.
+- **FR-24.8:** The system SHALL record a `probe_events` row per armed probe per request and emit `probe:event` without prompt or context text.
+- **FR-24.9:** The system SHALL report armed probes, paused reasons and overhead; a probe SHALL never be silently quiet.
+- **FR-24.10:** The system SHALL force the serial path while probes are armed, mark batched / n>1 / speculative requests not scored with a reason, refuse arming on llama.cpp, and disarm on model change.
+- **FR-24.11:** The system SHALL show each probe's evidence rung with miStudio's language verbatim and SHALL require an operator acknowledgement to arm below rung 2.
+- **FR-24.12:** The Admin UI SHALL provide a Probe Monitors page and SHALL rename the "Probe" page to "Feature Monitor" without changing its route.
+- **FR-24.13:** The MCP contract SHALL add a `millm_probes` category (v1.6), co-released with miStudio's registry.
+- **FR-24.15:** The system SHALL run k-sparse SAE probes using a private copy of the encoder columns for the probe's features, loaded from an SAE downloaded in miLLM and verified against the definition (repo, revision, weights hash, architecture, dimensions); the SAE SHALL NOT be attached and SHALL NOT steer.
+- **FR-24.14:** Probe scoring SHALL add under `PROBE_MAX_OVERHEAD_MS` (5 ms) per request at 4k-token contexts with two armed probes.
 
 #### Performance (NFR-1.x)
 - NFR-1.1: SAE hook overhead <15% vs base model latency
@@ -847,6 +866,30 @@ hook points those need, so interpretability work remains transformers-only.
 
 ---
 
+#### Feature 24: Probe Monitor Runtime
+
+**User Value:** Run the detectors trained in miStudio on live traffic at almost
+no cost — the cheap first stage every published monitoring cascade uses — with
+proof that miLLM scores exactly as miStudio did.
+
+**Priority:** Planned (BRD-MILLM-PROBES-001; after miStudio Feature 33 publishes the v1 contract)
+
+**UI Tab:** Probe Monitors (new); the existing "Probe" tab is renamed "Feature Monitor"
+
+**Requirements Covered:** FR-24.1 through FR-24.15
+
+**Key Capabilities:**
+- Import probe definitions from file, HF or MCP; refuse the wrong model by name
+- Parity gate on the definition's own test vectors before a probe can be armed
+- Pre-steering read hook that never depends on SAE attachment; several probes per layer share one hook
+- Dense probes and k-sparse SAE probes (a private encoder copy of the probe's features; the SAE is downloaded, never attached)
+- Verdicts in a response header or a final stream chunk; live event feed without prompt text
+- Evidence rung shown everywhere; acknowledgement to arm below rung 2
+- MCP `millm_probes`
+
+**Dependencies:** miStudio Feature 33 (`mistudio.probe-definition/v1`); F11 sensing
+lifecycle; F20 MCP contract discipline; F23 (GGUF refused)
+
 #### Feature 22: Neuronpedia Integration
 **User Value:** Browse and search features with human-readable labels from Neuronpedia.
 
@@ -880,6 +923,9 @@ hook points those need, so interpretability work remains transformers-only.
 | 20. MCP Circuit Surface | | | | | | | | | | | | | | | | | | |   | ✅ |
 
 ---
+
+*Features 23 (GGUF Serving) and 24 (Probe Monitor Runtime) map one-to-one to their own requirement groups, FR-23.x and FR-24.x.*
+
 
 ## 7. User Experience Goals
 

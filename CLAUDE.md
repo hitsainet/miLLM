@@ -1,6 +1,13 @@
 # Project: miLLM - Mechanistic Interpretability LLM Server
 
 ## Current Status
+- **Next — PLANNED, handed off 2026-09-25: Feature 24 Probe Monitor Runtime (BRD-MILLM-PROBES-001).** Start with
+  `0xcc/tasks/024_FTASKS|Probe_Monitor_Runtime.md` task 0.0 (spikes) under `0xcc/instruct/008_process-task-list.md`.
+  Build against a draft of miStudio's `docs/schemas/probe-definition-v1.json` (miStudio 033 phase 1) and
+  re-vendor byte-identical before release. **Task 9 (MCP contract v1.6, `millm_probes`) co-releases with
+  miStudio 033 phase 7.** Specified in `~/app/enhance/specs/ENH-001-probe-monitors` — locked decisions
+  (D2, D7, D8, D11, D13, D14) and the reviewed defaults are in each document's Decisions section; do not
+  reopen them without the user.
 - **Phase:** ✅ **CIRCUIT CONSOLIDATION INCREMENT CLOSED (2026-07-21)** — BRD-MILLM-CIRCUITS-002 features **016–020 all IMPLEMENTED + each ran THREE review rounds** (293 findings total: F16 71, F17 60, F18 60, F19 60, F20 62). Executed in the locked order: steering epoch → request-scoped context → single serving derivation → concurrent circuit serving → MCP circuit surface. Suites: **miLLM 2133 passed / 12 skipped**, miStudio unit suite green; **CI green in both repos**, and the new cross-repo `Contract ↔ MCP registry` job runs and passes. **F20's durable deliverable is the reachability rule** — *a capability is not shipped until a test FAILS when its wiring is removed* — now recorded in both repos' CLAUDE.md and the global review discipline, with `test_reachability.py` as the shape to copy. **R3's structural finding:** every earlier fix had been applied to ONE representative and never generalized — the built-server test covered 1 of 4 tool categories (so the original F20 defect was reproducible one category over), the hand-rolled gate fix 1 of 3 tools (both DESTRUCTIVE siblings unguarded), `@gated` 1 of 12, and `raw_get`'s non-JSON guard was never carried into the enveloped path. **Also found:** an R2 commit of mine disabled the ENTIRE CI workflow for four commits (`${{ runner.temp }}` is illegal in a job-level `env:`, so GitHub rejects the whole file — no jobs, no logs) while I reported the suite green from local runs; now guarded by `test_workflow_contexts_are_legal.py`. Per-round records: `0xcc/reviews/review_feature020_R{1,2,3}_2026-07-21.md` and the F16–F19 equivalents.
 - **Phase (prior):** 📋 **CIRCUIT CONSOLIDATION (BRD-MILLM-CIRCUITS-002) — DOCS COMPLETE 2026-07-20, implementation not started.** BRD (13 BRs, clarifying round held, decisions locked) + contention-model design of record + PPRD v1.3 + PADR v1.3 + the full Features 16–20 doc chains (20 documents). Locked order: **F16 steering epoch → F17 request-scoped context → F18 single serving derivation → F19 concurrent circuit serving → F20 MCP circuit surface + reachability.** Goal stated by the product owner: "as mature and bullet-proof a product as possible", which settled whether a consolidation increment with little demo surface was worth running at all. **GPU close-out DONE:** F14 §9.1 CLOSED (5 SAEs on layers 10–14, real circuit at `serving_mode: full`, off/min/max observably different, correct λ echoes and rung header); F15 §9.1 partial (sensing armed with 4 sensable edges and non-zero overhead but 0 events — the honest result for arbitrary feature indices). **Two hazards measured:** cross-layer compounding destroys generation at TWO layers, two orders of magnitude below the ±200 clamp; and `CIRCUIT_SENSING_MAX_OVERHEAD_MS` has no multi-layer denominator (5.4–7.3 ms across 5 layers vs a fixed 5 ms). **Three shipped-but-unreachable capabilities found and two fixed** (attach-set UI control wired; MCP circuit tools still unregistered, which is F20).
 - **Phase (prior):** ✅ **CIRCUIT RUNTIME INCREMENT CLOSED (2026-07-20)** — F12 (multi-SAE attach/serving), F13 (circuit import, slice-fallback, evidence ladder), F14 (circuit-aware OWUI dial) and F15 (circuit edge sensing) all IMPLEMENTED, each with three review rounds: **349 findings / 135 fixed**. miLLM now consumes miStudio's whole circuits arc end-to-end — import a `circuit-definition/v1`, serve it across several SAEs under one λ, dial it per request from Open WebUI with its evidence rung echoed, and watch its edges fire on live traffic — with the evidence ladder surfaced verbatim throughout and "causal" structurally impossible below rung 2. Suite **1588 backend / 255 frontend** green.
@@ -146,6 +153,15 @@ refactor(services): extract HuggingFace logic
 ## Document Inventory
 
 ### Project Level Documents
+- ⏳ 0xcc/prds/BRD-MILLM-PROBES-001.md (Probe Monitor Runtime; consumes miStudio's `mistudio.probe-definition/v1`; sibling BRD-MIS-PROBES-001; handed off 2026-09-25)
+- ⏳ PPRD v1.4 (Feature 24, FR-24.1–24.15) · PADR v1.4 (§1 probe rows, §10 Probe Monitor Runtime trade-offs)
+
+**Feature 24: Probe Monitor Runtime** — ⏳ **PLANNED**
+- ⏳ 0xcc/prds/024_FPRD|Probe_Monitor_Runtime.md
+- ⏳ 0xcc/tdds/024_FTDD|Probe_Monitor_Runtime.md
+- ⏳ 0xcc/tids/024_FTID|Probe_Monitor_Runtime.md
+- ⏳ 0xcc/tasks/024_FTASKS|Probe_Monitor_Runtime.md
+
 - ✅ 0xcc/docs/miLLM_BRD_v1.0.md (original v1.0 BRD)
 - ✅ 0xcc/prds/BRD-MILLM-CLUSTERS-001.md (Incremental BRD — Cluster Runtime: import / unified MCP / OWUI dial / sensing, drafted 2026-07-16)
 - ✅ 0xcc/prds/BRD-MILLM-CIRCUITS-001.md (Incremental BRD — Circuit Runtime: multi-SAE serving / live circuit steering / circuit-aware OWUI dial / edge sensing, drafted 2026-07-20; successor to BRD-MILLM-CLUSTERS-001, consumes miStudio's circuit-definition/v1 + EvidenceRung ladder)

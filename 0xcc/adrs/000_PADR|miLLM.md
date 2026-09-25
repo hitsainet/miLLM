@@ -2,11 +2,11 @@
 
 ## Mechanistic Interpretability LLM Server
 
-**Document Version:** 1.3
+**Document Version:** 1.4
 **Created:** January 30, 2026
-**Updated:** July 20, 2026 (Circuit Consolidation increment — BRD-MILLM-CIRCUITS-002)
+**Updated:** September 25, 2026 (Probe Monitor Runtime — BRD-MILLM-PROBES-001)
 **Status:** Approved
-**Reference:** Project PRD (000_PPRD|miLLM.md v1.3) · BRD-MILLM-CLUSTERS-001 · BRD-MILLM-CIRCUITS-001 · BRD-MILLM-CIRCUITS-002
+**Reference:** Project PRD (000_PPRD|miLLM.md v1.3) · BRD-MILLM-CLUSTERS-001 · BRD-MILLM-CIRCUITS-001 · BRD-MILLM-CIRCUITS-002 · BRD-MILLM-PROBES-001
 
 ---
 
@@ -38,6 +38,9 @@
 | Circuit interchange (v1.2) | `mistudio.circuit-definition/v1`, frozen, new kind; consumed live | Multi-SAE + typed edges + per-layer budgets + evidence rungs; miLLM consumes, never mutates |
 | Circuit slice-fallback (v1.2) | Consume the per-layer `cluster-definition/v1` slice on single-SAE/incomplete hosts | A slice is a valid v1 cluster def — imports unchanged through the cluster path; never a wrong-basis serve |
 | Evidence-rung surfacing (v1.2) | Carry the EvidenceRung ladder vocabulary verbatim to API/MCP/OWUI/UI | "causal" forbidden <rung 2; single source of truth is miStudio's ladder — no local re-authoring |
+| Probe read hook (v1.4) | One prepended, read-only forward hook per armed layer, independent of SAEs | Probes need no SAE; prepending reads the pre-steering residual as sensing does |
+| Probe parity gate (v1.4) | A definition's test vectors must reproduce miStudio's scores on the live model before arming | Scoring the wrong revision or template is silent; parity makes it loud |
+| Probe verdict transport (v1.4) | `X-miLLM-Probe-Verdicts` (RFC 8941) on non-streaming; a final `choices: []` chunk on streaming | OpenAI-compatible shapes; headers are committed before a stream starts |
 
 ### Decision-Making Criteria
 1. **miStudio Compatibility:** Align architecture for future integration
@@ -1130,6 +1133,33 @@ SAE_CACHE_DIR=./data/saes
 ## 10. Decision Rationale
 
 ### Major Trade-offs
+
+#### Probe Monitor Runtime (Feature 24, 2026-09-25)
+
+#### Prepended, attachment-independent hook vs scoring inside the SAE hook
+**Decision:** Probes get their own read-only forward hook, registered with `prepend=True`, one per armed layer and shared by every probe on it; it returns `None` and never modifies the residual.
+**Trade-off:** A second hook path to maintain beside `SAEHooker`, vs a probe that works only while some SAE happens to be attached at its layer and reads whatever that SAE's steering left behind.
+**Rationale:** A monitor must not depend on an unrelated attachment, and must not be blinded by steering at its own layer. Prepending makes the read order a property of registration, pinned by a test with an SAE steering the same layer.
+
+#### Parity gate on arm vs trust the contract
+**Decision:** Arming runs the definition's test vectors (token ids → per-token and combined scores) through the live model and refuses beyond tolerance; tokenization drift (miLLM's own render of the vector's messages vs the recorded ids) is reported separately.
+**Trade-off:** A forward pass of up to 32 × 1,024 tokens inside a queue slot at arm time, vs silent score drift from a revision, dtype, template or layer-indexing difference no schema can express.
+**Rationale:** The identity check catches the wrong model; only parity catches the right model scoring differently.
+
+#### SAE probes: a private encoder copy vs reading an attached SAE
+**Decision:** An SAE probe loads only the encoder columns of its k features from an SAE downloaded in miLLM, verified by weights hash, and encodes the pre-steering residual itself. It never uses `AttachedSAEState`.
+**Trade-off:** k × d_model extra memory per probe (~0.5 MB at k=128, d=2048) and a second encode path to keep equal to `LoadedSAE`'s, vs a probe that works only while its SAE is attached and stops silently on detach.
+**Rationale:** A monitor's lifetime must not depend on steering choices. Parity on the definition's test vectors pins the encoder path.
+
+#### Separate `probe_events` vs reusing `sensing_events`
+**Decision:** A new table keyed by probe.
+**Trade-off:** A second events table and prune policy, vs overloading a table whose foreign key is a steering profile.
+**Rationale:** Probes are not profiles; forcing them into one would require a nullable FK and a discriminator on every query.
+
+#### Verdict in a final stream chunk vs an SSE `event:` line
+**Decision:** A chunk with `choices: []` and an extension field `millm_probe_verdicts`, before `[DONE]` — opt-in via request header if client testing shows breakage.
+**Trade-off:** An extension field in an otherwise OpenAI-shaped stream, vs a named SSE event some clients drop and others mis-parse.
+**Rationale:** OpenAI itself sends an empty-choices chunk for usage, so clients already tolerate the shape.
 
 #### GGUF serving (Feature 23, 2026-09-08)
 

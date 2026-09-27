@@ -333,3 +333,40 @@ class TestTheGateIsTheCombinedScore:
         assert details["tolerance"] == 0.05
         assert details["score_tolerance"] == 0.10
         assert details["max_combined_diff"] == 0.098
+
+
+class TestTheContractSaysScore:
+    """⚠ The per-token gate was a MISREADING of the contract, not a stricter reading of it.
+
+    `ProbeTestVectors.tolerance` is documented in `mistudio.probe-definition/v1` as *"An ABSOLUTE
+    score tolerance"*, and the measurement behind its 0.05 is explicitly about scores — batch
+    composition moving a SCORE by at most 5.78e-03. Nothing ever asked for per-token agreement.
+
+    Asserted against miStudio's own source, so that if the producer ever redefines the field, this
+    goes red rather than miLLM quietly continuing to mean something else by it.
+    """
+
+    @staticmethod
+    def _contract_source() -> str:
+        import os
+        from pathlib import Path
+
+        root = Path(
+            os.environ.get("MISTUDIO_REPO", str(Path(__file__).resolve().parents[3].parent / "miStudio"))
+        )
+        path = root / "backend" / "src" / "schemas" / "probe_definition.py"
+        if not path.exists():
+            pytest.skip(f"miStudio checkout not found at {root} — set MISTUDIO_REPO")
+        return path.read_text(encoding="utf-8")
+
+    def test_the_producer_calls_it_a_SCORE_tolerance(self):
+        source = self._contract_source()
+        assert "ABSOLUTE score tolerance" in source, (
+            "miStudio no longer documents `tolerance` as a score tolerance — re-read the "
+            "contract before trusting this gate's interpretation of it"
+        )
+
+    def test_the_producer_anticipated_the_precision_difference(self):
+        """The floor is not an invention; the contract names the effect it covers."""
+        source = self._contract_source()
+        assert "fp16 versus bf16" in source

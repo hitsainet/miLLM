@@ -2501,7 +2501,14 @@ class InferenceService:
             service = getattr(deps, "_probe_event_service", None)
             if service is None:
                 return
-            await service.record(context.request_id, verdicts)
+            # ⚠ THE OVERHEAD IS PASSED. `note_request_overhead` existed, was unit-tested by
+            # direct call, and had NO production caller — so `GET /api/probes/status` reported
+            # `last_request_overhead_ms: null` on every request ever served, the
+            # above-threshold warning could never fire, and SC-4 was unmeasurable from the
+            # product. Found on hardware, by trying to measure it.
+            await service.record(
+                context.request_id, verdicts, overhead_ms=context.overhead_ms
+            )
         except Exception as exc:
             logger.warning("probe_record_failed", error=str(exc))
 

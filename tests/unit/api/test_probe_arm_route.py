@@ -19,6 +19,7 @@ model" from "server broken".
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
+import torch
 from fastapi.testclient import TestClient
 
 from millm.core.errors import (
@@ -64,8 +65,26 @@ def _client(*, probe=None, arm_side_effect=None, identity_side_effect=None):
     repo.update = AsyncMock()
 
     arming = MagicMock()
-    armed = MagicMock()
-    armed.basis = "residual"
+    # ⚠ A REAL `ArmedProbe`, not a MagicMock. A MagicMock answers every attribute, so the route
+    # reading `armed.basis` — a field `ArmedProbe` does not have — passed here and raised
+    # AttributeError in production, AFTER the probe was already armed and hooked. The operator
+    # saw INTERNAL_ERROR for an operation that had fully succeeded.
+    #
+    # This file's own `RecordingClient` note in test_reachability.py states the rule: a stand-in
+    # must never be more forgiving than the thing it stands in for.
+    from millm.ml.probe_head import ProbeHead
+    from millm.services.probe_runtime import ArmedProbe
+
+    armed = ArmedProbe(
+        probe_id="pr_1",
+        name="high-stakes",
+        head=ProbeHead(weight=torch.randn(4)),
+        rule="mean",
+        scope="all",
+        layer=11,
+        rung=2,
+        rung_language="detects on unseen tasks",
+    )
     arming.arm = AsyncMock(side_effect=arm_side_effect, return_value=armed)
     arming.disarm = AsyncMock(return_value=True)
 

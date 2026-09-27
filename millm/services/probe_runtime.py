@@ -28,6 +28,7 @@ from __future__ import annotations
 
 import logging
 import threading
+import time
 from dataclasses import dataclass, field
 from typing import Any, Callable, Optional
 
@@ -86,6 +87,13 @@ class ProbeRequestContext:
     def __init__(self, request_id: str, probes: list[ArmedProbe]) -> None:
         self.request_id = request_id
         self.probes = probes
+        #: Milliseconds this request has spent doing PROBE work — the scoring in `observe` plus
+        #: the rules in `finish`. Reported by `GET /api/probes/status` and compared against
+        #: `PROBE_MAX_OVERHEAD_MS` (FR-24.14, SC-4).
+        #:
+        #: ⚠ It was declared here and written by NOTHING, so `last_request_overhead_ms` was
+        #: `null` for every request ever served, the above-threshold warning could never fire,
+        #: and SC-4 was unmeasurable from the product itself. Found on the node, by measuring.
         self.overhead_ms = 0.0
         self._not_scored_reason: Optional[str] = None
         #: probe_id -> per-token scores, in arrival order.
@@ -125,6 +133,8 @@ class ProbeRequestContext:
         here = [p for p in self.probes if p.layer == layer]
         if not here:
             return
+
+        started = time.perf_counter()
 
         # ⚠ **SCORED WHERE THE TENSOR ALREADY IS, AND ONLY THE SCORES COME BACK.**
         #
@@ -175,6 +185,7 @@ class ProbeRequestContext:
             )
 
         self._position += n_tokens
+        self.overhead_ms += (time.perf_counter() - started) * 1000.0
 
     def token_scores_for(self, probe_id: str) -> list[float]:
         """The scores at the positions that were actually SCORED, in order.
@@ -193,6 +204,7 @@ class ProbeRequestContext:
         Every armed probe produces a verdict, scored or not. A probe that is silent about a request
         is indistinguishable from one that is broken.
         """
+        started = time.perf_counter()
         verdicts: list[Verdict] = []
         for probe in self.probes:
             base = dict(
@@ -248,6 +260,7 @@ class ProbeRequestContext:
                     **base,
                 )
             )
+        self.overhead_ms += (time.perf_counter() - started) * 1000.0
         return verdicts
 
 

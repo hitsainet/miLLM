@@ -281,9 +281,13 @@ async def arm_probe(
         reason=request.reason,
         encoder=await build_probe_encoder(probe),
     )
+    # ⚠ `armed` is an `ArmedProbe`, which has NO `basis` — the basis lives on the row. This read
+    # `armed.basis` and raised AttributeError AFTER the probe was already armed and hooked, so
+    # the operator saw INTERNAL_ERROR for an operation that had fully succeeded. A response
+    # serialiser that can fail after the side effect is worse than one that fails before it.
     detail = _probe_summary(probe)
     detail["armed"] = True
-    detail["basis"] = armed.basis
+    detail["parity"] = probe.parity
     return ApiResponse.ok(detail)
 
 

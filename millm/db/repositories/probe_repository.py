@@ -19,6 +19,23 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from millm.db.models.probe import Probe, ProbeEvent
 
 
+# ⚠ **EVERY WRITE COMMITS, AND `flush()` IS NOT ENOUGH HERE.**
+#
+# `get_db` yields a session and closes it — it does NOT commit. So a repository that only
+# flushes returns a populated object, the route serialises it happily, and the transaction
+# rolls back when the request ends. Nothing persists, and nothing reports a failure.
+#
+# This shipped. On the node, `POST /api/probes/import` answered `{"success": true}` with a
+# real probe id, and `GET /api/probes` returned **zero rows** a second later. Arming then
+# failed with PROBE_NOT_FOUND for a probe that had just been created. Every probe write was
+# affected: imports, the armed flag, parity reports, acknowledgements and events.
+#
+# No test could see it. Unit tests assert inside the same transaction, where the flush is
+# sufficient and the row is visibly there; the integration tests use mocked repositories. It
+# took a second HTTP request against a real database — which is to say, hardware acceptance.
+#
+# `circuit_repository.py` has committed since it was written; this file was the outlier.
+
 class ProbeRepository:
     """Async CRUD for `Probe` rows."""
 
@@ -28,7 +45,7 @@ class ProbeRepository:
     async def create(self, **fields: Any) -> Probe:
         probe = Probe(**fields)
         self.session.add(probe)
-        await self.session.flush()
+        await self.session.commit()
         return probe
 
     async def get(self, probe_id: str) -> Probe | None:
@@ -64,13 +81,13 @@ class ProbeRepository:
     async def update(self, probe: Probe, **fields: Any) -> Probe:
         for key, value in fields.items():
             setattr(probe, key, value)
-        await self.session.flush()
+        await self.session.commit()
         return probe
 
     async def delete(self, probe: Probe) -> None:
         """Delete a probe. Its events go with it (FK ON DELETE CASCADE)."""
         await self.session.delete(probe)
-        await self.session.flush()
+        await self.session.commit()
 
     async def disarm_all(self, reason: str) -> int:
         """Disarm every armed probe, recording why.
@@ -83,7 +100,7 @@ class ProbeRepository:
         for probe in armed:
             probe.armed = False
             probe.paused_reason = reason
-        await self.session.flush()
+        await self.session.commit()
         return len(armed)
 
 
@@ -96,7 +113,7 @@ class ProbeEventRepository:
     async def create_many(self, events: list[dict[str, Any]]) -> list[ProbeEvent]:
         rows = [ProbeEvent(**event) for event in events]
         self.session.add_all(rows)
-        await self.session.flush()
+        await self.session.commit()
         return rows
 
     async def list_events(
@@ -130,7 +147,7 @@ class ProbeEventRepository:
         if probe_id is not None:
             stmt = stmt.where(ProbeEvent.probe_id == probe_id)
         result = await self.session.execute(stmt)
-        await self.session.flush()
+        await self.session.commit()
         return int(result.rowcount or 0)
 
     async def prune_aged(self, max_age_days: int) -> int:
@@ -141,7 +158,7 @@ class ProbeEventRepository:
         result = await self.session.execute(
             delete(ProbeEvent).where(ProbeEvent.created_at < cutoff)
         )
-        await self.session.flush()
+        await self.session.commit()
         return int(result.rowcount or 0)
 
     async def prune_to_cap(self, probe_id: str, cap: int) -> int:
@@ -163,7 +180,7 @@ class ProbeEventRepository:
                 ProbeEvent.id.not_in(keep.scalar_subquery()),
             )
         )
-        await self.session.flush()
+        await self.session.commit()
         return int(result.rowcount or 0)
 
     async def prune(self, probe_id: str, *, cap: int, max_age_days: int) -> int:

@@ -208,3 +208,105 @@ class TestItIsPrivate:
         slice_ = SaeFeatureSlice.from_state_dict(state, INDICES, architecture="relu")
         with pytest.raises(ValueError, match="d_model=3 but this slice is d_model=6"):
             slice_.encode(torch.randn(2, 3))
+
+
+class TestTheEncodeMatchesMiStudiosFormulation:
+    """⚠ THE SLICE ENCODED IN AN UNCENTERED BASIS, AND NOTHING ABOUT THE OUTPUT SAID SO.
+
+    miStudio's SAE is `z = ReLU(W_enc @ (x - b_dec) + b_enc)` — the standard Bricken et al. 2023
+    formulation, centering by the DECODER bias so the encoder sees zero-mean residuals. The
+    slice omitted `- b_dec`.
+
+    The result was sparse, plausible, well-behaved features that meant something else. The file
+    loaded, its sha256 matched the probe's pin, and roughly the right number of features fired.
+    Only the parity gate caught it, on hardware: the recorded scores diverged with a per-token
+    median of 58.3, where the dense probe's was 0.96.
+
+    ⚠ **And the precision hypothesis was WRONG, which is why this is a test and not a comment.**
+    I assumed bf16-vs-fp16 noise crossing JumpReLU thresholds explained the divergence. Measured:
+    **1 flip in 23,040 features (0.004%)**, and where both precisions were active the max
+    difference was 0.0711. Precision was never the story; the basis was.
+    """
+
+    @staticmethod
+    def _state(d_model: int = 8, d_sae: int = 6, seed: int = 0):
+        torch.manual_seed(seed)
+        return {
+            "W_enc": torch.randn(d_model, d_sae),
+            "b_enc": torch.randn(d_sae) * 0.1,
+            # ⚠ NON-ZERO, deliberately. A zero b_dec makes centered and uncentered identical,
+            # so a fixture with one would agree by construction with the defect — the single
+            # commonest reason a suite in this estate stays green over a real bug.
+            "b_dec": torch.randn(d_model),
+        }
+
+    def _mistudio_encode(self, state, x, indices):
+        """miStudio's formulation, written out, over the FULL dictionary then selected."""
+        z = torch.relu((x - state["b_dec"]) @ state["W_enc"] + state["b_enc"])
+        return z[..., indices]
+
+    def test_the_slice_agrees_with_the_full_centered_encode(self, tmp_path):
+        from safetensors.torch import save_file
+
+        state = self._state()
+        path = tmp_path / "sae_weights.safetensors"
+        save_file(state, str(path))
+        indices = [0, 2, 4]
+
+        slice_ = SaeFeatureSlice.load(path, indices, architecture="standard")
+        x = torch.randn(5, 8)
+        assert torch.allclose(
+            slice_.encode(x), self._mistudio_encode(state, x, indices), atol=1e-5
+        ), "the slice does not reproduce miStudio's encode restricted to its features"
+
+    def test_a_fixture_with_a_ZERO_decoder_bias_cannot_tell_the_difference(self, tmp_path):
+        """Specificity, stated as a test so the trap stays visible.
+
+        With `b_dec = 0` the centered and uncentered forms are identical, so this fixture
+        passes against the DEFECT. It is here to prove the test above is doing work that this
+        one cannot.
+        """
+        from safetensors.torch import save_file
+
+        state = self._state()
+        state["b_dec"] = torch.zeros(8)
+        path = tmp_path / "zero.safetensors"
+        save_file(state, str(path))
+
+        slice_ = SaeFeatureSlice.load(path, [0, 1], architecture="standard")
+        x = torch.randn(3, 8)
+        uncentered = torch.relu(x @ state["W_enc"] + state["b_enc"])[..., [0, 1]]
+        assert torch.allclose(slice_.encode(x), uncentered, atol=1e-5)
+
+    def test_the_decoder_bias_is_loaded_and_kept_whole(self, tmp_path):
+        """It is subtracted in d_model space, so slicing it to k would be wrong."""
+        from safetensors.torch import save_file
+
+        state = self._state()
+        path = tmp_path / "w.safetensors"
+        save_file(state, str(path))
+        slice_ = SaeFeatureSlice.load(path, [0, 3], architecture="standard")
+        assert slice_.decoder_bias is not None
+        assert slice_.decoder_bias.shape == (8,), "b_dec must stay d_model-wide, not sliced to k"
+
+    def test_it_survives_a_device_move(self, tmp_path):
+        from safetensors.torch import save_file
+
+        state = self._state()
+        path = tmp_path / "w.safetensors"
+        save_file(state, str(path))
+        slice_ = SaeFeatureSlice.load(path, [0, 1], architecture="standard")
+        moved = slice_.to_device(torch.device("cpu"))
+        assert moved.decoder_bias is not None
+
+    def test_a_dictionary_with_no_b_dec_still_loads(self, tmp_path):
+        """Not every published SAE carries one; the absence must not crash the load."""
+        from safetensors.torch import save_file
+
+        state = self._state()
+        del state["b_dec"]
+        path = tmp_path / "nob.safetensors"
+        save_file(state, str(path))
+        slice_ = SaeFeatureSlice.load(path, [0, 1], architecture="standard")
+        assert slice_.decoder_bias is None
+        slice_.encode(torch.randn(2, 8))  # no centering, and no crash

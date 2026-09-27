@@ -94,6 +94,8 @@ class SaeFeatureSlice:
     normalization_mode: str = NO_NORMALIZATION
     thresholds: Optional[torch.Tensor] = None   # (k,), JumpReLU only
     feature_indices: tuple[int, ...] = ()
+    #: (d_model,) — the DECODER bias, kept because the encoder centers by it. See `encode`.
+    decoder_bias: Optional[torch.Tensor] = None
 
     @property
     def k(self) -> int:
@@ -135,9 +137,23 @@ class SaeFeatureSlice:
             normalization_mode=self.normalization_mode,
             thresholds=None if self.thresholds is None else self.thresholds.to(device),
             feature_indices=self.feature_indices,
+            decoder_bias=None if self.decoder_bias is None else self.decoder_bias.to(device),
         )
 
     def _encode_on_device(self, hidden: torch.Tensor) -> torch.Tensor:
+        # ⚠ **CENTER BY THE DECODER BIAS FIRST.** miStudio's SAE encodes
+        #     z = ReLU(W_enc @ (x - b_dec) + b_enc)
+        # — the standard Bricken et al. 2023 formulation, and what the probe's weights were
+        # fitted against. This omitted it, so the slice encoded in an UNCENTERED basis.
+        #
+        # It produced sparse, plausible, well-behaved features that meant something else, and
+        # nothing about the output said so: the slice loaded, the hash matched, the right number
+        # of features fired. The only thing that caught it was the parity gate, on hardware —
+        # the recorded scores diverged with a per-token median of 58.3 where the dense probe's
+        # was 0.96. miStudio's own notes record this exact omission costing a sparsity reading
+        # of 2-3x elsewhere in its pipeline.
+        if self.decoder_bias is not None:
+            hidden = hidden - self.decoder_bias
         pre = hidden @ self.weight + self.bias
         if self.architecture.lower() in JUMPRELU_ARCHITECTURES:
             if self.thresholds is None:
@@ -166,6 +182,9 @@ class SaeFeatureSlice:
         """Slice an already-loaded state dict. Keeps only the k columns this probe reads."""
         weight = _pick(state, ("W_enc", "encoder.weight", "W_e", "w_enc"))
         bias = _pick(state, ("b_enc", "encoder.bias", "b_e", "bias_enc"))
+        # (d_model,) and kept WHOLE — it is subtracted before the projection, so it is not
+        # sliced to k. 8 KB at d_model 2048.
+        decoder_bias = _pick(state, ("b_dec", "decoder.bias", "b_d", "bias_dec"))
         if weight is None or bias is None:
             raise ValueError("the SAE weights carry no encoder (W_enc / b_enc)")
 
@@ -183,6 +202,8 @@ class SaeFeatureSlice:
             normalization_mode=normalization_mode,
             thresholds=(thresholds.to(dtype)[index].contiguous() if thresholds is not None else None),
             feature_indices=tuple(int(i) for i in feature_indices),
+            # NOT sliced: it is subtracted in d_model space, before the projection.
+            decoder_bias=(decoder_bias.to(dtype).contiguous() if decoder_bias is not None else None),
         )
 
     @classmethod

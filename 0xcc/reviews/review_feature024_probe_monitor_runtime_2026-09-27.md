@@ -141,7 +141,116 @@ baseline: a sweep whose runs collect nothing reports silence, and silence reads 
 
 ---
 
-## 5. Still owed
+## 5. Hardware acceptance (10.3 / 10.3b): four defects in the first twenty minutes
+
+Everything below was found by running the feature against a real model on the node. None of it
+was findable any other way, and each was invisible to a suite that is green.
+
+### 5.1 ⚠ EVERY PROBE WRITE WAS SILENTLY ROLLED BACK
+
+`POST /api/probes/import` answered `{"success": true}` with a real id and the full serialised
+row. `GET /api/probes` returned **zero rows** a second later; arming then failed
+`PROBE_NOT_FOUND` for the probe just created.
+
+`get_db` yields a session and closes it — it does not commit — and `ProbeRepository` only
+called `flush()`. Imports, the armed flag, parity reports, acknowledgements and events: all of
+it, with the route having already returned success. `circuit_repository.py` has committed since
+it was written; this file was the outlier and the difference was invisible to the suite.
+
+**No test could have caught it.** Unit tests assert inside the transaction that made the write,
+where a flush is sufficient. The integration tests mock the repository. It needs a *second
+session* — which is to say a second HTTP request. `tests/unit/db/test_probe_writes_persist.py`
+is built entirely around that. Control: reverting all eight sites to `flush()` turns all 8 red.
+
+### 5.2 ⚠ `sae.path` IS A DIRECTORY
+
+miStudio writes `ExternalSAE.hf_filepath` into it (`layer_11`), naming the directory holding
+`cfg.json` and `sae_weights.safetensors`. The loader branches on `.suffix == ".safetensors"`
+and would have handed a directory to `np.load`. **The contract's `path` has no description, so
+the producer is the authority** — the field name is not.
+
+### 5.3 ⚠ `sae.normalization` IS AN OBJECT, AND THE SLICE REFUSING IS WHY THIS WAS QUICK
+
+`{"mode": …, "source": …}` passed through `str()` reached the slice as a dict repr. All sixteen
+vectors failed. A lenient loader would have defaulted, encoded in the wrong basis, and produced
+plausible features with different meanings — miStudio shipped exactly that once. Refusing an
+unrecognised mode turned a silent wrong answer into a five-minute diagnosis.
+
+**The reported reason was still misleading:** the read hook swallows callback exceptions by
+design, so the crash surfaced as `no_scored_tokens` — "the scope selected no positions", not
+"the probe broke". Now `encoder_failed: <error>`.
+
+⚠ **And the mutation survived first time, on the caller again.** Reverting to `str(...)` left
+36 tests green because every one called `_normalization_mode` directly. **Five times in this
+estate now: a well-tested helper whose call site is tested by nothing.**
+
+### 5.4 ⚠ THE PRODUCER AND CONSUMER DISAGREE ON PRECISION, AND PARITY CORRECTLY REFUSED
+
+With every defect above fixed, the dense probe still refuses at the parity gate — **and it is
+right to.**
+
+miStudio scores probes in **float16** (`model_loader.py` hardcodes it). miLLM serves in
+**bfloat16**, deliberately: fp16 overflows on bf16-trained models and produces NaN logits. bf16
+carries ~8 mantissa bits against fp16's 11.
+
+Measured on the node, 16 vectors, all comparable, tolerance 0.05:
+
+| | max | median | min |
+|---|---|---|---|
+| per-token | 6.875 | 0.958 | **0.706** |
+| combined (the score) | 0.0981 | 0.0168 | 0.0014 |
+
+Combined lands within 0.05 on **14 of 16** and within 0.10 on **16 of 16**; no vector's
+per-token trace comes near 0.05. A standalone **fp16** run of the same vectors gives per-token
+0.10–0.28 and scores agreeing to 0.007 — still outside 0.05 per-token, because 0.05 is an
+ABSOLUTE tolerance against values reaching 55, i.e. 0.09% relative.
+
+Alignment was ruled out by measurement, not argument: shifting the comparison by one position
+makes the error **190x worse** (0.278 → 52.8).
+
+**So the gate is working and the contract has a gap.** Parity as specified compares per-token
+scores at a tolerance only reachable by bit-identical computation, which is what miStudio
+measured when it recorded "0.000e+00" — re-scoring in the same process with the same model
+object. An independent implementation cannot reach it, and an independent implementation is
+exactly what the gate exists to verify. This is the mirror image of the defect miStudio already
+fixed once, where the parity check told a correct consumer it was wrong on every vector.
+
+**This needs a product decision and is not mine to take** — loosening a parity tolerance is
+loosening the thing that stops a probe reporting under an AUROC measured on something else. The
+options, with what each costs:
+
+1. **Record the dtype in the contract and compare at a dtype-aware tolerance.** Honest and
+   durable; needs a contract revision on both sides.
+2. **Gate on the combined score, report per-token as informational.** Matches how the probe is
+   actually used (a verdict against a threshold of 2.879, where the worst observed score error
+   is 0.098 — 3.4%). Needs the tolerance raised to ~0.1 for all 16 to pass.
+3. **miStudio re-records its vectors under bf16.** Correct for this consumer, wrong for the next
+   one that serves fp16.
+4. **miLLM serves probe-carrying models in fp16.** Rejected: unsafe for bf16-trained models.
+
+### 5.5 What PASSED on hardware
+
+- **Persistence across a pod restart.** Both probes survived a rollout and were listed after it.
+- **The identity gate, in full.** Arming the LFM2 probe against Qwen2.5-7B refuses
+  `PROBE_MODEL_MISMATCH` naming **all five** differing fields — `hf_id`, `d_model` (2048 vs
+  3584), `n_layers` (16 vs 28), `chat_template_sha256` and `revision` — not the first.
+- **The evidence rung and its language**, verbatim from the server: rung 3, "detects on unseen
+  tasks, compared with a judge".
+- **The SAE slice loads from a real 268 MB dictionary** whose sha256 matches the probe's pin
+  byte for byte, resolved out of the cache by repo and path.
+- **Import from file**, at 491,967 bytes, through the 2 MB cap.
+
+### 5.6 Not verified on hardware, and why
+
+- **GGUF refusal.** The only GGUF model on the node is in `error` status and will not load, so
+  the `PROBE_HOOK_UNSUPPORTED` path is covered by unit test and code inspection only. Recorded
+  as unverified rather than assumed.
+- **Import from HuggingFace.** `mistudio/sae-…` and the probe repo are **private** (HTTP 401
+  anonymously), so the Hub path needs a token miLLM does not hold. The SAE was staged onto the
+  node directly and verified by hash instead, which tests the slice but not `hub/import`.
+- **SC-4's absolute figure.** Needs an armed probe, which needs §5.4 resolved.
+
+## 6. Still owed
 
 - **10.3 / 10.3b / the SC-4 absolute figure** — hardware acceptance. All three need this branch
   deployed with a model loaded; they are not skippable and they are not done.

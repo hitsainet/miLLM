@@ -27,11 +27,13 @@ would mean arming something this gate never actually checked.
 from __future__ import annotations
 
 import logging
+import math
 from dataclasses import dataclass, field
 from typing import Any, Optional, Sequence
 
 import torch
 
+from millm.ml.probe_head import combine
 from millm.services.probe_runtime import ArmedProbe, ProbeRequestContext
 from millm.services.probe_scope import scope_is_reproducible
 
@@ -40,6 +42,12 @@ logger = logging.getLogger(__name__)
 #: Reasons a vector could not be compared at all, as opposed to compared and found wrong.
 NOT_COMPARABLE_SCOPE = "scope_positions_unavailable"
 NOT_COMPARABLE_LENGTH = "scored_token_count_differs"
+NOT_COMPARABLE_UNSTABLE = "too_few_reproducible_positions"
+
+#: `attention` weights every token by `softmax(q . z_t)`, and a definition records no per-token
+#: logits — so the producer's side cannot be recombined over a subset of positions. Such a probe
+#: is gated on the full sequence, as it always was, and its report says so.
+_RECOMBINABLE = ("mean", "max", "last", "softmax", "rolling_mean_max")
 
 
 @dataclass
@@ -47,10 +55,21 @@ class VectorResult:
     index: int
     max_abs_diff: Optional[float] = None
     combined_diff: Optional[float] = None
+    #: The combined score recomputed over the positions whose JumpReLU gate IS reproducible.
+    #: `None` when the rule cannot be recombined (`attention`) or nothing was measured.
+    robust_combined_diff: Optional[float] = None
+    #: How many scored positions carried a near-threshold feature, out of how many.
+    at_risk_tokens: int = 0
+    n_tokens: int = 0
     expected_score: Optional[float] = None
     actual_score: Optional[float] = None
     comparable: bool = True
     reason: Optional[str] = None
+
+    @property
+    def gated_diff(self) -> Optional[float]:
+        """The figure the gate uses: the robust one when it exists, else the full one."""
+        return self.combined_diff if self.robust_combined_diff is None else self.robust_combined_diff
 
 
 @dataclass
@@ -89,6 +108,40 @@ class ParityReport:
 
     **What it no longer catches:** a per-token pattern that cancels in the mean. That is why the
     per-token figures stay in the report, beside the verdict, rather than being dropped.
+
+    ⚠ **AND FOR A k-SPARSE JumpReLU PROBE THE COMBINED SCORE ALONE IS NOT ENOUGH EITHER**, which
+    is what `robust_combined_diff` exists for. A JumpReLU feature is `pre * H(pre - θ)`: a step.
+    The same 1.5% producer/consumer residual difference that costs a dense probe 0.017 flips a
+    handful of the k selected features across their own thresholds, and a flip is not a small
+    disagreement — the feature moves between θ and 0, shifting THAT ONE token's score by ~20-40.
+    The `mean` rule then divides by the token count, so the combined score lands wherever the
+    flip count happens to put it.
+
+    Measured at real width (2048 -> 16384, k = 128, L0 ~ 60, the reference probe's own head),
+    against a 1.5% residual difference and against the uncentered-basis defect of 2026-09-27,
+    over the same 390 tokens:
+
+    | | per-token median | per-token max | combined | combined, robust positions |
+    |---|---|---|---|---|
+    | precision only | 0.0000 | 27.3 | 0.156 | **0.0015** |
+    | uncentered basis (a real defect) | 0.0000 | 70.8 | 1.447 | **0.945** |
+    | wrong input (wrong layer/hook) | 0.0000 | 126.7 | 1.070 | **0.390** |
+
+    On hardware the same probe measured a combined median of 0.101 and a worst of 0.686 — so on
+    the combined score a CORRECT build and that morning's defect are a factor of two apart, and
+    raising the floor to admit 0.686 would have left this gate a 2x margin against the only
+    defect it has ever caught. Setting the unreproducible positions aside instead leaves 630x,
+    at the contract's own tolerance rather than a loosened one.
+
+    **Two other designs were measured and rejected**, recorded so nobody re-derives them: gating
+    on the per-token MEDIAN separates nothing, because a sparse basis leaves most tokens at 0 on
+    both sides and the median is 0.0000 for the defects too; and admitting a worst-case
+    Cauchy-Schwarz uncertainty band instead of dropping positions yields a band of **85.8**, 59x
+    the defect it must leave visible.
+
+    **A vector with too few reproducible positions is REFUSED, not passed on the remainder.**
+    Below `PROBE_PARITY_MIN_ROBUST_FRACTION` of its scored positions, the comparison is resting
+    on a handful of tokens and says little about the probe.
 
     **Why a 0.10 floor and not the contract's 0.05.** The contract's figure is calibrated against
     BATCH COMPOSITION (5.78e-03, x8.7 margin). Cross-precision is a larger effect, and the
@@ -135,13 +188,34 @@ class ParityReport:
         return max(diffs) if diffs else None
 
     @property
+    def max_robust_combined_diff(self) -> Optional[float]:
+        """The worst combined difference over reproducible positions, or `None` if never measured."""
+        diffs = [v.robust_combined_diff for v in self.vectors if v.robust_combined_diff is not None]
+        return max(diffs) if diffs else None
+
+    @property
+    def max_gated_diff(self) -> Optional[float]:
+        """What the gate compares: robust where it exists, full where it does not."""
+        diffs = [v.gated_diff for v in self.vectors if v.gated_diff is not None]
+        return max(diffs) if diffs else None
+
+    @property
+    def at_risk_tokens(self) -> int:
+        return sum(v.at_risk_tokens for v in self.vectors)
+
+    @property
+    def scored_tokens(self) -> int:
+        return sum(v.n_tokens for v in self.vectors)
+
+    @property
     def passed(self) -> bool:
         if self.error is not None or not self.vectors:
             return False
         if any(not v.comparable for v in self.vectors):
             return False
-        # ⚠ THE COMBINED SCORE, not the per-token trace. See the class docstring.
-        worst = self.max_combined_diff
+        # ⚠ THE COMBINED SCORE over REPRODUCIBLE POSITIONS, not the per-token trace and not the
+        # full sequence where a step gate makes part of it unreproducible. See the class docstring.
+        worst = self.max_gated_diff
         if worst is None:
             # Vectors were comparable but carried no recorded score to compare against, so
             # nothing was actually checked. That is not a pass.
@@ -156,6 +230,13 @@ class ParityReport:
             "tolerance": self.tolerance,
             "score_tolerance": self.score_tolerance,
             "max_combined_diff": self.max_combined_diff,
+            # ⚠ THE FIGURE THE GATE USED. `max_combined_diff` is the whole sequence including
+            # the positions a step gate makes unreproducible; this one excludes them. For a
+            # dense probe the two are the same number.
+            "max_robust_combined_diff": self.max_robust_combined_diff,
+            "max_gated_diff": self.max_gated_diff,
+            "at_risk_tokens": self.at_risk_tokens,
+            "scored_tokens": self.scored_tokens,
             # ⚠ INFORMATIONAL. Large per-token divergence with small combined divergence is the
             # expected signature of a precision difference between producer and consumer; it is
             # reported so nobody has to rediscover that, and it does not gate.
@@ -167,6 +248,9 @@ class ParityReport:
                     "index": v.index,
                     "max_abs_diff": v.max_abs_diff,
                     "combined_diff": v.combined_diff,
+                    "robust_combined_diff": v.robust_combined_diff,
+                    "at_risk_tokens": v.at_risk_tokens,
+                    "n_tokens": v.n_tokens,
                     "comparable": v.comparable,
                     "reason": v.reason,
                 }
@@ -228,7 +312,7 @@ class ProbeParityEngine:
                 report.vectors.append(result)
                 continue
 
-            context = ProbeRequestContext(f"parity:{index}", [probe])
+            context = ProbeRequestContext(f"parity:{index}", [probe], collect_flip_risk=True)
             self._forward(torch.tensor([token_ids], dtype=torch.long), context)
             verdicts = context.finish()
             verdict = verdicts[0]
@@ -263,19 +347,79 @@ class ProbeParityEngine:
             )
             result.combined_diff = combined
             result.max_abs_diff = max(per_token, combined)
+            result.n_tokens = len(actual_tokens)
+
+            at_risk = context.flip_risk_for(probe.probe_id)
+            result.at_risk_tokens = sum(1 for flag in at_risk if flag)
+            if result.at_risk_tokens and probe.rule in _RECOMBINABLE:
+                robust = [not flag for flag in at_risk]
+                if sum(robust) < self._min_robust_tokens(len(robust)):
+                    # Refused, not passed on the remainder: a comparison resting on a handful of
+                    # positions says little about the probe, and a probe whose basis is mostly
+                    # unreproducible is one nobody should arm on this build.
+                    result.comparable = False
+                    result.reason = (
+                        f"{NOT_COMPARABLE_UNSTABLE}: {sum(robust)} of {len(robust)} positions "
+                        f"carry no near-threshold feature"
+                    )
+                    report.vectors.append(result)
+                    continue
+                result.robust_combined_diff = self._recombined_diff(
+                    probe, actual_tokens, expected_tokens, robust
+                )
             report.vectors.append(result)
 
         if tokenizer is not None:
             report.tokenization_drift = self._drift(vectors, tokenizer)
 
         logger.info(
-            "probe_parity probe=%s passed=%s max_abs_diff=%s tolerance=%s",
+            "probe_parity probe=%s passed=%s gated_diff=%s combined_diff=%s max_abs_diff=%s "
+            "at_risk=%s/%s tolerance=%s",
             probe.probe_id,
             report.passed,
+            report.max_gated_diff,
+            report.max_combined_diff,
             report.max_abs_diff,
+            report.at_risk_tokens,
+            report.scored_tokens,
             tolerance,
         )
         return report
+
+    @staticmethod
+    def _min_robust_tokens(n: int) -> int:
+        """At least this many positions must be reproducible for the comparison to mean anything."""
+        from millm.core.config import settings
+
+        return max(1, math.ceil(n * settings.PROBE_PARITY_MIN_ROBUST_FRACTION))
+
+    @staticmethod
+    def _recombined_diff(
+        probe: ArmedProbe,
+        actual: Sequence[float],
+        expected: Sequence[float],
+        robust: Sequence[bool],
+    ) -> float:
+        """|combined(actual) - combined(expected)| over the reproducible positions only.
+
+        ⚠ **BOTH SIDES ARE RECOMBINED THROUGH THE PROBE'S OWN RULE**, not averaged. Dropping a
+        position from a `max` or a `last` probe is not the same operation as dropping it from a
+        `mean`, and hand-averaging here would compare a statistic the probe does not compute.
+        """
+        mask = torch.tensor([robust], dtype=torch.bool)
+        params = {k: v for k, v in (probe.rule_params or {}).items() if k in ("tau", "window")}
+        values = [
+            float(
+                combine(
+                    probe.rule,
+                    torch.tensor([list(side)], dtype=torch.float32),
+                    mask=mask,
+                    **params,
+                ).item()
+            )
+            for side in (actual, expected)
+        ]
+        return abs(values[0] - values[1])
 
     @staticmethod
     def _drift(vectors: Sequence[dict[str, Any]], tokenizer: Any) -> dict[str, Any]:

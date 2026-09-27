@@ -188,6 +188,18 @@ class Settings(BaseSettings):
     #: that costs a worst-case 0.098 on the score against a threshold of 2.879 — 3.4%. Set from
     #: measurement on 2026-09-27, not chosen. See `ParityReport`.
     PROBE_PARITY_SCORE_TOLERANCE: float = 0.10
+    #: How much of a vector must be reproducible for its comparison to count.
+    #:
+    #: ⚠ A k-sparse JumpReLU probe has positions whose gate NO independent implementation can
+    #: reproduce (see `ParityReport`); those are set aside rather than tolerated. This is the
+    #: point below which setting them aside would leave a comparison resting on a handful of
+    #: tokens — such a vector is refused, not passed on the remainder. Measured at real width
+    #: (2048 -> 16384, k = 128, the reference probe's own sparsity), 86% of positions survive the
+    #: three-sigma band, so this is nowhere near binding on a healthy probe; it binds on a probe
+    #: whose selected features sit on their own thresholds, which is a probe to refuse. A SMALL
+    #: robust subset is noisy, not blind: a basis error is present at EVERY position, so it
+    #: survives subsetting (measured 0.945 over 94% of positions, 0.356 over 86%).
+    PROBE_PARITY_MIN_ROBUST_FRACTION: float = 0.25
     PROBE_MAX_OVERHEAD_MS: float = 5.0        # warn threshold per request
     PROBE_MAX_EVENTS_PER_PROBE: int = 5000
     PROBE_MAX_AGE_DAYS: int = 30

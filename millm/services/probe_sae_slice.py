@@ -54,6 +54,27 @@ NO_NORMALIZATION = "none"
 #: Architectures whose activation is a hard threshold rather than a relu.
 JUMPRELU_ARCHITECTURES = ("jumprelu", "jump_relu")
 
+#: How far apart a producer's and a consumer's residual are, relative, at `resid_post`.
+#:
+#: ⚠ THIS IS A MEASURED CONSTANT, NOT A TUNING KNOB. miStudio scores probes in **float16**;
+#: miLLM serves **bfloat16**, deliberately, because fp16 overflows on bf16-trained models. Its
+#: own record of that difference at `resid_post` is *"about 1.5% relative"*. It is used for one
+#: purpose only — deciding which positions a JumpReLU gate could plausibly have resolved the
+#: other way — and never to widen a tolerance. See `flip_risk`.
+PRODUCER_PRECISION_GAP: float = 0.015
+
+#: How many standard deviations of that gap's effect on one pre-activation to treat as at risk.
+#:
+#: ⚠ **THREE, BECAUSE ONE WAS MEASURED TO LEAK.** `W_enc_j . dx` for an unaligned `dx` is a
+#: random variable with standard deviation `||W_enc_j|| ||dx|| / sqrt(d_model)`, so a one-sigma
+#: band is exceeded by roughly a third of features. Measured over 40 draws at the reference
+#: probe's own sparsity (its `norm_mean`/`norm_std` imply each selected feature fires on 0.79% of
+#: tokens, about 1.01 active of 128): at one sigma **141 of 1,040 real flips fell outside the
+#: band**, at three sigma **none did**, twice, at d_model 64 and at 2048. A flip outside the band
+#: lands in the subset the gate trusts and refuses a correct build — the safe direction, and
+#: still a flaky gate.
+FLIP_RISK_SIGMAS: float = 3.0
+
 
 def normalize(x: torch.Tensor, mode: str) -> torch.Tensor:
     """miStudio's training-time activation normalization, per sample.
@@ -140,6 +161,87 @@ class SaeFeatureSlice:
             decoder_bias=None if self.decoder_bias is None else self.decoder_bias.to(device),
         )
 
+    @property
+    def is_stepped(self) -> bool:
+        """Whether this basis gates on a LEARNED THRESHOLD rather than at zero.
+
+        A relu basis has a gate too, but its boundary is 0, so crossing it costs nothing — the
+        feature is worth ~0 on both sides. A JumpReLU's boundary is θ, and crossing it moves the
+        feature between θ and 0. That discontinuity is the whole reason `flip_risk` exists.
+        """
+        return (
+            self.architecture.lower() in JUMPRELU_ARCHITECTURES and self.thresholds is not None
+        )
+
+    def flip_risk(
+        self,
+        x: torch.Tensor,
+        *,
+        precision_gap: float = PRODUCER_PRECISION_GAP,
+        sigmas: float = FLIP_RISK_SIGMAS,
+    ) -> torch.Tensor:
+        """(..., T, d_model) -> (..., T) of bool: positions whose gate is not reproducible.
+
+        ⚠ **THIS IS NOT A TOLERANCE. IT IS A STATEMENT ABOUT WHICH POSITIONS CANNOT BE
+        COMPARED AT ALL**, and it is computed from THIS build's own pre-activations and the
+        slice's own thresholds — never from a difference against the producer's numbers, so it
+        cannot be tuned to make a failure go away.
+
+        A JumpReLU feature is `pre * H(pre - θ)`. Producer and consumer see residuals that differ
+        by `PRODUCER_PRECISION_GAP` relative, so a feature whose pre-activation sits inside that
+        band of its own θ may be active for one and inactive for the other. That is not a small
+        disagreement: the feature moves between θ and 0, which after the head's `norm_std`
+        (median 0.203 on the reference probe) and weight (median 0.689) shifts THAT ONE token's
+        score by ~20-40. Measured at real width (2048 -> 16384, k=128, L0 ~ 60) against a 1.5%
+        residual difference: 6 flips in 49,920 slots, per-token max 27.3, per-token **median
+        0.0000**, combined 0.156 — while the uncentered-basis defect of 2026-09-27 gave combined
+        1.45 over the SAME tokens. The two are indistinguishable on the combined score and
+        separate by 630x once these positions are set aside.
+
+        The band on one feature's pre-activation is `||W_enc_j|| * ||dx_n||` by Cauchy-Schwarz,
+        with `||dx_n|| ~= gap * ||x_n||`; a residual difference is not aligned with any one
+        encoder row, so the expected projection carries the `1/sqrt(d_model)` factor. Using the
+        aligned worst case instead was measured and REJECTED: it marks 4.7% of slots at risk and
+        admits a combined band of **85.8**, which is 59x the defect it is supposed to leave
+        visible. Every position is judged by its own residual norm, not a corpus average.
+        """
+        here = self.to_device(x.device)
+        if not here.is_stepped:
+            return torch.zeros(x.shape[:-1], dtype=torch.bool, device=x.device)
+        centred = here._centred_on_device(normalize(x.to(here.weight.dtype), here.normalization_mode))
+        pre = here._pre_on_device(centred)
+        # (k,) per-feature sensitivity x (..., T, 1) per-position residual scale.
+        slack = (
+            sigmas
+            * precision_gap
+            * here.weight.norm(dim=0)
+            * centred.norm(dim=-1, keepdim=True)
+            / (here.d_model ** 0.5)
+        )
+        return ((pre - here.thresholds).abs() <= slack).any(dim=-1)
+
+    def pre_activations(self, x: torch.Tensor) -> torch.Tensor:
+        """(..., d_model) -> (..., k): `z` BEFORE the gate, in the basis the probe was fitted in.
+
+        The same normalisation and the same `- b_dec` centring `encode` applies, because a
+        threshold judged against anything else is judged in a different space — which is the
+        defect of 2026-09-27 wearing another hat.
+        """
+        here = self.to_device(x.device)
+        hidden = normalize(x.to(here.weight.dtype), here.normalization_mode)
+        return here._pre_on_device(here._centred_on_device(hidden))
+
+    def _centred_on_device(self, hidden: torch.Tensor) -> torch.Tensor:
+        return hidden - self.decoder_bias if self.decoder_bias is not None else hidden
+
+    def _pre_on_device(self, centred: torch.Tensor) -> torch.Tensor:
+        """`W_enc[:, idx]^T (x_n - b_dec) + b_enc[idx]`, the pre-activation.
+
+        One source for it, so `encode` and `flip_risk` cannot drift into judging a threshold
+        against a number the encoder does not use.
+        """
+        return centred @ self.weight + self.bias
+
     def _encode_on_device(self, hidden: torch.Tensor) -> torch.Tensor:
         # ⚠ **CENTER BY THE DECODER BIAS FIRST.** miStudio's SAE encodes
         #     z = ReLU(W_enc @ (x - b_dec) + b_enc)
@@ -152,9 +254,7 @@ class SaeFeatureSlice:
         # the recorded scores diverged with a per-token median of 58.3 where the dense probe's
         # was 0.96. miStudio's own notes record this exact omission costing a sparsity reading
         # of 2-3x elsewhere in its pipeline.
-        if self.decoder_bias is not None:
-            hidden = hidden - self.decoder_bias
-        pre = hidden @ self.weight + self.bias
+        pre = self._pre_on_device(self._centred_on_device(hidden))
         if self.architecture.lower() in JUMPRELU_ARCHITECTURES:
             if self.thresholds is None:
                 raise ValueError(

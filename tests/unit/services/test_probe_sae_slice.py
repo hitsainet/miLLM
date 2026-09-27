@@ -12,12 +12,15 @@ The two tests that matter most:
 from __future__ import annotations
 
 import hashlib
+from dataclasses import replace
 
 import pytest
 import torch
 
 from millm.services.probe_sae_slice import (
+    FLIP_RISK_SIGMAS,
     NO_NORMALIZATION,
+    PRODUCER_PRECISION_GAP,
     SaeFeatureSlice,
     normalize,
     sha256_of,
@@ -310,3 +313,155 @@ class TestTheEncodeMatchesMiStudiosFormulation:
         slice_ = SaeFeatureSlice.load(path, [0, 1], architecture="standard")
         assert slice_.decoder_bias is None
         slice_.encode(torch.randn(2, 8))  # no centering, and no crash
+
+class TestFlipRisk:
+    """Which positions a JumpReLU gate cannot be reproduced at, computed from OUR side alone.
+
+    ⚠ THE FIXTURE MUST NOT AGREE WITH THE DEFECT BY CONSTRUCTION. `b_dec` is non-zero
+    throughout, because with `b_dec = 0` a centred and an uncentered encode are the same
+    function and every assertion about the basis passes against the defect that omits it.
+    """
+
+    @staticmethod
+    def _slice(*, architecture="jumprelu", thresholds=True, centre=True, d=32, k=8):
+        g = torch.Generator().manual_seed(4)
+        weight = torch.randn(d, k, generator=g) / d**0.5
+        b_dec = torch.randn(d, generator=g) * 0.6 + 0.4          # NOT zero
+        x = torch.randn(40, d, generator=g) * 0.05 + 0.02
+        centred = normalize(x, "constant_norm_rescale") - (b_dec if centre else 0)
+        theta = torch.quantile(centred @ weight, 0.95, dim=0).clamp_min(1e-4)
+        return (
+            SaeFeatureSlice(
+                weight=weight.contiguous(),
+                bias=torch.zeros(k),
+                architecture=architecture,
+                normalization_mode="constant_norm_rescale",
+                thresholds=theta.contiguous() if thresholds else None,
+                feature_indices=tuple(range(k)),
+                decoder_bias=b_dec.contiguous() if centre else None,
+            ),
+            x,
+        )
+
+    def test_a_relu_basis_has_no_unreproducible_positions(self):
+        """Its gate is at 0, so crossing it moves the feature by ~0. Nothing to set aside."""
+        slice_, x = self._slice(architecture="standard", thresholds=False)
+        assert slice_.is_stepped is False
+        risk = slice_.flip_risk(x)
+        assert risk.shape == (40,)
+        assert not bool(risk.any())
+
+    def test_a_jumprelu_basis_is_stepped(self):
+        slice_, _ = self._slice()
+        assert slice_.is_stepped is True
+
+    def test_a_relu_basis_CARRYING_thresholds_is_still_not_stepped(self):
+        """⚠ `from_state_dict` reads `threshold` from the file whatever the architecture says, so
+        a relu SAE published beside a threshold tensor arrives with one. Deciding on the presence
+        of the tensor instead of the architecture would set positions aside for a basis with no
+        step in it — weakening the parity gate for every such probe, silently.
+
+        A mutation control found this: the first version of this class only ever built a relu
+        slice with `thresholds=None`, so it agreed with that defect by construction.
+        """
+        stepped, x = self._slice(architecture="jumprelu")
+        flat = replace(stepped, architecture="standard")
+        assert flat.thresholds is not None
+        assert flat.is_stepped is False
+        assert not bool(flat.flip_risk(x).any())
+
+    def test_a_feature_sitting_on_its_threshold_is_at_risk(self):
+        """The mechanism, stated directly: move one threshold onto one token's pre-activation."""
+        slice_, x = self._slice()
+        pre = slice_.pre_activations(x)
+        token, feature = 7, 2
+        theta = slice_.thresholds.clone()
+        theta[feature] = pre[token, feature]
+        on_the_edge = replace(slice_, thresholds=theta)
+        assert bool(on_the_edge.flip_risk(x)[token])
+
+    def test_a_feature_far_from_its_threshold_is_not(self):
+        slice_, x = self._slice()
+        theta = torch.full_like(slice_.thresholds, 1e6)   # unreachable: nothing can flip
+        assert not bool(replace(slice_, thresholds=theta).flip_risk(x).any())
+
+    def test_the_band_scales_with_the_precision_gap(self):
+        """A wider producer/consumer gap puts MORE positions out of reach, never fewer."""
+        slice_, x = self._slice()
+        narrow = int(slice_.flip_risk(x, precision_gap=1e-9).sum())
+        wide = int(slice_.flip_risk(x, precision_gap=0.5).sum())
+        assert wide > narrow
+
+    def test_it_is_judged_per_position_not_on_a_corpus_average(self):
+        """A token whose residual is ten times larger has a ten-times wider band.
+
+        A single corpus-wide slack would mark the small-residual positions as risky and the
+        large ones as safe, which is backwards.
+        """
+        slice_, x = self._slice()
+        big = x.clone()
+        big[0] *= 10.0
+        pre = slice_.pre_activations(big)
+        # put every threshold a hair outside the band that position 1 alone would admit
+        theta = pre[0] + 0.02
+        risk = replace(slice_, thresholds=theta.contiguous()).flip_risk(big)
+        assert bool(risk[0]), "the position the thresholds were placed against must be at risk"
+
+    def test_flip_risk_and_encode_read_the_same_pre_activations(self):
+        """One source for the pre-activation, so a threshold cannot be judged against a number
+        the encoder does not use — including the `- b_dec` centring."""
+        slice_, x = self._slice()
+        pre = slice_.pre_activations(x)
+        encoded = slice_.encode(x)
+        gated = torch.where(pre > slice_.thresholds, pre, torch.zeros_like(pre))
+        assert torch.equal(encoded, gated)
+
+    def test_pre_activations_are_centred_by_the_decoder_bias(self):
+        """With a non-zero b_dec the centred and uncentered pre-activations must differ."""
+        slice_, x = self._slice()
+        uncentered = replace(slice_, decoder_bias=None)
+        assert not torch.allclose(slice_.pre_activations(x), uncentered.pre_activations(x))
+
+    def test_one_sigma_lets_real_flips_escape_and_three_does_not(self):
+        """Why `FLIP_RISK_SIGMAS` is 3 and not 1 — measured, on a real flip.
+
+        `W_enc_j . dx` is a random variable whose standard deviation is
+        `||W_enc_j|| ||dx|| / sqrt(d_model)`, so a one-sigma band is exceeded by a large minority
+        of features. A flip outside the band lands in the subset the parity gate trusts and
+        refuses a correct build. 400 positions at the reference probe's own firing rate (0.6%):
+        two of nine real flips escape one sigma, none escapes three.
+        """
+        d, k, t, rate = 64, 16, 400, 0.006
+        g = torch.Generator().manual_seed(4)
+        weight = torch.randn(d, k, generator=g) / d**0.5
+        b_dec = torch.randn(d, generator=g) * 0.6 + 0.4
+        consumer = torch.randn(t, d, generator=g) * 0.05 + 0.02
+        producer = consumer * (
+            1.0 + PRODUCER_PRECISION_GAP * torch.randn(consumer.shape, generator=g)
+        )
+        scaffold = SaeFeatureSlice(
+            weight=weight.contiguous(),
+            bias=torch.zeros(k),
+            architecture="jumprelu",
+            normalization_mode="constant_norm_rescale",
+            thresholds=torch.zeros(k),
+            feature_indices=tuple(range(k)),
+            decoder_bias=b_dec.contiguous(),
+        )
+        theta = torch.quantile(scaffold.pre_activations(consumer), 1 - rate, dim=0).clamp_min(1e-4)
+        slice_ = replace(scaffold, thresholds=theta.contiguous())
+
+        flipped = (
+            (slice_.encode(consumer) != 0) != (slice_.encode(producer) != 0)
+        ).any(dim=1)
+        assert int(flipped.sum()) > 0, "no flip in the fixture; the test would prove nothing"
+        escaped_at_one = int((flipped & ~slice_.flip_risk(consumer, sigmas=1.0)).sum())
+        escaped_at_three = int((flipped & ~slice_.flip_risk(consumer, sigmas=3.0)).sum())
+        assert escaped_at_one > 0
+        assert escaped_at_three == 0
+        assert FLIP_RISK_SIGMAS >= 3.0
+
+    def test_three_sigmas_still_leaves_most_positions_comparable(self):
+        """A band that swallows the sequence would make the gate vacuous rather than tight."""
+        slice_, x = self._slice(d=64, k=16)
+        assert float((~slice_.flip_risk(x)).float().mean()) > 0.5

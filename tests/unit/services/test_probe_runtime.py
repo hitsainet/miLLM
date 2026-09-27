@@ -244,3 +244,58 @@ class TestMasking:
         context = ProbeRequestContext("chatcmpl-a", [probe])
         context.observe(1, torch.ones(1, 5, 4), mask=[True, True])
         assert context.finish()[0].n_scored_tokens == 2
+
+class TestFlipRiskCollection:
+    """The unreproducible-position collector is OFF on the hot path and ON for parity only."""
+
+    class _Encoder:
+        """An encoder that records whether its flip_risk was asked for."""
+
+        def __init__(self, d, k):
+            self.weight = torch.eye(d, k)
+            self.asked = 0
+
+        def __call__(self, x):
+            return x[..., : self.weight.shape[1]]
+
+        def flip_risk(self, x):
+            self.asked += 1
+            return torch.zeros(x.shape[0], dtype=torch.bool)
+
+    def test_a_served_request_never_computes_it(self):
+        """It re-derives the pre-activations, which a 5 ms budget cannot afford per request."""
+        encoder = self._Encoder(4, 4)
+        probe = make_probe()
+        probe = ArmedProbe(**{**probe.__dict__, "encoder": encoder})
+        context = ProbeRequestContext("r1", [probe])
+        context.observe(1, torch.ones(1, 3, 4))
+        assert encoder.asked == 0
+        assert context.flip_risk_for(probe.probe_id) == []
+
+    def test_parity_asks_for_it(self):
+        encoder = self._Encoder(4, 4)
+        probe = make_probe()
+        probe = ArmedProbe(**{**probe.__dict__, "encoder": encoder})
+        context = ProbeRequestContext("r1", [probe], collect_flip_risk=True)
+        context.observe(1, torch.ones(1, 3, 4))
+        assert encoder.asked == 1
+        assert context.flip_risk_for(probe.probe_id) == [False, False, False]
+
+    def test_an_encoder_that_cannot_say_records_FALSE_not_TRUE(self):
+        """⚠ Defaulting to True would set every position aside on no evidence, which is how a
+        gate stops gating. A dense probe has no encoder at all and must contribute nothing."""
+        probe = make_probe()
+        context = ProbeRequestContext("r1", [probe], collect_flip_risk=True)
+        context.observe(1, torch.ones(1, 3, 4))
+        assert context.flip_risk_for(probe.probe_id) == [False, False, False]
+
+    def test_it_is_aligned_with_the_scored_positions(self):
+        """Same positions, same order, as `token_scores_for` — the parity engine pairs them."""
+        encoder = self._Encoder(4, 4)
+        probe = make_probe()
+        probe = ArmedProbe(**{**probe.__dict__, "encoder": encoder})
+        context = ProbeRequestContext("r1", [probe], collect_flip_risk=True)
+        context.observe(1, torch.ones(1, 4, 4), mask=[True, False, True, False])
+        assert len(context.flip_risk_for(probe.probe_id)) == len(
+            context.token_scores_for(probe.probe_id)
+        ) == 2

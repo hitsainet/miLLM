@@ -84,9 +84,20 @@ class Verdict:
 class ProbeRequestContext:
     """One request, as every armed probe sees it."""
 
-    def __init__(self, request_id: str, probes: list[ArmedProbe]) -> None:
+    def __init__(
+        self,
+        request_id: str,
+        probes: list[ArmedProbe],
+        *,
+        collect_flip_risk: bool = False,
+    ) -> None:
         self.request_id = request_id
         self.probes = probes
+        #: ⚠ **OFF FOR EVERY SERVED REQUEST, ON FOR PARITY ONLY.** `flip_risk` re-derives the
+        #: pre-activations, which roughly doubles a k-sparse probe's encode cost — affordable
+        #: sixteen times before arming, not on the hot path with a 5 ms budget. It is a
+        #: constructor argument rather than a setting so that nothing can turn it on globally.
+        self.collect_flip_risk = collect_flip_risk
         #: Milliseconds this request has spent doing PROBE work — the scoring in `observe` plus
         #: the rules in `finish`. Reported by `GET /api/probes/status` and compared against
         #: `PROBE_MAX_OVERHEAD_MS` (FR-24.14, SC-4).
@@ -100,6 +111,8 @@ class ProbeRequestContext:
         self._scores: dict[str, list[float]] = {p.probe_id: [] for p in probes}
         #: probe_id -> per-token attention logits, for the `attention` rule only.
         self._logits: dict[str, list[float]] = {p.probe_id: [] for p in probes}
+        #: probe_id -> per-token "this position's gate is not reproducible", parity only.
+        self._flip_risk: dict[str, list[bool]] = {p.probe_id: [] for p in probes}
         self._mask: dict[str, list[bool]] = {p.probe_id: [] for p in probes}
         self._position = 0
 
@@ -194,6 +207,15 @@ class ProbeRequestContext:
                 self.mark_not_scored("head_mismatch")
                 return
             self._scores[probe.probe_id].extend(scores.tolist())
+            if self.collect_flip_risk:
+                # ⚠ A probe whose encoder cannot say (a dense probe, a relu basis, an injected
+                # test double) records False, meaning "nothing here is unreproducible" — NEVER
+                # True. Defaulting to True would set positions aside on no evidence, which is
+                # exactly how a gate stops gating.
+                risk = getattr(probe.encoder, "flip_risk", None)
+                self._flip_risk[probe.probe_id].extend(
+                    risk(row).tolist() if risk is not None else [False] * n_tokens
+                )
             if probe.rule == "attention":
                 self._logits[probe.probe_id].extend(probe.head.attention_logits(basis).tolist())
             self._mask[probe.probe_id].extend(
@@ -213,6 +235,17 @@ class ProbeRequestContext:
         scores = self._scores.get(probe_id, [])
         mask = self._mask.get(probe_id, [])
         return [value for value, keep in zip(scores, mask) if keep]
+
+    def flip_risk_for(self, probe_id: str) -> list[bool]:
+        """Per SCORED position, whether a step gate could have resolved the other way.
+
+        Aligned with `token_scores_for` — the same positions, in the same order — so the parity
+        engine can pair them without re-deriving the scope mask. Empty when the collector was
+        off, which callers must read as "unknown", not as "nothing at risk".
+        """
+        risk = self._flip_risk.get(probe_id, [])
+        mask = self._mask.get(probe_id, [])
+        return [value for value, keep in zip(risk, mask) if keep]
 
     def finish(self) -> list[Verdict]:
         """Combine each probe's scores into a verdict.

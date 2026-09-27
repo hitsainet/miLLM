@@ -370,3 +370,263 @@ class TestTheContractSaysScore:
         """The floor is not an invention; the contract names the effect it covers."""
         source = self._contract_source()
         assert "fp16 versus bf16" in source
+
+# ── k-sparse JumpReLU: the positions no independent implementation can reproduce ──────────
+
+D_MODEL_K, K_FEATURES, N_TOKENS = 32, 8, 40
+#: The one feature whose threshold is placed ON a token's pre-activation. Not arbitrary: it is
+#: the mechanism, made deterministic instead of waited for.
+FLIP_FEATURE, HEAD_WEIGHTS = 2, [0.4, -0.7, 1.5, 0.9, -0.3, 0.6, -1.1, 0.2]
+
+
+def _ksparse_parts():
+    """A JumpReLU slice, the consumer's residual, and the producer's (1.5% apart).
+
+    ⚠ **`b_dec` IS NON-ZERO, DELIBERATELY.** With `b_dec = 0` a centred encode and the
+    uncentered defect of 2026-09-27 are the SAME function, so a fixture built that way passes
+    against the very bug these tests exist to keep out. Every number below moves if the
+    centring is dropped, which is what `test_the_uncentered_basis_defect_still_fails` checks.
+    """
+    from dataclasses import replace
+
+    from millm.services.probe_sae_slice import (
+        PRODUCER_PRECISION_GAP,
+        SaeFeatureSlice,
+    )
+
+    g = torch.Generator().manual_seed(4)
+    weight = torch.randn(D_MODEL_K, K_FEATURES, generator=g) / D_MODEL_K**0.5
+    b_dec = torch.randn(D_MODEL_K, generator=g) * 0.6 + 0.4
+    consumer = torch.randn(N_TOKENS, D_MODEL_K, generator=g) * 0.05 + 0.02
+    producer = consumer * (
+        1.0 + PRODUCER_PRECISION_GAP * torch.randn(consumer.shape, generator=g)
+    )
+
+    scaffold = SaeFeatureSlice(
+        weight=weight.contiguous(),
+        bias=torch.zeros(K_FEATURES),
+        architecture="jumprelu",
+        normalization_mode="constant_norm_rescale",
+        thresholds=torch.zeros(K_FEATURES),
+        feature_indices=tuple(range(K_FEATURES)),
+        decoder_bias=b_dec.contiguous(),
+    )
+    pre_c = scaffold.pre_activations(consumer)
+    pre_p = scaffold.pre_activations(producer)
+    theta = torch.quantile(pre_c, 0.95, dim=0).clamp_min(1e-4)
+    token = int(pre_c[:, FLIP_FEATURE].argmax())
+    # BETWEEN the two precisions' pre-activations: active for one side, inactive for the other.
+    theta[FLIP_FEATURE] = (pre_c[token, FLIP_FEATURE] + pre_p[token, FLIP_FEATURE]) / 2.0
+    slice_ = replace(scaffold, thresholds=theta.contiguous())
+
+    features = slice_.encode(consumer)
+    head = ProbeHead(
+        weight=torch.tensor(HEAD_WEIGHTS),
+        bias=-0.2,
+        mean=features.mean(0),
+        std=features.std(0).clamp_min(0.2),
+        layer=1,
+    )
+    return slice_, head, consumer, producer
+
+
+def _ksparse_case(*, producer_slice=None):
+    """`(probe, definition, forward)` for one k-sparse vector.
+
+    `producer_slice` lets a test have miStudio's recorded scores come from a DIFFERENT encode —
+    which is how a real basis defect is simulated.
+    """
+    slice_, head, consumer, producer = _ksparse_parts()
+    recording = producer_slice or slice_
+    expected = head.token_scores(recording.encode(producer if producer_slice is None else consumer))
+    probe = ArmedProbe(
+        probe_id="pr_sae",
+        name="k-sparse",
+        head=head,
+        rule="mean",
+        scope="all",
+        layer=1,
+        rung=2,
+        rung_language="detects on unseen tasks",
+        threshold=1.0,
+        encoder=slice_,
+    )
+    definition = definition_with(
+        list(range(100, 100 + N_TOKENS)),
+        [float(v) for v in expected],
+        float(expected.mean()),
+    )
+
+    def forward(input_ids: torch.Tensor, context):
+        context.observe(1, consumer.unsqueeze(0))
+
+    return probe, definition, forward
+
+
+class TestKSparseJumpReLUPositions:
+    """A JumpReLU basis has positions whose gate is not reproducible, and they must be set
+    aside rather than tolerated.
+
+    The producer scores in float16, this build serves bfloat16, and the residual they see
+    differs by about 1.5% relative. A JumpReLU feature is `pre * H(pre - theta)`: for a feature
+    sitting inside that band of its own threshold the two sides gate it differently, and the
+    feature then moves between theta and 0 — which after the head's `norm_std` shifts THAT ONE
+    token's score by tens of units. Diluted by the `mean` rule it lands in the same range as a
+    real basis defect, so the combined score over the whole sequence cannot separate them.
+    """
+
+    def test_the_full_sequence_figure_would_have_failed(self):
+        """The fixture is in the regime this change is about — asserted, not assumed.
+
+        Without setting the unreproducible positions aside there is nothing to discuss: the
+        gate refuses a build that is correct.
+        """
+        probe, definition, forward = _ksparse_case()
+        report = ProbeParityEngine(forward).run(probe, definition, tolerance=0.001)
+        assert report.max_combined_diff > report.score_tolerance, (
+            "this fixture no longer exercises the gate-flip regime; the test below proves "
+            "nothing until it does"
+        )
+
+    def test_a_correct_build_passes_on_the_reproducible_positions(self):
+        probe, definition, forward = _ksparse_case()
+        report = ProbeParityEngine(forward).run(probe, definition, tolerance=0.001)
+        assert report.max_robust_combined_diff is not None
+        assert report.max_robust_combined_diff < report.max_combined_diff / 10, (
+            "setting the unreproducible positions aside must remove most of the divergence, "
+            "or the divergence was not the gate"
+        )
+        assert report.passed is True
+
+    def test_the_positions_set_aside_are_reported_not_hidden(self):
+        probe, definition, forward = _ksparse_case()
+        report = ProbeParityEngine(forward).run(probe, definition, tolerance=0.001)
+        details = report.as_details()
+        assert 0 < details["at_risk_tokens"] < details["scored_tokens"]
+        assert details["max_combined_diff"] > details["max_gated_diff"]
+        assert details["vectors"][0]["n_tokens"] == N_TOKENS
+
+    def test_the_uncentered_basis_defect_still_fails(self):
+        """The defect of 2026-09-27, over the SAME positions. It must not be admitted.
+
+        `b_dec` is non-zero in the fixture, so dropping the centring is a real change. On the
+        full sequence this defect and a correct build are a factor of four apart; over the
+        reproducible positions they are two orders of magnitude apart.
+        """
+        from dataclasses import replace
+
+        slice_, _, _, _ = _ksparse_parts()
+        probe, definition, forward = _ksparse_case(
+            producer_slice=replace(slice_, decoder_bias=None)
+        )
+        report = ProbeParityEngine(forward).run(probe, definition, tolerance=0.001)
+        assert report.max_robust_combined_diff > report.score_tolerance
+        assert report.passed is False
+
+    def test_a_vector_with_almost_nothing_reproducible_is_refused(self):
+        """Not passed on the remainder. A comparison resting on a handful of positions says
+        little about the probe, and a basis that sits on its own thresholds is one to refuse."""
+        from dataclasses import replace
+
+        from millm.services.probe_parity import NOT_COMPARABLE_UNSTABLE
+
+        from millm.services.probe_sae_slice import PRODUCER_PRECISION_GAP
+
+        slice_, head, _, _ = _ksparse_parts()
+        # A near-constant residual: every position has the SAME pre-activations, so a threshold
+        # placed on them is on the edge for all of them at once.
+        g = torch.Generator().manual_seed(12)
+        consumer = torch.full((N_TOKENS, D_MODEL_K), 0.05) + 1e-4 * torch.randn(
+            (N_TOKENS, D_MODEL_K), generator=g
+        )
+        producer = consumer * (
+            1.0 + PRODUCER_PRECISION_GAP * torch.randn(consumer.shape, generator=g)
+        )
+        everywhere = replace(
+            slice_, thresholds=slice_.pre_activations(consumer).mean(0).contiguous()
+        )
+        expected = head.token_scores(everywhere.encode(producer))
+        probe = ArmedProbe(
+            probe_id="pr_sae",
+            name="k-sparse",
+            head=head,
+            rule="mean",
+            scope="all",
+            layer=1,
+            rung=2,
+            rung_language="detects on unseen tasks",
+            encoder=everywhere,
+        )
+
+        def forward(input_ids, context):
+            context.observe(1, consumer.unsqueeze(0))
+
+        report = ProbeParityEngine(forward).run(
+            probe,
+            definition_with(
+                list(range(100, 100 + N_TOKENS)),
+                [float(v) for v in expected],
+                float(expected.mean()),
+            ),
+            tolerance=0.001,
+        )
+        assert report.passed is False
+        assert NOT_COMPARABLE_UNSTABLE in (report.vectors[0].reason or "")
+
+    def test_a_dense_probe_is_unchanged(self):
+        """No encoder, so no position is set aside and the gate is exactly what it was."""
+        engine = ProbeParityEngine(forward_with(1.0))
+        report = engine.run(
+            make_probe(), definition_with([5, 6, 7], [4.0, 4.0, 4.0], 4.0), tolerance=0.001
+        )
+        assert report.passed is True
+        assert report.at_risk_tokens == 0
+        assert report.max_robust_combined_diff is None
+        assert report.max_gated_diff == report.max_combined_diff
+
+    def test_the_robust_figure_goes_through_the_PROBE_S_OWN_RULE(self):
+        """⚠ Not an average. Dropping a position from a `max` probe is not the same operation as
+        dropping it from a `mean`, and hand-averaging here would compare a statistic the probe
+        does not compute — the `attention`-as-`softmax` failure in another costume."""
+        from millm.ml.probe_head import combine
+
+        slice_, head, consumer, producer = _ksparse_parts()
+        expected = head.token_scores(slice_.encode(producer))
+        actual = head.token_scores(slice_.encode(consumer))
+        probe = ArmedProbe(
+            probe_id="pr_max",
+            name="k-sparse-max",
+            head=head,
+            rule="max",
+            scope="all",
+            layer=1,
+            rung=2,
+            rung_language="detects on unseen tasks",
+            encoder=slice_,
+        )
+
+        def forward(input_ids, context):
+            context.observe(1, consumer.unsqueeze(0))
+
+        report = ProbeParityEngine(forward).run(
+            probe,
+            definition_with(
+                list(range(100, 100 + N_TOKENS)),
+                [float(v) for v in expected],
+                float(expected.max()),
+            ),
+            tolerance=0.001,
+        )
+        mask = (~slice_.flip_risk(consumer)).unsqueeze(0)
+        by_rule = abs(
+            float(combine("max", actual.unsqueeze(0), mask=mask).item())
+            - float(combine("max", expected.unsqueeze(0), mask=mask).item())
+        )
+        by_average = abs(
+            float(combine("mean", actual.unsqueeze(0), mask=mask).item())
+            - float(combine("mean", expected.unsqueeze(0), mask=mask).item())
+        )
+        assert by_rule != pytest.approx(by_average), (
+            "this fixture cannot tell the two apart, so it cannot pin the rule"
+        )
+        assert report.vectors[0].robust_combined_diff == pytest.approx(by_rule, abs=1e-6)

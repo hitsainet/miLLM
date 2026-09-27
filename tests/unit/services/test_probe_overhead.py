@@ -195,6 +195,202 @@ class TestTheActivationsAreNotCopiedToTheHost:
         assert slice_.to_device(torch.device("cpu")) is slice_
 
 
+class TestNothingProportionalToTheTokensHappensOnTheHostPerPass:
+    """⚠ THE SECOND HALF OF THE SAME DEFECT. The activations stopped crossing to the host; the
+    SCORES did not.
+
+    Per forward pass, per probe, `observe` used to build a Python list of one float per token, a
+    Python list of one bool per token, and `finish` then rebuilt tensors from both. Measured on
+    the 3090 at 4096 tokens, per probe: 0.051 ms for the `.tolist()`, 0.006 for the mask,
+    0.133 + 0.192 to rebuild the tensors, and **0.431 ms for a Python `sorted()` over every
+    scored position to keep five of them** — 0.813 ms of bookkeeping around 0.42 ms of
+    arithmetic, against a 5 ms budget for the whole request.
+
+    These assert the SHAPE of what is accumulated rather than a timing, because a timing at
+    4096 x 2048 on CI measures the runner. The measured figures are in the commit and in
+    `0xcc/reviews/`.
+    """
+
+    @staticmethod
+    def _probe(rule: str = "mean", d_model: int = 16, attention: bool = False):
+        from millm.services.probe_runtime import ArmedProbe
+
+        torch.manual_seed(2)
+        return ArmedProbe(
+            probe_id="pr_1",
+            name="t",
+            head=ProbeHead(
+                weight=torch.randn(d_model),
+                bias=0.25,
+                mean=torch.zeros(d_model),
+                std=torch.ones(d_model),
+                attention_query=torch.randn(d_model) if attention else None,
+            ),
+            rule=rule,
+            scope="all",
+            layer=1,
+            rung=2,
+            rung_language="detects on unseen tasks",
+            threshold=0.0,
+        )
+
+    def test_the_accumulated_scores_are_TENSORS_one_per_pass(self):
+        from millm.services.probe_runtime import ProbeRequestContext
+
+        context = ProbeRequestContext("req", [self._probe()])
+        context.observe(1, torch.randn(1, 64, 16))
+        context.observe(1, torch.randn(1, 1, 16))
+        parts = context._scores["pr_1"]
+        assert len(parts) == 2, "one tensor per forward pass, not one entry per token"
+        assert all(isinstance(p, torch.Tensor) for p in parts), (
+            f"the score accumulator holds {[type(p).__name__ for p in parts]} — a Python float "
+            "per token is 0.051 ms of `.tolist()` per probe per pass at 4k, and `finish` then "
+            "rebuilds the tensor it needed all along"
+        )
+        assert [tuple(p.shape) for p in parts] == [(64,), (1,)]
+
+    def test_the_mask_is_a_TENSOR_too_and_is_shared_across_probes_on_a_layer(self):
+        """The window depends on the position and the length, not on the probe."""
+        from millm.services.probe_runtime import ArmedProbe, ProbeRequestContext
+
+        a = self._probe()
+        b = ArmedProbe(**{**a.__dict__, "probe_id": "pr_2"})
+        context = ProbeRequestContext("req", [a, b])
+        context.observe(1, torch.randn(1, 32, 16))
+        windows = (context._mask["pr_1"][0], context._mask["pr_2"][0])
+        assert all(isinstance(w, torch.Tensor) and w.dtype == torch.bool for w in windows)
+        assert windows[0] is windows[1], (
+            "each probe built its own mask — that is a Python list per probe per pass"
+        )
+
+    def test_the_attention_logits_are_tensors_too(self):
+        """The `attention` rule has its own accumulator, and it had its own `.tolist()`."""
+        from millm.services.probe_runtime import ProbeRequestContext
+
+        context = ProbeRequestContext("req", [self._probe(rule="attention", attention=True)])
+        context.observe(1, torch.randn(1, 48, 16))
+        parts = context._logits["pr_1"]
+        assert parts and all(isinstance(p, torch.Tensor) for p in parts)
+        assert context.finish()[0].scored is True
+
+    def test_the_head_is_moved_to_the_device_ONCE_not_once_per_pass(self):
+        """⚠ `to_device` COPIES every weight it is given. It was called from inside
+        `token_scores`, so a 192-token completion re-uploaded `weight`, `mean` and `std` 193
+        times per probe — measured at 0.035 ms per call on the 3090, which is 13 ms for two
+        probes, more than twice the whole 5 ms budget, for weights that never change.
+
+        Counted by spying on the head, not by reading the source — and counting the calls that
+        actually COPIED, since `to_device` returns `self` when there is nothing to move and being
+        called is not the same as costing anything. The head's weights are float64 here so that a
+        copy is required on CPU at all; on the card the same copy is a host-to-device upload.
+        """
+        from millm.ml import probe_head as head_module
+        from millm.services.probe_runtime import ArmedProbe, ProbeRequestContext
+
+        copies: list[object] = []
+        real = head_module.ProbeHead.to_device
+
+        def counted(self, device):
+            out = real(self, device)
+            if out is not self:
+                copies.append(device)
+            return out
+
+        monkeypatch = pytest.MonkeyPatch()
+        monkeypatch.setattr(head_module.ProbeHead, "to_device", counted)
+        try:
+            probe = ArmedProbe(
+                probe_id="pr_1",
+                name="t",
+                head=ProbeHead(weight=torch.randn(16, dtype=torch.float64)),
+                rule="mean",
+                scope="all",
+                layer=1,
+                rung=2,
+                rung_language="detects on unseen tasks",
+                threshold=0.0,
+            )
+            context = ProbeRequestContext("req", [probe])
+            for _ in range(12):
+                context.observe(1, torch.randn(1, 4, 16))
+        finally:
+            monkeypatch.undo()
+
+        assert len(copies) == 1, (
+            f"the head's weights were copied {len(copies)} times over 12 forward passes — that "
+            "is a re-upload of weight, mean and std per pass, measured at 0.035 ms each"
+        )
+        assert context.finish()[0].n_scored_tokens == 48
+
+    def test_finish_brings_the_row_to_the_HOST_so_combine_runs_where_parity_runs(self):
+        """⚠ NOT AN OVERSIGHT THAT THE ROW LEAVES THE CARD.
+
+        `combine()` is the function the parity gate calls, and the parity gate scores its test
+        vectors on the host. A reduction over 4k float32 values does not associate the same way
+        on both: measured on the 3090, the `mean` over a 4160-token row differed by **4.8e-07**
+        between a device reduction and a host one, deterministically. Four orders inside the
+        1e-3 tolerance, and still two numbers where the design says there is one.
+
+        Asserted by recording the call, because there is no CUDA on CI.
+        """
+        from millm.services import probe_runtime
+
+        moved: list[str] = []
+
+        class ElsewhereTensor(torch.Tensor):
+            """A CPU tensor that reports a non-CPU device, so the branch runs without a GPU."""
+
+            @staticmethod
+            def __new__(cls, data):
+                return torch.Tensor._make_subclass(cls, data, False)
+
+            @property
+            def device(self):  # type: ignore[override]
+                return torch.device("cuda", 0)
+
+            def cpu(self, *a, **k):  # type: ignore[override]
+                moved.append("cpu")
+                return torch.Tensor(self)
+
+        row = probe_runtime._row([ElsewhereTensor(torch.randn(8))])
+        assert moved == ["cpu"], "the row stayed on the card, so combine() reduces there"
+        assert row.device.type == "cpu"
+
+    def test_a_row_already_on_the_host_is_not_copied(self):
+        """Specificity: an unconditional `.cpu()` is a copy of every score on every request."""
+        from millm.services import probe_runtime
+
+        part = torch.randn(8)
+        assert probe_runtime._row([part]) is part
+
+    def test_top_positions_break_ties_by_ASCENDING_POSITION(self):
+        """⚠ The Python `sorted()` this replaced is stable, so equal scores came back in position
+        order. `topk` and an unstable sort do not promise that, and the difference only shows on
+        a row with repeated scores — where it would make the reported positions vary between
+        runs on identical input, which is unreproducible rather than wrong.
+
+        ⚠ **128 TIED POSITIONS, NOT 9, AND THE NUMBER IS THE WHOLE TEST.** Written first with 9,
+        it was mutation-controlled by flipping `stable=True` to `stable=False` — and the control
+        SURVIVED. torch's CPU sort uses insertion sort below a size threshold, which is stable
+        whatever the flag says, so at n=9 the two forms return identical indices and the fixture
+        agreed with the mutation by construction. Measured on this build: identical at n=9,
+        divergent from n=100 upward (at 128 the unstable sort's first index is not 0). A tie-break
+        test below the threshold asserts nothing at all.
+        """
+        from millm.services.probe_runtime import ProbeRequestContext
+
+        n_tied = 128
+        probe = self._probe(d_model=1)
+        # weight is a single value, so a constant activation gives every position one score.
+        context = ProbeRequestContext("req", [probe])
+        context.observe(1, torch.ones(1, n_tied, 1))
+        verdict = context.finish()[0]
+        assert verdict.top_positions == [0, 1, 2, 3, 4], (
+            f"{n_tied} tied scores reported {verdict.top_positions} — ties must resolve to the "
+            "lowest positions, as the Python sort this replaced did"
+        )
+
+
 class TestTheRejectedOptimisationsStayRejected:
     """⚠ Two faster forms exist. Both are wrong, and both look right.
 

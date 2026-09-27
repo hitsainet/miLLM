@@ -8,13 +8,39 @@ but it is **not** what serves a request. Using the online form live and the batc
 would be two implementations of one definition, and parity would be verifying the wrong one.
 
 The cost is holding the per-token scores for the request: a 4k context across the 8-probe limit is
-about 128 KB. That is not a trade worth making for a drift risk.
+about 128 KB, as float32 **tensors**. That is not a trade worth making for a drift risk.
 
-## One hook per layer, one device-to-host copy per pass
+## One hook per layer, and ONE host crossing per probe per REQUEST
 
-The budget is `PROBE_MAX_OVERHEAD_MS` (5 ms). It is only reachable if the hidden states cross to
-the host **once** per forward pass, with every probe on that layer reading the same CPU tensor. A
-`.item()` or `.tolist()` per probe per token is what caused an earlier sensing regression here.
+The budget is `PROBE_MAX_OVERHEAD_MS` (5 ms), and the way it is reached is that a forward pass
+costs the probe no host-side work proportional to the tokens in it. The row crosses to the host
+once, in `finish()`, where `_row` explains why it crosses at all rather than staying on the card.
+
+Scores, attention logits and the scope mask are accumulated as **tensors on the activations' own
+device**, one small tensor per pass, and `torch.cat` runs once per probe in `finish()`. What used
+to happen instead — measured on the 3090 at 4096 tokens, per probe, with `nvidia-smi` idle:
+
+    scores.tolist()                     0.051 ms   (D2H, then 4096 Python floats)
+    [True] * 4096                       0.006 ms
+    torch.tensor(py_scores)  in finish  0.133 ms
+    torch.tensor(py_mask)    in finish  0.192 ms
+    sorted(4096, key=...)    in finish  0.431 ms   <- the top-5 positions
+                                        -------
+                                        0.813 ms   per probe, x2 probes = 1.6 ms
+
+against a 5 ms budget for the whole request, for bookkeeping around 0.42 ms of arithmetic. The
+`sorted()` is the one that surprises: it is a Python sort over every scored position to keep five
+of them, and it cost more than the matvec it was sorting.
+
+A `.item()` or `.tolist()` per probe per token is what caused an earlier sensing regression here;
+there is now no `.tolist()` on the pass path at all.
+
+## The head follows the activations, and is resolved ONCE per request
+
+`ProbeHead.to_device` builds a new head every call, so calling it inside `token_scores` re-uploaded
+`weight`, `mean` and `std` to the card **on every forward pass** — 0.035 ms per probe per pass,
+which over a 192-token completion with two probes is 13 ms of pure re-upload, more than twice the
+whole budget. The context resolves the device head once and keeps it.
 
 ## The request slot
 
@@ -42,6 +68,29 @@ logger = logging.getLogger(__name__)
 
 #: How many of the highest-scoring positions an event records.
 TOP_POSITIONS = 5
+
+
+def _row(parts: list[torch.Tensor]) -> torch.Tensor:
+    """The per-pass tensors as one row, ON THE HOST.
+
+    A prefill-only request has exactly one part, and `torch.cat` on a single tensor COPIES it,
+    so the common case skips the cat.
+
+    ⚠ **AND THE ROW COMES BACK TO THE HOST HERE, ONCE PER PROBE PER REQUEST**, which is the only
+    device-to-host transfer left on the probe path: 16 kB of scores and 4 kB of mask at 4k tokens,
+    against the 33.6 MB per forward pass this module used to copy.
+
+    It is not an oversight that it is not left on the card. `combine()` is the function the parity
+    gate calls, and the parity gate scores its test vectors on the **host**. A reduction over 4k
+    float32 values does not associate the same way on both, so leaving the row on the card makes
+    serving and parity the same CODE over different arithmetic — a weaker form of the two
+    implementations this module's docstring exists to prevent. Measured: the `mean` over a
+    4160-token row differed by **4.8e-07** between the two, deterministic and reproducible across
+    rounds. That is four orders inside the 1e-3 parity tolerance and it is still a number nobody
+    asked for, bought back for about 0.05 ms per probe per request.
+    """
+    row = parts[0] if len(parts) == 1 else torch.cat(parts)
+    return row if row.device.type == "cpu" else row.cpu()
 
 
 @dataclass(frozen=True)
@@ -107,13 +156,21 @@ class ProbeRequestContext:
         #: and SC-4 was unmeasurable from the product itself. Found on the node, by measuring.
         self.overhead_ms = 0.0
         self._not_scored_reason: Optional[str] = None
-        #: probe_id -> per-token scores, in arrival order.
-        self._scores: dict[str, list[float]] = {p.probe_id: [] for p in probes}
-        #: probe_id -> per-token attention logits, for the `attention` rule only.
-        self._logits: dict[str, list[float]] = {p.probe_id: [] for p in probes}
+        #: probe_id -> one (n_tokens,) float32 score tensor PER FORWARD PASS, in arrival order.
+        #: Tensors, not floats: see the module docstring. `finish()` cats them once.
+        self._scores: dict[str, list[torch.Tensor]] = {p.probe_id: [] for p in probes}
+        #: probe_id -> the same, for per-token attention logits, for the `attention` rule only.
+        self._logits: dict[str, list[torch.Tensor]] = {p.probe_id: [] for p in probes}
         #: probe_id -> per-token "this position's gate is not reproducible", parity only.
+        #: A Python list and not a tensor, deliberately: it is collected only when
+        #: `collect_flip_risk` is set, which is never on a served request, so it is not on the
+        #: path the 5 ms budget covers.
         self._flip_risk: dict[str, list[bool]] = {p.probe_id: [] for p in probes}
-        self._mask: dict[str, list[bool]] = {p.probe_id: [] for p in probes}
+        #: probe_id -> one (n_tokens,) bool scope window per pass.
+        self._mask: dict[str, list[torch.Tensor]] = {p.probe_id: [] for p in probes}
+        #: probe_id -> that probe's head, already on the activations' device. Resolved on the
+        #: first pass and reused, because `to_device` copies every weight when it is called.
+        self._heads: dict[str, ProbeHead] = {}
         self._position = 0
 
     @property
@@ -183,6 +240,23 @@ class ProbeRequestContext:
         row = hidden[0].detach()
         n_tokens = row.shape[0]
 
+        # The scope window for THIS pass, built once and shared by every probe on this layer —
+        # it depends on the position and the length, not on the probe. As a tensor on the
+        # activations' device, because `combine()` masks against the scores and a CPU mask would
+        # drag the scores back off the card.
+        #
+        # `scope_window` still owns the padding rule (short mask pads CLOSED), so there is one
+        # definition of it and not two. When `mask` is None — which is every request the runtime
+        # serves today, `scope="all"` — there is no Python list at all.
+        if mask is None:
+            window = torch.ones(n_tokens, dtype=torch.bool, device=row.device)
+        else:
+            window = torch.as_tensor(
+                scope_window(mask, self._position, n_tokens),
+                dtype=torch.bool,
+                device=row.device,
+            )
+
         for probe in here:
             try:
                 # ⚠ THE ENCODER IS INSIDE THE TRY. It was outside, so a k-sparse probe whose
@@ -197,16 +271,24 @@ class ProbeRequestContext:
                 logger.error("probe_encode_failed id=%s error=%s", probe.probe_id, exc)
                 self.mark_not_scored(f"encoder_failed: {exc}"[:200])
                 return
+            # The head, on the activations' device, resolved ONCE per request rather than on
+            # every pass. `to_device` builds a new head and copies `weight`, `mean` and `std`
+            # each time it is called, so calling it per pass re-uploaded them per pass.
+            head = self._heads.get(probe.probe_id)
+            if head is None or head.weight.device != basis.device:
+                head = probe.head.to_device(basis.device)
+                self._heads[probe.probe_id] = head
             try:
-                # `.tolist()` below is the one host transfer, of (T,) floats.
-                scores = probe.head.token_scores(basis)
+                scores = head.token_scores(basis)
             except ValueError as exc:
                 # A width mismatch here means arming let through a probe that cannot read this
                 # model. Refusing the request is right; scoring it would be scoring noise.
                 logger.error("probe_score_failed id=%s error=%s", probe.probe_id, exc)
                 self.mark_not_scored("head_mismatch")
                 return
-            self._scores[probe.probe_id].extend(scores.tolist())
+            # ⚠ APPEND THE TENSOR. `.tolist()` here was 4096 Python floats per probe per pass,
+            # which `finish()` then rebuilt into the tensor it needed anyway.
+            self._scores[probe.probe_id].append(scores)
             if self.collect_flip_risk:
                 # ⚠ A probe whose encoder cannot say (a dense probe, a relu basis, an injected
                 # test double) records False, meaning "nothing here is unreproducible" — NEVER
@@ -217,12 +299,18 @@ class ProbeRequestContext:
                     risk(row).tolist() if risk is not None else [False] * n_tokens
                 )
             if probe.rule == "attention":
-                self._logits[probe.probe_id].extend(probe.head.attention_logits(basis).tolist())
-            self._mask[probe.probe_id].extend(
-                scope_window(mask, self._position, n_tokens)
-            )
+                self._logits[probe.probe_id].append(head.attention_logits(basis))
+            self._mask[probe.probe_id].append(window)
 
         self._position += n_tokens
+
+        # ⚠ AND SYNCHRONISE BEFORE STOPPING THE CLOCK, for the same reason it was started after
+        # one. The work above is now entirely asynchronous kernel launches, so a bare
+        # `perf_counter` would time the ENQUEUE and report a fraction of what the probe costs —
+        # the mirror image of the 10x over-report this measurement used to carry. `.tolist()`
+        # provided this sync implicitly, once per probe; this is once per pass and moves no data.
+        if hidden.is_cuda:
+            torch.cuda.synchronize(hidden.device)
         self.overhead_ms += (time.perf_counter() - started) * 1000.0
 
     def token_scores_for(self, probe_id: str) -> list[float]:
@@ -231,10 +319,15 @@ class ProbeRequestContext:
         Masked-out positions are omitted rather than zeroed, because that is the shape miStudio
         records in a test vector — `forward_scores` returns the kept scores, not the full row —
         and parity compares against exactly that.
+
+        This is the ONLY place per-token scores become Python floats, and it is called by the
+        parity gate at arm time, never by a served request.
         """
-        scores = self._scores.get(probe_id, [])
-        mask = self._mask.get(probe_id, [])
-        return [value for value, keep in zip(scores, mask) if keep]
+        score_parts = self._scores.get(probe_id) or []
+        mask_parts = self._mask.get(probe_id) or []
+        if not score_parts or not mask_parts:
+            return []
+        return _row(score_parts)[_row(mask_parts)].tolist()
 
     def flip_risk_for(self, probe_id: str) -> list[bool]:
         """Per SCORED position, whether a step gate could have resolved the other way.
@@ -242,10 +335,17 @@ class ProbeRequestContext:
         Aligned with `token_scores_for` — the same positions, in the same order — so the parity
         engine can pair them without re-deriving the scope mask. Empty when the collector was
         off, which callers must read as "unknown", not as "nothing at risk".
+
+        ⚠ `_mask` holds ONE TENSOR PER FORWARD PASS, not one bool per token — so the scope has to
+        be flattened through `_row` before it can be zipped against a per-token list. Zipping the
+        parts directly pairs the first token's risk with a whole pass's window, which is a
+        length-of-passes answer that a multi-element tensor then raises on.
         """
-        risk = self._flip_risk.get(probe_id, [])
-        mask = self._mask.get(probe_id, [])
-        return [value for value, keep in zip(risk, mask) if keep]
+        risk = self._flip_risk.get(probe_id) or []
+        mask_parts = self._mask.get(probe_id) or []
+        if not risk or not mask_parts:
+            return []
+        return [value for value, keep in zip(risk, _row(mask_parts).tolist()) if keep]
 
     def finish(self) -> list[Verdict]:
         """Combine each probe's scores into a verdict.
@@ -269,19 +369,28 @@ class ProbeRequestContext:
                 )
                 continue
 
-            scores = self._scores[probe.probe_id]
-            mask = self._mask[probe.probe_id]
-            if not scores or not any(mask):
-                # No position in scope. Not an error and not a zero — the probe never looked.
+            score_parts = self._scores[probe.probe_id]
+            mask_parts = self._mask[probe.probe_id]
+            if not score_parts:
+                # The probe never looked. Not an error and not a zero.
                 verdicts.append(Verdict(scored=False, not_scored_reason="no_scored_tokens", **base))
                 continue
 
-            score_tensor = torch.tensor(scores, dtype=torch.float32).unsqueeze(0)
-            mask_tensor = torch.tensor(mask, dtype=torch.bool).unsqueeze(0)
-            logits = self._logits[probe.probe_id]
-            logit_tensor = (
-                torch.tensor(logits, dtype=torch.float32).unsqueeze(0) if logits else None
-            )
+            # One `cat` and one host crossing per probe per request, over one tensor per pass.
+            score_row = _row(score_parts)
+            mask_row = _row(mask_parts)
+            #: Ascending positions that are in scope. Also the `no_scored_tokens` test and the
+            #: `n_scored_tokens` count, so it replaces three separate walks over the mask.
+            scored_index = mask_row.nonzero(as_tuple=True)[0]
+            if scored_index.numel() == 0:
+                # A mask that selects nothing is not a score of 0 — the probe never looked.
+                verdicts.append(Verdict(scored=False, not_scored_reason="no_scored_tokens", **base))
+                continue
+
+            score_tensor = score_row.unsqueeze(0)
+            mask_tensor = mask_row.unsqueeze(0)
+            logit_parts = self._logits[probe.probe_id]
+            logit_tensor = _row(logit_parts).unsqueeze(0) if logit_parts else None
             params = {
                 k: v for k, v in (probe.rule_params or {}).items() if k in ("tau", "window")
             }
@@ -295,8 +404,15 @@ class ProbeRequestContext:
                 ).item()
             )
 
-            scored_positions = [i for i, keep in enumerate(mask) if keep]
-            top = sorted(scored_positions, key=lambda i: scores[i], reverse=True)[:TOP_POSITIONS]
+            # ⚠ `stable=True` IS LOAD-BEARING, not tidiness. This replaced
+            # `sorted(scored_positions, key=scores.__getitem__, reverse=True)`, and Python's sort
+            # keeps equal elements in their original (ascending-position) order. `topk`, and an
+            # unstable sort, break ties arbitrarily — so on a row with repeated scores the
+            # reported positions would drift between runs on the same input, which is the kind of
+            # difference nobody notices and nobody can reproduce. Measured at 0.431 ms per probe
+            # as a Python sort at 4k tokens, against 0.42 ms for the matvec it was sorting.
+            order = torch.sort(score_row[scored_index], descending=True, stable=True).indices
+            top = scored_index[order[:TOP_POSITIONS]].tolist()
             verdicts.append(
                 Verdict(
                     scored=True,
@@ -304,7 +420,7 @@ class ProbeRequestContext:
                     # ⚠ `None`, not `False`, when no threshold was placed: the probe ranks but
                     # does not decide, and reporting `False` would be a verdict it never gave.
                     fires=None if probe.threshold is None else value > probe.threshold,
-                    n_scored_tokens=len(scored_positions),
+                    n_scored_tokens=int(scored_index.numel()),
                     top_positions=top,
                     **base,
                 )

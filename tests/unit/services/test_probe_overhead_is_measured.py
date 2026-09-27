@@ -60,12 +60,38 @@ class TestTheContextAccumulatesItsOwnCost:
         assert context.overhead_ms > after_observe
 
     def test_more_work_costs_more(self):
-        """Specificity: a constant would satisfy every assertion above."""
-        small = ProbeRequestContext("a", [_probe()])
-        small.observe(1, torch.randn(1, 32, 8))
-        large = ProbeRequestContext("b", [_probe()])
-        large.observe(1, torch.randn(1, 4096, 8))
-        assert large.overhead_ms > small.overhead_ms
+        """Specificity: a constant would satisfy every assertion above.
+
+        ⚠ MEDIAN OF SEVERAL, AND A WIDE RATIO, because this test used to pass for the wrong
+        reason. At `d_model=8` it compared a single wall-clock sample of 32 tokens against one of
+        4096, and what made the larger one reliably bigger was the per-token PYTHON work — a
+        4096-element `.tolist()` and a 4096-element mask list. Once those were replaced by
+        tensors, `observe` at this width is dominated by fixed per-call dispatch, the two sizes
+        came within noise of each other, and the test failed on correct code (0.0257 ms for 4096
+        tokens against 0.0329 ms for 32).
+
+        The property is still true and still worth asserting — the arithmetic is linear in tokens
+        — but it has to be measured where the arithmetic is visible above the call overhead, and
+        with more than one sample. `d_model=256` and a 256x token ratio put the work two orders
+        above the dispatch cost.
+        """
+        wide = _probe(d_model=256)
+
+        def median_ms(n_tokens: int) -> float:
+            samples = []
+            for _ in range(7):
+                context = ProbeRequestContext("req", [wide])
+                context.observe(1, torch.randn(1, n_tokens, 256))
+                samples.append(context.overhead_ms)
+            samples.sort()
+            return samples[len(samples) // 2]
+
+        small = median_ms(32)
+        large = median_ms(8192)
+        assert large > small, (
+            f"8192 tokens cost {large:.4f} ms against 32 tokens' {small:.4f} ms — the reported "
+            "overhead does not grow with the work, so it is not measuring the work"
+        )
 
     def test_a_pass_with_no_probe_on_that_layer_is_not_charged(self):
         """The probe did no work, so it costs nothing — otherwise the number measures the model."""
@@ -173,6 +199,22 @@ class TestTheMeasurementDoesNotChargeTheModel:
         assert calls, (
             "the score path did not synchronise before timing — the reported overhead then "
             "includes the model's in-flight work, which measured 10x the probe's real cost"
+        )
+        # ⚠ TWICE, AND THE SECOND ONE IS AS LOAD-BEARING AS THE FIRST.
+        #
+        # The scoring path used to end in `.tolist()`, which blocked until the probe's own
+        # kernels finished and so closed the timer honestly by accident. Nothing crosses to the
+        # host per pass any more, so every line between the two syncs is an asynchronous launch:
+        # without the closing sync the timer measures the ENQUEUE and reports a fraction of what
+        # the probe costs. That is the same defect as the 10x over-report with its sign flipped,
+        # and it is the harder one to notice, because an under-report looks like success.
+        #
+        # The count is asserted, not merely "it was called": one sync satisfies the assertion
+        # above while leaving the clock closing on an empty queue.
+        assert len(calls) == 2, (
+            f"synchronised {len(calls)} time(s) per pass, expected 2 — one before the clock "
+            "starts so the model is not charged to the probe, and one before it stops so the "
+            "probe's own asynchronous work is"
         )
 
     def test_a_cpu_tensor_does_not_synchronise(self):

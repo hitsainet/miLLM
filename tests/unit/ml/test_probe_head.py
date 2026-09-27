@@ -188,6 +188,65 @@ class TestStandardisation:
         assert out[0, 0].item() == pytest.approx(2.0)
         assert out[0, 1].item() == 0.0, "a degenerate channel must contribute nothing"
 
+    def test_the_memoised_form_is_BIT_EXACT_against_the_unmemoised_one(self):
+        """⚠ THE ONLY LICENCE `standardise` HAS TO BE FASTER IS THAT IT IS NOT DIFFERENT.
+
+        Three things were hoisted out of the per-pass path: `degenerate` and `divisor` are
+        memoised, the zero is 0-dim instead of a (T, d) `zeros_like`, and the `where` is SKIPPED
+        when no channel is degenerate. Each is meant to be a selection or a cached constant, not
+        a change to the arithmetic — so this compares against the literal form the module used to
+        contain, and requires `== 0.0`, not `approx`.
+
+        Both branches are covered: a head with NO degenerate channel (where the `where` is
+        skipped) and one WITH (where it is not). Testing only the first would leave the skip
+        untested in the case it exists for.
+        """
+        def reference(h: ProbeHead, z: torch.Tensor) -> torch.Tensor:
+            out = z
+            if h.mean is not None:
+                out = out - h.mean
+            if h.std is not None:
+                degenerate = h.std.abs() <= h.eps
+                divisor = torch.where(degenerate, torch.ones_like(h.std), h.std)
+                out = torch.where(degenerate, torch.zeros_like(out), out / divisor)
+            return out
+
+        torch.manual_seed(11)
+        d = 512
+        healthy_std = torch.rand(d) + 0.5
+        degenerate_std = healthy_std.clone()
+        degenerate_std[3] = 0.0
+        degenerate_std[400] = 1e-9
+
+        for label, std in (("no degenerate channel", healthy_std), ("with one", degenerate_std)):
+            h = ProbeHead(weight=torch.randn(d), bias=0.25, mean=torch.randn(d) * 0.1, std=std)
+            z = torch.randn(64, d)
+            diff = (h.standardise(z) - reference(h, z)).abs().max().item()
+            assert diff == 0.0, (
+                f"standardise ({label}) moved by {diff:.3e} against the unmemoised form — the "
+                "hoisting changed the arithmetic, and token_scores must stay bit-exact against "
+                "miStudio"
+            )
+            # And the same again, to prove the SECOND call through the memo agrees too.
+            assert (h.standardise(z) - reference(h, z)).abs().max().item() == 0.0
+
+    def test_the_standardisation_constants_are_computed_ONCE(self):
+        """The whole point of the memo. It runs once per forward pass per probe, so at 4k tokens
+        plus a 192-token completion it ran 386 times for one request."""
+        h = ProbeHead(weight=torch.ones(4), std=torch.tensor([1.0, 2.0, 0.0, 4.0]))
+        first = h._standardisation()
+        h.standardise(torch.randn(3, 4))
+        assert h._standardisation() is first, (
+            "the divisor was rebuilt — that is four kernel launches per forward pass per probe"
+        )
+        assert first[2] is True, "a zero std must be reported as degenerate"
+
+    def test_a_head_with_no_degenerate_channel_says_so(self):
+        """Specificity: if `any_degenerate` were always True the skip would never happen, and if
+        it were always False a real degenerate channel would be divided by its own std."""
+        h = ProbeHead(weight=torch.ones(3), std=torch.tensor([1.0, 2.0, 3.0]))
+        assert h._standardisation()[2] is False
+
     def test_the_wrong_width_is_refused_with_both_widths_named(self):
         with pytest.raises(ValueError, match="d=7 but this probe is d=4"):
             head().token_scores(torch.randn(1, 3, 7))

@@ -55,6 +55,34 @@ class VectorResult:
 
 @dataclass
 class ParityReport:
+    """Whether this build reproduces the scores miStudio recorded.
+
+    ⚠ **THE GATE IS THE COMBINED SCORE. PER-TOKEN DIVERGENCE IS REPORTED, NOT GATED.**
+    Decided 2026-09-27 by the product owner, after hardware acceptance showed the original
+    per-token gate could not be passed by any independent implementation:
+
+    miStudio scores probes in **float16**; miLLM serves **bfloat16**, deliberately, because fp16
+    overflows on bf16-trained models and yields NaN logits. Over 16 real vectors the combined
+    scores agreed to a median of 0.017 and a worst of 0.098, while per-token traces never came
+    within 0.70 of each other — because the recorded 0.05 is an ABSOLUTE tolerance against
+    per-token values reaching 55, i.e. 0.09% relative. Even a matched-precision fp16 run left
+    per-token at 0.10–0.28.
+
+    miStudio's recorded "0.000e+00 on all sixteen" was measured re-scoring **in the same process
+    with the same model object**. A gate at that tightness is reachable only by bit-identical
+    computation — and an independent implementation is precisely what this gate exists to verify.
+    A check that a correct consumer cannot pass is the mirror of the defect miStudio already
+    fixed once, where parity told a correct consumer it was wrong on every vector.
+
+    **What this still catches**, and the reason it is a real gate and not a formality: the
+    uncentered-basis defect found the same day moved the combined median to **1.68**, seventeen
+    times this tolerance. A wrong hook point, a wrong layer, a wrong dictionary or a wrong
+    feature selection all move the score by far more than precision does.
+
+    **What it no longer catches:** a per-token pattern that cancels in the mean. That is why the
+    per-token figures stay in the report, beside the verdict, rather than being dropped.
+    """
+
     tolerance: float
     vectors: list[VectorResult] = field(default_factory=list)
     tokenization_drift: dict[str, Any] = field(default_factory=dict)
@@ -74,19 +102,49 @@ class ParityReport:
         return worst
 
     @property
+    def score_tolerance(self) -> float:
+        """The tolerance the GATE uses, on the combined score.
+
+        `max` of the document's own and the deployment's floor, so a definition asking for
+        something looser is honoured and one asking for something tighter than any independent
+        implementation can meet does not make the probe unusable.
+        """
+        from millm.core.config import settings
+
+        return max(self.tolerance, settings.PROBE_PARITY_SCORE_TOLERANCE)
+
+    @property
+    def max_combined_diff(self) -> Optional[float]:
+        diffs = [v.combined_diff for v in self.vectors if v.combined_diff is not None]
+        return max(diffs) if diffs else None
+
+    @property
     def passed(self) -> bool:
         if self.error is not None or not self.vectors:
             return False
         if any(not v.comparable for v in self.vectors):
             return False
-        worst = self.max_abs_diff
-        return worst is not None and worst <= self.tolerance
+        # ⚠ THE COMBINED SCORE, not the per-token trace. See the class docstring.
+        worst = self.max_combined_diff
+        if worst is None:
+            # Vectors were comparable but carried no recorded score to compare against, so
+            # nothing was actually checked. That is not a pass.
+            return False
+        return worst <= self.score_tolerance
 
     def as_details(self) -> dict[str, Any]:
         return {
             "passed": self.passed,
+            # What the gate used, and what the document asked for — both, because they can
+            # differ and a reader needs to know which decided the verdict.
             "tolerance": self.tolerance,
+            "score_tolerance": self.score_tolerance,
+            "max_combined_diff": self.max_combined_diff,
+            # ⚠ INFORMATIONAL. Large per-token divergence with small combined divergence is the
+            # expected signature of a precision difference between producer and consumer; it is
+            # reported so nobody has to rediscover that, and it does not gate.
             "max_abs_diff": self.max_abs_diff,
+            "per_token_is_informational": True,
             "vector_index": self.worst_vector,
             "vectors": [
                 {

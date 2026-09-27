@@ -180,6 +180,14 @@ class Settings(BaseSettings):
     #: acceptance measured its vectors reproducing at 0.000e+00 from the recorded token_ids, so
     #: this is absorbing nothing on the reference path.
     PROBE_PARITY_TOLERANCE: float = 0.001
+    #: The floor for the GATE's tolerance, on the combined score.
+    #:
+    #: ⚠ Not a loosening of `PROBE_PARITY_TOLERANCE`, which still governs how closely a build is
+    #: expected to track. This is the point below which a refusal says more about float precision
+    #: than about the probe: miStudio scores in fp16, miLLM serves bf16, and over 16 real vectors
+    #: that costs a worst-case 0.098 on the score against a threshold of 2.879 — 3.4%. Set from
+    #: measurement on 2026-09-27, not chosen. See `ParityReport`.
+    PROBE_PARITY_SCORE_TOLERANCE: float = 0.10
     PROBE_MAX_OVERHEAD_MS: float = 5.0        # warn threshold per request
     PROBE_MAX_EVENTS_PER_PROBE: int = 5000
     PROBE_MAX_AGE_DAYS: int = 30

@@ -76,6 +76,21 @@ Before arming, the definition's test vectors are re-scored here and compared wit
 miStudio recorded, within 1e-3. If they differ, the probe is refused — the alternative is a
 detector reporting under a measurement taken of something slightly different.
 
+**The gate is the SCORE, not the per-token trace.** Parity passes or fails on the combined
+score — what the probe actually decides with — and reports per-token divergence beside it
+without gating on it.
+
+That is deliberate, and measured. miStudio scores probes in float16; miLLM serves bfloat16,
+because float16 overflows on models trained in bfloat16. Over sixteen real vectors that costs a
+worst case of **0.098 on the score** against a threshold of 2.879 — 3.4% — while per-token
+traces diverge by up to 6.9, because the recorded tolerance is *absolute* against values
+reaching 55. A gate at that tightness is reachable only by computing bit-identically, and an
+independent implementation is exactly what parity exists to verify.
+
+It remains a real gate: the wrong dictionary, the wrong layer, the wrong hook or the wrong
+feature selection all move the score by far more than precision does. A basis error found during
+acceptance moved it to **1.68**, seventeen times the tolerance.
+
 Parity scores from the recorded **`token_ids`**, never by re-rendering `messages`. miStudio measured
 the ids reproducing exactly while re-rendered `messages` missed by over 1.1, because `messages` is a
 reconstruction whose re-render adds template tokens. Whether `messages` re-renders to the same ids

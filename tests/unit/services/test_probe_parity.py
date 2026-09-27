@@ -255,3 +255,81 @@ class TestTokenizationDrift:
             make_probe(), definition_with([5], [4.0], 4.0), tolerance=0.001
         )
         assert report.tokenization_drift == {}
+
+
+class TestTheGateIsTheCombinedScore:
+    """The 2026-09-27 decision, pinned.
+
+    ⚠ Every one of the seventeen tests above passed unchanged when the gate moved from the
+    per-token trace to the combined score — so none of them was asserting which one decided.
+    A change to what a safety gate MEASURES that no test notices is the thing to fix first.
+    """
+
+    @staticmethod
+    def _report(pairs, tolerance=0.05):
+        """`pairs` is [(per_token_diff, combined_diff), ...]."""
+        report = ParityReport(tolerance=tolerance)
+        for i, (pt, cb) in enumerate(pairs):
+            report.vectors.append(
+                VectorResult(
+                    index=i, max_abs_diff=pt, combined_diff=cb,
+                    expected_score=1.0, actual_score=1.0 + cb, comparable=True,
+                )
+            )
+        return report
+
+    def test_a_huge_per_token_divergence_with_a_small_score_PASSES(self):
+        """The production case: fp16 producer, bf16 consumer.
+
+        Per-token 6.875 against a recorded 0.05, combined 0.098 — the real numbers measured on
+        the node. This must pass, because the alternative is a gate no independent
+        implementation can clear.
+        """
+        report = self._report([(6.875, 0.098), (0.706, 0.0014), (0.958, 0.0168)])
+        assert report.passed
+        assert report.max_abs_diff == 6.875, "the per-token figure must still be REPORTED"
+        assert report.as_details()["per_token_is_informational"] is True
+
+    def test_a_small_per_token_divergence_with_a_large_score_FAILS(self):
+        """The inverse, and the one that matters: the score is what the probe decides with."""
+        assert not self._report([(0.001, 0.5)]).passed
+
+    def test_the_uncentered_basis_defect_would_STILL_be_caught(self):
+        """⚠ The gate must remain a real gate, not a formality.
+
+        The uncentered-basis defect found the same day moved the combined median to 1.68 —
+        seventeen times this tolerance. If a change to the gate ever lets these numbers through,
+        it has stopped catching the class of defect it exists for.
+        """
+        assert not self._report([(58.26, 1.683), (71.20, 9.987)]).passed
+
+    def test_the_floor_applies_when_the_document_asks_for_something_tighter(self):
+        report = self._report([(6.875, 0.098)], tolerance=0.001)
+        assert report.score_tolerance == 0.10
+        assert report.passed
+
+    def test_a_document_asking_for_something_LOOSER_is_honoured(self):
+        """`max`, not a replacement: a definition that knows it needs slack gets it."""
+        report = self._report([(1.0, 0.4)], tolerance=0.5)
+        assert report.score_tolerance == 0.5
+        assert report.passed
+
+    def test_comparable_vectors_with_no_recorded_SCORE_are_not_a_pass(self):
+        """Nothing was checked. Silence must not read as agreement."""
+        report = ParityReport(tolerance=0.05)
+        report.vectors.append(
+            VectorResult(index=0, max_abs_diff=0.001, combined_diff=None, comparable=True)
+        )
+        assert not report.passed
+
+    def test_an_incomparable_vector_still_fails_regardless_of_score(self):
+        report = self._report([(0.0, 0.0)])
+        report.vectors.append(VectorResult(index=1, comparable=False, reason="scope"))
+        assert not report.passed
+
+    def test_the_details_name_BOTH_tolerances(self):
+        """A reader must be able to tell which number decided the verdict."""
+        details = self._report([(6.875, 0.098)]).as_details()
+        assert details["tolerance"] == 0.05
+        assert details["score_tolerance"] == 0.10
+        assert details["max_combined_diff"] == 0.098

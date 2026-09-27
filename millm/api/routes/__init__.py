@@ -8,6 +8,7 @@ from fastapi import FastAPI
 
 from millm.api.routes.management.models import router as models_router
 from millm.api.routes.management.monitoring import router as monitoring_router
+from millm.api.routes.management.probes import router as probes_router
 from millm.api.routes.management.profiles import router as profiles_router
 from millm.api.routes.management.clusters import router as clusters_router
 from millm.api.routes.management.circuits import router as circuits_router
@@ -34,6 +35,7 @@ def register_routes(app: FastAPI) -> None:
     app.include_router(models_router)
     app.include_router(saes_router)
     app.include_router(monitoring_router)
+    app.include_router(probes_router)
     app.include_router(profiles_router)
     app.include_router(clusters_router)
     app.include_router(circuits_router)

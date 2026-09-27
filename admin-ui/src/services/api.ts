@@ -204,6 +204,14 @@ export async function request<T>(
  * ```
  */
 import type {
+  Probe,
+  ProbeEvent,
+  ProbeHubDefinition,
+  ProbeHubRepo,
+  ProbeParityReport,
+  ProbeStatus,
+} from '@/types/probe';
+import type {
   SensingConfigResult,
   SensingEvent,
   SensingEventList,
@@ -952,6 +960,99 @@ export const clusterApi = {
     }
     return (await response.json()) as ClusterDefinitionV1;
   },
+};
+
+export const probesApi = {
+  /** Imported probes, optionally only the armed ones. */
+  list: (opts?: { armed?: boolean }) => {
+    const qs = opts?.armed === undefined ? '' : `?armed=${opts.armed}`;
+    return request<Probe[]>(`/probes${qs}`);
+  },
+
+  /** One probe, WITH its full definition. */
+  get: (id: string) => request<Probe>(`/probes/${encodeURIComponent(id)}`),
+
+  /** Runtime status: what is armed, and why anything armed is not scoring. */
+  status: () => request<ProbeStatus>('/probes/status'),
+
+  /** Import a definition. `on_conflict` is rename|fail — there is no `replace`. */
+  import: (definition: Record<string, unknown>, onConflict: 'rename' | 'fail' = 'rename') =>
+    request<Probe>(`/probes/import?on_conflict=${onConflict}`, {
+      method: 'POST',
+      body: JSON.stringify(definition),
+    }),
+
+  /** Newest-first verdicts. ⚠ WITHOUT context text — use `eventDetail` for one. */
+  events: (opts?: { probeId?: string; requestId?: string; limit?: number }) => {
+    const params = new URLSearchParams();
+    if (opts?.probeId) params.set('probe_id', opts.probeId);
+    if (opts?.requestId) params.set('request_id', opts.requestId);
+    if (opts?.limit) params.set('limit', String(opts.limit));
+    const qs = params.toString();
+    return request<ProbeEvent[]>(`/probes/events${qs ? `?${qs}` : ''}`);
+  },
+
+  /** Event detail — the only path that carries context text. */
+  eventDetail: (id: number) => request<ProbeEvent>(`/probes/events/${id}`),
+
+  clearEvents: (probeId?: string) => {
+    const qs = probeId ? `?probe_id=${encodeURIComponent(probeId)}` : '';
+    return request<{ removed: number }>(`/probes/events${qs}`, { method: 'DELETE' });
+  },
+
+  /**
+   * Arm a probe. Runs four gates server-side: limit → identity → evidence rung → parity.
+   *
+   * ⚠ `acknowledgeBelowRung2` is the OPERATOR's acknowledgement, not the one inside the
+   * definition. A refusal comes back as an error whose `code` names the gate
+   * (`PROBE_MODEL_MISMATCH`, `UNVALIDATED_PROBE`, `PROBE_PARITY_FAILED`, `PROBE_LIMIT`), so the UI
+   * can tell "wrong model" from "needs your say-so".
+   */
+  arm: (id: string, opts?: { acknowledgeBelowRung2?: boolean; reason?: string }) =>
+    request<Probe>(`/probes/${encodeURIComponent(id)}/arm`, {
+      method: 'POST',
+      body: JSON.stringify({
+        acknowledge_below_rung2: opts?.acknowledgeBelowRung2 ?? false,
+        reason: opts?.reason ?? '',
+      }),
+    }),
+
+  /** Re-run parity WITHOUT arming — the case after a model reload. */
+  checkParity: (id: string) =>
+    request<ProbeParityReport>(`/probes/${encodeURIComponent(id)}/parity`, { method: 'POST' }),
+
+  /** Repos tagged `mistudio-probe-definition`. Anonymous and read-only. */
+  hubSearch: (opts?: { q?: string; baseModel?: string; limit?: number }) => {
+    const params = new URLSearchParams();
+    if (opts?.q) params.set('q', opts.q);
+    if (opts?.baseModel) params.set('base_model', opts.baseModel);
+    params.set('limit', String(opts?.limit ?? 30));
+    return request<ProbeHubRepo[]>(`/probes/hub/search?${params.toString()}`);
+  },
+
+  /** One repo's definitions. `repoId` carries a slash, which the route's `:path` keeps whole. */
+  hubDefinitions: (repoId: string, revision?: string) => {
+    const qs = revision ? `?revision=${encodeURIComponent(revision)}` : '';
+    return request<ProbeHubDefinition[]>(`/probes/hub/${repoId}/definitions${qs}`);
+  },
+
+  hubImport: (body: {
+    repo_id: string;
+    filename: string;
+    revision?: string;
+    on_conflict?: 'rename' | 'fail';
+  }) =>
+    request<Probe>('/probes/hub/import', {
+      method: 'POST',
+      body: JSON.stringify({ on_conflict: 'rename', ...body }),
+    }),
+
+  disarm: (id: string) =>
+    request<Probe>(`/probes/${encodeURIComponent(id)}/disarm`, { method: 'POST' }),
+
+  /** Delete a probe and its events. Refused by the server while armed. */
+  remove: (id: string) =>
+    request<{ deleted: string }>(`/probes/${encodeURIComponent(id)}`, { method: 'DELETE' }),
 };
 
 export const sensingApi = {

@@ -104,13 +104,37 @@ def _download_file_sync(repo_id: str, filename: str, revision: str | None,
 
 
 class ClusterHubService:
-    """Anonymous, read-only Hub access for cluster packs."""
+    """Anonymous, read-only Hub access for cluster packs.
+
+    ⚠ PARAMETERISED BY SUBCLASS SINCE 2026-09-27 (Feature 024 task 3.2). The browse, TTL cache,
+    circuit breaker and manifest-first listing are identical for every miStudio artifact kind;
+    only the tag, the filename suffix, the cache directory and the contract model differ. Those
+    four are class attributes so `ProbeHubService` can reuse the rest rather than copy it — a
+    second copy of the breaker and cache logic is a second thing to fix when either is wrong.
+
+    The defaults below preserve the cluster behaviour exactly.
+    """
+
+    #: The `settings` attribute holding this kind's Hub tag.
+    HUB_TAG_SETTING: str = "CLUSTER_HUB_TAG"
+    #: Only files with this suffix may be imported.
+    DEFINITION_SUFFIX: str = ".cluster.json"
+    #: Sub-directory of SAE_CACHE_DIR for downloaded definitions.
+    CACHE_SUBDIR: str = "clusters"
+    #: The pydantic contract this kind validates against.
+    DEFINITION_MODEL: Any = ClusterDefinitionV1
+    #: Human name for error messages.
+    ARTIFACT_NAME: str = "cluster"
 
     def __init__(self, cache_ttl_s: int | None = None) -> None:
         self._ttl = cache_ttl_s if cache_ttl_s is not None \
             else settings.CLUSTER_HUB_CACHE_TTL_S
         self._cache: dict[str, tuple[float, Any]] = {}
-        self._cache_dir = os.path.join(settings.SAE_CACHE_DIR, "clusters")
+        self._cache_dir = os.path.join(settings.SAE_CACHE_DIR, self.CACHE_SUBDIR)
+
+    @property
+    def hub_tag(self) -> str:
+        return getattr(settings, self.HUB_TAG_SETTING)
 
     # ── Browse ───────────────────────────────────────────────────────────
 
@@ -129,7 +153,7 @@ class ClusterHubService:
 
         try:
             models = await asyncio.to_thread(
-                _list_models_sync, settings.CLUSTER_HUB_TAG, query, base_model, limit
+                _list_models_sync, self.hub_tag, query, base_model, limit
             )
         except CircuitOpenError as e:
             raise HubUnavailableError(
@@ -182,7 +206,7 @@ class ClusterHubService:
             refs = [
                 HubDefinitionRef(file=f)
                 for f in files
-                if f.endswith(DEFINITION_SUFFIX)
+                if f.endswith(self.DEFINITION_SUFFIX)
             ][:MAX_LISTED_DEFINITIONS]
 
         self._cache_put(key, refs)
@@ -198,9 +222,9 @@ class ClusterHubService:
         storage so unknown additive fields survive re-export (lossless
         contract), exactly like file imports.
         """
-        if not filename.endswith(DEFINITION_SUFFIX):
+        if not filename.endswith(self.DEFINITION_SUFFIX):
             raise ValidationError(
-                f"Only {DEFINITION_SUFFIX} files can be imported from the Hub",
+                f"Only {self.DEFINITION_SUFFIX} files can be imported from the Hub",
                 details={"filename": filename},
             )
         if ".." in filename or filename.startswith("/"):
@@ -231,7 +255,7 @@ class ClusterHubService:
             )
         with open(path, encoding="utf-8") as f:
             payload = json.load(f)
-        definition = ClusterDefinitionV1.model_validate(payload)
+        definition = self.DEFINITION_MODEL.model_validate(payload)
         hub_ref = {"repo_id": repo_id, "revision": revision or "main",
                    "path": filename}
         logger.info("cluster_hub_fetched", repo_id=repo_id, filename=filename)
@@ -255,7 +279,7 @@ class ClusterHubService:
                     row = json.loads(line)
                     if (isinstance(row, dict)
                             and isinstance(row.get("file"), str)
-                            and row["file"].endswith(DEFINITION_SUFFIX)):
+                            and row["file"].endswith(self.DEFINITION_SUFFIX)):
                         refs.append(HubDefinitionRef(
                             file=row["file"],
                             name=row.get("name"),

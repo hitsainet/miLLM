@@ -75,8 +75,21 @@ activation). The rung and its language are shown everywhere.
 
 **FR-24.1 Import.** `POST /api/probes/import` accepts a definition JSON body (≤ 2 MB), validates
 the kind, then validates against the pydantic mirror of the vendored v1 schema, and stores it with
-provenance `origin=file|hub|mcp`. `on_conflict=rename|replace|refuse` follows the circuit
-convention. (BR-001)
+provenance `origin=file|hub|mcp`. **`on_conflict=rename|fail`** follows the circuit convention.
+(BR-001)
+
+> **⚠ CORRECTED 2026-09-27.** This read `rename|replace|refuse` and claimed to follow the circuit
+> convention; it did not. The real convention is `rename|fail` — `api/routes/management/circuits.py`
+> pins the regex `^(rename|fail)$` and `api/schemas/cluster.py` the `Literal["rename","fail"]`.
+> There is no `replace` and no `refuse` anywhere in miLLM, so building this as written would have
+> given probes a third vocabulary for an operation two other importers already name.
+>
+> `refuse` is simply `fail` renamed. **`replace` is rejected on merit, not only for consistency:**
+> overwriting a definition in place while that probe is ARMED would silently change the detector
+> underneath a running monitor, and every event recorded before and after would carry the same
+> `probe_id` — so the event history would describe two different detectors as one. Re-importing a
+> rebuilt definition goes **disarm → delete → import**, which is explicit and leaves the old probe's
+> events attached to the probe that actually produced them.
 
 **FR-24.2 Hub.** `GET /api/probes/hub/search?q=&base_model=` lists HF repos tagged
 `PROBE_HUB_TAG="mistudio-probe-definition"`, optionally filtered by `base_model:<id>`.

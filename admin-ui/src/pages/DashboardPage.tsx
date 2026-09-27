@@ -150,7 +150,7 @@ export function DashboardPage() {
             details={steeringStatus.details}
           />
           <StatusCard
-            title="Probe"
+            title="Feature Monitor"
             icon={<Activity className="w-5 h-5" />}
             status={monitoringStatus.status}
             statusText={monitoringStatus.text}

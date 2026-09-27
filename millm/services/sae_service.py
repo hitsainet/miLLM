@@ -2467,21 +2467,14 @@ class SAEService:
 
     @staticmethod
     def _reset_dynamo_for_hook_change() -> None:
-        """Reset TorchDynamo so compiled graphs re-trace after a hook change.
+        """Reset TorchDynamo after a hook change.
 
-        SAE steering/monitoring works by a forward hook on an inner decoder
-        layer.  When the model was compiled with torch.compile, a cached graph
-        may not reflect a hook that is added or removed afterwards.  Clearing
-        Dynamo's cache forces the next forward pass to re-trace with the current
-        hook set.  Best-effort: never raises.
+        Delegates to `millm.ml.layer_resolution` (024 task 1.3) so probe code can reach it without
+        importing this service — and therefore without importing `AttachedSAEState`.
         """
-        try:
-            import torch._dynamo as _dynamo
+        from millm.ml.layer_resolution import reset_dynamo_for_hook_change
 
-            _dynamo.reset()
-            logger.debug("dynamo_reset_after_hook_change")
-        except Exception as e:
-            logger.debug("dynamo_reset_skipped", error=str(e))
+        reset_dynamo_for_hook_change()
 
     # =========================================================================
     # Steering Methods

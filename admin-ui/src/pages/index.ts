@@ -3,6 +3,7 @@ export { ModelsPage } from './ModelsPage';
 export { SAEPage } from './SAEPage';
 export { SteeringPage } from './SteeringPage';
 export { MonitoringPage } from './MonitoringPage';
+export { ProbeMonitorsPage } from './ProbeMonitorsPage';
 export { ProfilesPage } from './ProfilesPage';
 export { SettingsPage } from './SettingsPage';
 export { ClustersPage } from './ClustersPage';

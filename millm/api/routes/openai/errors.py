@@ -59,6 +59,18 @@ def create_openai_error(
 
 # Error code to (HTTP status, OpenAI error type) mapping
 ERROR_STATUS_MAP: dict[str, tuple[int, str]] = {
+    # Probe monitors (Feature 24). Present so a probe refusal reaching a `/v1` route renders as
+    # an OpenAI error rather than a bare 500 — the arm-time refusals are management-plane, but
+    # PROBE_NOT_FOUND can surface from a per-request path.
+    "PROBE_NOT_FOUND": (404, "invalid_request_error"),
+    "PROBE_MODEL_MISMATCH": (409, "invalid_request_error"),
+    "PROBE_PARITY_FAILED": (409, "invalid_request_error"),
+    "UNVALIDATED_PROBE": (200, "invalid_request_error"),
+    "PROBE_LIMIT": (409, "invalid_request_error"),
+    "PROBE_SAE_MISSING": (409, "invalid_request_error"),
+    "PROBE_SAE_MISMATCH": (409, "invalid_request_error"),
+    "PROBE_NO_MODEL_LOADED": (409, "invalid_request_error"),
+    "PROBE_HOOK_UNSUPPORTED": (409, "invalid_request_error"),
     # Model errors
     "MODEL_NOT_LOADED": (503, "server_error"),
     "MODEL_NOT_FOUND": (404, "invalid_request_error"),

@@ -399,6 +399,89 @@ async def get_circuit_service(
 # Type alias for injected CircuitService
 CircuitServiceDep = Annotated["CircuitService", Depends(get_circuit_service)]
 
+
+# ── Probe monitors (Feature 24) ───────────────────────────────────────────────
+#
+# The repositories are session-scoped like every other; the event service and the arming service
+# are process singletons, because they own state that outlives a request — the socket throttle and
+# the drop counter, and the armed-probe registry respectively.
+
+
+async def get_probe_repository(session: DbSession) -> "ProbeRepository":
+    from millm.db.repositories.probe_repository import ProbeRepository
+
+    return ProbeRepository(session)
+
+
+async def get_probe_event_repository(session: DbSession) -> "ProbeEventRepository":
+    from millm.db.repositories.probe_repository import ProbeEventRepository
+
+    return ProbeEventRepository(session)
+
+
+ProbeRepo = Annotated["ProbeRepository", Depends(get_probe_repository)]
+ProbeEventRepo = Annotated["ProbeEventRepository", Depends(get_probe_event_repository)]
+
+
+async def get_probe_service(repository: ProbeRepo) -> "ProbeService":
+    from millm.services.probe_service import ProbeService
+
+    return ProbeService(repository)
+
+
+async def get_probe_arming_service(repository: ProbeRepo) -> "ProbeArmingService":
+    from millm.services.probe_arming import ProbeArmingService
+
+    return ProbeArmingService(repository)
+
+
+_probe_event_service = None
+
+
+async def get_probe_event_service(
+    repository: ProbeRepo, events: ProbeEventRepo
+) -> "ProbeEventService":
+    """Singleton service, rebound to this request's repositories.
+
+    ⚠ The INSTANCE is reused so the socket throttle and the dropped-event counter survive across
+    requests — a per-request service would reset the throttle on every call, which is the same as
+    having none. Its repositories are rebound each time because those are session-scoped.
+    """
+    global _probe_event_service
+    from millm.services.probe_event_service import ProbeEventService
+
+    if _probe_event_service is None:
+        _probe_event_service = ProbeEventService(repository, events)
+    else:
+        _probe_event_service.repository = repository
+        _probe_event_service.events = events
+    return _probe_event_service
+
+
+ProbeServiceDep = Annotated["ProbeService", Depends(get_probe_service)]
+ProbeArmingDep = Annotated["ProbeArmingService", Depends(get_probe_arming_service)]
+ProbeEventServiceDep = Annotated["ProbeEventService", Depends(get_probe_event_service)]
+
+
+_probe_hub_service: "ProbeHubService | None" = None
+
+
+async def get_probe_hub_service() -> "ProbeHubService":
+    """The shared, process-wide probe Hub service (Feature 24, FR-24.2).
+
+    Shared so the TTL cache and the circuit breaker are shared: a per-request instance would give
+    every request its own breaker, and a flapping Hub would then never trip one.
+    """
+    from millm.services.probe_hub_service import ProbeHubService
+
+    global _probe_hub_service
+    if _probe_hub_service is None:
+        _probe_hub_service = ProbeHubService()
+    return _probe_hub_service
+
+
+ProbeHubServiceDep = Annotated["ProbeHubService", Depends(get_probe_hub_service)]
+
 # Module-level singleton so the Hub listing cache survives across requests.
 _cluster_hub_service: "ClusterHubService | None" = None
 

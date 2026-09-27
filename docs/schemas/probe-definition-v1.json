@@ -1,0 +1,918 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://raw.githubusercontent.com/hitsainet/miStudio/main/docs/schemas/probe-definition-v1.json",
+  "title": "miStudio Probe Definition v1",
+  "description": "Portable probe monitor (mistudio.probe-definition/v1) \u2014 a linear readout over one decoder layer's residual stream (or a k-sparse SAE basis) plus its normalisation, combining rule, operating point, evidence rung and reproducible test vectors. Generated from the pydantic contract in backend/src/schemas/probe_definition.py; regenerate via backend/tests/unit/test_probe_definition_schema_sync.py.",
+  "$ref": "#/$defs/ProbeDefinitionV1",
+  "$defs": {
+    "Acknowledgement": {
+      "additionalProperties": false,
+      "description": "Who accepted a below-rung-2 export, when, and why (FR-5).\n\nThe reason is required and has a floor, because \"ok\" records nothing. It exists so a probe\nserved on thin evidence carries the name of the person who decided that was acceptable.",
+      "properties": {
+        "by": {
+          "maxLength": 200,
+          "minLength": 1,
+          "title": "By",
+          "type": "string"
+        },
+        "at": {
+          "format": "date-time",
+          "title": "At",
+          "type": "string"
+        },
+        "reason": {
+          "maxLength": 1000,
+          "minLength": 10,
+          "title": "Reason",
+          "type": "string"
+        }
+      },
+      "required": [
+        "by",
+        "at",
+        "reason"
+      ],
+      "title": "Acknowledgement",
+      "type": "object"
+    },
+    "Aggregation": {
+      "additionalProperties": false,
+      "description": "The per-token combining rule. `streamable` is DERIVED, and checked, not trusted.",
+      "properties": {
+        "rule": {
+          "enum": [
+            "mean",
+            "max",
+            "last",
+            "softmax",
+            "attention",
+            "rolling_mean_max"
+          ],
+          "title": "Rule",
+          "type": "string"
+        },
+        "params": {
+          "additionalProperties": true,
+          "title": "Params",
+          "type": "object"
+        },
+        "streamable": {
+          "title": "Streamable",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "rule",
+        "streamable"
+      ],
+      "title": "Aggregation",
+      "type": "object"
+    },
+    "DatasetRef": {
+      "additionalProperties": false,
+      "description": "Where a dataset came from, portably. `{hf_id, config, split, revision}`.",
+      "properties": {
+        "hf_id": {
+          "maxLength": 200,
+          "minLength": 1,
+          "title": "Hf Id",
+          "type": "string"
+        },
+        "config": {
+          "anyOf": [
+            {
+              "maxLength": 200,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Config"
+        },
+        "split": {
+          "anyOf": [
+            {
+              "maxLength": 200,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Split"
+        },
+        "revision": {
+          "anyOf": [
+            {
+              "maxLength": 200,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Revision"
+        }
+      },
+      "required": [
+        "hf_id"
+      ],
+      "title": "DatasetRef",
+      "type": "object"
+    },
+    "Decision": {
+      "additionalProperties": false,
+      "description": "The operating point. `threshold=None` means FIRE ON NOTHING, which is a real point.",
+      "properties": {
+        "threshold": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Threshold"
+        },
+        "target_fpr": {
+          "anyOf": [
+            {
+              "exclusiveMaximum": 1.0,
+              "exclusiveMinimum": 0.0,
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Target Fpr"
+        },
+        "realised_fpr": {
+          "anyOf": [
+            {
+              "maximum": 1.0,
+              "minimum": 0.0,
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Realised Fpr"
+        },
+        "threshold_source": {
+          "anyOf": [
+            {
+              "maxLength": 200,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Threshold Source"
+        },
+        "calibration": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/DatasetRef"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        }
+      },
+      "title": "Decision",
+      "type": "object"
+    },
+    "EvaluationEntry": {
+      "additionalProperties": false,
+      "description": "One evaluation set's result, as measured.",
+      "properties": {
+        "dataset": {
+          "$ref": "#/$defs/DatasetRef"
+        },
+        "distribution": {
+          "enum": [
+            "in_distribution",
+            "out_of_distribution"
+          ],
+          "title": "Distribution",
+          "type": "string"
+        },
+        "n_positive": {
+          "minimum": 0,
+          "title": "N Positive",
+          "type": "integer"
+        },
+        "n_negative": {
+          "minimum": 0,
+          "title": "N Negative",
+          "type": "integer"
+        },
+        "auroc": {
+          "maximum": 1.0,
+          "minimum": 0.0,
+          "title": "Auroc",
+          "type": "number"
+        },
+        "auroc_ci": {
+          "anyOf": [
+            {
+              "items": {
+                "type": "number"
+              },
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Auroc Ci"
+        },
+        "recall_at_target_fpr": {
+          "anyOf": [
+            {
+              "maximum": 1.0,
+              "minimum": 0.0,
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Recall At Target Fpr"
+        }
+      },
+      "required": [
+        "dataset",
+        "distribution",
+        "n_positive",
+        "n_negative",
+        "auroc"
+      ],
+      "title": "EvaluationEntry",
+      "type": "object"
+    },
+    "Evidence": {
+      "additionalProperties": false,
+      "description": "What is actually known about this probe \u2014 the expensive part of the document.\n\n\u26a0 `rung_language` IS CARRIED, NOT RECOMPUTED BY THE CONSUMER. The wording that describes a\nrung is the product's claim about it, and 033's whole purpose is that miLLM can refuse to\nserve a probe whose claim is weaker than the use. A consumer inventing its own phrasing is a\nsecond source of truth for a causal statement.",
+      "properties": {
+        "rung": {
+          "maximum": 3,
+          "minimum": 0,
+          "title": "Rung",
+          "type": "integer"
+        },
+        "rung_language": {
+          "maxLength": 2000,
+          "minLength": 1,
+          "title": "Rung Language",
+          "type": "string"
+        },
+        "acknowledgement": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Acknowledgement"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "evaluations": {
+          "items": {
+            "$ref": "#/$defs/EvaluationEntry"
+          },
+          "title": "Evaluations",
+          "type": "array"
+        },
+        "judge": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/JudgeEvidence"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        }
+      },
+      "required": [
+        "rung",
+        "rung_language"
+      ],
+      "title": "Evidence",
+      "type": "object"
+    },
+    "JudgeEvidence": {
+      "additionalProperties": false,
+      "properties": {
+        "model": {
+          "maxLength": 200,
+          "minLength": 1,
+          "title": "Model",
+          "type": "string"
+        },
+        "prompt_version": {
+          "maxLength": 200,
+          "minLength": 1,
+          "title": "Prompt Version",
+          "type": "string"
+        },
+        "per_set_auroc": {
+          "additionalProperties": {
+            "type": "number"
+          },
+          "title": "Per Set Auroc",
+          "type": "object"
+        }
+      },
+      "required": [
+        "model",
+        "prompt_version"
+      ],
+      "title": "JudgeEvidence",
+      "type": "object"
+    },
+    "ModelIdentity": {
+      "additionalProperties": false,
+      "description": "Which model's activations this probe reads, pinned hard enough to serve against.\n\n\u26a0 `revision` IS A RESOLVED COMMIT SHA, NOT A BRANCH. \"main\" moves, and a probe read from a\ndifferent revision of the same repo is a probe over a different distribution \u2014 the estate has\nalready paid for that once at the tokenizer level, where two models sharing a family name\nagreed on 0.00% of token ids.\n\n\u26a0 `chat_template_sha256` IS PART OF THE IDENTITY. The role mask and every rendered row depend\non the template. A model whose template changed renders different text from the same messages,\nso a consumer must be able to notice.",
+      "properties": {
+        "hf_id": {
+          "maxLength": 200,
+          "minLength": 1,
+          "title": "Hf Id",
+          "type": "string"
+        },
+        "revision": {
+          "maxLength": 200,
+          "minLength": 1,
+          "title": "Revision",
+          "type": "string"
+        },
+        "d_model": {
+          "exclusiveMinimum": 0,
+          "maximum": 16384,
+          "title": "D Model",
+          "type": "integer"
+        },
+        "n_layers": {
+          "exclusiveMinimum": 0,
+          "maximum": 1024,
+          "title": "N Layers",
+          "type": "integer"
+        },
+        "architecture": {
+          "maxLength": 200,
+          "minLength": 1,
+          "title": "Architecture",
+          "type": "string"
+        },
+        "chat_template_sha256": {
+          "anyOf": [
+            {
+              "maxLength": 64,
+              "minLength": 64,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Chat Template Sha256"
+        },
+        "mistudio_model_id": {
+          "anyOf": [
+            {
+              "maxLength": 200,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Mistudio Model Id"
+        }
+      },
+      "required": [
+        "hf_id",
+        "revision",
+        "d_model",
+        "n_layers",
+        "architecture"
+      ],
+      "title": "ModelIdentity",
+      "type": "object"
+    },
+    "ProbeHead": {
+      "additionalProperties": false,
+      "description": "The readout: `w`, `b`, and the standardisation it was FITTED with.\n\n\u26a0 THE NORMALISATION TRAVELS WITH THE WEIGHTS BECAUSE IT IS PART OF THE FUNCTION. A head\napplied to unstandardised activations is not a worse probe, it is a different one \u2014 the same\nwrong-basis class as encoding with an SAE's normalisation dropped (MIS-E2E-083).",
+      "properties": {
+        "weights": {
+          "items": {
+            "type": "number"
+          },
+          "minItems": 1,
+          "title": "Weights",
+          "type": "array"
+        },
+        "bias": {
+          "default": 0.0,
+          "title": "Bias",
+          "type": "number"
+        },
+        "norm_mean": {
+          "items": {
+            "type": "number"
+          },
+          "minItems": 1,
+          "title": "Norm Mean",
+          "type": "array"
+        },
+        "norm_std": {
+          "items": {
+            "type": "number"
+          },
+          "minItems": 1,
+          "title": "Norm Std",
+          "type": "array"
+        },
+        "attention_query": {
+          "anyOf": [
+            {
+              "items": {
+                "type": "number"
+              },
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Attention Query"
+        }
+      },
+      "required": [
+        "weights",
+        "norm_mean",
+        "norm_std"
+      ],
+      "title": "ProbeHead",
+      "type": "object"
+    },
+    "Provenance": {
+      "additionalProperties": false,
+      "properties": {
+        "train_dataset": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/DatasetRef"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "label_mapping": {
+          "additionalProperties": {
+            "type": "string"
+          },
+          "title": "Label Mapping",
+          "type": "object"
+        },
+        "keyword_filter": {
+          "anyOf": [
+            {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Keyword Filter"
+        },
+        "split": {
+          "anyOf": [
+            {
+              "maxLength": 200,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Split"
+        },
+        "run_id": {
+          "anyOf": [
+            {
+              "maxLength": 200,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Run Id"
+        },
+        "probe_id": {
+          "anyOf": [
+            {
+              "maxLength": 200,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Probe Id"
+        },
+        "created_at": {
+          "anyOf": [
+            {
+              "format": "date-time",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Created At"
+        },
+        "exported_at": {
+          "anyOf": [
+            {
+              "format": "date-time",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Exported At"
+        },
+        "mistudio_version": {
+          "anyOf": [
+            {
+              "maxLength": 200,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Mistudio Version"
+        }
+      },
+      "title": "Provenance",
+      "type": "object"
+    },
+    "ReadPoint": {
+      "additionalProperties": false,
+      "description": "\u26a0 `hook_point` IS A Literal WITH ONE MEMBER, AND THAT IS THE POINT.\n\nThis estate captured at a post-attention norm for months while every document said\n\"residual\", and nothing could tell: the numbers were plausible and the SAEs trained fine on a\nsignal miLLM never reads. A single-member Literal means a document claiming any other capture\npoint is refused rather than interpreted.",
+      "properties": {
+        "layer": {
+          "description": "0-based decoder block index",
+          "minimum": 0,
+          "title": "Layer",
+          "type": "integer"
+        },
+        "hook_point": {
+          "const": "resid_post",
+          "default": "resid_post",
+          "title": "Hook Point",
+          "type": "string"
+        }
+      },
+      "required": [
+        "layer"
+      ],
+      "title": "ReadPoint",
+      "type": "object"
+    },
+    "SaeReference": {
+      "additionalProperties": false,
+      "description": "Where the SAE lives and exactly how it normalises \u2014 required for `sae_features`.\n\n\u26a0 `normalization` IS NOT DECORATION. `encode_with_training_normalization` exists because\nencoding with a bare `encode()` reads the right weights in the wrong basis, produces\nplausible features and is invisible in the numbers. A consumer that cannot reproduce the\nnormalisation cannot reproduce the probe.",
+      "properties": {
+        "hf_repo": {
+          "maxLength": 200,
+          "minLength": 1,
+          "title": "Hf Repo",
+          "type": "string"
+        },
+        "path": {
+          "maxLength": 200,
+          "minLength": 1,
+          "title": "Path",
+          "type": "string"
+        },
+        "revision": {
+          "maxLength": 200,
+          "minLength": 1,
+          "title": "Revision",
+          "type": "string"
+        },
+        "weights_sha256": {
+          "maxLength": 64,
+          "minLength": 64,
+          "title": "Weights Sha256",
+          "type": "string"
+        },
+        "architecture": {
+          "maxLength": 200,
+          "minLength": 1,
+          "title": "Architecture",
+          "type": "string"
+        },
+        "d_model": {
+          "exclusiveMinimum": 0,
+          "maximum": 16384,
+          "title": "D Model",
+          "type": "integer"
+        },
+        "n_features": {
+          "exclusiveMinimum": 0,
+          "title": "N Features",
+          "type": "integer"
+        },
+        "normalization": {
+          "additionalProperties": true,
+          "title": "Normalization",
+          "type": "object"
+        },
+        "feature_indices": {
+          "items": {
+            "type": "integer"
+          },
+          "minItems": 1,
+          "title": "Feature Indices",
+          "type": "array"
+        },
+        "feature_labels": {
+          "anyOf": [
+            {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Feature Labels"
+        }
+      },
+      "required": [
+        "hf_repo",
+        "path",
+        "revision",
+        "weights_sha256",
+        "architecture",
+        "d_model",
+        "n_features",
+        "feature_indices"
+      ],
+      "title": "SaeReference",
+      "type": "object"
+    },
+    "TestVector": {
+      "additionalProperties": false,
+      "description": "One row scored by the exporting build, for a consumer to reproduce.\n\n\u26a0 `token_scores` HAS ONE ENTRY PER SCORED TOKEN, NOT PER TOKEN. The scope decides which\ntokens are scored; a consumer comparing a full-length score array against its own masked one\nwould disagree for a reason that has nothing to do with the weights.",
+      "properties": {
+        "messages": {
+          "items": {
+            "additionalProperties": true,
+            "type": "object"
+          },
+          "minItems": 1,
+          "title": "Messages",
+          "type": "array"
+        },
+        "token_ids": {
+          "items": {
+            "type": "integer"
+          },
+          "minItems": 1,
+          "title": "Token Ids",
+          "type": "array"
+        },
+        "token_scores": {
+          "items": {
+            "type": "number"
+          },
+          "minItems": 1,
+          "title": "Token Scores",
+          "type": "array"
+        },
+        "score": {
+          "title": "Score",
+          "type": "number"
+        },
+        "verdict": {
+          "anyOf": [
+            {
+              "type": "boolean"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Verdict"
+        }
+      },
+      "required": [
+        "messages",
+        "token_ids",
+        "token_scores",
+        "score"
+      ],
+      "title": "TestVector",
+      "type": "object"
+    },
+    "TestVectors": {
+      "additionalProperties": false,
+      "description": "The parity set, with the tolerance the producer suggests comparing at.\n\n\u26a0 SCORE `token_ids`. NOT `messages`. THIS IS NOT A PREFERENCE.\n\nMeasured in 033 acceptance 8.1 on a real definition, 16 vectors:\n\n    scored from the recorded `token_ids`   max |\u0394| = 0.000e+00   (exact, all 16)\n    re-rendered from `messages`            max |\u0394| = 1.153e+00   (23x the tolerance)\n\n`messages` is a **reconstruction**. The training corpus here is plain prose, not conversations,\nso the exporter wraps each row in a single user turn to have something a consumer can send \u2014\nand re-rendering that through the model's chat template adds six tokens of scaffolding the\nscored row never had, with the first difference at index 2. Two of the sixteen rows were\ntruncated to the token cap, keeping the TAIL, so their re-render differs from index 0.\n\nA consumer that took `messages`, scored them and compared against `score` within `tolerance`\nwould fail on **every vector** and conclude its implementation was wrong. A parity check exists\nto tell a correct implementation from an incorrect one; one that reports \"incorrect\" against a\ncorrect implementation is worse than no check at all, because it is believed once.\n\n`messages_reproduce_token_ids` is measured at build time \u2014 the exporter re-renders its own\n`messages` and compares \u2014 so a consumer is told whether it may start from them rather than\nfinding out from a failed comparison.",
+      "properties": {
+        "tolerance": {
+          "exclusiveMinimum": 0.0,
+          "title": "Tolerance",
+          "type": "number"
+        },
+        "authoritative_input": {
+          "const": "token_ids",
+          "default": "token_ids",
+          "title": "Authoritative Input",
+          "type": "string"
+        },
+        "messages_reproduce_token_ids": {
+          "anyOf": [
+            {
+              "type": "boolean"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Messages Reproduce Token Ids"
+        },
+        "vectors": {
+          "items": {
+            "$ref": "#/$defs/TestVector"
+          },
+          "maxItems": 32,
+          "minItems": 8,
+          "title": "Vectors",
+          "type": "array"
+        }
+      },
+      "required": [
+        "tolerance",
+        "vectors"
+      ],
+      "title": "TestVectors",
+      "type": "object"
+    },
+    "ProbeDefinitionV1": {
+      "additionalProperties": false,
+      "description": "`mistudio.probe-definition/v1`.",
+      "properties": {
+        "kind": {
+          "const": "mistudio.probe-definition/v1",
+          "default": "mistudio.probe-definition/v1",
+          "title": "Kind",
+          "type": "string"
+        },
+        "name": {
+          "maxLength": 200,
+          "minLength": 1,
+          "title": "Name",
+          "type": "string"
+        },
+        "description": {
+          "anyOf": [
+            {
+              "maxLength": 2000,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Description"
+        },
+        "concept": {
+          "anyOf": [
+            {
+              "maxLength": 2000,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Concept"
+        },
+        "model": {
+          "$ref": "#/$defs/ModelIdentity"
+        },
+        "read": {
+          "$ref": "#/$defs/ReadPoint"
+        },
+        "scope": {
+          "enum": [
+            "all",
+            "prompt",
+            "response"
+          ],
+          "title": "Scope",
+          "type": "string"
+        },
+        "basis": {
+          "enum": [
+            "residual",
+            "sae_features"
+          ],
+          "title": "Basis",
+          "type": "string"
+        },
+        "head": {
+          "$ref": "#/$defs/ProbeHead"
+        },
+        "sae": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/SaeReference"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "aggregation": {
+          "$ref": "#/$defs/Aggregation"
+        },
+        "decision": {
+          "$ref": "#/$defs/Decision"
+        },
+        "evidence": {
+          "$ref": "#/$defs/Evidence"
+        },
+        "provenance": {
+          "$ref": "#/$defs/Provenance"
+        },
+        "test_vectors": {
+          "$ref": "#/$defs/TestVectors"
+        }
+      },
+      "required": [
+        "name",
+        "model",
+        "read",
+        "scope",
+        "basis",
+        "head",
+        "aggregation",
+        "decision",
+        "evidence",
+        "test_vectors"
+      ],
+      "title": "ProbeDefinitionV1",
+      "type": "object"
+    }
+  }
+}

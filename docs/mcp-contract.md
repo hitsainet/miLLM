@@ -1,9 +1,10 @@
 # miLLM ↔ Unified MCP Server Contract
 
-**Status:** Normative for miLLM Feature 9 (Unified MCP) and Feature 15 (Circuit Edge Sensing / circuit MCP surface) and Feature 19 (Concurrent Circuit Serving). **Version:** 1.5.1 (2026-07-22)
+**Status:** Normative for miLLM Feature 9 (Unified MCP), Feature 15 (Circuit Edge Sensing / circuit MCP surface), Feature 19 (Concurrent Circuit Serving) and Feature 24 (Probe Monitor Runtime). **Version:** 1.6 (2026-09-27)
 **Consumer:** the unified MCP server that ships in the miStudio repo
 (`backend/src/mcp_server/`), exposing `millm_runtime` / `millm_clusters` /
-`millm_sensing` / `millm_circuits` tool categories against a miLLM deployment.
+`millm_sensing` / `millm_circuits` / `millm_probes` tool categories against a miLLM
+deployment.
 
 ## 1. Versioning rule
 
@@ -11,6 +12,22 @@ This contract is **additive-only**: miLLM may add endpoints, response fields, an
 error codes; it must not rename or remove anything listed here, change field
 types, or change status-code semantics without a new contract version. The MCP
 server must tolerate unknown fields everywhere.
+
+**v1.6 (2026-09-27)** is a strict additive superset of v1.5.1: it adds the
+`millm_probes` tool category (§4d), the `/api/probes/*` endpoints, the probe error
+codes (§5), and the probe evidence-rung rule (§4d-bis). No earlier endpoint, field,
+type, or error code changed. A v1.5 client that ignores the probe surface is
+unaffected.
+
+⚠ **This version is a CO-RELEASE.** The tools live in miStudio
+(`backend/src/mcp_server/tools/millm_probes.py`) and the routes live here; neither
+half is shippable alone, and this repo's history records what happens when that is
+got wrong — sixteen `millm_circuit_*` tools were fully implemented, unit-tested and
+documented in this file while never registered with the server, so the suite was
+green and the contract said ✅ while no agent could call the feature. The guard is
+`tests/unit/test_mcp_tool_paths_are_real.py` under
+`MILLM_REQUIRE_CROSS_REPO_CHECKS=1`: it reads miStudio's tool module and requires
+every path it calls to be a route this app actually serves.
 
 **v1.1 (2026-07-20)** is a strict additive superset of v1.0 (Circuit Runtime,
 BRD-MILLM-CIRCUITS-001): it adds the `millm_circuits` tool category (§4), the
@@ -157,6 +174,87 @@ sub-collection of a circuit, and the flat prefix matches `/api/sensing`.
 | `millm_circuit_claims` | `GET /api/circuits/claims` (layer → claimant, `composed` flagged; the unit of contention is the LAYER) | REST ✅ · MCP ✅ |
 | `millm_release_circuit_claims` | `POST /api/circuits/claims/release?circuit_id=` (**recovery** — release ONE circuit's stuck claims; scoped deliberately, there is no "release everything") | REST ✅ · MCP ✅ |
 | `millm_delete_circuit` | `DELETE /api/circuits/{id}` (deactivates first if serving) | REST ✅ · MCP ✅ |
+
+### `millm_probes` (v1.6 — Feature 24, Probe Monitor Runtime)
+
+> **STATUS: routes served, tools registered.** Both halves shipped 2026-09-27. The
+> three-state convention this file uses elsewhere applies: *served* means a path in
+> `app.openapi()["paths"]`, *registered* means present in the MCP server's live
+> registry, and *documented* means listed here. All three must hold. A row is not
+> ✅ on two of them.
+>
+> ⚠ Five of these routes did not exist when phase 7 of Feature 024 was marked done,
+> and the reachability test passed anyway because it asserted a **subset** of paths.
+> The arming service, the identity gate, the parity engine, the k-sparse slice and the
+> Hub service therefore had no production caller at all. The set — not a count — is now
+> asserted against the FPRD.
+
+| Tool | Endpoint |
+|---|---|
+| `millm_import_probe` | `POST /api/probes/import?on_conflict=rename\|fail` (body = the `mistudio.probe-definition/v1` document) **or** `POST /api/probes/hub/import` (`{repo_id, filename, revision?, on_conflict?}`) |
+| `millm_list_probes` | `GET /api/probes?armed=` |
+| `millm_arm_probe` | `POST /api/probes/{probe_id}/arm` (`{acknowledge_below_rung2?: bool, reason?: str}`) |
+| `millm_disarm_probe` | `POST /api/probes/{probe_id}/disarm` |
+| `millm_probe_status` | `GET /api/probes/status` |
+| `millm_probe_events` | `GET /api/probes/events?probe_id=&request_id=&limit=` |
+
+Also served, and deliberately **not** exposed as tools in v1.6:
+`GET /api/probes/{probe_id}` (carries the whole definition — large, and an agent that
+wants it can read the file it imported), `POST /api/probes/{probe_id}/parity` (an
+operator action whose report is already on the list row), `GET /api/probes/hub/search`
+and `GET /api/probes/hub/{repo_id:path}/definitions` (browsing is a human activity;
+an agent importing from the Hub already knows the repo and filename), and
+`DELETE /api/probes/events`.
+
+**`on_conflict` is `rename|fail`. There is no `replace`, and this is normative.**
+Overwriting a definition in place while its probe is armed would change the detector
+underneath a running monitor while every event before and after kept the same
+`probe_id` — the history would describe two different detectors as one. Re-importing
+a rebuilt probe is **disarm → delete → import**.
+
+**`GET /api/probes/events` list rows carry NO context text.** `context_text` and
+`context_token_ids` are the decoded window around a firing position, i.e. the user's
+words, and they are served only by `GET /api/probes/events/{event_id}` — which no
+v1.6 tool consumes. An agent that needs one asks for it explicitly; it does not
+receive a feed of prompts.
+
+**What a probe verdict is, on the `/v1` side.** Non-streaming responses carry
+`X-miLLM-Probe-Verdicts` (RFC 8941 structured field); streaming responses carry a
+final chunk with `choices: []` and a `millm_probe_verdicts` extension before
+`[DONE]`. Both are additive: a v1.5 client ignores the header and skips the
+empty-choices chunk, which is what the OpenAI SDK and Open WebUI both already do.
+
+### 4d-bis. Probe evidence-rung rule (v1.6 — Feature 24)
+
+A probe's rung is **a number and the server's words for it, together**. The MCP client
+must surface `rung_language` verbatim and must not compose its own phrase from `rung`.
+miStudio owns this vocabulary; miLLM mirrors it; a third rendering in the MCP layer is
+free to drift, and the thing most likely to drift is a detector's language rising above
+its evidence.
+
+| rung | `rung_language` |
+|---|---|
+| 0 | `trained` |
+| 1 | `detects on held-out data` |
+| 2 | `detects on unseen tasks` |
+| 3 | `detects on unseen tasks, compared with a judge` |
+
+⚠ **Rung 3 is "compared with", not "beats".** A judge scored the same data; it may have
+won, and on miStudio's own reference run it did — the judge averaged 0.8744 AUROC against
+the 1.2B probe's 0.7938, on all five sets. An agent that reads rung 3 as "better than a
+judge" will over-trust it. The wording is load-bearing and must not be paraphrased.
+
+**The rung is the highest PASSED, not a chain**, and `millm_arm_probe` on a probe below
+rung 2 returns `UNVALIDATED_PROBE` (200 + envelope) unless
+`acknowledge_below_rung2=true`. That acknowledgement is stored separately from the one
+inside the definition: the agent or person who exported a weak probe and the one arming
+it against live traffic are not necessarily the same, and only the second is choosing to
+monitor with it.
+
+**A probe records; it does not act.** No tool in this category stops, re-routes or
+alters a generation, and none will without a new contract version. A verdict is evidence
+for a downstream reader, not a gate. Nor is a verdict a cause: a probe detects, it does
+not explain.
 
 ### 4a. Circuit evidence-rung rule (v1.1)
 Every circuit and edge field carries `rung` (0–3 int) and `rung_language`
@@ -444,6 +542,27 @@ circuit"; carries `details.active_circuits[{id, name}]`. Deactivate all but one,
 or dial the layers through the owning cluster). Reused as-is:
 `UNKNOWN_KIND`, `PAYLOAD_TOO_LARGE`, `HUB_UNAVAILABLE`. `CIRCUIT_SENSING_EVENT_NOT_FOUND` (404 — an edge sensing event id that does not exist; F15).
 
+**v1.6 probe codes:** `PROBE_NOT_FOUND` (404), `PROBE_MODEL_MISMATCH` (409 — the
+definition was fitted on a different model than the one loaded; `details.mismatches`
+names **every** differing field, not the first, so an agent can tell "wrong model
+loaded" from "wrong probe imported"), `PROBE_PARITY_FAILED` (409 — this build does not
+reproduce the scores miStudio recorded for the definition's test vectors;
+`details.max_abs_diff` may be **null**, meaning no vector could be compared at all,
+which is not "zero off"), `UNVALIDATED_PROBE` (200+envelope — arming below rung 2
+without `acknowledge_below_rung2=true`; carries `rung`, `rung_language` and
+`next_step`), `PROBE_LIMIT` (409 — `PROBE_MAX_ARMED` already armed),
+`PROBE_SAE_MISSING` (409 — a k-sparse probe's SAE is not downloaded here; names the
+repo and path), `PROBE_SAE_MISMATCH` (409 — the downloaded SAE is not the one the probe
+was fitted against), `PROBE_NO_MODEL_LOADED` (409 — nothing loaded, or its width and
+depth are unreadable; **never defaulted**, because a fabricated `d_model` compares
+cleanly against a definition and means nothing), `PROBE_HOOK_UNSUPPORTED` (409 — the
+loaded runtime, e.g. llama.cpp, exposes no module tree to hook). Reused as-is:
+`UNKNOWN_KIND`, `PAYLOAD_TOO_LARGE`, `HUB_UNAVAILABLE`, `VALIDATION_ERROR`.
+
+⚠ **`UNVALIDATED_PROBE` and `PROBE_MODEL_MISMATCH` must not be collapsed into one
+"arming failed".** They call for opposite actions — the first is resolved by asserting
+intent, the second can never be resolved by retrying.
+
 ## 6. Auth posture & deployment guidance (Task 1.3)
 
 miLLM's management API is **unauthenticated by design** in the current
@@ -458,9 +577,16 @@ optional bearer header to be forward-compatible.
 
 Deployment wiring (miStudio side): set `MILLM_API_URL` (e.g.
 `http://millm-backend.millm.svc.cluster.local:8000`) and opt in via
-`MCP_TOOL_CATEGORIES=...,millm_runtime,millm_clusters,millm_sensing`. With
-`MILLM_API_URL` unset, the millm_* categories are skipped at registration
+`MCP_TOOL_CATEGORIES=...,millm_runtime,millm_clusters,millm_sensing,millm_circuits,millm_probes`.
+With `MILLM_API_URL` unset, the millm_* categories are skipped at registration
 (logged once) — miStudio-only deployments are unaffected.
+
+⚠ **`millm_probes` is NOT in `DEFAULT_CATEGORIES`, and registering it in code is
+necessary and not sufficient.** An explicit `MCP_TOOL_CATEGORIES` in the k8s manifest
+or compose file overrides the default list, so a category absent from that variable is
+absent from the deployment however thoroughly it is registered and tested. That is four
+layers — the module, `MILLM_CATEGORY_MODULES`, `VALID_CATEGORIES`, and the manifest —
+and this estate's sixteen-unregistered-tools failure lived in the fourth.
 
 ## 7. Cross-product agent flow (reference)
 

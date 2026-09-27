@@ -547,6 +547,38 @@ class ProgressEmitter:
             # Don't let emission errors affect inference
             logger.warning("monitoring_emit_failed", error=str(e))
 
+    def emit_probe_event(self, payload: dict) -> None:
+        """Emit a persisted probe verdict (Feature 24).
+
+        Same fire-and-forget shape as `emit_sensing_event`, and the same privacy contract:
+        ⚠ the payload EXCLUDES every `context_*` key — the decoded window around the top firing
+        position is user content, and the UI fetches it from the event detail route instead. The
+        stripping happens in `ProbeEventService.strip_context`; this method is the last place it
+        could leak, so it is worth knowing that nothing here re-adds it.
+        """
+        if self._sio is None:
+            return
+
+        import asyncio
+
+        try:
+            try:
+                asyncio.get_running_loop()
+                asyncio.create_task(self._sio.emit("probe:event", payload))
+            except RuntimeError:
+                if hasattr(self, "_main_loop") and self._main_loop:
+                    asyncio.run_coroutine_threadsafe(
+                        self._sio.emit("probe:event", payload),
+                        self._main_loop,
+                    )
+                else:
+                    logger.warning(
+                        "probe_emit_no_loop",
+                        msg="No event loop available for WebSocket emission",
+                    )
+        except Exception as e:
+            logger.warning("probe_emit_failed", error=str(e))
+
     def emit_sensing_event(self, payload: dict) -> None:
         """
         Emit a persisted co-activation event (Feature 11).
@@ -579,28 +611,6 @@ class ProgressEmitter:
         except Exception as e:
             logger.warning("sensing_emit_failed", error=str(e))
 
-    async def emit_monitoring_state_changed(
-        self,
-        enabled: bool,
-        monitored_features: Optional[list[int]] = None,
-    ) -> None:
-        """
-        Emit monitoring state changed event.
-
-        Args:
-            enabled: Whether monitoring is now enabled
-            monitored_features: List of monitored feature indices
-        """
-        if self._sio is None:
-            return
-
-        await self._sio.emit(
-            "monitoring:state",
-            {
-                "enabled": enabled,
-                "monitoredFeatures": monitored_features,
-            },
-        )
 
 
 # Global emitter instance - will be configured with sio on app startup
@@ -660,37 +670,6 @@ class ProgressEmitter:
 progress_emitter = ProgressEmitter()
 
 
-def create_socket_io() -> socketio.AsyncServer:
-    """
-    Create and configure the Socket.IO async server.
-
-    Returns:
-        Configured Socket.IO AsyncServer instance
-    """
-    from millm.core.config import settings
-
-    # Use the same CORS_ORIGINS as the HTTP layer rather than a hardcoded wildcard.
-    # Socket.IO cors_allowed_origins accepts "*" or a list of origin strings.
-    sio_cors: str | list[str] = (
-        "*" if settings.CORS_ORIGINS == "*" else settings.cors_origins_list
-    )
-
-    sio = socketio.AsyncServer(
-        async_mode="asgi",
-        cors_allowed_origins=sio_cors,
-        logger=False,  # Use structlog instead
-        engineio_logger=False,
-        ping_timeout=60,    # Increased from 20s for Cloudflare tunnel latency
-        ping_interval=25,   # Keep default but pair with longer timeout
-    )
-
-    # Register event handlers
-    register_handlers(sio)
-
-    # Configure global emitter
-    progress_emitter.set_sio(sio)
-
-    return sio
 
 
 

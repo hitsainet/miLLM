@@ -129,6 +129,60 @@ def _claims_mcp(status: str) -> bool:
     return bool(CLAIMS_MCP.match(status.strip()))
 
 
+def _mistudio_rung_language() -> dict:
+    """miStudio's `RUNG_LANGUAGE`, read from source without importing its app.
+
+    Keys are `EvidenceRung.NAME` in the source; they are returned as the enum's integer
+    value, resolved from the `EvidenceRung` class in the same file, so the comparison is
+    against miLLM's `{int: str}` mapping rather than against attribute spellings.
+    """
+    import ast
+
+    path = MISTUDIO / "backend" / "src" / "schemas" / "evidence_ladder.py"
+    if not path.exists():
+        _unavailable(
+            f"miStudio's evidence_ladder.py not found at {path} — parity unverified, "
+            "NOT verified-clean. Set MISTUDIO_REPO."
+        )
+    tree = ast.parse(path.read_text(encoding="utf-8"))
+
+    # The enum's NAME -> value, so a key written as `EvidenceRung.MINED` resolves.
+    members: dict[str, int] = {}
+    for node in tree.body:
+        if isinstance(node, ast.ClassDef) and node.name == "EvidenceRung":
+            for stmt in node.body:
+                if isinstance(stmt, ast.Assign) and isinstance(
+                    stmt.value, ast.Constant
+                ):
+                    for target in stmt.targets:
+                        if isinstance(target, ast.Name):
+                            members[target.id] = stmt.value.value
+    assert members, (
+        "could not read EvidenceRung's members out of miStudio's source — the parser "
+        "has drifted and this parity check is comparing nothing"
+    )
+
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.AnnAssign):
+            continue
+        if not (isinstance(node.target, ast.Name) and node.target.id == "RUNG_LANGUAGE"):
+            continue
+        assert isinstance(node.value, ast.Dict), "RUNG_LANGUAGE is not a literal dict"
+        out: dict[int, str] = {}
+        for key, value in zip(node.value.keys, node.value.values):
+            assert isinstance(key, ast.Attribute), f"unexpected key form: {ast.dump(key)}"
+            assert isinstance(value, ast.Constant), "a phrase is not a literal"
+            out[members[key.attr]] = value.value
+        assert out, "RUNG_LANGUAGE parsed as empty — an empty dict compares equal to"
+        return out
+
+    _unavailable(
+        "RUNG_LANGUAGE was not found in miStudio's evidence_ladder.py — parity "
+        "unverified, NOT verified-clean"
+    )
+    raise AssertionError("unreachable")  # pragma: no cover
+
+
 class TestContractMatchesTheRegistry:
     def test_the_contract_file_exists(self):
         # R3-21: absent in the public mirror BY DESIGN — degrade, do not fail.
@@ -217,28 +271,15 @@ class TestContractMatchesTheRegistry:
 
         from millm.core.circuit_evidence import RUNG_LANGUAGE
 
-        backend = MISTUDIO / "backend"
-        sys.path.insert(0, str(backend))
-        try:
-            from src.schemas.evidence_ladder import (  # noqa: PLC0415
-                RUNG_LANGUAGE as THEIRS,
-            )
-        except ImportError:
-            _unavailable(
-                "miStudio's evidence_ladder is not importable from this "
-                "checkout — parity unverified, NOT verified-clean"
-            )
-        except Exception as exc:
-            # Importing miStudio's schema package pulls its app settings,
-            # which can fail on a cache directory this process cannot write.
-            # That is an ENVIRONMENT limit, not a parity result — report it as
-            # unverified rather than as agreement or disagreement.
-            _unavailable(
-                f"miStudio's evidence_ladder could not be imported ({exc}). "
-                "Parity is UNVERIFIED — this is not a clean result."
-            )
-        finally:
-            sys.path.remove(str(backend))
+        # ⚠ READ AS TEXT, NOT IMPORTED. Importing miStudio's schema package pulls its
+        # whole application — app settings under the same env-var names miLLM uses, then
+        # psycopg2, then structlog — so this check spent its whole life reporting
+        # UNVERIFIED, which is the honest answer to a check that cannot run and no answer
+        # at all to the question it was written to ask. The file's own docstring already
+        # named the fix: `test_mcp_tool_paths_are_real.py` reads the tool module as text
+        # and needs no settings. Parsing the AST gets the same two dicts compared, with
+        # nothing imported and nothing to configure. Verified beats unverified.
+        THEIRS = _mistudio_rung_language()
 
         assert dict(RUNG_LANGUAGE) == dict(THEIRS), (
             "the two repos disagree about the evidence-ladder phrasing, so an "

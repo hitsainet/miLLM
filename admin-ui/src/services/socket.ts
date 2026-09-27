@@ -39,6 +39,9 @@ interface SocketEventHandlers {
     import('@/types/circuitSensing').CircuitSensingEvent
   >;
 
+  // Probe monitors (Feature 24) — payload omits every context_* key, i.e. no prompt text
+  'probe:event': EventCallback<import('@/types/probe').ProbeEvent>;
+
   // System events
   'system:metrics': EventCallback<SystemMetricsEvent>;
 }

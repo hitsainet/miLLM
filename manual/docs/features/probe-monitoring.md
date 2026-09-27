@@ -1,11 +1,18 @@
 ---
 sidebar_position: 4
-title: Probe Monitoring
+title: Feature Monitoring
 ---
 
-# Probe Monitoring
+# Feature Monitoring
 
-The Probe page provides real-time visibility into which SAE features activate during inference — the observational counterpart to steering, with no effect on model output.
+:::note Renamed
+This page was called **Probe Monitoring**, and the UI entry was called **Probe**, until Feature 24
+added [Probe Monitors](/features/probe-monitors) — a different thing entirely. This page watches
+**SAE feature activations**; a probe monitor is a **trained linear detector** imported from
+miStudio. The URL (`/monitoring`) is unchanged, so bookmarks still work.
+:::
+
+The Feature Monitor page provides real-time visibility into which SAE features activate during inference — the observational counterpart to steering, with no effect on model output.
 
 For capture semantics and internals, see [Concepts: How Monitoring Works](/concepts/monitoring).
 

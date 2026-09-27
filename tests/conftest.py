@@ -10,6 +10,7 @@ import pytest
 import pytest_asyncio
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.ext.compiler import compiles
+from sqlalchemy import event
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
 from millm.db.base import Base
@@ -53,6 +54,17 @@ async def test_engine():
         "sqlite+aiosqlite:///:memory:",
         echo=False,
     )
+
+    # ⚠ SQLite ignores FOREIGN KEY constraints unless this pragma is set PER CONNECTION, so
+    # without it every `ondelete="CASCADE"` in the repo is untested — a broken one passes the
+    # whole suite and only fails in production, where PostgreSQL does enforce it. Added
+    # 2026-09-27 while building Feature 024, when a probe cascade test passed against a cascade
+    # that had never run.
+    @event.listens_for(engine.sync_engine, "connect")
+    def _enforce_sqlite_foreign_keys(dbapi_connection, _record):  # noqa: ANN001
+        cursor = dbapi_connection.cursor()
+        cursor.execute("PRAGMA foreign_keys=ON")
+        cursor.close()
 
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)

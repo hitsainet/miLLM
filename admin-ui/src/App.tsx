@@ -9,6 +9,7 @@ import {
   SAEPage,
   SteeringPage,
   MonitoringPage,
+  ProbeMonitorsPage,
   ProfilesPage,
   ClustersPage,
   CircuitsPage,
@@ -59,6 +60,7 @@ function AppContent() {
           <Route path="/sae" element={<SAEPage />} />
           <Route path="/steering" element={<SteeringPage />} />
           <Route path="/monitoring" element={<MonitoringPage />} />
+          <Route path="/probe-monitors" element={<ProbeMonitorsPage />} />
           <Route path="/profiles" element={<ProfilesPage />} />
           <Route path="/clusters" element={<ClustersPage />} />
           <Route path="/circuits" element={<CircuitsPage />} />

@@ -169,6 +169,25 @@ class Settings(BaseSettings):
     CIRCUIT_SENSING_FORCE_SERIAL: bool = True
     CIRCUIT_SENSING_MAX_OVERHEAD_MS: float = 5.0
 
+    # --- Feature 24: probe monitors -------------------------------------
+    #: Armed probes force the serial path. ⚠ This is a SETTING, so the CBM path must also mark a
+    #: request `not_scored` with a reason rather than relying on this being true — a probe never
+    #: goes silently quiet (BR-006), and an absent verdict is exactly that.
+    PROBE_FORCE_SERIAL: bool = True
+    #: Bounds per-request overhead. Adjustable; 8 is the authored default.
+    PROBE_MAX_ARMED: int = 8
+    #: Floor on the parity tolerance. A definition may ask for tighter, never looser; miStudio's
+    #: acceptance measured its vectors reproducing at 0.000e+00 from the recorded token_ids, so
+    #: this is absorbing nothing on the reference path.
+    PROBE_PARITY_TOLERANCE: float = 0.001
+    PROBE_MAX_OVERHEAD_MS: float = 5.0        # warn threshold per request
+    PROBE_MAX_EVENTS_PER_PROBE: int = 5000
+    PROBE_MAX_AGE_DAYS: int = 30
+    PROBE_EVENT_CONTEXT_TOKENS: int = 24      # +-K decoded tokens around the top firing position
+    PROBE_HUB_TAG: str = "mistudio-probe-definition"
+    PROBE_HUB_CACHE_TTL_S: int = 300
+    PROBE_MAX_IMPORT_BYTES: int = 2_097_152   # 2 MB, the circuit importer's hostile-payload cap
+
     # Performance: Inference concurrency.
     # MUST stay 1 for correctness of everything built on the global SAE
     # state: per-request steering overrides (Features 8/10), monitoring

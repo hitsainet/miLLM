@@ -59,153 +59,365 @@ then, build against a draft copy and re-vendor before release.
 
 ## Tasks
 
-- [ ] 0.0 Spikes (covers open questions 1–3)
-  - [ ] 0.1 **OQ-2:** confirm the snapshot SHA can be read from `models.cache_path`
-        (`snapshots/<sha>`) for HF downloads; record the fallback (`REVISION_UNVERIFIED`).
-  - [ ] 0.2 **OQ-3:** send a stream with a final `choices: []` extension chunk through the OpenAI
-        Python SDK and Open WebUI. If either breaks, make the chunk opt-in with the
-        `X-miLLM-Probe-Stream: 1` request header, and record the decision.
-  - [ ] 0.4 **OQ-4:** on one LFM2 SAE, compare miLLM's SAE encode with miStudio's
-        `encode_with_training_normalization` on identical inputs (max abs diff); record the result, and
-        the normalization fields the definition must carry.
-  - [ ] 0.3 **OQ-1:** agree the parity tolerance with miStudio 033 acceptance (default 1e-3), and
-        record it.
+- [x] 0.0 Spikes (covers open questions **1–4** — the heading said 1–3 and the Coverage Audit
+      omitted OQ-4 while task 0.4 existed and phase 4A depended on it; corrected 2026-09-27).
+      **All four answered — record: `0xcc/reviews/probe_runtime_phase0_spikes_2026-09-27.md`.**
+  - [x] 0.1 **OQ-2: the specified mechanism does not work and is replaced.** `cache_path` has no
+        `snapshots/<sha>` segment on any model — miLLM downloads with a `local_dir`, so the parse
+        would fall through to `REVISION_UNVERIFIED` every time. `models.revision` is the *requested*
+        value (NULL on 2 of 4 live models). **Resolve from `.cache/huggingface/download/*.metadata`
+        line 1**, verified consistent across all four model dirs on the node; fall back to
+        `models.revision` when it is 40 hex, then to `REVISION_UNVERIFIED`. Assert agreement across
+        files — a dir re-downloaded across revisions would otherwise report a confident wrong SHA.
+  - [x] 0.2 **OQ-3: both clients tolerate it — the opt-in fallback is NOT needed.** OpenAI SDK
+        3.19.2 consumed the chunk cleanly (5/5 chunks, text intact, extension reachable via
+        `model_extra`). Open WebUI guards it explicitly at `utils/middleware.py:4966`
+        (`if not choices:` → continue). ⚠ Open WebUI silently DROPS the extension field, consistent
+        with the outlet non-goal. **Drop `X-miLLM-Probe-Stream: 1` from phase 6.**
+  - [x] 0.4 **OQ-4: they cannot match, and the contract already carries the fix.** miLLM's
+        `LoadedSAE.encode` is a bare `relu(xW+b)` — no normalization, no JumpReLU threshold.
+        Normalization needs **no new fields**: `constant_norm_rescale` and `anthropic_rescale` are
+        the same per-sample rescale (agreeing to 7.2e-7; MIS-E2E-085) and `none` is a no-op, so only
+        the `mode` already in `sae.normalization` is required. **⚠ 4A.4 is reworded:** its
+        comparison target is **miStudio's** encode, not `LoadedSAE.encode` — against the latter the
+        assertion is satisfiable *and wrong*, pinning the slice to the un-normalized basis. The
+        numeric max-abs-diff on a real SAE moves to acceptance; it is a measurement, not a design
+        input.
+  - [x] 0.3 **OQ-1: 1e-3 confirmed, and generous.** miStudio 033 acceptance measured `token_ids`
+        reproducing at **0.000e+00 on all sixteen vectors**. ⚠ Holds for the `token_ids` path only —
+        re-scoring from `messages` missed by up to 1.153 there, so parity scores from `token_ids`
+        and reports `messages` divergence separately as tokenization drift.
 
-- [ ] 1.0 Probe head and hook (covers FR-24.5, FR-24.6)
-  - [ ] 1.1 `ml/probe_head.py`: `ProbeHead` (normalise, `token_scores`, `attn_logits`) and the six
-        accumulators, with the same math as miStudio's `ml/probe_monitor_model.py`.
-  - [ ] 1.2 Tests: streaming accumulator equals batch aggregate to 1e-6; `last` is only final; mask
-        handling.
-  - [ ] 1.3 Lift `_get_layer` / `layer_device` / `get_layer_count` to module functions (`SAEHooker`
-        delegates); the existing hooker tests stay green unchanged.
-  - [ ] 1.4 `ml/probe_hooker.py`: `install(model, layer, fn)` with `prepend=True`, returning the
-        handle; remove.
-  - [ ] 1.5 Tests: the probe sees pre-steer values when an SAE steers the same layer (mutation:
-        drop prepend → red); output unchanged; one hook shared by several probes on a layer; a
-        batch > 1 gives `not_scored`; one D2H per pass (a spy on `.cpu()`).
+- [x] 1.0 Probe head and hook (covers FR-24.5, FR-24.6) — **DONE 2026-09-27**
+  - [x] 1.1 `ml/probe_head.py`: `ProbeHead` (`standardise`, `token_scores`, `attention_logits`),
+        `combine` over all six rules, and `OnlineRule` for the five streamable ones.
+  - [x] 1.2 Tests: `tests/unit/ml/test_probe_head.py` (27) — online equals batch on every
+        streamable rule, including the case that separates them (largest logit arriving last, which
+        forces the running-max rebase); `last` refuses to stream; left-padding; degenerate std;
+        rolling window shorter than the sequence.
+        **Plus `test_probe_head_matches_mistudio.py` (16), which was not in the plan and should
+        have been.** The parity gate only covers inputs a definition's vectors happen to contain,
+        and miStudio samples those from evaluation data — a padding side or a degenerate channel
+        may never appear, so the two implementations could diverge where parity never looks.
+        Measured against miStudio's module directly: **0.000e+00 on all six batch rules, all five
+        online rules, token scores and attention logits.** Identical, not "within tolerance".
+        Required under `MILLM_REQUIRE_CROSS_REPO_CHECKS=1` so CI cannot pass by skipping.
+  - [x] 1.3 Lifted to `ml/layer_resolution.py` (`get_layer`, `layer_device`, `get_layer_count`);
+        `SAEHooker` delegates and its 20 existing tests pass unchanged. `sae_hooker.py` lost 116
+        lines. **Also lifted `reset_dynamo_for_hook_change`** — the FTID said to import it from
+        `SAEService`, but that pulls in `AttachedSAEState`, the singleton 4A.4 spies on to prove a
+        probe never touches it. `SAEService._reset_dynamo_for_hook_change` now delegates here.
+  - [x] 1.4 `ml/probe_hooker.py`: `install(model, layer, callback)` with `prepend=True`, `remove`,
+        `extract_hidden_states` (tuple / bare tensor / `last_hidden_state`, **None** rather than a
+        guess on anything else), and `is_single_row`.
+  - [x] 1.5 Tests: `tests/unit/ml/test_probe_hooker.py` (14) — the probe reads the **pre-steer**
+        residual with an SAE steering the SAME layer, and hook order asserted directly; output
+        unchanged; a raising callback does not break generation; removal detaches; one hand-over per
+        pass; batch detection.
+        ⚠ The `.cpu()` D2H spy is **not** here — this hook never copies; it hands over the tensor.
+        The one-copy-per-pass budget is the scoring service's contract and its spy belongs with
+        phase 5, where the copy is made. The hook's half (the tensor arrives once) is tested here.
 
-- [ ] 2.0 Data, config, contract mirror (covers FR-24.1, FR-24.8)
-  - [ ] 2.1 Migration 016: `probes`, `probe_events` (JSON variant columns), with a real downgrade.
-  - [ ] 2.2 `db/models/probe.py` + `__init__` export; `db/repositories/probe_repository.py`
-        (create, get, list, update, delete; events create_many, list, get, prune by count and age,
-        clear).
-  - [ ] 2.3 Tests: migration round trip (SQLite); schema guards and the drift ratchet; repository
-        CRUD and prune.
-  - [ ] 2.4 Vendor `docs/schemas/probe-definition-v1.json` from miStudio; `api/schemas/probe.py`
-        mirror (`extra="allow"`); `test_probe_schema_sync.py` (structural completeness like the
-        circuit sync, plus a byte-identity check against miStudio when present).
-  - [ ] 2.5 `PROBE_*` settings block and `.env.example`.
+- [x] 2.0 Data, config, contract mirror (covers FR-24.1, FR-24.8) — **DONE 2026-09-27**
+  - [x] 2.1 Migration `016_add_probe_monitors.py` (`revision="016"`, `down_revision="015"`), with a
+        real downgrade — **exercised**, not just written (see 2.3).
+        ⚠ **No index on `sae_ref->>'hf_repo'`, contrary to the FTDD.** A JSONB expression index
+        exists only on PostgreSQL, so the ORM and the migrations would describe different schemas
+        on SQLite — which the drift ratchet correctly refused. The lookup it serves scans a table
+        bounded by `PROBE_MAX_ARMED` (8) armed probes and a few dozen imported ones; a sequential
+        scan over that is free, and buying nothing with a cross-dialect divergence is a bad trade.
+  - [x] 2.2 `db/models/probe.py` (`Probe`, `ProbeEvent`) + `__init__` export;
+        `db/repositories/probe_repository.py` (`ProbeRepository`, `ProbeEventRepository`).
+        `ProbeEvent.rung` is denormalised at write time, as `CircuitEdgeSensingEvent.edge_rung` is:
+        an event must keep describing the evidence true WHEN OBSERVED, or a later re-import
+        retroactively upgrades month-old observations.
+  - [x] 2.3 Tests: `tests/unit/db/test_probe_repository.py` (22),
+        `tests/schema/test_probe_migration_round_trip.py` (2, **on real PostgreSQL** — up → down →
+        up, plus the cascade asserted where it is actually enforced). Schema guards and the drift
+        ratchet pass; the ratchet caught **five real divergences** between my migration and the ORM
+        (four `server_default` mismatches and the expression index) and none were added to the
+        ratchet file.
+        **⚠ AND THE SUITE COULD NOT TEST A CASCADE AT ALL.** SQLite ignores FOREIGN KEY constraints
+        unless `PRAGMA foreign_keys=ON` is set per connection, and nothing in this repo set it — so
+        every `ondelete="CASCADE"` in miLLM (circuits, sensing events, edge events, now probes) was
+        passing against a cascade that had never run. My probe cascade test passed before the FK
+        even existed. Fixed in `tests/conftest.py`; **full suite re-run 2642 passed / 0 failed**, so
+        nothing was relying on the unenforced constraint. Negative control: turning the pragma back
+        off makes the cascade test go red.
+  - [x] 2.4 Vendored `docs/schemas/probe-definition-v1.json` **byte-identical** from miStudio;
+        `api/schemas/probe.py` mirror (`extra="allow"`, following `circuit.py`).
+        `test_probe_schema_sync.py` (28) pins structural completeness against the frozen file, the
+        byte identity (required under `MILLM_REQUIRE_CROSS_REPO_CHECKS=1`), and that the mirror's
+        rule list matches the runtime's — a definition that validates and then cannot be scored is
+        the failure that pairing catches. `test_probe_contract.py` (30) covers every validator.
+  - [x] 2.5 `PROBE_*` settings block in `core/config.py` (10 settings).
+        ⚠ **`.env.example` gets ONE line, not the block.** That file is deployment config — DB,
+        storage, HF token — and documents no feature settings at all; SENSING and CIRCUIT_SENSING
+        are both absent. Listing all ten would make probes the only feature with a catalogue there
+        and imply they must be configured to deploy. `PROBE_FORCE_SERIAL` is listed, commented out,
+        because it alone changes how requests are SERVED: while any probe is armed, continuous
+        batching is off and requests run serially.
 
-- [ ] 3.0 Import, hub, identity (covers FR-24.1, FR-24.2, FR-24.3, FR-24.11)
-  - [ ] 3.1 `ProbeService.import_definition(payload, raw_bytes, on_conflict, origin)`: size gate,
-        kind gate (`UNKNOWN_KIND`), mirror validation, typed projection columns, dedupe.
-  - [ ] 3.2 Hub: parameterise the cluster hub helpers by tag and suffix; `search`,
-        `list_definitions` (manifest-first), `fetch_definition`; TTL cache, breaker,
-        `HUB_UNAVAILABLE`.
-  - [ ] 3.3 `check_identity(probe, loaded)`: `hf_id`, `d_model`, `n_layers`, `template_sha256`,
-        revision (the SHA, or a `REVISION_UNVERIFIED` warning); engine must support hooks.
-  - [ ] 3.4 Errors: `ProbeModelMismatchError`, `ProbeParityFailedError`, `UnvalidatedProbeError`,
-        `ProbeLimitError`, `ProbeNotFoundError` (class-level `code`/`status_code`).
-  - [ ] 3.5 `core/probe_evidence.py` mirror, plus a cross-repo identity test with miStudio's
-        `PROBE_RUNG_LANGUAGE`/`NEXT_STEP` and a forbidden-words audit.
-  - [ ] 3.6 Tests: each identity mismatch named; GGUF refused; import gates; hub with a mocked
-        `HfApi`.
+- [x] 3.0 Import, hub, identity (covers FR-24.1, FR-24.2, FR-24.3, FR-24.11) — **DONE 2026-09-27**
+  - [x] 3.1 `services/probe_service.py` — `ProbeService.import_definition(payload, raw_bytes,
+        on_conflict, origin)`. Gates run size → kind → schema, in that order: a circuit definition
+        posted here gets `UNKNOWN_KIND` rather than forty field errors about a document of another
+        shape. **`on_conflict=rename|fail`** per the corrected FPRD. `delete` refuses while armed —
+        otherwise a hook stays installed against a row that no longer exists.
+  - [x] 3.2 `services/probe_hub_service.py` — `ProbeHubService(ClusterHubService)`, 30 lines.
+        `ClusterHubService` is now **parameterised by four class attributes** (tag setting, suffix,
+        cache subdir, contract model); its 14 existing tests pass unchanged. Copying the breaker
+        and TTL cache instead would have duplicated the part most likely to be subtly wrong.
+  - [x] 3.3 `services/probe_identity.py` — `check_identity` over `hf_id`, `d_model`, `n_layers`,
+        `chat_template_sha256` (all refuse) and the revision (warns), plus the engine check first.
+        **Every mismatch is named, not the first** — stopping early makes an operator fix one
+        field, retry, and meet the next, never learning whether they loaded the wrong model or
+        imported the wrong probe. ⚠ Two known revisions that DIFFER are refused; only an
+        *unestablished* revision warns. Those are different situations and decision 10 covers the
+        second.
+        **`resolve_revision` implements spike 0.1's finding**: the commit comes from
+        `.cache/huggingface/download/*.metadata`, and **several witness files are read, not one** —
+        a directory re-downloaded across two revisions would otherwise report a confident, wrong
+        SHA. A test asserts the FTID's `snapshots/<sha>` parse finds nothing against all four
+        literal `cache_path` values on the node.
+  - [x] 3.4 Seven error classes (the five specified plus `ProbeSaeMissingError` /
+        `ProbeSaeMismatchError` for phase 4A), each with class-level `code`/`status_code` and a
+        matching `ERROR_STATUS_MAP` row so a probe refusal reaching `/v1` renders as an OpenAI
+        error rather than a bare 500.
+  - [x] 3.5 `core/probe_evidence.py` — byte-identical to miStudio's ladder, asserted by
+        `tests/unit/core/test_probe_evidence.py` (21) under
+        `MILLM_REQUIRE_CROSS_REPO_CHECKS=1`, with the forbidden-words audit over both dictionaries
+        and a test that probe language is disjoint from circuit language.
+        ⚠ **The existing circuit copy audit caught my own docstring** hand-writing a circuit rung
+        phrase verbatim on a runtime surface. The guard was right — a phrase typed into a module
+        can drift from the one `rung_language()` returns — and the docstring now says so.
+  - [x] 3.6 Tests: `test_probe_identity.py` (25), `test_probe_import.py` (21),
+        `test_probe_hub_service.py` (8). Seven mutation controls, all biting.
 
-- [ ] 4.0 Parity, runtime state, arming (covers FR-24.4, FR-24.10, FR-24.11)
-  - [ ] 4.1 `ProbeParityEngine.run()`: token_ids-driven, temporary hook, per-token and combined
-        comparison, a tokenization-drift report; runs inside a `RequestQueue` slot under
-        `inference_mode`.
-  - [ ] 4.2 `ProbeRuntimeState`: `arm` (limit 8, identity → parity → install hook → dynamo reset),
-        `disarm`, `disarm_all`, `probes_at(layer)`, `current_request` slot.
-  - [ ] 4.3 Below-rung-2 arming needs `acknowledge_below_rung2` (`UNVALIDATED_PROBE` envelope
-        refusal); store the operator acknowledgement.
-  - [ ] 4.4 Tests: parity pass, fail (vector index and max diff) and drift; an arm refused on parity
-        failure; the limit; the ack gate.
-  - [ ] 4.5 The request context: prompt-scope mask by prefix rendering (`_render_chat_template`),
-        `role_mask_unreliable` fallback, decode = response, position offsets, accumulators; tests.
-  - [ ] 4.6 Model swap and unload: `disarm_all("model_changed")` runs before release and removes the
-        handles from the old module; the test asserts the handles are removed and status shows the
-        reason.
+- [x] 4.0 Parity, runtime state, arming (covers FR-24.4, FR-24.10, FR-24.11) — **DONE 2026-09-27**
+  - [x] 4.1 `services/probe_parity.py` — `ProbeParityEngine.run()`. Scores from **`token_ids`**,
+        reports `messages` re-render as **tokenization drift beside the verdict, never inside it**
+        (miStudio measured `messages` missing by up to 1.153 while the ids reproduced at
+        0.000e+00 — a parity check built on `messages` would tell a correct consumer it was wrong
+        on every vector). The `forward` callable is injected so the caller owns the `RequestQueue`
+        slot and `inference_mode`, and so the engine is testable without a GPU.
+        ⚠ **A scope it cannot reproduce FAILS.** Only `all` is exactly reproducible: `prompt` and
+        `response` were recorded under miStudio's narrower internal role mask and the contract
+        carries no record of which positions those were. Passing them would mean arming a probe
+        this gate never checked. **Recorded as a cross-repo contract gap.**
+  - [x] 4.2 `services/probe_runtime.py` — `ProbeRuntimeState` (arm / disarm / disarm_all /
+        probes_at / layers / the single `current_request` slot) and `ProbeRequestContext`.
+        **One hook per layer, shared**, so the device-to-host budget stays at one copy per pass
+        however many probes are armed. A second concurrent `begin_request` raises rather than
+        overwriting — silently replacing the slot would attribute one request's activations to
+        another's verdict.
+        ⚠ **The live path calls `combine()`, the same function parity calls.** `OnlineRule` exists
+        and is proven equal, but using the online form live and the batch form for parity would be
+        two implementations of one definition, and parity would be verifying the wrong one. The
+        cost is ~128 KB of per-token scores at 4k context across the 8-probe limit.
+  - [x] 4.3 `services/probe_arming.py` — the four gates in the order they are cheapest to fail:
+        limit → identity → rung → parity. Identity precedes the rung gate deliberately: asking
+        someone to acknowledge a probe that cannot run on the loaded model is asking them to
+        consent to nothing. Parity is last because it is the only gate that costs a forward pass,
+        and a test asserts the model is not run when an earlier gate fails.
+        The arm acknowledgement is stored **separately** from the definition's — the person who
+        exported a weak probe and the person arming it on live traffic are not necessarily the
+        same, and only the second is choosing to monitor with it.
+  - [x] 4.4 Tests: `test_probe_parity.py` (17), `test_probe_arming.py` (15),
+        `test_probe_runtime.py` (20). A failed arm leaves **nothing** armed in either the runtime
+        or the database, and the failed parity report is still stored so the operator can see why.
+  - [x] 4.5 The request context: mask windowing through `probe_scope.window`, `not_scored` reasons
+        with **the first reason winning**, top-5 firing positions, and `fires=None` (not `False`)
+        when no threshold was placed.
+        ⚠ **`probe_scope.py` was REWRITTEN.** Its first version recovered role spans by
+        prefix-rendering the chat template, for scopes `all|assistant|user|last_assistant` — 032's
+        INTERNAL names, which I took from a miStudio TypeScript type instead of the frozen schema.
+        The contract's scopes are **`all|prompt|response`**, so none of that machinery could ever
+        have run, and all 22 of its tests were green. See the enum guard added to
+        `test_probe_schema_sync.py`.
+  - [x] 4.6 `disarm_all(reason)` clears **both** the runtime and the rows. Clearing only the
+        runtime leaves rows claiming to be armed after a restart; clearing only the rows leaves
+        hooks on a model nobody is tracking. Wiring it to the model-swap path is phase 5.
 
-- [ ] 4A.0 SAE probes with a private encoder copy (covers FR-24.15; D14)
-  - [ ] 4A.1 `services/probe_sae_slice.py`: find the downloaded SAE by repo/path/revision; verify
-        the weights SHA-256; load only `W_enc[:, idx]`, `b_enc[idx]`, thresholds; `encode()` with the
-        definition's normalization.
-  - [ ] 4A.2 Errors `PROBE_SAE_MISSING` (naming the repo/path to download) and `PROBE_SAE_MISMATCH`
-        (naming the fields); arm path; the UI shows a "download this SAE" action that reuses the
-        existing SAE download.
-  - [ ] 4A.3 `ProbeHead` over an optional slice; parity through the SAE path.
-  - [ ] 4A.4 Tests: the slice equals the full encode restricted to `idx`; SHA mismatch refused;
-        missing refused; the probe's scores are unchanged while another SAE is attached and steering
-        on the same layer (mutation: read post-steer or use the attached SAE → red); `AttachedSAEState`
-        is never touched (spy).
-  - [ ] 4A.5 Migration 016 includes `basis` and `sae_ref`; the import stores them.
+- [x] 4A.0 SAE probes with a private encoder copy (covers FR-24.15; D14) — **DONE 2026-09-27**
+  - [x] 4A.1 `services/probe_sae_slice.py` — `SaeFeatureSlice` keeps only `W_enc[:, idx]`,
+        `b_enc[idx]` and (for JumpReLU) `threshold[idx]`, verifies the weights SHA-256 **before**
+        building the basis, and encodes with the definition's normalization.
+        ⚠ **miLLM's SAE loader has NEVER read a JumpReLU threshold** — `sae_loader` reads
+        `W_enc, b_enc, W_dec, b_dec` and nothing else — so the learned θ is unavailable through any
+        existing path. That is why the slice reads the weights file itself. A JumpReLU slice with
+        no thresholds **refuses** rather than falling back to relu: the fallback encodes in a
+        different basis than the probe was fitted in, producing plausible features with different
+        meanings.
+        Normalization needs **no new contract fields**: `constant_norm_rescale` and
+        `anthropic_rescale` are the same per-sample rescale (7.2e-7 apart, MIS-E2E-085), `none` is
+        a no-op, so the `mode` already in `sae.normalization` suffices.
+  - [x] 4A.2 `ProbeSaeMissingError` / `ProbeSaeMismatchError` added in phase 3 with their
+        `ERROR_STATUS_MAP` rows. (The UI "download this SAE" action is phase 8.)
+  - [x] 4A.3 `ArmedProbe.encoder` is the slice; `ProbeRequestContext.observe` applies it before the
+        head, so parity runs through the same path.
+  - [x] 4A.4 **Reworded per spike 0.4 and tested that way.** The comparison target is miStudio's
+        encode (normalization + the architecture's activation), NOT `LoadedSAE.encode` — against
+        the latter "the slice equals the full encode restricted to `idx`" is satisfiable *and
+        wrong*, because it would pin the slice to the un-normalized relu basis. `AttachedSAEState`
+        is never touched, proven by a spy.
+  - [x] 4A.5 Migration 016 carries `basis` and `sae_ref`; the import stores both.
 
-- [ ] 5.0 Inference lifecycle wiring (covers FR-24.6, FR-24.10)
-  - [ ] 5.1 `_probe_begin` / `_probe_finish` / `_probe_record` in `inference_service.py`.
-  - [ ] 5.2 Non-stream chat: begin next to sensing begin (~L3283); finish before the response returns;
-        record in `finally` (~L3366).
-  - [ ] 5.3 Stream chat: begin (~L4007); **finish before the final chunk (~L4243)**; record in
-        `finally` (~L4344).
-  - [ ] 5.4 Text completions: begin (~L4399), finish, record (~L4466).
-  - [ ] 5.5 `_use_cbm_for_request` (~L849): force serial while probes are armed; batched and n>1 →
-        `not_scored`; speculative decoding → paused with the reason; llama.cpp paths untouched (arm
-        already refused).
-  - [ ] 5.6 Hung-thread guard: disarm probes where sensing is disarmed (~L4300–4330), with a reason.
-  - [ ] 5.7 `test_probe_wiring.py`: per path, begin and finish are called with the payload (the
-        mutation removing each call goes red); CBM forced serial; `not_scored` reasons recorded.
+- [x] 5.0 Inference lifecycle wiring (covers FR-24.6, FR-24.10) — **DONE 2026-09-27**
+  - [x] 5.1 `_probe_begin` / `_probe_finish` / `_probe_record` / `_probe_mark_not_scored` /
+        `_probe_stream_chunk` in `inference_service.py`. **None of them may raise** — a probe is an
+        observer, and taking a generation down because a monitor failed would make arming one
+        strictly worse than not arming it.
+  - [x] 5.2 Non-stream chat: begin beside the sensing boundary, `finish` **before** the `finally`
+        (the route reads the ContextVar for its header after generation), record in the `finally`.
+        Probes open on EVERY request including `n>1`, unlike sensing which skips — a skipped probe
+        is a silent probe.
+  - [x] 5.3 Stream chat: begin at the boundary, **finish before the final chunk**, probe chunk
+        between the final chunk and `[DONE]`, record in the `finally`.
+  - [x] 5.4 Text completions: begin, finish before the `finally`, record in it.
+  - [x] 5.5 `_use_cbm_for_request` forces serial while probes are armed. ⚠ It asks
+        `ProbeRuntimeState().has_armed()`, **not** `AttachedSAEState` — a probe sits on any layer
+        and needs no attached SAE, so copying the sensing clause's shape would have produced a
+        guard that never fires. The circuit clause's shape is the right one and a test pins that
+        the probe clause does not read the SAE registry.
+  - [x] 5.6 Hung-thread guard: probes are disarmed where sensing is, **with a recorded reason**.
+        A woken hung thread's forward pass would call the probe hook into the NEXT request's
+        context, reporting one conversation's verdict against another's id.
+  - [x] 5.7 `tests/unit/services/test_probe_wiring.py` (27) — every path begins, finishes and
+        records; ordering asserted; CBM gate; batched reasons; the hung-thread guard; the header
+        builder; the chunk payload.
+  - [x] 5.8 **⚠ THE SECOND STREAMING PATH — and making the test precise found MORE.**
+        `_cbm_stream_chat_completion` now opens a context and marks `continuous_batching`, so an
+        unscored request explains itself instead of returning a normal-looking response with no
+        verdict anywhere.
+        **And `stream_chat_completion` has SEVEN `[DONE]` emissions, three of them after the probe
+        context opens.** My first ordering test used `code.index()` and matched the first one — the
+        "satisfied by the wrong occurrence" trap, which here produced a false FAILURE; the same
+        mistake the other way is a false pass. Those three are refusal and error returns: they
+        deliberately send **no verdict chunk** (the client is receiving an error, not a completion)
+        but **do** record an event, because a request that failed and a request nobody monitored
+        must not look identical in the log. Pinned by
+        `test_an_error_path_still_writes_an_EVENT_even_though_it_sends_no_chunk`.
 
-- [ ] 6.0 Verdict delivery (covers FR-24.7)
-  - [ ] 6.1 A `_PROBE_VERDICTS` ContextVar with a reset at request start (next to
-        `reset_steering_memo`).
-  - [ ] 6.2 Non-stream header `X-miLLM-Probe-Verdicts` (RFC 8941 list, sorted by name) in `chat.py`
-        after generation, only when armed.
-  - [ ] 6.3 Stream: the `choices: []` + `millm_probe_verdicts` chunk yielded between the final chunk
-        and `[DONE]` (or opt-in per 0.2).
-  - [ ] 6.4 Tests: header formatting; no header when unarmed; chunk position before `[DONE]`; stream
-        and non-stream verdicts agree for the same prompt; no leak between consecutive requests.
+- [x] 6.0 Verdict delivery (covers FR-24.7) — **DONE 2026-09-27**
+  - [x] 6.1 `_PROBE_VERDICTS` ContextVar beside the steering memos, cleared **by the existing
+        `reset_steering_memo`** rather than by a second call — a route that has to remember two
+        resets is a route that will one day remember one, and a stale list would report a concept
+        as detected in a conversation that never contained it.
+  - [x] 6.2 `X-miLLM-Probe-Verdicts`, RFC 8941, sorted by name, set after generation beside
+        `X-miLLM-Circuit-Rung`. ⚠ `verdict` is **omitted entirely** when no threshold was placed —
+        `?0` would report a decision the probe never made. No header at all when nothing is armed,
+        so an unarmed server's response is byte-identical to before this feature.
+  - [x] 6.3 The `choices: []` chunk between the final chunk and `[DONE]`, **unconditional**: spike
+        0.2 measured both clients tolerating it, so the `X-miLLM-Probe-Stream: 1` opt-in is gone.
+  - [x] 6.4 Tests in `test_probe_wiring.py`, including the documented example reproduced exactly.
 
-- [ ] 7.0 Events, status, routes (covers FR-24.8, FR-24.9)
-  - [ ] 7.1 `ProbeService.record()`: rows per armed probe (scored or not), context window, prune,
-        emit.
-  - [ ] 7.2 `sockets/progress.py`: `emit_probe_event` (throttle as sensing); **remove the duplicate
-        `emit_monitoring_state_changed` and `create_socket_io` definitions**, keeping the one in
-        effect today, with a test that each name is defined once.
-  - [ ] 7.3 `test_probe_event_privacy.py`: the emitted payload has no `context_*` keys and no prompt
-        text (mutation: stop stripping → red).
-  - [ ] 7.4 `status()`: armed probes, paused reasons, overhead and threshold, events recorded,
-        socket events dropped.
-  - [ ] 7.5 Routes `/api/probes` (FPRD §7) registered in `api/routes/__init__.py`; the
-        `test_probe_routes.py` membership test **and** a call test with the payload per route.
+- [x] 7.0 Events, status, routes (covers FR-24.8, FR-24.9) — **DONE 2026-09-27**
+  - [x] 7.1 `services/probe_event_service.py` — `record()` writes one event per verdict (including
+        the not-scored ones), prunes to the cap and the age window on every write, and emits.
+        Never raises: the verdict is already on the response.
+  - [x] 7.2 `emit_probe_event` beside its sensing sibling, and **both duplicate definitions in
+        `progress.py` removed** — `emit_monitoring_state_changed` (dead copy at 614) and
+        `create_socket_io` (dead copy at 695). Verified byte-identical by AST before deleting, so
+        removing the shadowed one is provably behaviour-neutral.
+  - [x] 7.3 **The privacy test asserts ABSENCE.** `strip_context` is the single place prompt text
+        is removed, tested on the stripped payload, on the emitted payload, and by checking the
+        prompt string appears nowhere in the payload's `repr`. Mutation: return the payload
+        unstripped → 3 red.
+  - [x] 7.4 `status()` — armed probes with their rung language and next step, **`paused_reason`
+        for every armed-but-not-scoring probe**, overhead and its threshold (present even when
+        nothing has run, so "nothing is wrong" is distinguishable from "field missing"), events
+        recorded, socket events dropped.
+  - [x] 7.5 `api/routes/management/probes.py` registered in `routes/__init__.py`, with
+        dependencies following the `CircuitRepo`/`CircuitServiceDep` convention. Reachability is
+        asserted against **`app.openapi()["paths"]`**, not `app.routes` — this FastAPI version
+        wraps included routers in objects with no `.path`, so introspecting `app.routes` reports
+        an empty app that serves fine. Mutation: remove the `include_router` → 2 red.
+        ⚠ **THIS TASK SHIPPED FIVE MISSING ROUTES AND ITS OWN COUNT HID THEM.** It read "(7 paths)"
+        and the module had exactly 7 — while the FPRD §7 specifies **12**. Absent were
+        `POST /{id}/arm`, `POST /{id}/parity`, `GET /hub/search`,
+        `GET /hub/{repo_id:path}/definitions` and `POST /hub/import`, so
+        **`ProbeArmingService.arm` (all four gates and the acknowledgement gate), `check_identity`,
+        `resolve_revision`, `ProbeParityEngine.run`, `SaeFeatureSlice` (the whole k-sparse path) and
+        `ProbeHubService` had between them no production caller.** A probe could be imported and
+        never armed. The reachability test passed because it was a **subset** assertion —
+        `for expected in (…): assert expected in paths` over seven literals — and a membership loop
+        cannot fail for a route missing from both the code and the list. **A count is not a set.**
+        Fixed 2026-09-27 in phase 8: the five routes, `services/probe_arm_bridge.py` (identity and
+        the parity forward pass), and `tests/unit/api/test_probe_route_surface.py`, which asserts
+        the served set **equals** the set parsed out of the FPRD itself. 10 mutation controls; two
+        survived first time because a module-wide AST scan was satisfied by `check_parity`'s calls,
+        so the guard is now scoped per handler.
 
-- [ ] 8.0 Admin UI and rename (covers FR-24.12)
-  - [ ] 8.1 `types/probe.ts`, `services/api.ts` `probesApi`, `services/socket.ts` `'probe:event'`
-        handler type.
-  - [ ] 8.2 `hooks/useProbes.ts` (react-query; socket subscription as in `useSensing`; cleanup with
-        `off`).
-  - [ ] 8.3 `ProbeMonitorsPage` + `components/probes/*` (import file/hub, list, arm/ack dialog,
-        parity report, events feed with on-demand context, status card, rung chip); route
-        `/probe-monitors`; sidebar item.
-  - [ ] 8.4 Rename "Probe" → "Feature Monitor": `Sidebar.tsx:33`, `DashboardPage.tsx:153`,
-        `QuickActions.tsx:73,192`; the route stays `/monitoring`.
-  - [ ] 8.5 vitest: page renders, ack dialog required below rung 2, live feed updates from a mocked
-        socket, refusal messages rendered, sidebar labels.
-  - [ ] 8.6 Playwright `e2e/navigation.spec.ts`: both pages reachable by their new labels.
-  - [ ] 8.7 Manual: `features/probe-monitors.md` (new) + `sidebars.ts`; retitle
-        `probe-monitoring.md` to "Feature Monitor"; `test_manual_pages_are_reachable` green; no
-        model-family-specific recommendations (standing copy rule).
+- [x] 8.0 Admin UI and rename (covers FR-24.12) — **DONE 2026-09-27**
+  - [x] 8.1 `types/probe.ts`, `services/api.ts` `probesApi`, `services/socket.ts` `'probe:event'`
+        handler type. `probesApi` carries `arm`, `checkParity`, `hubSearch`, `hubDefinitions` and
+        `hubImport` — five of its methods had no route to call until this phase (see 7.5).
+  - [x] 8.2 `hooks/useProbes.ts` (react-query; socket subscription as in `useSensing`; cleanup with
+        `off`). ⚠ `UNVALIDATED_PROBE` is surfaced through `pendingAck`, **not a toast**: a toast is
+        dismissed and the decision is not made. Every other refusal is mapped to the operator's
+        words by the server's own code, never re-derived — "wrong model" and "needs your say-so"
+        call for different actions, and a generic "arm failed" tells someone to retry what can
+        never work.
+  - [x] 8.3 `ProbeMonitorsPage` + `components/probes/ProbeHubBrowser.tsx` (import from file AND
+        hub, list, Arm + acknowledgement dialog, on-demand parity, events feed with on-demand
+        context, status card, rung chip); route `/probe-monitors`; sidebar item.
+        ⚠ **The ack dialog renders from the SERVER's refusal, never from `rung < 2`.** Rendering it
+        from the rung alone would prompt for probes nobody tried to arm, and would make the
+        acknowledgement a UI opinion rather than the thing the server stores.
+        ⚠ A Hub definition with no recorded rung shows **"rung not stated"**, not rung 0: rung 0 is
+        the claim *trained and nothing further measured*.
+  - [x] 8.4 Rename "Probe" → "Feature Monitor": extracted to `components/layout/navItems.ts`
+        (exporting the array from `Sidebar.tsx` tripped `react-refresh/only-export-components`).
+        The route stays `/monitoring`.
+  - [x] 8.5 vitest: 19 page tests + 6 Hub tests + 5 sidebar-naming tests. The ones worth keeping
+        assert what the page must NOT say — a null threshold as "ranks, does not decide" rather
+        than 0.0000, an unscored verdict with its reason rather than a blank row, overhead as an
+        em-dash rather than 0.00 ms. **12 mutation controls, all verified biting.**
+  - [x] 8.6 Playwright `e2e/navigation.spec.ts`: both pages by exact label. ⚠ The pre-existing spec
+        clicked `text=Monitoring`, which matched **neither** page; exact-label `getByRole` locators
+        now, since "Feature Monitor" and "Probe Monitors" both contain "Monitor".
+  - [x] 8.7 Manual: `features/probe-monitors.md` (new) + `sidebars.ts`; retitled
+        `probe-monitoring.md` to "Feature Monitoring". Build green.
+  - [x] 8.8 **Repo tooling, found while running the gates:** `npm run typecheck` was
+        `tsc --noEmit`, which is a **no-op** against a root tsconfig of
+        `{"files": [], "references": […]}` — and CI ran it as a gate. Now `tsc -b --noEmit`, proven
+        to bite (exit 2 on a bogus import) and clean on the tree. It had been masking a missing
+        barrel export in `src/pages/index.ts`.
 
-- [ ] 9.0 MCP contract v1.6 (covers FR-24.13). **Co-release with miStudio 033 phase 7.**
-  - [ ] 9.1 Precondition: miStudio branch with `millm_probes` registered (033 task 7.3).
-  - [ ] 9.2 `docs/mcp-contract.md`: version 1.6 header; a §1 paragraph; `### \`millm_probes\``
-        table with a three-state status; §4 probe rung rule; §5 codes (`PROBE_MODEL_MISMATCH`,
-        `PROBE_PARITY_FAILED`, `UNVALIDATED_PROBE`, `PROBE_LIMIT`, `PROBE_NOT_FOUND`); the §6
-        categories list.
-  - [ ] 9.3 Extend `test_mcp_tool_paths_are_real.py` (ROUTERS += probes; read miStudio
-        `tools/millm_probes.py`) or add a sibling; extend the consistency-test status checks to the
-        probes table.
-  - [ ] 9.4 Run with `MILLM_REQUIRE_CROSS_REPO_CHECKS=1` against the miStudio branch: green. Without
-        miStudio's registry: red (co-release proof).
+- [x] 9.0 MCP contract v1.6 (covers FR-24.13). **Co-release with miStudio 033 phase 7** — **DONE
+      2026-09-27, and the cross-repo guard found four defects nobody was looking for.**
+  - [x] 9.1 Precondition met: miStudio has `millm_probes` registered across all four layers
+        (module, `MILLM_CATEGORY_MODULES`, `VALID_CATEGORIES`, k8s `MCP_TOOL_CATEGORIES`).
+  - [x] 9.2 `docs/mcp-contract.md` v1.6: header, the §1 additive paragraph naming the co-release,
+        `### millm_probes` with the three-state status convention, §4d-bis the probe rung rule
+        (including that rung 3 is **"compared with"** a judge and not "beats" one — on the reference
+        run the judge won), and §5 with all nine probe codes. It also states which served routes are
+        deliberately **not** tools, so the absence is a decision on the record rather than a gap.
+  - [x] 9.3 `test_mcp_tool_paths_are_real.py` **parametrised over surfaces** rather than copied to a
+        sibling — a second extraction would drift from the first the moment either was fixed.
+        ⚠ **THE NEW COMPLETENESS TEST WENT RED ON FOUR MORE MODULES THE MOMENT IT WAS WRITTEN.**
+        `millm_clusters`, `millm_models`, `millm_runtime` and `millm_sensing` had never had their
+        paths checked at all; this guard had been pointed at `millm_circuits` alone since it was
+        written, and a guard covers what it is pointed at. Adding them found a real production
+        defect: **`millm_download_model` posts to `/api/models/download`, which this server does not
+        serve and never has** — the download is POST on the collection — so that tool 404'd for every
+        agent that ever called it, while miStudio's own caller assertion **pinned the wrong path** and
+        agreed with it. Both fixed.
+  - [x] 9.4 Co-release proof, all three states: **repo present + flag → 19 green; repo absent +
+        flag → 13 RED; repo absent, no flag → skipped.**
+        ⚠ **THE FLAG WAS UNREAD BY THIS FILE.** `MILLM_REQUIRE_CROSS_REPO_CHECKS=1` with
+        `MISTUDIO_REPO=/nonexistent` reported `6 passed, 13 skipped` — the one switch meant to make
+        the cross-repo gate mandatory silently left it optional. A gate satisfied by deleting the
+        other repo is not a gate.
+        ⚠ **AND `test_mcp_contract_consistency.py` HAD NEVER RUN.** It reported "10 skipped /
+        UNVERIFIED" for its entire life, because building miStudio's registry needs `mcp`, then
+        psycopg2, then structlog. `mcp>=1.9.0,<2` is now a test dependency (2.x renamed FastMCP to
+        MCPServer and cannot load these modules at all), and the last check that still could not
+        run — the evidence-ladder phrase parity — now **reads `evidence_ladder.py` by AST instead of
+        importing it**, which is the answer the file's own docstring had already given for the path
+        half. **17 of 17 pass, 0 skipped.** 3 mutation controls: a drift in either repo's phrasing,
+        an AST parser returning empty, and a renamed contract section all go red.
 
 - [ ] 10.0 Feature Acceptance
   - [ ] 10.1 Vendor the final schema from miStudio (byte-identical); add
@@ -217,10 +429,47 @@ then, build against a draft copy and re-vendor before release.
         when its SAE is removed.
   - [ ] 10.3 **SC-1/SC-2 on the node:** the LFM2 probe imports from file and from HF, passes parity
         (≤ 1e-3) and arms; refuses on Qwen2.5-7B (mismatch named) and on a GGUF model.
-  - [ ] 10.4 **SC-4:** `test_probe_overhead.py`, plus a node measurement at 4k tokens with 2 probes
-        under 5 ms; record the numbers.
-  - [ ] 10.5 **SC-5:** delete each wiring line (FTID §6 list), observe red, restore; record the
-        mutation controls in `0xcc/reviews/review_feature024_probe_monitor_runtime_<date>.md`.
+  - [~] 10.4 **SC-4 — THE TEST FOUND A REAL DEFECT; THE ABSOLUTE FIGURE IS STILL OWED.**
+        ⚠ **THE SCORE PATH COPIED THE WHOLE RESIDUAL TO THE HOST AND SCORED IT THERE.**
+        `observe` did `hidden[0].detach().to(torch.float32).cpu()` — **33.6 MB per forward
+        pass** at 4k x 2048 — then ran the arithmetic single-threaded in float32: **25–37 ms
+        for two probes**, against a 5 ms budget. The comment above it read "THE ONE
+        DEVICE-TO-HOST COPY", which was true and was beside the point: one copy of 33.6 MB IS
+        the cost. No test caught it, because none measured it and the scores were right.
+        Fixed: the head and the SAE slice follow the ACTIVATIONS' device, the matvec runs
+        there, and only the (T,) score vector crosses — **16 kB instead of 33.6 MB, 2000x**.
+        ⚠ **TWO FASTER FORMS WERE MEASURED AND REJECTED, and both look right.** Folding the
+        standardisation into the weight is algebraically exact and 2.6x, and perturbs the score
+        by **1.9e-06** — which breaks the BIT-EXACT agreement with miStudio that 033's
+        acceptance recorded as "0.000e+00, all sixteen vectors". Exactness is a stronger
+        guarantee than "within tolerance", and it is what makes a parity pass mean anything.
+        An fp16 matvec is another 4x and moves the score by up to **8.5e-02 — 85x the 1e-3
+        tolerance**: every armed probe would fail parity, or pass by luck and then score
+        differently from what was measured, with no symptom. Both are pinned as tests carrying
+        their measured error, because a comment does not fail.
+        ⚠ **THE TEST DOES NOT ASSERT THE 5 ms BUDGET, and my first version did.** It failed at
+        37 ms on the reasoning that CPU arithmetic is a floor under the GPU figure — backwards:
+        over 8.4M elements the CPU is slower by orders of magnitude, so a CPU timing bounds the
+        production number from neither side. Automated instead is what CPU can decide: that the
+        activations are NOT moved off their device (asserted by RECORDING the calls made on the
+        tensor — a source scrape for `.cpu()` fails open on any rewrite, and this estate has
+        shipped that mistake in three arcs), that the head and slice do not rebuild per pass,
+        that cost is not superlinear in probe count, and the two rejected forms. 12 tests,
+        5 mutation controls including reinstating the original defect.
+        **STILL OWED: the node measurement at 4k tokens with 2 probes under 5 ms.** It needs
+        this branch deployed and a model loaded — the same blocker as 10.3.
+  - [x] 10.5 **SC-5 PASSES — all seven FTID §6 controls bite.** Baseline 464 passed / 0 failed.
+        `prepend=True` removed → 1 red (the probe would read post-steer); the router include
+        removed → 17 red; one byte of the vendored schema → 2 red; **one word of the rung
+        language (`compared with` → `better than` a judge) → 2 red across repos**;
+        `_probe_begin` removed from the non-streaming path → 1 red; the CBM serial clause → 2
+        red; `strip_context` dropped from the socket emit → 1 red, asserting ABSENCE.
+        ⚠ **S6 FIRST RAN WITH AN ANCHOR THAT MATCHED TWICE**, so the edit never landed and the
+        run reported `44 passed`. Recorded because it is mutation testing's own failure mode:
+        an unlanded mutation is indistinguishable from a surviving one. Every control was
+        re-run with a verified-unique anchor.
+        Record: `0xcc/reviews/review_feature024_probe_monitor_runtime_2026-09-27.md`, which also
+        lists the ten defects in my own work and what caught each — **not one by re-reading.**
   - [ ] 10.6 Update `CLAUDE.md` (Feature 24 documents ✅, status); PPRD Feature 24 status.
   - [ ] 10.7 Full suites: backend, admin-ui, e2e, lint, typecheck.
 
@@ -230,5 +479,5 @@ then, build against a draft copy and re-vendor before release.
   24.12 → 8.x · 24.13 → 9.x · 24.14 → 10.4.
 - **Edge cases:** GGUF (3.6) · model changed (4.6) · speculative (5.5) · batched (5.5, 1.5) · CBM
   (5.5) · parity fail (4.4) · limit (4.4) · hung thread (5.6) · oversized/unknown import (3.1).
-- **Open questions:** OQ-1 → 0.3 · OQ-2 → 0.1 · OQ-3 → 0.2.
+- **Open questions:** OQ-1 → 0.3 · OQ-2 → 0.1 · OQ-3 → 0.2 · **OQ-4 → 0.4** (omitted here until 2026-09-27, while phase 4A depended on its outcome).
 - **The final parent task is Feature Acceptance.** ✔

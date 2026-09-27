@@ -35,11 +35,30 @@ test.describe('Navigation', () => {
     await expect(page.locator('h1')).toContainText(/Profile/i);
   });
 
-  test('should navigate to Monitoring page', async ({ page }) => {
+  // ⚠ EXACT labels, not substrings. "Feature Monitor" and "Probe Monitors" both contain
+  // "Monitor", so a substring click is ambiguous and Playwright resolves it by position — a test
+  // that passes today and clicks the other page the moment the sidebar is reordered.
+  //
+  // The previous version of this test clicked `text=Monitoring`, which matched NEITHER: the
+  // sidebar label was "Probe" at `/monitoring`.
+  test('should navigate to the Feature Monitor page', async ({ page }) => {
     await page.goto('/');
-    await page.click('text=Monitoring');
+    await page.getByRole('link', { name: 'Feature Monitor', exact: true }).click();
     await expect(page).toHaveURL(/.*monitoring/);
-    await expect(page.locator('h1')).toContainText(/Monitor/i);
+  });
+
+  test('should navigate to the Probe Monitors page', async ({ page }) => {
+    await page.goto('/');
+    await page.getByRole('link', { name: 'Probe Monitors', exact: true }).click();
+    await expect(page).toHaveURL(/.*probe-monitors/);
+    await expect(page.locator('h1')).toContainText(/Probe Monitors/i);
+  });
+
+  test('the two monitoring pages are distinguishable by name', async ({ page }) => {
+    // D8's whole reason: two pages both called "Probe" is a coin flip for an operator.
+    await page.goto('/');
+    await expect(page.getByRole('link', { name: 'Feature Monitor', exact: true })).toBeVisible();
+    await expect(page.getByRole('link', { name: 'Probe Monitors', exact: true })).toBeVisible();
   });
 
   test('should navigate to Settings page', async ({ page }) => {

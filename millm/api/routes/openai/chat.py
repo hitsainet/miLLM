@@ -38,8 +38,40 @@ from millm.core.logging import get_logger
 from millm.services.inference_service import (
     InferenceService,
     circuit_apply_failed,
+    get_probe_verdicts,
     reset_steering_memo,
 )
+
+
+def build_probe_verdicts_header(verdicts: list) -> str:
+    """`X-miLLM-Probe-Verdicts` as an RFC 8941 structured list (FR-24.7).
+
+        "high-stakes";score=2.31;threshold=1.07;verdict=?1;rung=3, "x";not-scored;reason="..."
+
+    Sorted by name so the header is deterministic — a header whose field order depends on dict
+    iteration is a header nobody can diff between two responses.
+
+    Returns "" when nothing is armed, and the caller then sets no header at all: an unarmed
+    server's response must be byte-identical to what it was before this feature existed.
+    """
+    members: list[str] = []
+    for verdict in sorted(verdicts, key=lambda v: v.name):
+        name = str(verdict.name).replace('"', "")
+        if not verdict.scored:
+            reason = str(verdict.not_scored_reason or "unknown").replace('"', "")
+            members.append(f'"{name}";not-scored;reason="{reason}";rung={verdict.rung}')
+            continue
+        parts = [f'"{name}"', f"score={verdict.score:.6g}"]
+        if verdict.threshold is not None:
+            parts.append(f"threshold={verdict.threshold:.6g}")
+        # ⚠ `verdict` is omitted entirely when `fires` is None — the probe ranked without
+        # deciding, and `?0` would report a decision it never made.
+        if verdict.fires is not None:
+            parts.append(f"verdict={'?1' if verdict.fires else '?0'}")
+        parts.append(f"rung={verdict.rung}")
+        members.append(";".join(parts))
+    return ", ".join(members)
+
 
 router = APIRouter()
 logger = get_logger(__name__)
@@ -239,4 +271,14 @@ async def create_chat_completion(
         result = await inference.create_chat_completion(request)
         if echo_circuit_rung is not None and not circuit_apply_failed():
             response.headers["X-miLLM-Circuit-Rung"] = echo_circuit_rung
+
+        # Probe verdicts (Feature 24, FR-24.7). Read AFTER generation for the same reason the
+        # rung header is: the verdict does not exist until the request has been scored.
+        #
+        # ⚠ The STREAMING branch above cannot do this — it commits headers before the first byte,
+        # and the verdict is not known then. That is why streaming carries the verdict in a
+        # terminal chunk instead, and why the two are not simply the same mechanism twice.
+        probe_header = build_probe_verdicts_header(get_probe_verdicts())
+        if probe_header:
+            response.headers["X-miLLM-Probe-Verdicts"] = probe_header
         return result

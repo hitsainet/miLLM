@@ -40,6 +40,7 @@ const sidebars: SidebarsConfig = {
         'features/sae-management',
         'features/feature-steering',
         'features/probe-monitoring',
+        'features/probe-monitors',
         'features/profiles',
         'features/clusters',
         'features/circuits',

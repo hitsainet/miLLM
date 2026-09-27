@@ -557,3 +557,94 @@ class CircuitSensingEventNotFoundError(MiLLMError):
 
     code = "CIRCUIT_SENSING_EVENT_NOT_FOUND"
     status_code = 404
+
+# ── Probe monitors (Feature 24) ───────────────────────────────────────────────
+#
+# ⚠ PROBES REFUSE WHERE CIRCUITS BIND. A circuit may be bound to a model whose identity does not
+# match, because a circuit is an authored artifact a human can reason about. A probe cannot: its
+# weights are a direction in one specific model's residual space, and read in another model's
+# space they produce numbers that are plausible, stable, and about nothing.
+
+
+class ProbeNotFoundError(MiLLMError):
+    """No probe with that id."""
+
+    code = "PROBE_NOT_FOUND"
+    status_code = 404
+
+
+class ProbeModelMismatchError(MiLLMError):
+    """The definition was fitted on a different model than the one loaded.
+
+    ``details["mismatches"]`` names every field that differs — all of them, not the first — so an
+    operator sees whether they loaded the wrong model or imported the wrong probe.
+    """
+
+    code = "PROBE_MODEL_MISMATCH"
+    status_code = 409
+
+
+class ProbeParityFailedError(MiLLMError):
+    """This build does not reproduce the scores miStudio recorded for the definition's vectors.
+
+    Refusing to arm is the whole point: the alternative is a probe that scores subtly differently
+    from the one whose AUROC was measured, reporting under that measurement's authority.
+    """
+
+    code = "PROBE_PARITY_FAILED"
+    status_code = 409
+
+
+class UnvalidatedProbeError(MiLLMError):
+    """Arming below rung 2 without an explicit acknowledgement.
+
+    Returned in the envelope with a 200, following the circuit house style: this is a refusal the
+    caller can resolve by asserting intent, not a malformed request.
+    """
+
+    code = "UNVALIDATED_PROBE"
+    status_code = 200
+
+
+class ProbeLimitError(MiLLMError):
+    """More probes armed than ``PROBE_MAX_ARMED`` allows."""
+
+    code = "PROBE_LIMIT"
+    status_code = 409
+
+
+class ProbeSaeMissingError(MiLLMError):
+    """A k-sparse probe's SAE is not downloaded here. Names the repo and path to fetch."""
+
+    code = "PROBE_SAE_MISSING"
+    status_code = 409
+
+
+class ProbeSaeMismatchError(MiLLMError):
+    """The downloaded SAE is not the one the probe was fitted against."""
+
+    code = "PROBE_SAE_MISMATCH"
+    status_code = 409
+
+
+class ProbeNoModelLoadedError(MiLLMError):
+    """Nothing is loaded, or its width and depth cannot be read from its config.
+
+    ⚠ Raised rather than defaulted. A fabricated ``d_model`` compares cleanly against a
+    definition's model block, so every identity gate would report a match while the probe read a
+    residual space it was never fitted in.
+    """
+
+    code = "PROBE_NO_MODEL_LOADED"
+    status_code = 409
+
+
+class ProbeHookUnsupportedError(MiLLMError):
+    """The loaded runtime exposes no module tree to hook.
+
+    A statement of fact about llama.cpp, not a policy: ``register_forward_hook`` has nothing to
+    attach to and no per-layer residual tensor is reachable from Python.
+    """
+
+    code = "PROBE_HOOK_UNSUPPORTED"
+    status_code = 409

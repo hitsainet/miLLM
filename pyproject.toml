@@ -106,6 +106,16 @@ dev = [
     "httpx>=0.28.0",
     "aiosqlite>=0.21.0",
 
+    # ⚠ FOR THE CROSS-REPO GUARD, NOT FOR miLLM ITSELF. miLLM serves no MCP surface; the
+    # `millm_*` tools live in miStudio. `tests/unit/test_mcp_contract_consistency.py`
+    # builds miStudio's tool registry to check that every category the contract documents
+    # is really registered — and without this package it SKIPPED, reporting "10 skipped /
+    # UNVERIFIED" for the whole life of the guard. A cross-repo check that cannot run is
+    # the same shape of gap as the defect it exists to catch. Pinned `<2` to match
+    # miStudio's own pin: mcp 2.x renamed FastMCP to MCPServer, so 2.x cannot load the
+    # tool modules at all.
+    "mcp>=1.9.0,<2",
+
     # Linting and formatting
     "ruff>=0.9.0",
     "mypy>=1.14.0",

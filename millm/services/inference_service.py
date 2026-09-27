@@ -224,6 +224,58 @@ _CIRCUIT_APPLY_FAILED: "contextvars.ContextVar[bool]" = contextvars.ContextVar(
 )
 
 
+#: This request's probe verdicts, published by `_probe_finish` and read by the chat route when it
+#: writes `X-miLLM-Probe-Verdicts` (non-streaming) or the terminal chunk (streaming).
+#:
+#: ⚠ Same ContextVar discipline as the memos above, for the same reason: the InferenceService is a
+#: process singleton, so per-request state cannot live on it. And the same explicit reset — an ASGI
+#: server may reuse a context across requests, so a stale list would attach one request's verdicts
+#: to another's response. That is not a cosmetic leak: it would report a concept as detected in a
+#: conversation that never contained it.
+_PROBE_VERDICTS: "contextvars.ContextVar[list]" = contextvars.ContextVar(
+    "millm_probe_verdicts", default=[]
+)
+
+
+def _verdict_payload(verdict: Any) -> dict:
+    """One verdict, as it travels on the wire.
+
+    `not_scored` entries carry their reason and nothing else numeric — reporting a score of 0 for
+    a request nobody scored would be a measurement that was never taken.
+    """
+    if not verdict.scored:
+        return {
+            "name": verdict.name,
+            "scored": False,
+            "reason": verdict.not_scored_reason,
+            "rung": verdict.rung,
+            "rung_language": verdict.rung_language,
+        }
+    return {
+        "name": verdict.name,
+        "scored": True,
+        "score": verdict.score,
+        "threshold": verdict.threshold,
+        "verdict": verdict.fires,
+        "rung": verdict.rung,
+        "rung_language": verdict.rung_language,
+    }
+
+
+def reset_probe_verdicts() -> None:
+    """Drop any probe verdicts left over from an earlier request in this context."""
+    _PROBE_VERDICTS.set([])
+
+
+def set_probe_verdicts(verdicts: list) -> None:
+    _PROBE_VERDICTS.set(list(verdicts))
+
+
+def get_probe_verdicts() -> list:
+    """This request's verdicts. Empty when nothing was armed."""
+    return list(_PROBE_VERDICTS.get())
+
+
 def reset_steering_memo() -> None:
     """Drop any memoised steering-circuit verdict for this context.
 
@@ -238,6 +290,9 @@ def reset_steering_memo() -> None:
     """
     _STEERING_CIRCUIT_MEMO.set(_MEMO_UNSET)
     _CIRCUIT_APPLY_FAILED.set(False)
+    # Probe verdicts reset here too, deliberately: a route that has to remember TWO resets is a
+    # route that will one day remember one. Same context, same lifetime, same hazard.
+    _PROBE_VERDICTS.set([])
 
 
 def note_circuit_apply_failed() -> None:
@@ -925,6 +980,15 @@ class InferenceService:
                     "cbm_routing_fallback_to_serial",
                     reason="circuit_sensing_armed",
                 )
+                return False
+        # Probes (Feature 24). Asks the runtime registry, not the SAE registry — a probe may sit
+        # on any layer and needs no attached SAE, so the sensing clause's shape would miss it.
+        # Same reasoning as the circuit clause above.
+        if _settings.PROBE_FORCE_SERIAL:
+            from millm.services.probe_runtime import ProbeRuntimeState
+
+            if ProbeRuntimeState().has_armed():
+                logger.info("cbm_routing_fallback_to_serial", reason="probes_armed")
                 return False
         if self._cbm_force_serial_monitoring and self._is_monitoring_enabled():
             logger.info(
@@ -2340,6 +2404,107 @@ class InferenceService:
 
         return kwargs
 
+    # ── Probe monitors (Feature 24) ───────────────────────────────────────────
+    #
+    # Three calls, mirroring the sensing lifecycle: `_probe_begin` at the request boundary,
+    # `_probe_finish` BEFORE the response is committed (the verdict has to exist before the
+    # header or the terminal chunk is written), and `_probe_record` in a `finally` so an event
+    # is written even when generation failed.
+    #
+    # ⚠ NONE OF THEM MAY RAISE. A probe is an observer; taking a generation down because a
+    # monitor failed would make arming one strictly worse than not.
+
+    def _probe_begin(self, request_id: str):
+        """Open the probe request boundary. Returns the context, or None when nothing is armed."""
+        try:
+            from millm.services.probe_runtime import ProbeRuntimeState
+
+            state = ProbeRuntimeState()
+            if not state.has_armed():
+                return None
+            return state.begin_request(request_id)
+        except Exception as exc:
+            logger.warning("probe_begin_failed", error=str(exc))
+            return None
+
+    def _probe_mark_not_scored(self, reason: str) -> None:
+        """Record why the request in flight cannot be scored. Safe when nothing is armed."""
+        try:
+            from millm.services.probe_runtime import ProbeRuntimeState
+
+            context = ProbeRuntimeState().current_request()
+            if context is not None:
+                context.mark_not_scored(reason)
+        except Exception as exc:
+            logger.warning("probe_mark_not_scored_failed", error=str(exc))
+
+    def _probe_finish(self, context):
+        """Compute the verdicts and publish them for this request's response.
+
+        Called explicitly before the response is written — NOT from a `finally`, because by the
+        time a `finally` runs on the streaming path the terminal chunk has already been yielded
+        and there is nothing left to attach a verdict to.
+        """
+        if context is None:
+            return []
+        try:
+            verdicts = context.finish()
+            set_probe_verdicts(verdicts)
+            return verdicts
+        except Exception as exc:
+            logger.warning("probe_finish_failed", error=str(exc))
+            return []
+
+    async def _probe_stream_chunk(self, verdicts, completion_id, created, model_name):
+        """Yield the terminal probe chunk, between the final chunk and `[DONE]` (FR-24.7).
+
+        Shaped like OpenAI's usage chunk: `choices: []` plus one extension field. Spike 0.2
+        measured both clients tolerating it — the OpenAI SDK consumes it cleanly and exposes the
+        extension through `model_extra`, and Open WebUI guards empty choices explicitly at
+        `utils/middleware.py:4966` — so it is emitted unconditionally and the proposed
+        `X-miLLM-Probe-Stream: 1` opt-in was dropped.
+
+        Yields nothing when nothing is armed, so an unarmed server's stream is byte-identical to
+        what it was before this feature existed.
+        """
+        if not verdicts:
+            return
+        try:
+            import json as _probe_json
+
+            payload = {
+                "id": completion_id,
+                "object": "chat.completion.chunk",
+                "created": created,
+                "model": model_name,
+                "choices": [],
+                "millm_probe_verdicts": [_verdict_payload(v) for v in verdicts],
+            }
+            yield f"data: {_probe_json.dumps(payload)}\n\n"
+        except Exception as exc:
+            # A monitor must not truncate a stream. The header and the event still carry it.
+            logger.warning("probe_stream_chunk_failed", error=str(exc))
+
+    async def _probe_record(self, context, verdicts=None) -> None:
+        """Persist one event per armed probe, and emit them. Never raises."""
+        if context is None:
+            return
+        try:
+            from millm.services.probe_runtime import ProbeRuntimeState
+
+            ProbeRuntimeState().end_request()
+            if verdicts is None:
+                verdicts = context.finish()
+
+            import millm.api.dependencies as deps
+
+            service = getattr(deps, "_probe_event_service", None)
+            if service is None:
+                return
+            await service.record(context.request_id, verdicts)
+        except Exception as exc:
+            logger.warning("probe_record_failed", error=str(exc))
+
     def _sensing_begin(self, request_id: str):
         """Open a sensing request boundary (serial paths only). Returns
         (sae, profile_id) for the armed SAE, or None when the request will
@@ -3283,6 +3448,12 @@ class InferenceService:
             _sensing_sae = self._sensing_begin(completion_id) if n == 1 else None
             _circuit_sensing = (self._circuit_sensing_begin(completion_id)
                                 if n == 1 else None)
+            # Probes open on EVERY request, including n>1 — unlike sensing, which simply skips.
+            # A skipped probe is a silent probe, and the request has to carry a reason.
+            _probe_ctx = self._probe_begin(completion_id)
+            _probe_verdicts = None
+            if _probe_ctx is not None and n > 1:
+                _probe_ctx.mark_not_scored("batched_request")
             if n > 1:
                 from millm.services.sae_service import AttachedSAEState as _S
 
@@ -3358,6 +3529,10 @@ class InferenceService:
                     total_prompt_tokens += prompt_tokens
                     total_completion_tokens += completion_tokens
 
+                # ⚠ BEFORE the `finally`, and before the route reads the ContextVar to write
+                # `X-miLLM-Probe-Verdicts`. A verdict computed in the `finally` would exist only
+                # after the response had already been handed back.
+                _probe_verdicts = self._probe_finish(_probe_ctx)
             finally:
                 # Restore steering to its pre-request state regardless of success/failure.
                 self._restore_request_profile(_saved_steering)
@@ -3365,6 +3540,8 @@ class InferenceService:
                 # so the boundary can't interleave with the next request)
                 await self._notify_sensing(_sensing_sae, _sensing_full_ids)
                 await self._notify_circuit_sensing(_circuit_sensing, _sensing_full_ids)
+                # `_probe_finish` ran before the response was built (below); this only persists.
+                await self._probe_record(_probe_ctx, _probe_verdicts)
 
         model_info = self.get_loaded_model_info()
         model_name = model_info.name if model_info else "unknown"
@@ -4003,6 +4180,10 @@ class InferenceService:
                     yield "data: [DONE]\n\n"
                     return
 
+            # Probe boundary (Feature 24) — serial streaming path
+            _probe_ctx = self._probe_begin(completion_id)
+            _probe_verdicts = None
+
             # Sensing boundary (Feature 11) — serial streaming path
             _sensing_sae = self._sensing_begin(completion_id)
             _circuit_sensing = self._circuit_sensing_begin(completion_id)
@@ -4256,7 +4437,16 @@ class InferenceService:
                         completion_tokens=token_count,
                     ),
                 )
+                # ⚠ FINISH BEFORE THE FINAL CHUNK, NOT IN THE `finally`.
+                # By the time a `finally` runs here the stream is already closed and there is
+                # nothing left to attach a verdict to. FTDD §8 names this precise hazard.
+                _probe_verdicts = self._probe_finish(_probe_ctx)
+
                 yield f"data: {final_chunk.model_dump_json(exclude_none=True)}\n\n"
+                async for _probe_extra in self._probe_stream_chunk(
+                    _probe_verdicts, completion_id, created, model_name
+                ):
+                    yield _probe_extra
                 yield "data: [DONE]\n\n"
 
             except Exception as e:
@@ -4332,6 +4522,25 @@ class InferenceService:
                                 _cs.close_request()
                         except Exception:
                             logger.warning("circuit_sensing_disarm_after_hang_failed")
+                    # F24: identical hazard for probes. A woken hung thread's forward pass would
+                    # call the probe hook into the NEXT request's context, scoring one
+                    # conversation's activations and reporting the verdict against another's id.
+                    # Disarming with a recorded reason is better than a verdict about the wrong
+                    # request — and the reason is what stops it reading as "nothing detected".
+                    try:
+                        from millm.services.probe_runtime import ProbeRuntimeState
+
+                        _pstate = ProbeRuntimeState()
+                        if _pstate.has_armed():
+                            _pstate.disarm_all("generation_thread_hung")
+                            import millm.api.dependencies as _deps
+
+                            _psvc = getattr(_deps, "_probe_arming_service", None)
+                            if _psvc is not None:
+                                await _psvc.mark_all_disarmed("generation_thread_hung")
+                        _pstate.end_request()
+                    except Exception:
+                        logger.warning("probe_disarm_after_hang_failed")
                         _circuit_sensing = None
                 # Restore steering to its pre-request state (Fix #1: steering race)
                 self._restore_request_profile(_saved_steering)
@@ -4343,6 +4552,10 @@ class InferenceService:
                              else inputs["input_ids"])
                 await self._notify_sensing(_sensing_sae, _full_ids)
                 await self._notify_circuit_sensing(_circuit_sensing, _full_ids)
+                # Persist only — `_probe_finish` already ran before the terminal chunk. If
+                # generation raised before reaching it, `_probe_verdicts` is None and
+                # `_probe_record` computes them here so the event still exists.
+                await self._probe_record(_probe_ctx, _probe_verdicts)
 
     # =========================================================================
     # Text Completions
@@ -4400,6 +4613,10 @@ class InferenceService:
                             if len(prompts) == 1 else None)
             _circuit_sensing = (self._circuit_sensing_begin(completion_id)
                                 if len(prompts) == 1 else None)
+            _probe_ctx = self._probe_begin(completion_id)
+            _probe_verdicts = None
+            if _probe_ctx is not None and len(prompts) > 1:
+                _probe_ctx.mark_not_scored("batched_request")
             _sensing_full_ids = None
 
             try:
@@ -4462,9 +4679,12 @@ class InferenceService:
 
                     total_prompt_tokens += prompt_tokens
                     total_completion_tokens += completion_tokens
+
+                _probe_verdicts = self._probe_finish(_probe_ctx)
             finally:
                 await self._notify_sensing(_sensing_ctx, _sensing_full_ids)
                 await self._notify_circuit_sensing(_circuit_sensing, _sensing_full_ids)
+                await self._probe_record(_probe_ctx, _probe_verdicts)
 
         model_info = self.get_loaded_model_info()
         model_name = model_info.name if model_info else "unknown"
@@ -4710,6 +4930,19 @@ class InferenceService:
         completion_id = f"chatcmpl-{uuid.uuid4().hex[:24]}"
         created = int(datetime.now().timestamp())
 
+        # ⚠ PROBES CANNOT SCORE HERE, AND MUST SAY SO (task 5.8, BR-006).
+        #
+        # `PROBE_FORCE_SERIAL` normally keeps continuous batching out while anything is armed —
+        # but it is a SETTING, and this path does no sensing at all (its only observability call
+        # is `_notify_monitoring`). Sensing gets away with relying on its flag alone; a probe
+        # cannot, because "a probe never goes silently quiet" is this feature's governing
+        # invariant. With the flag off and a probe armed, a verdict would simply be ABSENT — no
+        # header, no chunk, no event, no reason — which is the failure the feature exists to
+        # prevent, wearing the costume of a normal response.
+        probe_ctx = self._probe_begin(completion_id)
+        if probe_ctx is not None:
+            probe_ctx.mark_not_scored("continuous_batching")
+
         model_info = self.get_loaded_model_info()
         model_name = model_info.name if model_info else "unknown"
 
@@ -4814,7 +5047,14 @@ class InferenceService:
             ],
         )
         yield f"data: {final_chunk.model_dump_json(exclude_none=True)}\n\n"
+        # The verdict says `not_scored: continuous_batching` rather than nothing at all.
+        probe_verdicts = self._probe_finish(probe_ctx)
+        async for extra in self._probe_stream_chunk(
+            probe_verdicts, completion_id, created, model_name
+        ):
+            yield extra
         yield "data: [DONE]\n\n"
+        await self._probe_record(probe_ctx, probe_verdicts)
 
     async def _cbm_text_completion(
         self, request: TextCompletionRequest

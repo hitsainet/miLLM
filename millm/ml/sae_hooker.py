@@ -17,6 +17,9 @@ import torch
 from torch import nn, Tensor
 from torch.utils.hooks import RemovableHandle
 
+from millm.ml.layer_resolution import get_layer as _resolve_layer
+from millm.ml.layer_resolution import get_layer_count as _resolve_layer_count
+from millm.ml.layer_resolution import layer_device as _resolve_layer_device
 from millm.ml.sae_wrapper import LoadedSAE
 
 logger = logging.getLogger(__name__)
@@ -93,22 +96,12 @@ class SAEHooker:
         return handle
 
     def layer_device(self, model: nn.Module, layer: int) -> torch.device:
-        """
-        The device holding `layer`'s weights.
+        """The device holding `layer`'s weights.
 
-        A model spread across GPUs (device_map="auto") keeps later layers on
-        another card. An SAE hooked there must live on that card, or every
-        forward pass mixes devices.
-
-        Raises:
-            ValueError: If layer cannot be found in model.
+        Delegates to `millm.ml.layer_resolution` (024 task 1.3). Kept as a method because
+        callers and tests reach for it that way.
         """
-        target_layer = self._get_layer(model, layer)
-        for tensor in itertools.chain(target_layer.parameters(), target_layer.buffers()):
-            return tensor.device
-        for tensor in model.parameters():
-            return tensor.device
-        return torch.device("cpu")
+        return _resolve_layer_device(model, layer)
 
     @staticmethod
     def _resolve_module_path(
@@ -239,110 +232,12 @@ class SAEHooker:
         return hook_fn
 
     def _get_layer(self, model: nn.Module, layer_idx: int) -> nn.Module:
-        """
-        Get the layer module at specified index.
-
-        Supports multiple transformer architectures:
-        - Gemma/Llama: model.model.layers[layer_idx]
-        - GPT-2: model.transformer.h[layer_idx]
-        - Generic: model.layers[layer_idx]
-
-        Args:
-            model: The transformer model.
-            layer_idx: Target layer index.
-
-        Returns:
-            The layer module.
-
-        Raises:
-            ValueError: If layer cannot be found.
-        """
-        # Architecture-specific layer access patterns
-        layer_access_patterns = [
-            # Gemma, Llama, Mistral style
-            lambda m: m.model.layers[layer_idx],
-            # GPT-2, GPT-Neo style
-            lambda m: m.transformer.h[layer_idx],
-            # Some HF models
-            lambda m: m.model.decoder.layers[layer_idx],
-            # Generic patterns
-            lambda m: m.layers[layer_idx],
-            lambda m: m.encoder.layer[layer_idx],
-            lambda m: m.decoder.layer[layer_idx],
-        ]
-
-        for accessor in layer_access_patterns:
-            try:
-                layer = accessor(model)
-                logger.debug(f"Found layer {layer_idx} using accessor pattern")
-                return layer
-            except (AttributeError, IndexError, TypeError, KeyError):
-                continue
-
-        # Fallback: search for ModuleList containing layers
-        for name, module in model.named_modules():
-            if isinstance(module, nn.ModuleList) and len(module) > layer_idx:
-                # Check if this looks like a layer list
-                if "layer" in name.lower() or "block" in name.lower() or name == "h":
-                    logger.debug(f"Found layer via ModuleList search: {name}[{layer_idx}]")
-                    return module[layer_idx]
-
-        raise ValueError(
-            f"Could not find layer {layer_idx}. "
-            f"Model architecture may not be supported. "
-            f"Supported patterns: Llama/Gemma (model.model.layers), "
-            f"GPT-2 (transformer.h), generic (layers). "
-            f"Check model.named_modules() for layer structure."
-        )
+        """The layer module at `layer_idx`. Delegates to `millm.ml.layer_resolution`."""
+        return _resolve_layer(model, layer_idx)
 
     def get_layer_count(self, model: nn.Module) -> int:
-        """
-        Get total number of layers in model.
-
-        Args:
-            model: The transformer model.
-
-        Returns:
-            Number of layers.
-
-        Raises:
-            ValueError: If layer count cannot be determined.
-        """
-        # Try config first (most reliable)
-        if hasattr(model, "config"):
-            config = model.config
-            for attr in ["num_hidden_layers", "n_layer", "num_layers", "n_layers"]:
-                if hasattr(config, attr):
-                    return getattr(config, attr)
-
-        # Try to find and count layers directly
-        layer_access_patterns = [
-            lambda m: len(m.model.layers),
-            lambda m: len(m.transformer.h),
-            lambda m: len(m.layers),
-            lambda m: len(m.encoder.layer),
-        ]
-
-        for accessor in layer_access_patterns:
-            try:
-                count = accessor(model)
-                if isinstance(count, int) and count > 0:
-                    return count
-            except (AttributeError, TypeError):
-                continue
-
-        # Fallback: search for ModuleList
-        for name, module in model.named_modules():
-            if isinstance(module, nn.ModuleList) and len(module) > 0:
-                # Check if this looks like a layer list
-                first_child = list(module.children())[0] if len(list(module.children())) > 0 else None
-                if first_child is not None and hasattr(first_child, "self_attn"):
-                    return len(module)
-
-        raise ValueError(
-            "Could not determine layer count. "
-            "Model config should have num_hidden_layers or similar attribute."
-        )
+        """Total number of layers. Delegates to `millm.ml.layer_resolution`."""
+        return _resolve_layer_count(model)
 
     def validate_layer(self, model: nn.Module, layer: int) -> bool:
         """

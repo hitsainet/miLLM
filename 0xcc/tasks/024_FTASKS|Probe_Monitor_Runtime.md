@@ -420,10 +420,30 @@ then, build against a draft copy and re-vendor before release.
         an AST parser returning empty, and a renamed contract section all go red.
 
 - [ ] 10.0 Feature Acceptance
-  - [ ] 10.1 Vendor the final schema from miStudio (byte-identical); add
-        `tests/fixtures/lfm2_probe_definition.json` from miStudio 033 acceptance.
-  - [ ] 10.2 Integration (`test_probe_workflow.py`, tiny model): import → parity → arm → chat
-        stream and non-stream → events → header and chunk.
+  - [x] 10.1 **DONE 2026-09-27.** The schema is vendored byte-identically (asserted, not
+        assumed), and THREE real fixtures came off the node rather than one:
+        `lfm2_probe_definition.json` (dense, rung 3, 2048-wide, 491,967 B), `_sae.json`
+        (k-sparse, rung 2, **128-wide — the SAE's k**, with a real SAE reference) and
+        `_rung0.json` (033's SC-2 `last`-pooling layer-0 probe: rung 0 with five real
+        evaluations). A fixture set that was three copies of one probe would pass every test
+        while covering one path, so a test asserts the set spans both bases, three rungs and two
+        head widths.
+  - [x] 10.2 **DONE 2026-09-27**, and its best test is one I did not set out to write.
+        `tests/integration/test_probe_workflow.py`, 19 tests, tiny REAL Llama on CPU.
+        ⚠ **I EXPECTED THE REAL DOCUMENTS TO ARM AND THEY ARE REFUSED — AT THE PARITY GATE**,
+        because a randomly-initialised 32-wide model reproduces none of the scores measured on
+        LFM2.5-1.2B. That refusal is the guarantee the export contract exists for, so it is now
+        asserted directly, with the recorded numbers untouched and only the head width narrowed
+        so the refusal is about the SCORES and not a shape. The failed report is stored, and
+        `max_abs_diff` is asserted non-null — "the numbers disagree" and "nothing was
+        comparable" are different refusals.
+        The three tests needing a successful arm re-record their vectors through this build's own
+        forward, via the same `combine()` the live path calls; those numbers are meaningless as
+        detection and the gates they exercise are not.
+        Three defects in my own test, each caught by the code refusing it rather than by
+        re-reading: `kind` DOES carry `/v1` (circuits and clusters do not); narrowing `weights`
+        without `norm_mean`/`norm_std` is refused by `ProbeHead`, deliberately; and I tried to
+        invert sha256 for the chat-template gate. 6 mutation controls, all biting.
   - [ ] 10.3b **SC-1b on the node:** the LFM2 k-sparse SAE probe arms with its SAE downloaded (not
         attached), passes parity, keeps scoring while another SAE steers the same layer, and is refused
         when its SAE is removed.
@@ -470,8 +490,27 @@ then, build against a draft copy and re-vendor before release.
         re-run with a verified-unique anchor.
         Record: `0xcc/reviews/review_feature024_probe_monitor_runtime_2026-09-27.md`, which also
         lists the ten defects in my own work and what caught each — **not one by re-reading.**
-  - [ ] 10.6 Update `CLAUDE.md` (Feature 24 documents ✅, status); PPRD Feature 24 status.
-  - [ ] 10.7 Full suites: backend, admin-ui, e2e, lint, typecheck.
+  - [x] 10.6 **DONE 2026-09-27.** PPRD Feature 24 and `CLAUDE.md` updated. **Feature 24 is NOT
+        marked ✅**, deliberately: 10.3, 10.3b and the SC-4 absolute figure are outstanding, and
+        this repo's own history is what that rule is for — a feature marked ✅ over a capability
+        nobody could reach is the failure the reachability discipline exists to prevent.
+  - [x] 10.7 **DONE 2026-09-27.** Backend `tests/unit` **2948 passed / 3 skipped / 0 failed**
+        (including the probe integration suite), and **2928 passed / 4 skipped / 0 failed with
+        `0xcc/` hidden**, which is the PUBLIC MIRROR's view and the checkout the image is built
+        from — a distinction that cost a deploy today, see below. admin-ui **396 passed / 39
+        files**, `tsc -b --noEmit` clean, eslint at the pre-existing baseline (17 errors, 1
+        warning, none in files this arc touched). Manual builds. Cross-repo guards green with
+        miStudio present and red without it.
+        ⚠ **THE MERGE PRODUCED NO IMAGE, AND THAT WAS MY DEFECT.**
+        `test_the_fprd_and_the_app_agree` reads `0xcc/prds/024_FPRD|...`, and
+        `sync-to-clean.yml` does `rm -rf 0xcc/` when it publishes the mirror — which is where
+        images are built. Green in the private repo, green on the PR, red the instant the merge
+        reached the mirror; the build then **correctly refused** to publish over a red suite, so
+        the merge shipped nothing. The gate chain worked exactly as intended and the defect was
+        caught by the pipeline rather than in production. Now skipped loudly when the spec is
+        absent, with the set-equality test beside it still gating the mirror on the full route
+        surface. **A test that reads a repo document depends on WHICH checkout runs it, and this
+        project has two that differ by six paths.**
 
 ## Coverage Audit
 - **FRs:** 24.1 → 3.1 · 24.2 → 3.2 · 24.3 → 3.3 · 24.4 → 4.1, 4.4 · 24.5 → 1.4, 1.5 · 24.6 → 1.1,

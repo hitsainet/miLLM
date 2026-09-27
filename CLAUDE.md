@@ -1,13 +1,57 @@
 # Project: miLLM - Mechanistic Interpretability LLM Server
 
 ## Current Status
-- **Next — PLANNED, handed off 2026-09-25: Feature 24 Probe Monitor Runtime (BRD-MILLM-PROBES-001).** Start with
-  `0xcc/tasks/024_FTASKS|Probe_Monitor_Runtime.md` task 0.0 (spikes) under `0xcc/instruct/008_process-task-list.md`.
-  Build against a draft of miStudio's `docs/schemas/probe-definition-v1.json` (miStudio 033 phase 1) and
-  re-vendor byte-identical before release. **Task 9 (MCP contract v1.6, `millm_probes`) co-releases with
-  miStudio 033 phase 7.** Specified in `~/app/enhance/specs/ENH-001-probe-monitors` — locked decisions
-  (D2, D7, D8, D11, D13, D14) and the reviewed defaults are in each document's Decisions section; do not
-  reopen them without the user.
+- **Phase — ⏳ FEATURE 24 PROBE MONITOR RUNTIME: PHASES 0–10 SHIPPED AND MERGED (2026-09-27).**
+  BRD-MILLM-PROBES-001, PPRD Feature 24, PR #3 squashed to `main` at `6133160`. Co-released with
+  miStudio 033 phase 7 (**MCP contract v1.6**), which closed 033 at 49 of 49. miStudio trains a probe
+  monitor — a vector, a threshold, and a record of how well it worked; until now nothing could run one.
+  Backend `tests/unit` **2948 passed / 3 skipped / 0 failed**; admin-ui **396 passed**, `tsc -b` clean.
+  Record: `0xcc/reviews/review_feature024_probe_monitor_runtime_2026-09-27.md`.
+  **NOT marked ✅** — hardware acceptance (10.3, 10.3b, the SC-4 absolute figure) is outstanding.
+  - **⚠ THE ARMING SERVICE HAD NO CALLER, AND A PASSING TEST HID IT.** The FPRD specifies twelve
+    `/api/probes` paths; the module served seven. Absent were `arm`, `parity` and the three `hub`
+    paths — so all four arming gates, `check_identity`, `resolve_revision`, `ProbeParityEngine.run`,
+    the entire k-sparse `SaeFeatureSlice` path and `ProbeHubService` had **between them no production
+    caller**. A probe could be imported and never armed. The reachability test was a **subset**
+    assertion — `for expected in (…): assert expected in paths` over seven literals, every one served
+    — and task 7.5's own text read "(7 paths)" while the module had exactly seven. **A count is not a
+    set.** The served set is now asserted EQUAL to the set parsed out of the FPRD itself.
+  - **⚠ `millm_download_model` HAS ALWAYS POSTED TO A ROUTE THAT DOES NOT EXIST.** Found by pointing
+    the cross-repo path guard somewhere new: it had been aimed at `millm_circuits` alone since it was
+    written, and `millm_clusters`, `millm_models`, `millm_runtime` and `millm_sensing` had **never**
+    been path-checked. The download is POST on the collection, not `/api/models/download`, and
+    miStudio's own caller assertion **pinned the wrong path** — so tool and test agreed and both were
+    wrong. A caller assertion proves a tool matches its own documentation, nothing more.
+  - **⚠ THE SCORE PATH COPIED 33.6 MB TO THE HOST ON EVERY FORWARD PASS.** `observe` did
+    `hidden[0].detach().to(torch.float32).cpu()` and scored on the CPU, single-threaded: **25–37 ms
+    for two probes at 4k tokens**, against a 5 ms budget. The comment above it read "THE ONE
+    DEVICE-TO-HOST COPY" — true, and beside the point. Now **16 kB**. **Two faster forms were measured
+    and REJECTED:** folding the standardisation into the weight is algebraically exact, 2.6x, and
+    perturbs the score by **1.9e-06**, which breaks the BIT-EXACT agreement with miStudio that 033
+    recorded as "0.000e+00, all sixteen"; an fp16 matvec is another 4x and moves it **8.5e-02 — 85x
+    the 1e-3 parity tolerance**. Both are pinned as tests carrying their measured error, because a
+    comment does not fail.
+  - **⚠ miLLM'S CONTRACT-CONSISTENCY GUARD HAD NEVER RUN** — "10 skipped / UNVERIFIED" for its whole
+    life, because building miStudio's registry needs `mcp`, then psycopg2, then structlog.
+    `mcp>=1.9.0,<2` is now a test dependency, and the evidence-ladder phrase parity reads
+    `evidence_ladder.py` **by AST** instead of importing it. **17 of 17, 0 skipped.**
+  - **⚠ AND THE MERGE PRODUCED NO IMAGE, BECAUSE A TEST READ A FILE THE MIRROR STRIPS.**
+    `test_the_fprd_and_the_app_agree` reads `0xcc/prds/024_FPRD|...`; `sync-to-clean.yml` does
+    `rm -rf 0xcc/` when it publishes the mirror, **which is where images are built**. Green privately,
+    green on the PR, red the instant the merge reached the mirror — and the build **correctly refused
+    to publish over a red suite**, so nothing shipped. The gate chain worked; the defect was mine.
+    **A test that reads a repo document depends on WHICH checkout runs it, and this project has two
+    that differ by six paths.** Verify with `mv 0xcc /tmp && pytest tests/unit` before assuming a
+    green private run means a green build.
+  - **SC-5 passes on all seven wiring controls.** The sharpest: changing the rung language from
+    "compared with a judge" to "**better than** a judge" is a one-word edit that would ship a false
+    claim about every rung-3 probe, and it goes red across both repos. On miStudio's reference run the
+    judge won.
+  - **Still open, and correctly so:** 10.3 / 10.3b (node acceptance: import from file and HF, parity
+    ≤ 1e-3, arm, refuse on Qwen2.5-7B by name and on GGUF; the k-sparse probe with its SAE downloaded
+    but not attached) and the **SC-4 absolute figure** at 4k tokens with two probes. All three need
+    the deployment plus a loaded model. Everything they need is on the node: LFM2.5-1.2B-Instruct,
+    Qwen2.5-7B-Instruct and a GGUF model are all present.
 - **Phase:** ✅ **CIRCUIT CONSOLIDATION INCREMENT CLOSED (2026-07-21)** — BRD-MILLM-CIRCUITS-002 features **016–020 all IMPLEMENTED + each ran THREE review rounds** (293 findings total: F16 71, F17 60, F18 60, F19 60, F20 62). Executed in the locked order: steering epoch → request-scoped context → single serving derivation → concurrent circuit serving → MCP circuit surface. Suites: **miLLM 2133 passed / 12 skipped**, miStudio unit suite green; **CI green in both repos**, and the new cross-repo `Contract ↔ MCP registry` job runs and passes. **F20's durable deliverable is the reachability rule** — *a capability is not shipped until a test FAILS when its wiring is removed* — now recorded in both repos' CLAUDE.md and the global review discipline, with `test_reachability.py` as the shape to copy. **R3's structural finding:** every earlier fix had been applied to ONE representative and never generalized — the built-server test covered 1 of 4 tool categories (so the original F20 defect was reproducible one category over), the hand-rolled gate fix 1 of 3 tools (both DESTRUCTIVE siblings unguarded), `@gated` 1 of 12, and `raw_get`'s non-JSON guard was never carried into the enveloped path. **Also found:** an R2 commit of mine disabled the ENTIRE CI workflow for four commits (`${{ runner.temp }}` is illegal in a job-level `env:`, so GitHub rejects the whole file — no jobs, no logs) while I reported the suite green from local runs; now guarded by `test_workflow_contexts_are_legal.py`. Per-round records: `0xcc/reviews/review_feature020_R{1,2,3}_2026-07-21.md` and the F16–F19 equivalents.
 - **Phase (prior):** 📋 **CIRCUIT CONSOLIDATION (BRD-MILLM-CIRCUITS-002) — DOCS COMPLETE 2026-07-20, implementation not started.** BRD (13 BRs, clarifying round held, decisions locked) + contention-model design of record + PPRD v1.3 + PADR v1.3 + the full Features 16–20 doc chains (20 documents). Locked order: **F16 steering epoch → F17 request-scoped context → F18 single serving derivation → F19 concurrent circuit serving → F20 MCP circuit surface + reachability.** Goal stated by the product owner: "as mature and bullet-proof a product as possible", which settled whether a consolidation increment with little demo surface was worth running at all. **GPU close-out DONE:** F14 §9.1 CLOSED (5 SAEs on layers 10–14, real circuit at `serving_mode: full`, off/min/max observably different, correct λ echoes and rung header); F15 §9.1 partial (sensing armed with 4 sensable edges and non-zero overhead but 0 events — the honest result for arbitrary feature indices). **Two hazards measured:** cross-layer compounding destroys generation at TWO layers, two orders of magnitude below the ±200 clamp; and `CIRCUIT_SENSING_MAX_OVERHEAD_MS` has no multi-layer denominator (5.4–7.3 ms across 5 layers vs a fixed 5 ms). **Three shipped-but-unreachable capabilities found and two fixed** (attach-set UI control wired; MCP circuit tools still unregistered, which is F20).
 - **Phase (prior):** ✅ **CIRCUIT RUNTIME INCREMENT CLOSED (2026-07-20)** — F12 (multi-SAE attach/serving), F13 (circuit import, slice-fallback, evidence ladder), F14 (circuit-aware OWUI dial) and F15 (circuit edge sensing) all IMPLEMENTED, each with three review rounds: **349 findings / 135 fixed**. miLLM now consumes miStudio's whole circuits arc end-to-end — import a `circuit-definition/v1`, serve it across several SAEs under one λ, dial it per request from Open WebUI with its evidence rung echoed, and watch its edges fire on live traffic — with the evidence ladder surfaced verbatim throughout and "causal" structurally impossible below rung 2. Suite **1588 backend / 255 frontend** green.

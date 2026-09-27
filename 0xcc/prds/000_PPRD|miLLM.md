@@ -872,7 +872,10 @@ hook points those need, so interpretability work remains transformers-only.
 no cost — the cheap first stage every published monitoring cascade uses — with
 proof that miLLM scores exactly as miStudio did.
 
-**Priority:** Planned (BRD-MILLM-PROBES-001; after miStudio Feature 33 publishes the v1 contract)
+**Priority:** ⏳ **IMPLEMENTED 2026-09-27** (BRD-MILLM-PROBES-001). Phases 0–10 shipped and
+merged to `main`; co-released with miStudio 033 phase 7 (MCP contract v1.6), which closed 033
+at 49 of 49. **NOT marked ✅**: hardware acceptance (10.3, 10.3b and the SC-4 absolute figure)
+is outstanding and needs the deployment plus a loaded model.
 
 **UI Tab:** Probe Monitors (new); the existing "Probe" tab is renamed "Feature Monitor"
 

@@ -209,8 +209,15 @@ jobs:
               "repos/${GITHUB_REPOSITORY}/actions/runs?head_sha=${SHA}&per_page=100" \
               --jq '[.workflow_runs[] | select(.name=="Backend Tests")]
                     | sort_by(.created_at) | last
-                    | "\(.status) \(.conclusion)"' 2>/dev/null || echo "")"
+                    | if . == null then "" else "\(.status) \(.conclusion)" end' 2>/dev/null || echo "")"
 
+            # ⚠ `if . == null then ""` IS LOAD-BEARING. `last` on an empty array is `null`, and
+            # "\(.status) \(.conclusion)" renders that as the literal string "null null" — not
+            # empty. So the `""` branch below was UNREACHABLE, and had been since this gate was
+            # written: with no Backend Tests run, it polled all 60 attempts and died on the
+            # timeout instead of taking the no-run path. The original's own
+            # "No Backend Tests run found" error could never fire either. Found 2026-09-27 by
+            # reading a real run's log and seeing `waiting for Backend Tests (57/60): null null`.
             case "$RUN" in
               "completed success")
                 echo "Backend Tests passed for ${SHA} — publishing."; exit 0 ;;
@@ -239,7 +246,8 @@ jobs:
                     "repos/${GITHUB_REPOSITORY}/actions/runs?per_page=100" \
                     --jq '[.workflow_runs[] | select(.name=="Backend Tests")
                            | select(.status=="completed")]
-                          | sort_by(.created_at) | last | "\(.head_sha) \(.conclusion)"' \
+                          | sort_by(.created_at) | last
+                          | if . == null then "" else "\(.head_sha) \(.conclusion)" end' \
                     2>/dev/null || echo "")"
                   PREV_SHA="${PREV%% *}"; PREV_RESULT="${PREV##* }"
 

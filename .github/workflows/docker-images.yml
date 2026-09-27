@@ -188,7 +188,14 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       actions: read
+      contents: read
     steps:
+      # Needed by the fallback below, which diffs backend source between commits.
+      - name: Checkout source
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
       - name: Require Backend Tests to have passed for this commit
         env:
           GH_TOKEN: ${{ github.token }}
@@ -211,13 +218,58 @@ jobs:
                 echo "::error::Backend Tests did not pass for ${SHA} (${RUN}). \
           Refusing to publish a backend image over a red suite."; exit 1 ;;
               "")
-                # No run yet. Early on that means it has not been created; late
-                # it means it never will be, and publishing untested is exactly
-                # what this job exists to prevent.
+                # No run yet. Early on that means it has not been created; late it
+                # means it never will be — because `backend-tests.yml` carries path
+                # filters and this push changed no backend source.
+                #
+                # ⚠ FAILING HERE WAS A DEADLOCK, and it bit on this change's own first
+                # run. `detect` builds the backend whenever the published image carries
+                # no revision label — including after a failed backend build. So: build
+                # fails -> no label -> next push picks backend again -> if that push is
+                # docs- or CI-only there is still no test run -> fails again. Forever,
+                # with the backend image never able to earn its label back.
+                #
+                # The honest rule: the path filter not firing MEANS the backend source is
+                # unchanged. So fall back to the most recent commit that does have a
+                # Backend Tests result, and require BOTH that it passed AND that no
+                # backend source has changed since — the second half is what stops a
+                # broken path filter from waving through code that was never tested.
                 if [ "$attempt" -ge 20 ]; then
-                  echo "::error::No Backend Tests run found for ${SHA} after \
-          10 minutes. Refusing to publish untested — this workflow's path \
-          filters should have produced one for a backend change."; exit 1
+                  PREV="$(gh api \
+                    "repos/${GITHUB_REPOSITORY}/actions/runs?per_page=100" \
+                    --jq '[.workflow_runs[] | select(.name=="Backend Tests")
+                           | select(.status=="completed")]
+                          | sort_by(.created_at) | last | "\(.head_sha) \(.conclusion)"' \
+                    2>/dev/null || echo "")"
+                  PREV_SHA="${PREV%% *}"; PREV_RESULT="${PREV##* }"
+
+                  if [ -z "$PREV_SHA" ]; then
+                    echo "::error::No Backend Tests run found for ${SHA}, and no earlier \
+          run to fall back to. Refusing to publish untested."; exit 1
+                  fi
+                  if [ "$PREV_RESULT" != "success" ]; then
+                    echo "::error::No Backend Tests run for ${SHA}; the most recent one \
+          (${PREV_SHA}) was ${PREV_RESULT}. Refusing to publish over a red suite."; exit 1
+                  fi
+
+                  git cat-file -e "${PREV_SHA}^{commit}" 2>/dev/null \
+                    || git fetch --no-tags --depth=1 origin "$PREV_SHA" 2>/dev/null || true
+                  if ! git cat-file -e "${PREV_SHA}^{commit}" 2>/dev/null; then
+                    echo "::error::Cannot resolve ${PREV_SHA} to verify the backend source \
+          is unchanged. Refusing to publish unverified."; exit 1
+                  fi
+
+                  CHANGED="$(git diff --name-only "$PREV_SHA" "$SHA" || true)"
+                  if echo "$CHANGED" | grep -qE '^(millm/|Dockerfile|docker-entrypoint\.sh|pyproject\.toml|alembic|tests/)'; then
+                    echo "::error::Backend source changed since ${PREV_SHA} but no Backend \
+          Tests run exists for ${SHA} — the path filters should have produced one. \
+          Refusing to publish untested."; exit 1
+                  fi
+
+                  echo "No Backend Tests run for ${SHA}, and no backend source changed \
+          since ${PREV_SHA} (which passed). The backend code is byte-identical to a \
+          tested commit — publishing."
+                  exit 0
                 fi ;;
             esac
             echo "waiting for Backend Tests (${attempt}/60): ${RUN:-not started}"

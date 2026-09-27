@@ -177,6 +177,40 @@ async def build_probe_encoder(probe: Any) -> Optional[Any]:
     return slice_
 
 
+#: Weights filenames an SAE directory may use, in preference order.
+_WEIGHT_NAMES = ("sae_weights.safetensors", "sae.safetensors", "weights.safetensors", "sae_weights.npz")
+
+
+def _weights_file(target: "Path") -> str:
+    """The weights file at or inside `target`.
+
+    ⚠ **`sae.path` IS A DIRECTORY, NOT A FILE.** miStudio writes `ExternalSAE.hf_filepath`
+    into it — e.g. `layer_11`, or `layer_12/width_16k/canonical` — naming the directory inside
+    the repo that holds `cfg.json` and `sae_weights.safetensors`. The first version of this
+    function handed the directory straight to `SaeFeatureSlice.load`, which branches on
+    `.suffix == ".safetensors"` and would have fallen through to `np.load` on a directory.
+    Caught before it ran, by reading what miStudio actually writes rather than what the field
+    name suggests: the contract's `path` has no description, so the producer is the authority.
+
+    A file path still works, so a future producer that names the file directly needs no change
+    here.
+    """
+    from pathlib import Path as _Path
+
+    target = _Path(target)
+    if target.is_file():
+        return str(target)
+    for name in _WEIGHT_NAMES:
+        found = target / name
+        if found.is_file():
+            return str(found)
+    raise ProbeSaeMissingError(
+        f"{target} holds no recognised SAE weights file "
+        f"(looked for {', '.join(_WEIGHT_NAMES)})",
+        details={"directory": str(target), "looked_for": list(_WEIGHT_NAMES)},
+    )
+
+
 async def _resolve_sae_path(block: dict[str, Any]) -> str:
     """Where this probe's SAE weights are on disk, or a refusal naming what to fetch.
 
@@ -207,12 +241,12 @@ async def _resolve_sae_path(block: dict[str, Any]) -> str:
             details={"path": rel},
         ) from None
     if candidate.exists():
-        return str(candidate)
+        return _weights_file(candidate)
 
     # Any layout under the cache root that ends in this relative path.
     for found in sorted(root.rglob(Path(rel).name)):
         if str(found).endswith(rel) and repo.split("/")[-1] in str(found):
-            return str(found)
+            return _weights_file(found)
 
     raise ProbeSaeMissingError(
         f"This probe's SAE is not downloaded here. Fetch {rel!r} from {repo!r} first.",

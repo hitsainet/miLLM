@@ -444,11 +444,52 @@ then, build against a draft copy and re-vendor before release.
         re-reading: `kind` DOES carry `/v1` (circuits and clusters do not); narrowing `weights`
         without `norm_mean`/`norm_std` is refused by `ProbeHead`, deliberately; and I tried to
         invert sha256 for the chat-template gate. 6 mutation controls, all biting.
-  - [ ] 10.3b **SC-1b on the node:** the LFM2 k-sparse SAE probe arms with its SAE downloaded (not
-        attached), passes parity, keeps scoring while another SAE steers the same layer, and is refused
-        when its SAE is removed.
-  - [ ] 10.3 **SC-1/SC-2 on the node:** the LFM2 probe imports from file and from HF, passes parity
-        (≤ 1e-3) and arms; refuses on Qwen2.5-7B (mismatch named) and on a GGUF model.
+  - [~] 10.3b **SC-1b — THE SAE PATH WORKS; PARITY IS BLOCKED WITH 10.3.** The k-sparse probe
+        imports, its 268 MB dictionary resolves out of the cache by repo and path with a sha256
+        matching the probe's pin **byte for byte**, the private slice loads (k=128, jumprelu,
+        thresholds present) and encodes — **16 of 16 vectors comparable**. The SAE is downloaded,
+        never attached: `AttachedSAEState` is untouched.
+        ⚠ **AND IT FOUND THE ARC'S WORST DEFECT: the slice encoded in an UNCENTERED BASIS.**
+        miStudio's SAE is `ReLU(W_enc @ (x - b_dec) + b_enc)`; the slice omitted `- b_dec` and
+        produced sparse, plausible, well-behaved features that **meant something else**. The file
+        loaded, the hash matched, the right number of features fired — every metric looked
+        healthy. Only parity caught it. Fixed: combined divergence median **1.68 → 0.101, a 17x
+        collapse**, per-token 58.3 → 22.3.
+        ⚠ **My first explanation was wrong and measuring beat reasoning.** I assumed bf16-vs-fp16
+        noise was crossing JumpReLU thresholds and flipping features; measured **1 flip in 23,040
+        (0.004%)**, with a max difference of 0.0711 where both precisions were active. Precision
+        was never the story.
+        **Residual:** 0.101 median is still well above the dense probe's 0.017, so one more
+        k-sparse-specific difference remains — the threshold-rescale-under-normalisation question
+        miStudio's own `threshold-rescale-uncentred-basis` memory raises is the named suspect. It
+        sits behind the same blocker as 10.3, because the DENSE probe does not pass either.
+        **Not run:** "keeps scoring while another SAE steers the same layer", and the
+        refused-when-its-SAE-is-removed case — both need an ARMED probe.
+  - [~] 10.3 **SC-1/SC-2 — THE GATES PASS; PARITY IS BLOCKED ON A REAL CONTRACT GAP.**
+        **PASSED on the node:** import from file (491,967 bytes, through the 2 MB cap); the row
+        **persists across a pod restart** (which it did not before — see the rollback defect); the
+        rung and its language served verbatim ("rung 3 — detects on unseen tasks, compared with a
+        judge"); and **the identity gate refuses on Qwen2.5-7B naming ALL FIVE differing fields** —
+        `hf_id`, `d_model` 2048 vs 3584, `n_layers` 16 vs 28, `chat_template_sha256`, `revision` —
+        not the first, which is the whole point of that gate.
+        ⚠ **PARITY CORRECTLY REFUSES, AND THE CONTRACT HAS A GAP.** miStudio scores probes in
+        **float16** (hardcoded); miLLM serves **bfloat16** deliberately, because fp16 overflows on
+        bf16-trained models and yields NaN logits. Measured over 16 comparable vectors at
+        tolerance 0.05: per-token max/median/min **6.875 / 0.958 / 0.706**; combined
+        **0.0981 / 0.0168 / 0.0014**, within 0.05 on **14 of 16** and within 0.10 on **16 of 16**.
+        A standalone fp16 run gives per-token 0.10–0.28 — still outside an ABSOLUTE 0.05 against
+        values reaching 55, i.e. 0.09% relative. Alignment ruled out by measurement: shifting one
+        position makes it **190x worse** (0.278 → 52.8).
+        So parity as specified is reachable only by bit-identical computation — which is what
+        miStudio measured when it recorded "0.000e+00", re-scoring in the same process with the
+        same model object. An independent implementation cannot reach it, and an independent
+        implementation is exactly what the gate exists to verify. **This needs a product decision
+        and is not mine to take**; the four options and their costs are in §5.4 of the review.
+        **NOT VERIFIED, recorded rather than assumed:** import from HuggingFace (both repos are
+        private — anonymous HTTP 401 — so the Hub path needs a token miLLM does not hold; the SAE
+        was staged onto the node and verified by hash instead), and the GGUF refusal (the node's
+        only GGUF model is in `error` status and will not load, so `PROBE_HOOK_UNSUPPORTED` is
+        covered by unit test and inspection only).
   - [~] 10.4 **SC-4 — THE TEST FOUND A REAL DEFECT; THE ABSOLUTE FIGURE IS STILL OWED.**
         ⚠ **THE SCORE PATH COPIED THE WHOLE RESIDUAL TO THE HOST AND SCORED IT THERE.**
         `observe` did `hidden[0].detach().to(torch.float32).cpu()` — **33.6 MB per forward

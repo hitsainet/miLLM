@@ -228,6 +228,27 @@ options, with what each costs:
    one that serves fp16.
 4. **miLLM serves probe-carrying models in fp16.** Rejected: unsafe for bf16-trained models.
 
+### 5.4b The k-sparse residual, after centering
+
+Fixing §5.3's basis collapsed the k-sparse divergence but did not close it:
+
+| | before | after | dense probe, for scale |
+|---|---|---|---|
+| per-token median | 58.26 | **22.26** | 0.958 |
+| combined median | 1.683 | **0.101** | 0.0168 |
+| combined within 0.05 | 0 of 16 | **6 of 16** | 14 of 16 |
+
+A 17x improvement on the statistic that matters, and still 6x the dense probe's. So **one more
+k-sparse-specific difference remains.** The named suspect is threshold rescaling under
+normalisation — miStudio's own `threshold-rescale-uncentred-basis` memory records its extraction
+calibration reading a healthy SAE 2–3x sparser for a related reason. Ruled out already: the
+`W_enc` orientation (shapes run and the encode returns (T, k)), the normalisation arithmetic
+(both are `√d / ‖x‖`, one branch for both mode names), and precision (§5.3).
+
+This sits behind §5.4, not beside it: the DENSE probe does not pass parity either, so the
+k-sparse residual cannot be the next thing chased. Resolve the dtype question first, then
+re-measure both.
+
 ### 5.5 What PASSED on hardware
 
 - **Persistence across a pod restart.** Both probes survived a rollout and were listed after it.

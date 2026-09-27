@@ -81,7 +81,25 @@ def _fprd_paths() -> set[str]:
 
     The FPRD writes `{id}` where the route names its parameter `probe_id`, appends query strings
     and, for `arm`, a request-body sketch. All three are stripped; nothing else is.
+
+    ⚠ **THE SPEC IS NOT IN EVERY CHECKOUT.** `sync-to-clean.yml` does `rm -rf 0xcc/` when it
+    publishes the public mirror — and the mirror is where the Docker image is BUILT. The first
+    version of this file read the FPRD unconditionally, so it passed in the private repo, failed
+    on the mirror, and the image build refused to publish over a red suite. A merge to main
+    therefore produced no image at all.
+
+    Skipped rather than deleted, and skipped LOUDLY: the spec-agreement half genuinely cannot
+    run without the spec. The set-equality test above does not need it and still gates the
+    mirror on the full route surface, so nothing is unguarded there — only unverified against
+    the document, which is the honest description.
     """
+    if not FPRD.exists():
+        pytest.skip(
+            f"{FPRD.name} is not in this checkout — `0xcc/` is stripped from the public "
+            "mirror, which is where images are built. The served set is still asserted "
+            "against EXPECTED_PATHS by the test above; only the spec-agreement half is "
+            "unverified here, and it runs in the source repo."
+        )
     text = FPRD.read_text(encoding="utf-8")
     section = text.split("## 7. API/Integration Specifications", 1)[1]
     section = section.split("## 8.", 1)[0]

@@ -30,7 +30,6 @@ jobs:
       - name: Detect changed images
         id: detect
         env:
-          BEFORE: ${{ github.event.before }}
           REF: ${{ github.ref }}
         run: |
           set -euo pipefail
@@ -42,46 +41,128 @@ jobs:
             echo "images=$(emit_all)" >> "$GITHUB_OUTPUT"; echo "tag push → all"; exit 0
           fi
 
-          # Resolve a valid diff base — this repo's main is FORCE-PUSHED by the
-          # sync-to-clean workflow (source main + one filter commit), so:
-          #  - BEFORE (the previous filter tip) becomes an orphaned commit that
-          #    a normal fetch doesn't retrieve → fetch it explicitly by SHA
-          #    (GitHub serves unadvertised objects). Diffing old filter tip →
-          #    new filter tip yields exactly what changed between syncs.
-          #  - A HEAD~1 fallback would be WRONG here: HEAD~1 is the unfiltered
-          #    source tip, so the diff would show only the filter commit's file
-          #    removals and silently skip real code changes. When BEFORE cannot
-          #    be resolved, build everything instead — never silently skip.
-          BASE="$BEFORE"
-          if [ -n "$BASE" ] && [ "$BASE" != "0000000000000000000000000000000000000000" ]; then
-            git cat-file -e "${BASE}^{commit}" 2>/dev/null \
-              || git fetch --no-tags origin "$BASE" 2>/dev/null \
+          # ── The diff base is PER IMAGE, and it is the commit that image was
+          # ── actually built from.
+          #
+          # ⚠ THIS USED TO DIFF `github.event.before`, AND THAT SILENTLY STRANDED IMAGES.
+          # An image can fail to publish for reasons unrelated to its own code — the test gate
+          # refusing a red backend suite skipped the WHOLE matrix, admin-ui included. The next
+          # push then diffed from the commit that was never built, saw no changes under
+          # `admin-ui/`, and skipped it again. And again. The published image drifted from main
+          # indefinitely, with every run green, until a human dispatched a full rebuild.
+          #
+          # That happened on 2026-09-27: a merge carrying a new admin-ui page was gated out by a
+          # backend test failure, and the page reached the cluster only because the rebuild was
+          # triggered by hand. Nothing would ever have corrected it.
+          #
+          # Reading each image's own `org.opencontainers.image.revision` makes this
+          # SELF-CORRECTING: an image that was not published keeps its old revision, so the next
+          # run diffs across everything it missed and rebuilds it. No state to keep in sync, and
+          # the registry is the authority on what is actually deployed.
+          #
+          # Conservative at every failure: no label, an unreachable registry, or a commit git
+          # cannot resolve all mean "build it". Never silently skip.
+
+          published_revision() {
+            # Echo the commit `<repo>:latest` was built from, or nothing.
+            #
+            # ⚠ TWO THINGS HERE ARE LOAD-BEARING AND BOTH FAILED SILENTLY WHEN I FIRST WROTE THEM,
+            # returning empty rather than erroring — which reads as "never published" and would have
+            # made this whole mechanism inert (rebuild everything, every push, forever):
+            #
+            #   1. `-L` on the BLOB fetch. Docker Hub 307-redirects blob reads to a CDN. Without
+            #      -L, curl prints nothing and exits 0.
+            #   2. Following the INDEX. `:latest` is a multi-arch index with no `.config` of its
+            #      own; the config lives on the per-platform child manifest.
+            #
+            # Verified against a real public image carrying a real label before shipping.
+            local repo="$1" token accept doc mt cfg child
+            accept='application/vnd.docker.distribution.manifest.v2+json,application/vnd.oci.image.manifest.v1+json,application/vnd.docker.distribution.manifest.list.v2+json,application/vnd.oci.image.index.v1+json'
+
+            token="$(curl -fsSL --max-time 30 \
+              "https://auth.docker.io/token?service=registry.docker.io&scope=repository:${repo}:pull" \
+              | jq -r .token 2>/dev/null)" || return 0
+            [ -n "$token" ] && [ "$token" != "null" ] || return 0
+
+            doc="$(curl -fsSL --max-time 30 -H "Authorization: Bearer ${token}" -H "Accept: ${accept}" \
+              "https://registry-1.docker.io/v2/${repo}/manifests/latest" 2>/dev/null)" || return 0
+
+            mt="$(echo "$doc" | jq -r '.mediaType // empty' 2>/dev/null)"
+            case "$mt" in
+              *manifest.list*|*image.index*)
+                child="$(echo "$doc" | jq -r '
+                  [.manifests[] | select((.platform.os=="linux") and (.platform.architecture=="amd64")
+                    and ((.platform.variant // "")|test("unknown")|not))] | .[0].digest // empty' 2>/dev/null)"
+                [ -n "$child" ] || return 0
+                doc="$(curl -fsSL --max-time 30 -H "Authorization: Bearer ${token}" -H "Accept: ${accept}" \
+                  "https://registry-1.docker.io/v2/${repo}/manifests/${child}" 2>/dev/null)" || return 0
+                ;;
+            esac
+
+            cfg="$(echo "$doc" | jq -r '.config.digest // empty' 2>/dev/null)"
+            [ -n "$cfg" ] || return 0
+
+            curl -fsSL --max-time 30 -H "Authorization: Bearer ${token}" \
+              "https://registry-1.docker.io/v2/${repo}/blobs/${cfg}" 2>/dev/null \
+              | jq -r '.config.Labels["org.opencontainers.image.revision"] // empty' 2>/dev/null \
               || true
-          fi
-          if [ -z "$BASE" ] || [ "$BASE" = "0000000000000000000000000000000000000000" ] \
-             || ! git cat-file -e "${BASE}^{commit}" 2>/dev/null; then
-            echo "images=$(emit_all)" >> "$GITHUB_OUTPUT"; echo "no usable diff base → all"; exit 0
-          fi
+          }
 
-          CHANGED="$(git diff --name-only "$BASE" "$GITHUB_SHA")"
-          echo "--- changed files ---"; echo "$CHANGED"
+          repo_for() {
+            case "$1" in
+              backend)  echo "hitsai/millm-backend" ;;
+              admin-ui) echo "hitsai/millm-admin-ui" ;;
+              *) echo "" ;;
+            esac
+          }
 
-          declare -A pick=()
-          # Backend image content: application code, Dockerfile, entrypoint,
-          # Python dependency manifest, DB migrations.
-          if echo "$CHANGED" | grep -qE '^(millm/|Dockerfile|docker-entrypoint\.sh|pyproject\.toml|alembic)'; then
-            pick[backend]=1
-          fi
-          # Admin UI image content: everything under admin-ui/ (its own
-          # Dockerfile, package.json, and source live there).
-          if echo "$CHANGED" | grep -qE '^admin-ui/'; then
-            pick[admin-ui]=1
-          fi
+          # Which paths make up each image.
+          paths_for() {
+            case "$1" in
+              backend)  echo '^(millm/|Dockerfile|docker-entrypoint\.sh|pyproject\.toml|alembic)' ;;
+              admin-ui) echo '^admin-ui/' ;;
+              *) echo '^$' ;;
+            esac
+          }
 
           OUT=()
-          for img in "${ALL[@]}"; do [ "${pick[$img]:-}" = "1" ] && OUT+=("$img"); done
+          for img in "${ALL[@]}"; do
+            repo="$(repo_for "$img")"
+            base="$(published_revision "$repo" || true)"
+
+            if [ -z "$base" ]; then
+              echo "$img: no published revision recorded → build"
+              OUT+=("$img"); continue
+            fi
+
+            # The mirror's main is force-pushed as an orphan, so a previous revision is an
+            # unadvertised object here. GitHub serves those by explicit SHA.
+            git cat-file -e "${base}^{commit}" 2>/dev/null \
+              || git fetch --no-tags --depth=1 origin "$base" 2>/dev/null \
+              || true
+            if ! git cat-file -e "${base}^{commit}" 2>/dev/null; then
+              echo "$img: published revision ${base} is not resolvable here → build"
+              OUT+=("$img"); continue
+            fi
+
+            if [ "$base" = "$GITHUB_SHA" ]; then
+              echo "$img: already published from this exact commit → skip"; continue
+            fi
+
+            CHANGED="$(git diff --name-only "$base" "$GITHUB_SHA" || true)"
+            if [ -z "$CHANGED" ]; then
+              echo "$img: no file changes since ${base:0:8} → skip"; continue
+            fi
+            if echo "$CHANGED" | grep -qE "$(paths_for "$img")"; then
+              echo "$img: changed since published ${base:0:8} → build"
+              OUT+=("$img")
+            else
+              echo "$img: unchanged since published ${base:0:8} → skip"
+            fi
+          done
+
           if [ ${#OUT[@]} -eq 0 ]; then
-            echo "images=[]" >> "$GITHUB_OUTPUT"; echo "no image-affecting changes → nothing to build"
+            echo "images=[]" >> "$GITHUB_OUTPUT"; echo "nothing to build"
           else
             JSON="$(printf '%s\n' "${OUT[@]}" | jq -R . | jq -cs .)"
             echo "images=$JSON" >> "$GITHUB_OUTPUT"; echo "building: $JSON"
@@ -149,12 +230,21 @@ jobs:
     # `always()` because `gate` is SKIPPED for an admin-ui-only build, and a
     # skipped dependency would otherwise skip this job too. Skipped is allowed;
     # failed and cancelled are not.
+    # ⚠ THE GATE'S RESULT IS NOT IN THIS CONDITION, AND THAT IS THE FIX.
+    #
+    # It used to be `needs.gate.result != 'failure'`. A job-level `if` is evaluated ONCE for the
+    # whole job, not per matrix leg, so a failing backend gate skipped EVERY image — admin-ui
+    # included, which backend tests have nothing to do with. Combined with the old diff base,
+    # that stranded the UI image indefinitely: gated out once, then "unchanged" forever after.
+    #
+    # The gate is now enforced as the first STEP, scoped to the backend leg. A red suite fails
+    # the backend image and leaves the UI image free to publish, which is what the gate's own
+    # comment always said it intended ("Scoped to the BACKEND image on purpose").
     if: >-
       always()
       && (github.repository == 'hitsainet/millm' || github.repository == 'hitsainet/miLLM')
       && needs.detect.result == 'success'
       && needs.detect.outputs.images != '[]' && needs.detect.outputs.images != ''
-      && needs.gate.result != 'failure'
       && needs.gate.result != 'cancelled'
     runs-on: ubuntu-latest
 
@@ -169,6 +259,15 @@ jobs:
         name: ${{ fromJson(needs.detect.outputs.images) }}
 
     steps:
+      # ⚠ THE TEST GATE, scoped to the image it is about. See the job `if` above.
+      - name: Refuse to publish a backend image over a red suite
+        if: matrix.name == 'backend' && needs.gate.result != 'success'
+        run: |
+          echo "::error::Backend Tests did not pass for ${GITHUB_SHA} (gate: ${{ needs.gate.result }})."
+          echo "::error::Refusing to publish a backend image over a red suite."
+          echo "::error::The admin-ui image is unaffected and publishes independently."
+          exit 1
+
       - name: Checkout source
         uses: actions/checkout@v4
 
@@ -230,6 +329,12 @@ jobs:
           target: ${{ steps.img.outputs.target }}
           push: true
           tags: ${{ steps.version.outputs.tags }}
+          # ⚠ THIS LABEL IS WHAT `detect` DIFFS FROM. It records the commit this image was
+          # actually built from, so change detection can ask "what has changed since the image
+          # that is PUBLISHED" instead of "what changed in this push". Removing it does not break
+          # the build — it makes `detect` fall back to building everything, forever.
+          labels: |
+            org.opencontainers.image.revision=${{ github.sha }}
           cache-from: type=gha,scope=${{ matrix.name }}
           cache-to: type=gha,mode=max,scope=${{ matrix.name }}
           provenance: true

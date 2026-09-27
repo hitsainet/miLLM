@@ -145,7 +145,19 @@ class ProbeRequestContext:
         n_tokens = row.shape[0]
 
         for probe in here:
-            basis = probe.encoder(row) if probe.encoder is not None else row
+            try:
+                # ⚠ THE ENCODER IS INSIDE THE TRY. It was outside, so a k-sparse probe whose
+                # encode raised propagated to the hook — which swallows callback exceptions by
+                # design, because a probe must never break generation. The request then had no
+                # scores at all, and `finish()` reported `no_scored_tokens`, which means "the
+                # probe never looked", not "the probe broke". On hardware that turned a
+                # one-line configuration error into sixteen vectors of a misleading reason,
+                # with the real traceback only in the worker log.
+                basis = probe.encoder(row) if probe.encoder is not None else row
+            except Exception as exc:  # noqa: BLE001 - reported, never raised at the hook
+                logger.error("probe_encode_failed id=%s error=%s", probe.probe_id, exc)
+                self.mark_not_scored(f"encoder_failed: {exc}"[:200])
+                return
             try:
                 # `.tolist()` below is the one host transfer, of (T,) floats.
                 scores = probe.head.token_scores(basis)

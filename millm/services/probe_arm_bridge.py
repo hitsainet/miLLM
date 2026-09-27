@@ -162,7 +162,7 @@ async def build_probe_encoder(probe: Any) -> Optional[Any]:
         path,
         indices,
         architecture=str(block.get("architecture") or "standard"),
-        normalization_mode=str(block.get("normalization") or "none"),
+        normalization_mode=_normalization_mode(block),
         expected_sha256=block.get("weights_sha256") or None,
     )
     logger.info(
@@ -209,6 +209,37 @@ def _weights_file(target: "Path") -> str:
         f"(looked for {', '.join(_WEIGHT_NAMES)})",
         details={"directory": str(target), "looked_for": list(_WEIGHT_NAMES)},
     )
+
+
+def _normalization_mode(block: dict[str, Any]) -> str:
+    """The SAE's normalisation MODE, out of a field that is an object, not a string.
+
+    ⚠ `sae.normalization` is `{"mode": "constant_norm_rescale", "source": "..."}` — the mode
+    plus a record of where miStudio read it from. This passed the whole dict through `str()`,
+    so the slice received the dict's repr and refused it as an unknown mode. Every k-sparse
+    probe failed to score, and because the read hook swallows callback exceptions by design
+    ("a probe must never break generation"), parity reported `no_scored_tokens` on all sixteen
+    vectors rather than the actual error. The traceback was only in the worker log.
+
+    ⚠ **AND THE SLICE REFUSING IS THE DESIGN WORKING.** A lenient loader would have fallen
+    back to a default mode, encoded in the wrong basis, and produced plausible features with
+    different meanings — invisible in every metric. miStudio shipped exactly that once
+    (`sae_row.normalize_activations` silently guessed, and the default happened to be right
+    for the SAE it was found on). Refusing an unrecognised mode is why this was a five-minute
+    diagnosis instead of a wrong answer nobody noticed.
+
+    A plain string is still accepted, so an older document needs no migration.
+    """
+    raw = block.get("normalization")
+    if isinstance(raw, dict):
+        mode = raw.get("mode")
+        if not mode:
+            raise ProbeSaeMismatchError(
+                "the sae block's `normalization` object carries no `mode`",
+                details={"normalization": raw},
+            )
+        return str(mode)
+    return str(raw or "none")
 
 
 async def _resolve_sae_path(block: dict[str, Any]) -> str:

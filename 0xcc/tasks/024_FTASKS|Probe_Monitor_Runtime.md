@@ -465,7 +465,16 @@ then, build against a draft copy and re-vendor before release.
         sits behind the same blocker as 10.3, because the DENSE probe does not pass either.
         **Not run:** "keeps scoring while another SAE steers the same layer", and the
         refused-when-its-SAE-is-removed case — both need an ARMED probe.
-  - [~] 10.3 **SC-1/SC-2 — THE GATES PASS; PARITY IS BLOCKED ON A REAL CONTRACT GAP.**
+  - [x] 10.3 **SC-1 PASSES ON THE NODE (2026-09-27).** The dense probe imports, arms — parity
+        passed at **max score diff 0.0981 against the 0.10 gate** — and is read on live traffic:
+        the verdict arrives in an RFC 8941 `x-millm-probe-verdicts` header on a non-streaming
+        response (`score=0.772777;threshold=2.87858;verdict=?0;rung=3`) and in a terminal chunk
+        with `choices: []` before `[DONE]` on a streaming one. Events are recorded with scores and
+        verdicts, and **the event list carries no context text** — the privacy rule verified on
+        hardware rather than asserted.
+        Below, the state as it stood before the parity gate was corrected to the contract's own
+        wording; the reasoning is kept because it is why the gate reads as it does.
+        **SC-1/SC-2 — THE GATES PASS; PARITY WAS BLOCKED ON A CONTRACT MISREADING.**
         **PASSED on the node:** import from file (491,967 bytes, through the 2 MB cap); the row
         **persists across a pod restart** (which it did not before — see the rollback defect); the
         rung and its language served verbatim ("rung 3 — detects on unseen tasks, compared with a

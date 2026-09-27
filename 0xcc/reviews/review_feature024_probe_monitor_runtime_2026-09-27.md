@@ -271,6 +271,48 @@ re-measure both.
   node directly and verified by hash instead, which tests the slice but not `hub/import`.
 - **SC-4's absolute figure.** Needs an armed probe, which needs §5.4 resolved.
 
+### 5.7 The final run: SC-1 PASSES, the runtime works end to end
+
+With every defect above fixed and deployed, on LFM2.5-1.2B-Instruct on the 3090:
+
+```
+ARM the dense probe          ARMED  | rung 3 - detects on unseen tasks, compared with a judge
+                             parity passed: True | max score diff 0.0981 | gate 0.10
+                             per-token 6.875 (informational)
+x-millm-probe-verdicts: "pmr_…-mean-L11";score=0.772777;threshold=2.87858;verdict=?0;rung=3
+streaming                    verdict chunk present, choices empty, before [DONE]
+events                       4 recorded, scored, with scores and verdicts
+privacy                      CONTEXT TEXT IN THE LIST: NONE
+```
+
+**SC-1 passes.** A probe trained in miStudio is imported, checked against the loaded model,
+proved to reproduce miStudio's scores, armed, and read on live traffic — with its verdict in an
+RFC 8941 header on a non-streaming response and in a terminal chunk on a streaming one, and with
+no prompt text on the event list.
+
+### 5.8 SC-4 FAILS, and the first number was wrong by 10x
+
+| | |
+|---|---|
+| wall-clock, armed | **185.0 ms** median, 5 requests at ~4k tokens |
+| wall-clock, disarmed | **173.8 ms** |
+| **true added cost** | **11.2 ms**, against a **5 ms** budget |
+| what the product reported | **116 ms** |
+
+The hook fires during the forward, so the model's kernels are in flight when the probe arrives;
+`.tolist()` blocks until they finish and the timer charged that wait to the probe. Fixed by
+synchronising before the clock starts.
+
+**SC-4 fails at 2.2x, with ONE probe where the criterion asks for two.** The remaining cost is
+host-side marshalling, not arithmetic: per pass the probe builds a 4096-float Python list, a
+4096-bool mask, and rebuilds a tensor from the list in `finish()`. Keeping per-token scores as
+tensors end to end is the fix, and is **tracked debt, not done**.
+
+⚠ **The lesson is the measurement, not the number.** The reported figure would have put SC-4 23x
+over budget. Measuring armed against disarmed — the only honest test available — put it at 2.2x.
+A performance number taken from the thing being measured, rather than from a controlled
+comparison, is worth what the instrument is worth.
+
 ## 6. Still owed
 
 - **10.3 / 10.3b / the SC-4 absolute figure** — hardware acceptance. All three need this branch

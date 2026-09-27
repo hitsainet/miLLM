@@ -134,6 +134,22 @@ class ProbeRequestContext:
         if not here:
             return
 
+        # ⚠ SYNCHRONISE BEFORE STARTING THE CLOCK, or this measures the MODEL.
+        #
+        # The hook fires during the forward pass, so the model's own kernels are still in flight
+        # when we arrive. The first thing the probe does that touches the result — `.tolist()` —
+        # blocks until they finish, and a naive timer therefore charges the model's remaining
+        # work to the probe.
+        #
+        # Measured on the node at 4k tokens with one probe: the timer reported **116 ms** while
+        # the true added cost, wall-clock armed against disarmed, was **11.2 ms**. A tenfold
+        # over-report in the number an operator reads to decide whether probes are affordable,
+        # and one that would keep the above-threshold warning permanently lit.
+        #
+        # Syncing here moves that wait to where it belongs. It costs nothing the forward was not
+        # going to pay anyway: the pass must complete before its output is used.
+        if hidden.is_cuda:
+            torch.cuda.synchronize(hidden.device)
         started = time.perf_counter()
 
         # ⚠ **SCORED WHERE THE TENSOR ALREADY IS, AND ONLY THE SCORES COME BACK.**

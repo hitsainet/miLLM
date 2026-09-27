@@ -517,8 +517,23 @@ then, build against a draft copy and re-vendor before release.
         shipped that mistake in three arcs), that the head and slice do not rebuild per pass,
         that cost is not superlinear in probe count, and the two rejected forms. 12 tests,
         5 mutation controls including reinstating the original defect.
-        **STILL OWED: the node measurement at 4k tokens with 2 probes under 5 ms.** It needs
-        this branch deployed and a model loaded — the same blocker as 10.3.
+        **MEASURED ON THE NODE 2026-09-27, AND SC-4 FAILS — by 2.2x, not the 23x first reported.**
+        Wall-clock over five requests at ~4k tokens, median: **185.0 ms armed against 173.8 ms
+        disarmed — the probe adds 11.2 ms**, against a 5 ms budget. With **one** probe; the
+        criterion asks for two, and the second (k-sparse) cannot arm yet, so the real figure for
+        the stated criterion is worse than this.
+        ⚠ **AND THE REPORTED NUMBER WAS A TENFOLD LIE.** `last_request_overhead_ms` said
+        **116 ms** for the same requests. The hook fires DURING the forward, so the model's
+        kernels are still in flight; the probe's first touch of the result (`.tolist()`) blocks
+        until they finish, and the timer charged the model's remaining work to the probe. An
+        operator reading it would conclude probes cost 62% of a request when they cost 6%, and
+        the above-threshold warning would never stop firing. Fixed by synchronising before the
+        clock starts, which costs nothing the forward was not going to pay anyway.
+        **The remaining 11.2 ms is host-side marshalling, not arithmetic** — the scoring itself
+        is on-device and small. Per pass at 4k tokens the probe builds a 4096-float Python list
+        via `.tolist()`, a 4096-bool scope mask, and then rebuilds a tensor from the list in
+        `finish()`. Keeping per-token scores as tensors end to end is the fix; it is a real
+        change to `ProbeRequestContext`, and it is **tracked debt, not done**.
   - [x] 10.5 **SC-5 PASSES — all seven FTID §6 controls bite.** Baseline 464 passed / 0 failed.
         `prepend=True` removed → 1 red (the probe would read post-steer); the router include
         removed → 17 red; one byte of the vendored schema → 2 red; **one word of the rung

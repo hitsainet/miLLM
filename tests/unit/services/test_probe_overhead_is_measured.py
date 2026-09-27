@@ -129,3 +129,62 @@ class TestTheMeasurementReachesTheStatus:
 
         service.note_request_overhead(3.25)
         assert (await service.status())["last_request_overhead_ms"] == 3.25
+
+
+class TestTheMeasurementDoesNotChargeTheModel:
+    """⚠ The reported overhead was 10x the real cost.
+
+    The hook fires DURING the forward pass, so the model's kernels are still in flight. The
+    probe's first touch of the result (`.tolist()`) blocks until they finish, and a naive timer
+    charges that wait to the probe.
+
+    Measured on the node at 4k tokens with one probe: **116 ms reported, 11.2 ms actual**
+    (wall-clock median 185.0 armed against 173.8 disarmed). An operator reading the reported
+    number would conclude probes cost 62% of a request when they cost 6%, and the
+    above-threshold warning would never stop firing.
+
+    On CPU there is nothing to synchronise and the two agree, so this test asserts the CALL —
+    the only thing a CPU test can check — and the real correction is recorded in the measurement
+    above.
+    """
+
+    def test_a_cuda_tensor_is_synchronised_before_the_clock_starts(self, monkeypatch):
+        import millm.services.probe_runtime as runtime
+
+        calls: list[object] = []
+        monkeypatch.setattr(
+            runtime.torch.cuda, "synchronize", lambda device=None: calls.append(device)
+        )
+
+        class FakeCudaTensor(torch.Tensor):
+            """A CPU tensor that claims to be on CUDA, so the branch runs without a GPU."""
+
+            @staticmethod
+            def __new__(cls, data):
+                return torch.Tensor._make_subclass(cls, data, False)
+
+            @property
+            def is_cuda(self):  # type: ignore[override]
+                return True
+
+        context = ProbeRequestContext("req", [_probe()])
+        context.observe(1, FakeCudaTensor(torch.randn(1, 16, 8)))
+
+        assert calls, (
+            "the score path did not synchronise before timing — the reported overhead then "
+            "includes the model's in-flight work, which measured 10x the probe's real cost"
+        )
+
+    def test_a_cpu_tensor_does_not_synchronise(self):
+        """Specificity: syncing unconditionally would raise without CUDA available."""
+        import millm.services.probe_runtime as runtime
+
+        called = []
+        original = runtime.torch.cuda.synchronize
+        runtime.torch.cuda.synchronize = lambda device=None: called.append(device)
+        try:
+            context = ProbeRequestContext("req", [_probe()])
+            context.observe(1, torch.randn(1, 16, 8))
+        finally:
+            runtime.torch.cuda.synchronize = original
+        assert not called

@@ -2485,8 +2485,12 @@ class InferenceService:
             # A monitor must not truncate a stream. The header and the event still carry it.
             logger.warning("probe_stream_chunk_failed", error=str(exc))
 
-    async def _probe_record(self, context, verdicts=None) -> None:
-        """Persist one event per armed probe, and emit them. Never raises."""
+    async def _probe_record(self, context, verdicts=None, full_ids=None) -> None:
+        """Persist one event per armed probe, and emit them. Never raises.
+
+        `full_ids` is the request's token ids, used to build each verdict's decoded context
+        window. Every caller passes it; see `probe_context` for why it was missing.
+        """
         if context is None:
             return
         try:
@@ -2506,8 +2510,27 @@ class InferenceService:
             # `last_request_overhead_ms: null` on every request ever served, the
             # above-threshold warning could never fire, and SC-4 was unmeasurable from the
             # product. Found on hardware, by trying to measure it.
+            #
+            # ⚠ AND SO IS `contexts`, WHICH HAD THE SAME DEFECT AS THE ARGUMENT BESIDE IT.
+            # `record()` has always accepted it, the column, the detail route, the modal and
+            # `PROBE_EVENT_CONTEXT_TOKENS` all existed — and nothing passed it, so
+            # `context_text` was NULL on every event ever recorded and the UI's prompt window
+            # opened empty. Reported 2026-09-28. The comment above records the identical
+            # omission being fixed for `overhead_ms` in the same review round.
+            from millm.core.config import settings as _settings
+            from millm.services.probe_context import contexts_for
+
+            contexts = contexts_for(
+                verdicts,
+                full_ids,
+                _settings.PROBE_EVENT_CONTEXT_TOKENS,
+                self._tokenizer if self.is_model_loaded() else None,
+            )
             await service.record(
-                context.request_id, verdicts, overhead_ms=context.overhead_ms
+                context.request_id,
+                verdicts,
+                overhead_ms=context.overhead_ms,
+                contexts=contexts or None,
             )
         except Exception as exc:
             logger.warning("probe_record_failed", error=str(exc))
@@ -3548,7 +3571,7 @@ class InferenceService:
                 await self._notify_sensing(_sensing_sae, _sensing_full_ids)
                 await self._notify_circuit_sensing(_circuit_sensing, _sensing_full_ids)
                 # `_probe_finish` ran before the response was built (below); this only persists.
-                await self._probe_record(_probe_ctx, _probe_verdicts)
+                await self._probe_record(_probe_ctx, _probe_verdicts, full_ids=_sensing_full_ids)
 
         model_info = self.get_loaded_model_info()
         model_name = model_info.name if model_info else "unknown"
@@ -4562,7 +4585,7 @@ class InferenceService:
                 # Persist only — `_probe_finish` already ran before the terminal chunk. If
                 # generation raised before reaching it, `_probe_verdicts` is None and
                 # `_probe_record` computes them here so the event still exists.
-                await self._probe_record(_probe_ctx, _probe_verdicts)
+                await self._probe_record(_probe_ctx, _probe_verdicts, full_ids=_full_ids)
 
     # =========================================================================
     # Text Completions
@@ -4691,7 +4714,7 @@ class InferenceService:
             finally:
                 await self._notify_sensing(_sensing_ctx, _sensing_full_ids)
                 await self._notify_circuit_sensing(_circuit_sensing, _sensing_full_ids)
-                await self._probe_record(_probe_ctx, _probe_verdicts)
+                await self._probe_record(_probe_ctx, _probe_verdicts, full_ids=_sensing_full_ids)
 
         model_info = self.get_loaded_model_info()
         model_name = model_info.name if model_info else "unknown"
@@ -5061,7 +5084,11 @@ class InferenceService:
         ):
             yield extra
         yield "data: [DONE]\n\n"
-        await self._probe_record(probe_ctx, probe_verdicts)
+        # `input_ids` is a plain list here; `context_window` accepts either shape. Verdicts on
+        # this path are `not_scored: continuous_batching` and so carry no top position, but the
+        # ids are passed rather than dropped so this site does not become the one that silently
+        # stops producing context if that ever changes.
+        await self._probe_record(probe_ctx, probe_verdicts, full_ids=input_ids)
 
     async def _cbm_text_completion(
         self, request: TextCompletionRequest

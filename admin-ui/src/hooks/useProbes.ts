@@ -147,9 +147,17 @@ export function useProbes(probeId?: string) {
         return;
       }
       // Every other refusal names its gate, so say which one rather than "arm failed".
+      //
+      // ⚠ AND WHICH PROBE. With several imported, a toast naming only the gate leaves the
+      // operator unable to tell which row it came from — which is how one failing probe read as
+      // all of them failing.
       const gate =
         error instanceof ApiError ? (ARM_REFUSALS[error.code] ?? error.code) : 'Arming';
-      toast.error(`${gate}: ${error.message}`);
+      const which =
+        queryClient
+          .getQueryData<Probe[]>(PROBES_KEY)
+          ?.find((p) => p.id === variables.id)?.name ?? variables.id;
+      toast.error(`${which} — ${gate}: ${error.message}`);
     },
   });
 
@@ -211,11 +219,24 @@ export function useProbes(probeId?: string) {
     importing: importMutation.isPending,
     arm: armMutation.mutate,
     arming: armMutation.isPending,
+    /**
+     * ⚠ WHICH probe is arming, not merely THAT one is.
+     *
+     * `isPending` is one flag for the whole mutation. The page passed it to every row, so
+     * clicking Arm on one probe made EVERY row read "Arming…" and disabled every button — it
+     * looked like all of them were being armed at once, and then all failing together when the
+     * single real request errored. Reported by the operator on 2026-09-28.
+     *
+     * `variables` carries the arguments of the request in flight, so the id is already here.
+     */
+    armingId: armMutation.isPending ? (armMutation.variables?.id ?? null) : null,
     /** Set when the server asked for an acknowledgement. `null` once given or cancelled. */
     pendingAck,
     dismissAck: () => setPendingAck(null),
     checkParity: parityMutation.mutate,
     checkingParity: parityMutation.isPending,
+    /** Same, for the parity check — it shares the row's disabled state. */
+    checkingParityId: parityMutation.isPending ? (parityMutation.variables ?? null) : null,
     disarm: disarmMutation.mutate,
     remove: deleteMutation.mutate,
     clearEvents: clearEventsMutation.mutate,

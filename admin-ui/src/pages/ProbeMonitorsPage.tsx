@@ -278,10 +278,11 @@ export function ProbeMonitorsPage() {
     importing,
     arm,
     arming,
+    armingId,
+    checkingParityId,
     pendingAck,
     dismissAck,
     checkParity,
-    checkingParity,
     disarm,
     remove,
     clearEvents,
@@ -415,7 +416,13 @@ export function ProbeMonitorsPage() {
                 onDisarm={disarm}
                 onDelete={remove}
                 onCheckParity={checkParity}
-                busy={arming || checkingParity}
+                // ⚠ THIS ROW'S id, not the global pending flag.
+                //
+                // It was `busy={arming || checkingParity}` — one mutation flag handed to every
+                // row — so arming ONE probe made all of them read "Arming…" and disabled every
+                // button, then appear to fail together when the single real request errored.
+                // A shared pending flag is not a per-row state.
+                busy={armingId === probe.id || checkingParityId === probe.id}
               />
             ))}
           </div>

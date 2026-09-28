@@ -18,6 +18,7 @@ const state = {
   probes: [] as Probe[],
   status: undefined as ProbeStatus | undefined,
   events: [] as ProbeEvent[],
+  armingId: null as string | null,
   pendingAck: undefined as
     | { id: string; details: { rung?: number; rung_language?: string; next_step?: string } }
     | undefined,
@@ -41,7 +42,9 @@ vi.mock('@/hooks/useProbes', () => ({
     importProbe: vi.fn(),
     importing: false,
     arm: calls.arm,
-    arming: false,
+    arming: state.armingId !== null,
+    armingId: state.armingId,
+    checkingParityId: null,
     pendingAck: state.pendingAck,
     dismissAck: calls.dismissAck,
     checkParity: calls.checkParity,
@@ -112,6 +115,7 @@ function renderPage() {
 describe('ProbeMonitorsPage', () => {
   beforeEach(() => {
     state.pendingAck = undefined;
+    state.armingId = null;
     state.status = undefined;
     state.events = [];
     state.probes = [];
@@ -303,6 +307,44 @@ describe('ProbeMonitorsPage', () => {
     // A probe being weak is not itself a prompt: the SERVER decides when consent is needed, so a
     // dialog rendered from `rung < 2` alone would appear for probes nobody tried to arm.
     expect(screen.queryByTestId('ack-dialog')).not.toBeInTheDocument();
+  });
+
+  it('⚠ only the probe being armed shows Arming — not every row', async () => {
+    // A shared `isPending` flag was passed to every row, so clicking Arm on one probe made ALL
+    // of them read "Arming…" and disabled every button, then appear to fail together when the
+    // single real request errored. Reported by the operator 2026-09-28.
+    state.probes = [
+      probe({ id: 'pr_1', name: 'first' }),
+      probe({ id: 'pr_2', name: 'second' }),
+      probe({ id: 'pr_3', name: 'third' }),
+    ];
+    state.armingId = 'pr_2';
+    renderPage();
+
+    const rows = screen.getAllByTestId('probe-row');
+    expect(rows).toHaveLength(3);
+    const arming = rows.filter((r) => r.textContent?.includes('Arming'));
+    expect(arming).toHaveLength(1);
+    expect(arming[0]).toHaveTextContent('second');
+  });
+
+  it('the other rows stay clickable while one arms', async () => {
+    // Disabling every button is the same defect wearing a different hat: an operator cannot
+    // start a second probe, or disarm a running one, while any request is in flight.
+    state.probes = [probe({ id: 'pr_1', name: 'first' }), probe({ id: 'pr_2', name: 'second' })];
+    state.armingId = 'pr_1';
+    renderPage();
+
+    const buttons = screen.getAllByRole('button', { name: /^Arm$/ });
+    expect(buttons).toHaveLength(1);
+    expect(buttons[0]).not.toBeDisabled();
+  });
+
+  it('nothing shows Arming when nothing is in flight', async () => {
+    state.probes = [probe({ id: 'pr_1' }), probe({ id: 'pr_2' })];
+    state.armingId = null;
+    renderPage();
+    expect(screen.queryByText(/Arming/)).not.toBeInTheDocument();
   });
 
   it('the Hub browser is opt-in, not always mounted', async () => {

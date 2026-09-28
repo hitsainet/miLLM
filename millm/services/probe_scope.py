@@ -72,6 +72,39 @@ def scope_is_reproducible(scope: str) -> bool:
     return scope == "all"
 
 
+#: Scopes the RUNTIME can actually honour, which is a different question from whether a scope's
+#: test vectors can be reproduced.
+#:
+#: ⚠ **THIS IS `{"all"}` BECAUSE `scored_mask` HAS NO PRODUCTION CALLER, NOT BECAUSE THE OTHER TWO
+#: ARE UNCOMPUTABLE.** `scored_mask` above is complete and correct and needs nothing but the two
+#: token counts — but nothing builds a mask from it, and `ProbeRequestContext` is constructed at
+#: `probe_runtime.py` with `mask=None`, so `window(None, ...)` returns all-True. A `prompt`-scoped
+#: probe armed today would score the model's own output with weights that never saw one, which is
+#: precisely what this module's opening paragraph says makes it a different detector.
+#:
+#: Until 2026-09-28 the only thing stopping that was the parity gate incidentally refusing
+#: non-reproducible scopes. That is protection by coincidence: it would evaporate the moment
+#: parity learned to verify a `prompt` vector, and the arming path would open onto a runtime that
+#: still scores everything. So the refusal is now primary and keyed on runtime capability.
+#:
+#: The two conditions are genuinely independent and both must widen on their own evidence —
+#: reproducibility cannot be fixed here at all, because miStudio's `user` mask excludes a system
+#: preamble that the contract's `prompt` includes (see the module docstring).
+#:
+#: `test_probe_scope.py::TestRuntimeAdmissionTracksTheWiring` fails if this set widens while
+#: `scored_mask` is still uncalled, and fails if `scored_mask` gains a caller while this set stays
+#: narrow — so the constant cannot drift away from the code in either direction.
+RUNTIME_SCORABLE_SCOPES = frozenset({"all"})
+
+
+def scope_is_runtime_scorable(scope: str) -> bool:
+    """Whether this runtime can restrict scoring to the positions this scope names.
+
+    Distinct from `scope_is_reproducible`, which is about replaying recorded test vectors.
+    """
+    return scope in RUNTIME_SCORABLE_SCOPES
+
+
 def window(mask: Optional[list[bool]], start: int, length: int) -> list[bool]:
     """The slice of `mask` covering one forward pass, padded CLOSED if it runs short.
 

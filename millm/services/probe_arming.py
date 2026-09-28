@@ -40,6 +40,10 @@ from millm.core.probe_evidence import (
 from millm.ml.probe_head import ProbeHead
 from millm.services.probe_identity import LoadedIdentity, check_identity
 from millm.services.probe_parity import NOT_COMPARABLE_SCOPE, ProbeParityEngine
+from millm.services.probe_scope import (
+    RUNTIME_SCORABLE_SCOPES,
+    scope_is_runtime_scorable,
+)
 from millm.services.probe_runtime import ArmedProbe, ProbeRuntimeState
 
 logger = logging.getLogger(__name__)
@@ -130,6 +134,33 @@ class ProbeArmingService:
                     "rung": probe.rung,
                     "rung_language": probe_rung_language(probe.rung),
                     "next_step": probe_rung_next_step(probe.rung),
+                },
+            )
+
+        # ── 3.5 what this runtime can actually score ────────────────────────────────
+        # ⚠ BEFORE PARITY, AND DELIBERATELY NOT A CONSEQUENCE OF IT. Nothing builds a scope mask
+        # (`scored_mask` has no production caller and `ProbeRequestContext` gets `mask=None`), so
+        # every armed probe scores every position. For `all` that is correct and is the only
+        # reason this has never bitten. A `prompt`-scoped probe would score the model's own
+        # output with weights that never saw one.
+        #
+        # Until 2026-09-28 the parity gate refused these scopes incidentally, because it cannot
+        # replay them. Resting a safety property on another gate's side effect is how a later
+        # "fix parity for prompt scope" would have quietly opened this one. Costs no forward pass,
+        # so it belongs above parity regardless.
+        if not scope_is_runtime_scorable(probe.scope):
+            raise ProbeScopeUnverifiableError(
+                f"This probe's scope is {probe.scope!r}, and this runtime can only score "
+                f"scope 'all' probes. Two separate things are missing and neither is a problem "
+                f"with your build: nothing here restricts scoring to a scope's positions yet, so "
+                f"the probe would score the whole request; and a narrower scope's recorded "
+                f"scores cannot be reproduced for comparison, because the definition records "
+                f"which tokens miStudio scored but not which of them its role mask selected. "
+                f"Re-export the probe with scope 'all' to arm it here.",
+                details={
+                    "scope": probe.scope,
+                    "runtime_scorable_scopes": sorted(RUNTIME_SCORABLE_SCOPES),
+                    "reason": "scope_not_runtime_scorable",
                 },
             )
 

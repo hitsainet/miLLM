@@ -394,10 +394,14 @@ class TestAnUnverifiableScopeSaysSo:
                 forward=lambda *a, **k: None,
             )
         text = str(exc.value)
-        assert "'prompt'" in text
-        assert "scope 'all'" in text
-        assert "not a disagreement about the numbers" in text
+        assert "'prompt'" in text, "the operator must be told which scope they exported"
+        assert "scope 'all'" in text, "the remedy is producer-side and must be named"
+        # ⚠ The sentence that matters. The reported defect was a message that sent the operator
+        # to debug a build that was fine.
+        assert "neither is a problem with your build" in text
         assert exc.value.details["scope"] == "prompt"
+        assert exc.value.details["reason"] == "scope_not_runtime_scorable"
+        assert exc.value.details["runtime_scorable_scopes"] == ["all"]
 
     @pytest.mark.asyncio
     async def test_a_REAL_parity_failure_still_reports_as_one(self):

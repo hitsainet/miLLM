@@ -584,6 +584,30 @@ class ProbeModelMismatchError(MiLLMError):
     status_code = 409
 
 
+class ProbeScopeUnverifiableError(MiLLMError):
+    """The probe's scope cannot be checked against its recorded scores at all.
+
+    ⚠ **NOT THE SAME AS FAILING PARITY, AND SAYING SO MATTERS.** Only `scope: all` is exactly
+    reproducible. For `prompt` and `response`, miStudio scored under a narrower internal role
+    mask and `mistudio.probe-definition/v1` carries no record of WHICH positions those were —
+    only the token ids. So nothing can be compared, and the probe is refused rather than armed
+    unverified.
+
+    This used to surface as `PROBE_PARITY_FAILED` — *"this build does not reproduce the scores
+    miStudio recorded"* — over a report where **zero of sixteen vectors were comparable and zero
+    tokens were scored**. An operator reading that goes and debugs their build, their model and
+    their precision, none of which is involved. This estate already has the rule, written after
+    the mirror-image defect: a parity check that reports "incorrect" against a correct
+    implementation is worse than none, because it is believed the first time.
+
+    The fix is on the PRODUCER side — export the probe with `scope: all`, or extend the contract
+    to record the mask — so the message says that instead of implying a numerical disagreement.
+    """
+
+    code = "PROBE_SCOPE_UNVERIFIABLE"
+    status_code = 409
+
+
 class ProbeParityFailedError(MiLLMError):
     """This build does not reproduce the scores miStudio recorded for the definition's vectors.
 

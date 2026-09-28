@@ -71,6 +71,7 @@ ERROR_STATUS_MAP: dict[str, tuple[int, str]] = {
     "PROBE_SAE_MISMATCH": (409, "invalid_request_error"),
     "PROBE_NO_MODEL_LOADED": (409, "invalid_request_error"),
     "PROBE_HOOK_UNSUPPORTED": (409, "invalid_request_error"),
+    "PROBE_SCOPE_UNVERIFIABLE": (409, "invalid_request_error"),
     # Model errors
     "MODEL_NOT_LOADED": (503, "server_error"),
     "MODEL_NOT_FOUND": (404, "invalid_request_error"),

@@ -29,6 +29,7 @@ from millm.core.errors import (
     ProbeLimitError,
     ProbeModelMismatchError,
     ProbeParityFailedError,
+    ProbeScopeUnverifiableError,
     UnvalidatedProbeError,
 )
 from millm.core.probe_evidence import (
@@ -38,7 +39,7 @@ from millm.core.probe_evidence import (
 )
 from millm.ml.probe_head import ProbeHead
 from millm.services.probe_identity import LoadedIdentity, check_identity
-from millm.services.probe_parity import ProbeParityEngine
+from millm.services.probe_parity import NOT_COMPARABLE_SCOPE, ProbeParityEngine
 from millm.services.probe_runtime import ArmedProbe, ProbeRuntimeState
 
 logger = logging.getLogger(__name__)
@@ -144,9 +145,30 @@ class ProbeArmingService:
         )
         await self.repository.update(probe, parity=parity.as_details())
         if not parity.passed:
+            details = parity.as_details()
+            # ⚠ "NOTHING COULD BE COMPARED" IS NOT "THE NUMBERS DISAGREE".
+            #
+            # A `prompt` or `response` probe has no reproducible positions — the contract records
+            # the token ids but not which ones miStudio's role mask selected — so every vector
+            # comes back incomparable and nothing is scored. Reporting that as
+            # PROBE_PARITY_FAILED tells the operator their build is wrong, and sends them to
+            # debug a model, a precision and a hook point that are all fine. Reported
+            # 2026-09-28 against an L6 probe exported with `scope: prompt`.
+            unverifiable = [
+                v for v in parity.vectors if v.reason == NOT_COMPARABLE_SCOPE
+            ]
+            if unverifiable and len(unverifiable) == len(parity.vectors):
+                raise ProbeScopeUnverifiableError(
+                    f"This probe's scope is {probe.scope!r}, and only 'all' can be verified "
+                    f"against its recorded scores. miStudio scored it under a narrower role "
+                    f"mask and the definition does not record which positions those were, so "
+                    f"there is nothing to compare — this is not a disagreement about the "
+                    f"numbers. Re-export the probe with scope 'all' to arm it here.",
+                    details={**details, "scope": probe.scope},
+                )
             raise ProbeParityFailedError(
                 "This build does not reproduce the scores miStudio recorded for this probe",
-                details=parity.as_details(),
+                details=details,
             )
 
         # ── all gates passed ────────────────────────────────────────────────────────

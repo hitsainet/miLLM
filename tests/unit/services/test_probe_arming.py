@@ -289,3 +289,206 @@ class TestHeadConstruction:
         doc["head"]["attention_query"] = [0.5] * 8
         head = head_from_definition(doc)
         assert head.attention_query is not None and head.attention_query.shape == (8,)
+
+
+class TestAnUnverifiableScopeSaysSo:
+    """⚠ "Nothing could be compared" is not "the numbers disagree".
+
+    Only `scope: all` is exactly reproducible. A `prompt` or `response` probe has no
+    reproducible positions — the contract records the token ids but not which ones miStudio's
+    role mask selected — so every vector comes back incomparable and NOTHING is scored.
+
+    That surfaced as `PROBE_PARITY_FAILED`, *"this build does not reproduce the scores miStudio
+    recorded"*, over a report with **0 of 16 comparable and 0 tokens scored**. An operator
+    reading that debugs their build, their model and their precision, none of which is involved.
+    Reported 2026-09-28 against an L6 probe exported with `scope: prompt`.
+
+    This estate already has the rule, from the mirror-image defect: a parity check that reports
+    "incorrect" against a correct implementation is worse than none, because it is believed the
+    first time.
+    """
+
+    @staticmethod
+    def _probe(scope: str):
+        from unittest.mock import MagicMock
+
+        row = MagicMock()
+        row.id = "pr_s"
+        row.name = "scoped"
+        row.layer = 6
+        row.rule = "mean"
+        row.scope = scope
+        row.basis = "residual"
+        row.threshold = 1.0
+        row.rung = 2
+        row.armed = False
+        row.definition = {
+            "read": {"layer": 6, "hook_point": "resid_post"},
+            "aggregation": {"rule": "mean"},
+            "scope": scope,
+            "basis": "residual",
+            "head": {
+                "weights": [0.1] * 8,
+                "bias": 0.0,
+                "norm_mean": [0.0] * 8,
+                "norm_std": [1.0] * 8,
+            },
+            "model": {"hf_id": "LiquidAI/LFM2.5-1.2B-Instruct", "d_model": 8, "n_layers": 16},
+            "decision": {"threshold": 1.0},
+            "evidence": {"rung": 2},
+            "test_vectors": {
+                "tolerance": 0.05,
+                "vectors": [
+                    {"token_ids": [1, 2, 3], "token_scores": [0.1, 0.2, 0.3], "score": 0.2}
+                ],
+            },
+        }
+        return row
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("scope", ["prompt", "response"])
+    async def test_it_refuses_with_its_own_code_not_parity_failed(self, scope):
+        from unittest.mock import AsyncMock, MagicMock
+
+        from millm.core.errors import ProbeParityFailedError, ProbeScopeUnverifiableError
+        from millm.services.probe_arming import ProbeArmingService
+        from millm.services.probe_identity import LoadedIdentity
+
+        repo = MagicMock()
+        repo.count_armed = AsyncMock(return_value=0)
+        repo.update = AsyncMock()
+        identity = LoadedIdentity(
+            hf_id="LiquidAI/LFM2.5-1.2B-Instruct", d_model=8, n_layers=16
+        )
+
+        with pytest.raises(ProbeScopeUnverifiableError) as exc:
+            await ProbeArmingService(repo).arm(
+                self._probe(scope),
+                model=MagicMock(),
+                loaded=identity,
+                forward=lambda *a, **k: None,
+            )
+        assert not isinstance(exc.value, ProbeParityFailedError)
+        assert exc.value.code == "PROBE_SCOPE_UNVERIFIABLE"
+
+    @pytest.mark.asyncio
+    async def test_the_message_names_the_scope_and_the_remedy(self):
+        """The operator must be able to act on it: the fix is on the PRODUCER side."""
+        from unittest.mock import AsyncMock, MagicMock
+
+        from millm.core.errors import ProbeScopeUnverifiableError
+        from millm.services.probe_arming import ProbeArmingService
+        from millm.services.probe_identity import LoadedIdentity
+
+        repo = MagicMock()
+        repo.count_armed = AsyncMock(return_value=0)
+        repo.update = AsyncMock()
+
+        with pytest.raises(ProbeScopeUnverifiableError) as exc:
+            await ProbeArmingService(repo).arm(
+                self._probe("prompt"),
+                model=MagicMock(),
+                loaded=LoadedIdentity(
+                    hf_id="LiquidAI/LFM2.5-1.2B-Instruct", d_model=8, n_layers=16
+                ),
+                forward=lambda *a, **k: None,
+            )
+        text = str(exc.value)
+        assert "'prompt'" in text
+        assert "scope 'all'" in text
+        assert "not a disagreement about the numbers" in text
+        assert exc.value.details["scope"] == "prompt"
+
+    @pytest.mark.asyncio
+    async def test_a_REAL_parity_failure_still_reports_as_one(self):
+        """⚠ Specificity. If every refusal became 'unverifiable scope', the gate would stop
+        reporting the thing it exists for."""
+        from unittest.mock import AsyncMock, MagicMock
+
+        import torch
+
+        from millm.core.errors import ProbeParityFailedError
+        from millm.services.probe_arming import ProbeArmingService
+        from millm.services.probe_identity import LoadedIdentity
+        from millm.services.probe_runtime import ProbeRequestContext
+
+        repo = MagicMock()
+        repo.count_armed = AsyncMock(return_value=0)
+        repo.update = AsyncMock()
+
+        def forward(ids, context: ProbeRequestContext):
+            context.observe(6, torch.zeros(1, ids.shape[1], 8))
+
+        with pytest.raises(ProbeParityFailedError):
+            await ProbeArmingService(repo).arm(
+                self._probe("all"),          # reproducible scope, wrong numbers
+                model=MagicMock(),
+                loaded=LoadedIdentity(
+                    hf_id="LiquidAI/LFM2.5-1.2B-Instruct", d_model=8, n_layers=16
+                ),
+                forward=forward,
+            )
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "scope,expect_all",
+        [("prompt", True), ("response", True), ("all", False)],
+    )
+    async def test_the_scope_reason_is_all_or_nothing(self, scope, expect_all):
+        """⚠ THIS INVARIANT IS WHAT MAKES THE ARMING BRANCH SAFE, so it is pinned here.
+
+        `arm()` refuses with PROBE_SCOPE_UNVERIFIABLE only when **every** vector is
+        unverifiable, and reports a parity failure otherwise. A mutation relaxing that to
+        "any vector" survives the suite — measured, not argued: `NOT_COMPARABLE_SCOPE` is
+        set from `scope_is_reproducible(probe.scope)`, which is constant across vectors, so
+        the set is either empty or the whole list and the two spellings agree today.
+
+        If a later contract carries scope per vector, that stops being true and a single
+        unverifiable vector would hide a real disagreement on the other fifteen. This test
+        goes red at that moment, which is the point of it.
+        """
+        from unittest.mock import MagicMock
+
+        import torch
+
+        from millm.services.probe_parity import NOT_COMPARABLE_SCOPE, ProbeParityEngine
+        from millm.services.probe_runtime import ArmedProbe, ProbeRequestContext
+
+        row = self._probe(scope)
+        definition = dict(row.definition)
+        definition["test_vectors"] = {
+            "tolerance": 0.05,
+            "vectors": [
+                {"token_ids": [1, 2, 3], "token_scores": [0.1, 0.2, 0.3], "score": 0.2},
+                {"token_ids": [4, 5], "token_scores": [0.4, 0.5], "score": 0.45},
+                {"token_ids": [6], "token_scores": [0.6], "score": 0.6},
+            ],
+        }
+
+        def forward(ids, context: ProbeRequestContext):
+            context.observe(6, torch.zeros(1, ids.shape[1], 8))
+
+        probe = ArmedProbe(
+            probe_id="pr_s",
+            name="scoped",
+            head=head_from_definition(definition),
+            rule="mean",
+            scope=scope,
+            layer=6,
+            rung=2,
+            rung_language="held-out",
+            threshold=1.0,
+        )
+        report = ProbeParityEngine(forward).run(
+            probe=probe, definition=definition, tolerance=0.05
+        )
+        expected_n = len(definition["test_vectors"]["vectors"])
+
+        flagged = [v for v in report.vectors if v.reason == NOT_COMPARABLE_SCOPE]
+        assert len(report.vectors) == expected_n
+        if expect_all:
+            assert len(flagged) == len(report.vectors), (
+                "a partially-flagged report would make 'any' and 'all' disagree in arm()"
+            )
+        else:
+            assert flagged == []

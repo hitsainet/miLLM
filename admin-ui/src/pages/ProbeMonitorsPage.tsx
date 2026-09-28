@@ -13,7 +13,7 @@
  *    request said nothing at all. Neither is "did not fire".
  */
 
-import { useMemo, useState } from 'react';
+import { useCallback, useMemo, useState } from 'react';
 import { AlertTriangle, Radar, Trash2, Upload } from 'lucide-react';
 import type { ProbeAckDetails } from '@/hooks/useProbes';
 import { ProbeHubBrowser } from '@/components/probes/ProbeHubBrowser';
@@ -234,20 +234,72 @@ function AcknowledgeDialog({
 }
 
 
+/** One event's decoded prompt window, fetched on demand and rendered in place.
+ *
+ * ⚠ A SEPARATE COMPONENT SO THE HOOK IS UNCONDITIONAL. `useProbeEventDetail` cannot be called
+ * from a loop or behind an `if` in the parent, so each expanded row mounts its own fetcher. That
+ * is also what makes several windows open at once: each holds its own query, keyed by its own id.
+ *
+ * The list and the socket carry no prompt text — this route is the only one that serves it, and
+ * fetching per event on expand is the point of that design, not a workaround.
+ */
+function EventContext({ eventId }: { eventId: number }) {
+  const detail = useProbeEventDetail(eventId);
+
+  if (detail.isLoading) {
+    return <p className="text-xs text-slate-500 px-2 pb-2">Loading the prompt window…</p>;
+  }
+  if (detail.isError) {
+    return (
+      <p className="text-xs text-amber-300 px-2 pb-2">
+        Could not load this event&rsquo;s prompt window.
+      </p>
+    );
+  }
+  const data = detail.data;
+  if (!data) return null;
+
+  return (
+    <div data-testid="event-context" className="px-2 pb-2 space-y-1">
+      {data.summary && <p className="text-xs text-slate-400">{data.summary}</p>}
+      {data.context_text ? (
+        <pre
+          data-testid="event-context-text"
+          className="text-xs text-slate-300 whitespace-pre-wrap break-words bg-slate-900 p-2 rounded max-h-64 overflow-y-auto"
+        >
+          {data.context_text}
+        </pre>
+      ) : (
+        /* ⚠ Says WHY it is empty. A blank panel here is indistinguishable from the defect where
+           nothing captured the window at all — which is what was reported. Events recorded before
+           the capture shipped have no text and never will, so the absence is stated. */
+        <p data-testid="event-context-absent" className="text-xs text-slate-500">
+          No prompt window was recorded for this event.
+        </p>
+      )}
+    </div>
+  );
+}
+
+
 function EventRow({
   event,
   probeName,
-  onOpen,
+  expanded,
+  onToggle,
 }: {
   event: ProbeEvent;
   probeName: string;
-  onOpen: (id: number) => void;
+  expanded: boolean;
+  onToggle: (id: number) => void;
 }) {
   return (
+    <div className="border-b border-slate-800 last:border-b-0">
     <button
       data-testid="event-row"
-      onClick={() => onOpen(event.id)}
-      className="w-full text-left border-b border-slate-800 py-2 px-2 hover:bg-slate-800/50"
+      aria-expanded={expanded}
+      onClick={() => onToggle(event.id)}
+      className="w-full text-left py-2 px-2 hover:bg-slate-800/50"
     >
       <div className="flex items-center justify-between gap-3">
         {/* ⚠ WHICH PROBE SAID THIS. Two probes armed on one layer produce two verdicts per
@@ -282,10 +334,14 @@ function EventRow({
         </span>
         <span className="text-[11px] text-slate-500">·</span>
         <span className="text-[11px] text-slate-500">
-          click for the prompt window
+          {expanded ? 'hide the prompt window' : 'show the prompt window'}
         </span>
       </div>
     </button>
+    {/* Beneath THIS row, so the window sits with the verdict it belongs to. Several rows can be
+        open at once — each is its own independent toggle. */}
+    {expanded && <EventContext eventId={event.id} />}
+    </div>
   );
 }
 
@@ -302,12 +358,14 @@ function RequestGroup({
   requestId,
   events,
   probeNames,
-  onOpen,
+  expandedIds,
+  onToggle,
 }: {
   requestId: string;
   events: ProbeEvent[];
   probeNames: Map<string, string>;
-  onOpen: (id: number) => void;
+  expandedIds: ReadonlySet<number>;
+  onToggle: (id: number) => void;
 }) {
   return (
     <div data-testid="request-group" className="border-b border-slate-800 last:border-b-0">
@@ -328,7 +386,8 @@ function RequestGroup({
           key={event.id}
           event={event}
           probeName={probeNames.get(event.probe_id) ?? event.probe_id}
-          onOpen={onOpen}
+          expanded={expandedIds.has(event.id)}
+          onToggle={onToggle}
         />
       ))}
     </div>
@@ -367,7 +426,18 @@ export function ProbeMonitorsPage() {
     remove,
     clearEvents,
   } = useProbes();
-  const [openEventId, setOpenEventId] = useState<number | null>(null);
+  // ⚠ A SET, not a single id. One window per event, several open at once — a single
+  // `openEventId` could only ever show one, and it showed it in a panel detached from the row
+  // it described.
+  const [expandedIds, setExpandedIds] = useState<ReadonlySet<number>>(() => new Set());
+  const toggleEvent = useCallback((id: number) => {
+    setExpandedIds((current) => {
+      const next = new Set(current);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+  }, []);
   // probe_id -> name, so a verdict row says WHICH probe produced it. Falls back to the id for a
   // probe that has since been deleted — an orphaned verdict is still evidence and must render.
   const probeNames = useMemo(
@@ -375,7 +445,6 @@ export function ProbeMonitorsPage() {
     [probes],
   );
   const [showHub, setShowHub] = useState(false);
-  const eventDetail = useProbeEventDetail(openEventId);
 
   const onFile = async (file: File) => {
     try {
@@ -535,43 +604,14 @@ export function ProbeMonitorsPage() {
                 requestId={requestId}
                 events={group}
                 probeNames={probeNames}
-                onOpen={setOpenEventId}
+                expandedIds={expandedIds}
+                onToggle={toggleEvent}
               />
             ))}
           </div>
         )}
       </section>
 
-      {/* ⚠ The context window is fetched HERE, per event, on demand. The list and the socket
-          carry none of it — it is the user's words. */}
-      {openEventId !== null && (
-        <section
-          data-testid="event-detail"
-          className="border border-slate-700 rounded p-3 space-y-2"
-        >
-          <div className="flex items-center justify-between">
-            <h3 className="text-slate-200 text-sm font-medium">Event {openEventId}</h3>
-            <button
-              onClick={() => setOpenEventId(null)}
-              className="text-xs text-slate-400 hover:text-slate-200"
-            >
-              Close
-            </button>
-          </div>
-          {eventDetail.isLoading ? (
-            <p className="text-slate-500 text-sm">Loading…</p>
-          ) : eventDetail.data ? (
-            <>
-              <p className="text-xs text-slate-400">{eventDetail.data.summary}</p>
-              {eventDetail.data.context_text && (
-                <pre className="text-xs text-slate-300 whitespace-pre-wrap bg-slate-900 p-2 rounded">
-                  {eventDetail.data.context_text}
-                </pre>
-              )}
-            </>
-          ) : null}
-        </section>
-      )}
     </div>
   );
 }

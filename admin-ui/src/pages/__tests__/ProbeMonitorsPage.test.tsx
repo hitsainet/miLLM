@@ -10,7 +10,7 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { MemoryRouter } from 'react-router-dom';
-import { render, screen } from '@testing-library/react';
+import { fireEvent, render, screen } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import type { Probe, ProbeEvent, ProbeStatus } from '@/types/probe';
 
@@ -18,6 +18,8 @@ const state = {
   probes: [] as Probe[],
   status: undefined as ProbeStatus | undefined,
   events: [] as ProbeEvent[],
+  eventDetails: {} as Record<number, { summary?: string | null; context_text?: string | null }>,
+  eventDetailError: false,
   armingId: null as string | null,
   pendingAck: undefined as
     | { id: string; details: { rung?: number; rung_language?: string; next_step?: string } }
@@ -53,7 +55,13 @@ vi.mock('@/hooks/useProbes', () => ({
     remove: vi.fn(),
     clearEvents: vi.fn(),
   }),
-  useProbeEventDetail: () => ({ data: undefined, isLoading: false }),
+  // Keyed by event id, so a test can assert that EACH expanded row fetched ITS OWN event —
+  // a single shared stub would pass against a component that ignored the id.
+  useProbeEventDetail: (id: number | null) => ({
+    data: id === null ? undefined : state.eventDetails[id],
+    isLoading: false,
+    isError: Boolean(state.eventDetailError),
+  }),
 }));
 
 // Imported after the mock so the page picks it up.
@@ -450,5 +458,113 @@ describe('groupByRequest', () => {
     const groups = groupByRequest(rows);
     expect(groups).toHaveLength(2);
     expect(groups[0][0]).toBe('—');
+  });
+});
+
+describe('the prompt window opens inline, per event', () => {
+  beforeEach(() => {
+    state.probes = [];
+    state.events = [];
+    state.eventDetails = {};
+    state.eventDetailError = false;
+  });
+
+  it('is closed until the row is clicked, and then sits under that row', async () => {
+    state.probes = [probe({ id: 'pr_1', name: 'A' })];
+    state.events = [event({ id: 7 })];
+    state.eventDetails = { 7: { summary: 'score 2.31', context_text: 'the user asked about X' } };
+    renderPage();
+
+    expect(screen.queryByTestId('event-context')).toBeNull();
+
+    const row = screen.getByTestId('event-row');
+    expect(row).toHaveAttribute('aria-expanded', 'false');
+    fireEvent.click(row);
+
+    const panel = await screen.findByTestId('event-context');
+    expect(panel).toHaveTextContent('the user asked about X');
+    expect(screen.getByTestId('event-row')).toHaveAttribute('aria-expanded', 'true');
+    // ⚠ Under THAT row, not in a detached panel: the row and its window share a parent.
+    expect(screen.getByTestId('event-row').parentElement).toContainElement(panel);
+  });
+
+  it('clicking again closes it', async () => {
+    state.probes = [probe()];
+    state.events = [event({ id: 7 })];
+    state.eventDetails = { 7: { context_text: 'words' } };
+    renderPage();
+
+    fireEvent.click(screen.getByTestId('event-row'));
+    expect(await screen.findByTestId('event-context')).toBeTruthy();
+    fireEvent.click(screen.getByTestId('event-row'));
+    expect(screen.queryByTestId('event-context')).toBeNull();
+  });
+
+  it('⚠ TWO events can be open at once, each showing ITS OWN prompt', async () => {
+    // The reported ask. A single `openEventId` could only ever show one window, and showed it
+    // detached from the row. Two probes on one request is the normal case, so comparing their
+    // two windows side by side is the thing this has to support.
+    state.probes = [probe({ id: 'pr_a', name: 'A' }), probe({ id: 'pr_b', name: 'B' })];
+    state.events = [
+      event({ id: 11, probe_id: 'pr_a', request_id: 'chatcmpl-x' }),
+      event({ id: 12, probe_id: 'pr_b', request_id: 'chatcmpl-x' }),
+    ];
+    state.eventDetails = {
+      11: { context_text: 'window for eleven' },
+      12: { context_text: 'window for twelve' },
+    };
+    renderPage();
+
+    const rows = screen.getAllByTestId('event-row');
+    fireEvent.click(rows[0]);
+    fireEvent.click(rows[1]);
+
+    const panels = await screen.findAllByTestId('event-context');
+    expect(panels).toHaveLength(2);
+    const texts = screen.getAllByTestId('event-context-text').map((n) => n.textContent);
+    expect(texts).toContain('window for eleven');
+    expect(texts).toContain('window for twelve');
+  });
+
+  it('opening one row does not open the others', async () => {
+    state.probes = [probe({ id: 'pr_a', name: 'A' }), probe({ id: 'pr_b', name: 'B' })];
+    state.events = [
+      event({ id: 11, probe_id: 'pr_a', request_id: 'r1' }),
+      event({ id: 12, probe_id: 'pr_b', request_id: 'r1' }),
+    ];
+    state.eventDetails = { 11: { context_text: 'eleven' }, 12: { context_text: 'twelve' } };
+    renderPage();
+
+    fireEvent.click(screen.getAllByTestId('event-row')[0]);
+    await screen.findByTestId('event-context');
+
+    expect(screen.getAllByTestId('event-context')).toHaveLength(1);
+    expect(screen.getAllByTestId('event-row')[1]).toHaveAttribute('aria-expanded', 'false');
+  });
+
+  it('⚠ an event with no recorded window SAYS SO rather than rendering blank', async () => {
+    // A blank panel is indistinguishable from the defect where nothing captured the window at
+    // all — which is exactly what was reported. Events from before the capture shipped have no
+    // text and never will, so the absence has to be stated.
+    state.probes = [probe()];
+    state.events = [event({ id: 3 })];
+    state.eventDetails = { 3: { summary: 'score 1.0', context_text: null } };
+    renderPage();
+
+    fireEvent.click(screen.getByTestId('event-row'));
+    expect(await screen.findByTestId('event-context-absent')).toHaveTextContent(
+      'No prompt window was recorded',
+    );
+    expect(screen.queryByTestId('event-context-text')).toBeNull();
+  });
+
+  it('a failed fetch is reported, not silently empty', async () => {
+    state.probes = [probe()];
+    state.events = [event({ id: 3 })];
+    state.eventDetailError = true;
+    renderPage();
+
+    fireEvent.click(screen.getByTestId('event-row'));
+    expect(await screen.findByText(/Could not load/)).toBeTruthy();
   });
 });

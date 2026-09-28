@@ -155,8 +155,24 @@ class ProbeEventRepository:
         if max_age_days <= 0:
             return 0
         cutoff = datetime.now(timezone.utc) - timedelta(days=max_age_days)
+        # ⚠ `synchronize_session=False`, and it is not an optimisation.
+        #
+        # A criteria DELETE defaults to synchronizing the session by EVALUATING the WHERE clause in
+        # Python against every matching object already loaded in the identity map. That comparison
+        # is `loaded_created_at < cutoff`, and `cutoff` is timezone-aware. `created_at` is
+        # `DateTime(timezone=True)`, which PostgreSQL honours and **SQLite ignores** — so any
+        # session that has an event's `created_at` loaded raises
+        # `TypeError: can't compare offset-naive and offset-aware datetimes` and retention silently
+        # stops, because `record()` catches the failure and returns 0.
+        #
+        # It stayed hidden because `commit()` expires attributes, so the evaluator normally finds
+        # nothing loaded to compare. It surfaced on 2026-09-28 the moment `record()` began reading
+        # the persisted rows back (to emit `id` and `created_at` to the UI) — two `record()` calls
+        # on one session were enough. Nothing about the delete needs the identity map refreshed
+        # here, so the evaluation is simply not asked for.
         result = await self.session.execute(
-            delete(ProbeEvent).where(ProbeEvent.created_at < cutoff)
+            delete(ProbeEvent).where(ProbeEvent.created_at < cutoff),
+            execution_options={"synchronize_session": False},
         )
         await self.session.commit()
         return int(result.rowcount or 0)
@@ -178,7 +194,11 @@ class ProbeEventRepository:
             delete(ProbeEvent).where(
                 ProbeEvent.probe_id == probe_id,
                 ProbeEvent.id.not_in(keep.scalar_subquery()),
-            )
+            ),
+            # Same reason as `prune_aged`: no Python-side evaluation of the criteria. This one
+            # cannot be evaluated in Python at all (it is a subquery), so it has been falling back
+            # to a fetch — a second round trip for a synchronisation nothing here uses.
+            execution_options={"synchronize_session": False},
         )
         await self.session.commit()
         return int(result.rowcount or 0)

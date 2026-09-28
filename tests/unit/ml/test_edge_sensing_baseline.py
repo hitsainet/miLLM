@@ -103,19 +103,43 @@ class TestParityBaselines:
         """A miscalibrated threshold on a 4096-token prefill. Load shedding
         (F15 R1) must keep this off the critical path: it was 1430 ms before
         shedding existed, ~1 ms after."""
+        # Warm up, so the first pass's import and allocation costs land on
+        # neither measurement.
+        _time_pass(_armed(threshold=3.0), 4096)
+
         sae = _armed(threshold=0.5)
         ms = _time_pass(sae, 4096)
         # The BEHAVIOURAL half, asserted unconditionally: shedding must happen
         # and must be visible. This is the part that actually protects the
         # feature, and it is machine-independent.
         assert sae._edge_truncated is True, "saturation must be visible"
-        # The wall-clock half. 50 ms is the real target (measured ~25 ms
-        # locally); the slack exists so a contended CI runner does not fail a
-        # correct build. A genuine regression here was 1430 ms — 28x the bound
-        # even at full slack — so this still catches what it was written for.
-        assert ms < _budget(50.0), (
-            f"saturated 4096-token pass cost {ms:.1f}ms "
-            f"(bound {_budget(50.0):.0f}ms, slack x{_PERF_SLACK:g})"
+
+        # ⚠ THE COST HALF IS A RATIO AGAINST A BASELINE MEASURED ON THIS
+        # MACHINE, NOT A BARE WALL-CLOCK BOUND.
+        #
+        # It was `ms < _budget(50.0)` — 400 ms at the shared-runner slack — and
+        # on 2026-09-28 a correct build measured 457.3 ms on a contended GitHub
+        # runner. That failed Backend Tests, and the image gate then correctly
+        # refused to publish over a red suite, so three unrelated probe fixes
+        # sat undeployed behind a timing artefact. An absolute millisecond
+        # ceiling asserts something about the runner, not about this code.
+        #
+        # The calibrated pass is the same shape and the same token count with a
+        # threshold that does not saturate, so contention inflates both and
+        # cancels. Measured locally over seven paired runs: calibrated 11.0 ms
+        # median, saturated 25.3 ms median, ratio 2.24x - 2.34x.
+        #
+        # The regression this exists for is shedding not happening at all:
+        # 1430 ms against an ~11 ms calibrated pass, about 130x. 8x leaves ~3.4x
+        # headroom over the observed maximum and still fails an order of
+        # magnitude below that, which is the trade the original bound was
+        # reaching for and could not hold.
+        calibrated_ms = _time_pass(_armed(threshold=3.0), 4096)
+        ratio = ms / max(calibrated_ms, 1e-9)
+        assert ratio < 8.0, (
+            f"saturated 4096-token pass cost {ms:.1f}ms against a calibrated "
+            f"{calibrated_ms:.1f}ms on the same machine ({ratio:.2f}x, bound 8x) "
+            f"— shedding is not keeping saturation off the critical path"
         )
 
     def test_a_realistic_long_prefill_stays_within_the_per_layer_budget(self):

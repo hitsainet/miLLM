@@ -82,7 +82,7 @@ class ProbeEventService:
             )
 
         try:
-            await self.events.create_many(rows)
+            persisted = await self.events.create_many(rows)
             for probe_id in {row["probe_id"] for row in rows}:
                 await self.events.prune(
                     probe_id,
@@ -93,7 +93,9 @@ class ProbeEventService:
             logger.warning("probe_event_persist_failed", extra={"error": str(exc)})
             return 0
 
-        self._emit_events(rows)
+        # ⚠ The PERSISTED rows, not the dicts above: only these carry `id` and `created_at`,
+        # which the UI needs to key the list and to open the event detail.
+        self._emit_events([event_summary(row) for row in persisted])
         return len(rows)
 
     def _emit_events(self, payloads: list[dict[str, Any]]) -> None:
@@ -207,6 +209,44 @@ def _live_armed_ids() -> list[str]:
     from millm.services.probe_runtime import ProbeRuntimeState
 
     return [p.probe_id for p in ProbeRuntimeState().armed()]
+
+
+def event_summary(event: Any) -> dict[str, Any]:
+    """One probe event, WITHOUT its context — the single shape both readers get.
+
+    ⚠ THE SOCKET AND THE REST LIST FEED THE SAME UI LIST, SO THEY MUST NOT HAVE TWO SHAPES.
+    They did. `record()` emitted the dicts it had just built to INSERT, which carry no `id`
+    (autoincrement) and no `created_at` (server default) because neither exists until the row is
+    written. The REST list served these fields. So a live event arrived at the browser with
+    `id: undefined`, the tile's `key={event.id}` collapsed every live row onto the same key, and
+    `onClick={() => onOpen(event.id)}` could not open the one route that serves the prompt window.
+    The list only looked right after a refetch — reported 2026-09-28 as "I have to refresh the
+    browser for the verdicts to be displayed".
+
+    `create_many` has returned the persisted rows all along; the service discarded them.
+
+    Privacy: `context_text` and `context_token_ids` are absent BY CONSTRUCTION here rather than
+    removed afterwards. `strip_context` is still applied at the emit site — a no-op on this shape,
+    and the thing that keeps holding if a field is ever added.
+    """
+    created = getattr(event, "created_at", None)
+    return {
+        "id": getattr(event, "id", None),
+        "probe_id": event.probe_id,
+        "request_id": event.request_id,
+        "scored": event.scored,
+        "not_scored_reason": event.not_scored_reason,
+        "score": event.score,
+        "threshold": event.threshold,
+        "verdict": event.verdict,
+        "rung": event.rung,
+        "top_positions": event.top_positions,
+        "n_scored_tokens": event.n_scored_tokens,
+        "summary": event.summary,
+        # ⚠ isoformat, not the datetime: this goes through socket.io's JSON encoder, which has no
+        # datetime support, and a raised encoder error is swallowed by the fire-and-forget wrapper.
+        "created_at": created.isoformat() if hasattr(created, "isoformat") else created,
+    }
 
 
 def strip_context(payload: dict[str, Any]) -> dict[str, Any]:

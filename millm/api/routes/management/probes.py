@@ -27,6 +27,7 @@ from millm.api.dependencies import (
     ProbeServiceDep,
 )
 from millm.api.schemas.common import ApiResponse
+from millm.services.probe_event_service import event_summary
 from millm.core.errors import ProbeNotFoundError
 from millm.core.probe_evidence import probe_rung_language, probe_rung_next_step
 from millm.core.config import settings
@@ -83,23 +84,9 @@ def _probe_summary(probe: Any) -> dict[str, Any]:
     }
 
 
-def _event_summary(event: Any) -> dict[str, Any]:
-    """An event WITHOUT its context. See the module docstring."""
-    return {
-        "id": event.id,
-        "probe_id": event.probe_id,
-        "request_id": event.request_id,
-        "scored": event.scored,
-        "not_scored_reason": event.not_scored_reason,
-        "score": event.score,
-        "threshold": event.threshold,
-        "verdict": event.verdict,
-        "rung": event.rung,
-        "top_positions": event.top_positions,
-        "n_scored_tokens": event.n_scored_tokens,
-        "summary": event.summary,
-        "created_at": event.created_at,
-    }
+#: ⚠ Deliberately the SERVICE's serialiser, not a copy. The socket and this route feed the same
+#: UI list, and when each built its own dict the socket's lacked `id` and `created_at`.
+_event_summary = event_summary
 
 
 # ── import ────────────────────────────────────────────────────────────────────

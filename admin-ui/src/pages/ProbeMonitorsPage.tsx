@@ -13,7 +13,7 @@
  *    request said nothing at all. Neither is "did not fire".
  */
 
-import { useState } from 'react';
+import { useMemo, useState } from 'react';
 import { AlertTriangle, Radar, Trash2, Upload } from 'lucide-react';
 import type { ProbeAckDetails } from '@/hooks/useProbes';
 import { ProbeHubBrowser } from '@/components/probes/ProbeHubBrowser';
@@ -234,16 +234,27 @@ function AcknowledgeDialog({
 }
 
 
-function EventRow({ event, onOpen }: { event: ProbeEvent; onOpen: (id: number) => void }) {
+function EventRow({
+  event,
+  probeName,
+  onOpen,
+}: {
+  event: ProbeEvent;
+  probeName: string;
+  onOpen: (id: number) => void;
+}) {
   return (
     <button
       data-testid="event-row"
       onClick={() => onOpen(event.id)}
-      className="w-full text-left border-b border-slate-800 py-2 px-1 hover:bg-slate-800/50"
+      className="w-full text-left border-b border-slate-800 py-2 px-2 hover:bg-slate-800/50"
     >
       <div className="flex items-center justify-between gap-3">
-        <span className="font-mono text-xs text-slate-400 truncate">
-          {event.request_id ?? '—'}
+        {/* ⚠ WHICH PROBE SAID THIS. Two probes armed on one layer produce two verdicts per
+            request — often one firing and one not — and the row used to show neither name nor
+            time, so the pair was indistinguishable. */}
+        <span data-testid="event-probe-name" className="text-xs text-slate-300 truncate">
+          {probeName}
         </span>
         {event.scored ? (
           <span
@@ -265,8 +276,77 @@ function EventRow({ event, onOpen }: { event: ProbeEvent; onOpen: (id: number) =
           </span>
         )}
       </div>
+      <div className="flex items-center gap-2 mt-0.5">
+        <span className="text-[11px] text-slate-500">
+          {event.created_at ? new Date(event.created_at).toLocaleTimeString() : ''}
+        </span>
+        <span className="text-[11px] text-slate-500">·</span>
+        <span className="text-[11px] text-slate-500">
+          click for the prompt window
+        </span>
+      </div>
     </button>
   );
+}
+
+
+/** Verdicts from ONE request, which is the unit an operator reasons about.
+ *
+ * ⚠ The request id is the only link between a response and its verdicts, and one prompt produces
+ * one verdict PER ARMED PROBE. Listed flat, two verdicts for the same prompt look like two
+ * unrelated observations — which is exactly how a firing and a non-firing verdict on one prompt
+ * read before this. The prompt text itself stays out of the list by design; it is fetched per
+ * event from the detail route, so the group header names the request and the rows link to it.
+ */
+function RequestGroup({
+  requestId,
+  events,
+  probeNames,
+  onOpen,
+}: {
+  requestId: string;
+  events: ProbeEvent[];
+  probeNames: Map<string, string>;
+  onOpen: (id: number) => void;
+}) {
+  return (
+    <div data-testid="request-group" className="border-b border-slate-800 last:border-b-0">
+      <div className="flex items-baseline gap-2 px-2 pt-2">
+        <span className="text-[11px] uppercase tracking-wide text-slate-500">prompt</span>
+        <span
+          data-testid="group-request-id"
+          className="font-mono text-xs text-slate-400 truncate"
+        >
+          {requestId}
+        </span>
+        <span className="text-[11px] text-slate-500">
+          {events.length === 1 ? '1 verdict' : `${events.length} verdicts`}
+        </span>
+      </div>
+      {events.map((event) => (
+        <EventRow
+          key={event.id}
+          event={event}
+          probeName={probeNames.get(event.probe_id) ?? event.probe_id}
+          onOpen={onOpen}
+        />
+      ))}
+    </div>
+  );
+}
+
+
+/** Group in arrival order, preserving it. A Map keeps insertion order, so the newest request
+ *  stays first without sorting by a timestamp the socket payload once did not carry. */
+export function groupByRequest(events: ProbeEvent[]): [string, ProbeEvent[]][] {
+  const groups = new Map<string, ProbeEvent[]>();
+  for (const event of events) {
+    const key = event.request_id ?? '—';
+    const existing = groups.get(key);
+    if (existing) existing.push(event);
+    else groups.set(key, [event]);
+  }
+  return [...groups.entries()];
 }
 
 export function ProbeMonitorsPage() {
@@ -288,6 +368,12 @@ export function ProbeMonitorsPage() {
     clearEvents,
   } = useProbes();
   const [openEventId, setOpenEventId] = useState<number | null>(null);
+  // probe_id -> name, so a verdict row says WHICH probe produced it. Falls back to the id for a
+  // probe that has since been deleted — an orphaned verdict is still evidence and must render.
+  const probeNames = useMemo(
+    () => new Map(probes.map((probe) => [probe.id, probe.name])),
+    [probes],
+  );
   const [showHub, setShowHub] = useState(false);
   const eventDetail = useProbeEventDetail(openEventId);
 
@@ -443,8 +529,14 @@ export function ProbeMonitorsPage() {
           <p className="text-slate-500 text-sm">No verdicts yet.</p>
         ) : (
           <div className="border border-slate-800 rounded">
-            {events.map((event) => (
-              <EventRow key={event.id} event={event} onOpen={setOpenEventId} />
+            {groupByRequest(events).map(([requestId, group]) => (
+              <RequestGroup
+                key={requestId}
+                requestId={requestId}
+                events={group}
+                probeNames={probeNames}
+                onOpen={setOpenEventId}
+              />
             ))}
           </div>
         )}

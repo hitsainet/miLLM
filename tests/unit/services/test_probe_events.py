@@ -245,3 +245,84 @@ class TestTheRoutesAreReachable:
 
         source = inspect.getsource(register_routes)
         assert "app.include_router(probes_router)" in source
+
+
+class TestTheSocketAndTheRestListAgree:
+    """⚠ TWO SHAPES FOR ONE UI LIST IS THE DEFECT, so the shapes are compared, not described.
+
+    `record()` used to emit the dicts it had just built to INSERT. Those carry no `id` — it is an
+    autoincrement column — and no `created_at`, a server default. The REST list served both. The
+    browser's live handler prepends a socket event into the list the REST query filled, so a live
+    verdict arrived with `id: undefined`: the tile's `key={event.id}` collapsed every live row onto
+    one key, and `onClick={() => onOpen(event.id)}` could not open the only route that serves the
+    prompt window. The list looked correct after a refetch and only then.
+
+    Reported 2026-09-28 as *"I have to refresh the browser for the verdicts to be displayed"*, on a
+    request that produced two verdicts — so both live rows shared the same undefined key.
+    """
+
+    async def test_the_emitted_payload_has_the_SAME_KEYS_as_the_rest_list(self, ctx):
+        from millm.api.routes.management.probes import _event_summary
+
+        _repo, events, service, probe = ctx
+        emitter = MagicMock()
+        with patch("millm.sockets.progress.progress_emitter", emitter):
+            await service.record("chatcmpl-shape", [verdict(probe_id=probe.id)])
+
+        sent = emitter.emit_probe_event.call_args[0][0]
+        row = (await events.list_events(probe_id=probe.id))[0]
+        served = _event_summary(row)
+
+        assert set(sent) == set(served), (
+            f"the socket and the REST list disagree; socket-only="
+            f"{sorted(set(sent) - set(served))} rest-only={sorted(set(served) - set(sent))}"
+        )
+
+    async def test_the_emitted_payload_carries_the_id_and_the_timestamp(self, ctx):
+        """The two fields the UI cannot work without, asserted by name because those are the two
+        that were missing — a key-set comparison alone would pass if BOTH sides lost them."""
+        _repo, _events, service, probe = ctx
+        emitter = MagicMock()
+        with patch("millm.sockets.progress.progress_emitter", emitter):
+            await service.record("chatcmpl-ids", [verdict(probe_id=probe.id)])
+
+        sent = emitter.emit_probe_event.call_args[0][0]
+        assert isinstance(sent["id"], int), f"id is {sent['id']!r}; the tile keys the list on it"
+        assert sent["created_at"], "created_at is empty; the row cannot show when it happened"
+
+    async def test_created_at_is_json_encodable(self, ctx):
+        """⚠ socket.io's encoder has no datetime support, and the fire-and-forget wrapper
+        swallows the error it would raise — so a datetime here would drop the event silently."""
+        import json
+
+        _repo, _events, service, probe = ctx
+        emitter = MagicMock()
+        with patch("millm.sockets.progress.progress_emitter", emitter):
+            await service.record("chatcmpl-json", [verdict(probe_id=probe.id)])
+
+        sent = emitter.emit_probe_event.call_args[0][0]
+        json.dumps(sent)  # raises TypeError on a datetime
+
+    async def test_every_verdict_in_one_request_is_emitted_with_its_own_id(self, ctx):
+        """The reported case: one prompt, two armed probes, two verdicts. Distinct ids or the
+        browser cannot tell the rows apart."""
+        _repo, _events, service, probe = ctx
+        emitter = MagicMock()
+        with patch("millm.sockets.progress.progress_emitter", emitter):
+            await service.record(
+                "chatcmpl-two",
+                [verdict(probe_id=probe.id), verdict(probe_id=probe.id, score=-1.0)],
+            )
+
+        ids = [call[0][0]["id"] for call in emitter.emit_probe_event.call_args_list]
+        assert len(ids) == 2, f"expected two emissions, got {len(ids)}"
+        assert None not in ids
+        assert len(set(ids)) == 2, f"both verdicts were emitted with the same id: {ids}"
+
+    def test_the_route_does_not_keep_its_own_copy(self):
+        """⚠ The durable half. Two functions that happen to agree today will drift; this asserts
+        they are the SAME OBJECT, which cannot."""
+        from millm.api.routes.management.probes import _event_summary
+        from millm.services.probe_event_service import event_summary
+
+        assert _event_summary is event_summary

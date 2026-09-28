@@ -57,7 +57,7 @@ vi.mock('@/hooks/useProbes', () => ({
 }));
 
 // Imported after the mock so the page picks it up.
-const { ProbeMonitorsPage } = await import('../ProbeMonitorsPage');
+const { ProbeMonitorsPage, groupByRequest } = await import('../ProbeMonitorsPage');
 
 function probe(over: Partial<Probe> = {}): Probe {
   return {
@@ -371,5 +371,84 @@ describe('ProbeMonitorsPage', () => {
     };
     renderPage();
     expect(screen.getByTestId('probe-status')).toHaveTextContent('off (serial)');
+  });
+});
+
+describe('a verdict row says which probe and which prompt', () => {
+  beforeEach(() => {
+    state.probes = [];
+    state.events = [];
+  });
+
+  it('⚠ names the PROBE, because two probes on one layer produce two verdicts per prompt', () => {
+    // The reported case: one chat, two verdicts, one firing and one not. Without a name the pair
+    // is indistinguishable and the operator cannot tell which detector said what.
+    state.probes = [
+      probe({ id: 'pr_dense', name: 'high-stakes-dense', armed: true }),
+      probe({ id: 'pr_sae', name: 'high-stakes-ksparse', basis: 'sae_features', armed: true }),
+    ];
+    state.events = [
+      event({ id: 2, probe_id: 'pr_sae', request_id: 'chatcmpl-x', verdict: false, score: -1.2 }),
+      event({ id: 1, probe_id: 'pr_dense', request_id: 'chatcmpl-x', verdict: true, score: 6.3 }),
+    ];
+    renderPage();
+
+    const names = screen.getAllByTestId('event-probe-name').map((n) => n.textContent);
+    expect(names).toContain('high-stakes-ksparse');
+    expect(names).toContain('high-stakes-dense');
+  });
+
+  it('falls back to the probe id when the probe is gone — an orphan verdict is still evidence', () => {
+    state.probes = [];
+    state.events = [event({ probe_id: 'pr_deleted' })];
+    renderPage();
+    expect(screen.getByTestId('event-probe-name')).toHaveTextContent('pr_deleted');
+  });
+
+  it('groups the verdicts from one request together, under that request', () => {
+    state.probes = [probe({ id: 'pr_a', name: 'A' }), probe({ id: 'pr_b', name: 'B' })];
+    state.events = [
+      event({ id: 3, probe_id: 'pr_a', request_id: 'chatcmpl-second' }),
+      event({ id: 2, probe_id: 'pr_b', request_id: 'chatcmpl-first' }),
+      event({ id: 1, probe_id: 'pr_a', request_id: 'chatcmpl-first' }),
+    ];
+    renderPage();
+
+    const groups = screen.getAllByTestId('request-group');
+    expect(groups).toHaveLength(2);
+    const ids = screen.getAllByTestId('group-request-id').map((n) => n.textContent);
+    // Arrival order preserved: the newest request stays first.
+    expect(ids).toEqual(['chatcmpl-second', 'chatcmpl-first']);
+    expect(groups[1]).toHaveTextContent('2 verdicts');
+    expect(groups[0]).toHaveTextContent('1 verdict');
+  });
+
+  it('shows a timestamp, so two verdicts on the same prompt can be placed in time', () => {
+    state.probes = [probe()];
+    state.events = [event({ created_at: '2026-09-28T09:24:38Z' })];
+    renderPage();
+    // Rendered via toLocaleTimeString, so assert it is non-empty rather than a fixed locale string.
+    expect(screen.getByTestId('event-row').textContent).toMatch(/\d/);
+  });
+});
+
+describe('groupByRequest', () => {
+  it('keeps arrival order and does not merge different requests', () => {
+    const rows = [
+      event({ id: 3, request_id: 'r2' }),
+      event({ id: 2, request_id: 'r1' }),
+      event({ id: 1, request_id: 'r1' }),
+    ];
+    expect(groupByRequest(rows).map(([key, group]) => [key, group.length])).toEqual([
+      ['r2', 1],
+      ['r1', 2],
+    ]);
+  });
+
+  it('a null request_id does not swallow every other group', () => {
+    const rows = [event({ id: 2, request_id: null }), event({ id: 1, request_id: 'r1' })];
+    const groups = groupByRequest(rows);
+    expect(groups).toHaveLength(2);
+    expect(groups[0][0]).toBe('—');
   });
 });

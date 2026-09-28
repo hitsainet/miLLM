@@ -253,3 +253,66 @@ class TestRetention:
         removed = await events.prune("pr_0001", cap=2, max_age_days=30)
         assert removed == 6
         assert await events.count("pr_0001") == 2
+
+
+class TestRetentionSurvivesALoadedSession:
+    """⚠ RETENTION STOPPED WORKING WHENEVER AN EVENT HAD BEEN READ FIRST.
+
+    `prune_aged`'s criteria DELETE defaulted to synchronizing the session by evaluating its WHERE
+    clause in Python against loaded objects: `loaded_created_at < cutoff`. The cutoff is
+    timezone-aware and `created_at` is `DateTime(timezone=True)`, which PostgreSQL honours and
+    SQLite ignores — so with anything loaded it raised
+    `TypeError: can't compare offset-naive and offset-aware datetimes`.
+
+    That is a silent failure, not a loud one: `ProbeEventService.record()` catches it, logs at
+    WARNING and returns 0, so the events are written, nothing is pruned, no verdict is emitted to
+    the UI, and the caller is told zero events were recorded.
+
+    It hid behind `commit()` expiring attributes — the evaluator normally found nothing loaded to
+    compare. It surfaced on 2026-09-28 when `record()` began reading the persisted rows back to
+    send `id` and `created_at` to the browser: two `record()` calls on one session were enough.
+
+    So the condition is pinned directly: read an event's `created_at`, then prune, same session.
+    """
+
+    async def test_pruning_to_cap_works_after_an_event_has_been_read(self, repo, events):
+        await repo.create(**probe_row())
+        await events.create_many(
+            [{"probe_id": "pr_0001", "request_id": f"r{i}", "scored": True} for i in range(6)]
+        )
+
+        # ⚠ The load is the whole point. Touching `created_at` is what puts a naive datetime in
+        # front of the evaluator; a test that pruned on a cold session passes against the defect.
+        loaded = await events.list_events(probe_id="pr_0001")
+        assert loaded[0].created_at is not None
+
+        removed = await events.prune("pr_0001", cap=2, max_age_days=30)
+
+        assert removed == 4, f"pruned {removed}; retention did not run over a loaded session"
+        assert await events.count("pr_0001") == 2
+
+    async def test_age_pruning_works_after_an_event_has_been_read(self, repo, events):
+        """The half that actually raised: `prune_aged`'s comparison is the naive/aware one."""
+        await repo.create(**probe_row())
+        await events.create_many([{"probe_id": "pr_0001", "request_id": "r0", "scored": True}])
+
+        loaded = await events.list_events(probe_id="pr_0001")
+        assert loaded[0].created_at is not None
+
+        # max_age_days large enough that nothing qualifies: the assertion is that it does not
+        # RAISE, and that it leaves the row alone.
+        assert await events.prune_aged(30) == 0
+        assert await events.count("pr_0001") == 1
+
+    async def test_it_still_deletes_what_is_actually_old(self, repo, events):
+        """⚠ Specificity. `synchronize_session=False` must not become "deletes nothing" — a
+        retention rule that silently keeps everything is the failure it replaced."""
+        await repo.create(**probe_row())
+        await events.create_many([{"probe_id": "pr_0001", "request_id": "old", "scored": True}])
+
+        row = (await events.list_events(probe_id="pr_0001"))[0]
+        row.created_at = datetime.now(timezone.utc) - timedelta(days=90)
+        await events.session.commit()
+
+        assert await events.prune_aged(30) == 1
+        assert await events.count("pr_0001") == 0

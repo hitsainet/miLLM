@@ -6,6 +6,7 @@ Creates the combined FastAPI + Socket.IO application.
 
 from contextlib import asynccontextmanager
 from collections.abc import AsyncGenerator
+from typing import Any
 
 import socketio
 from fastapi import FastAPI
@@ -205,6 +206,73 @@ STALE_STATE_RESETS: list[tuple[str, str, str]] = [
 ]
 
 
+async def disarm_probes_on_startup(session_factory: Any) -> list[str]:
+    """Clear every `armed` probe row, because no hook survived into this process.
+
+    ⚠ `probes.armed` is a database column; the hook it describes lives in this process's
+    `ProbeRuntimeState`. A restart empties the second and leaves the first, so every armed row
+    survives into a process where nothing is hooked — and `/api/probes/status` reported those rows
+    as armed. Observed live on 2026-09-28: a rollout landed under an armed probe, status went on
+    listing it, and a real generation came back with no verdict header. The module that builds that
+    status says the governing invariant is *"a probe never goes silently quiet"*, and a monitor
+    that stopped monitoring while still claiming to be armed is the loudest version of exactly
+    that.
+
+    Identical in shape to the circuit-claim release in `lifespan`, which is the part worth
+    recording: this estate has now shipped "a new in-memory flag left out of startup
+    reconciliation" three times — miLLM's steering lock hid thirteen models for three months.
+    Anything added to `ProbeRuntimeState` belongs here on the same commit.
+
+    Returns the ids it disarmed. Never raises: a probe bookkeeping failure must not be the reason
+    the server does not start, and `status()` cross-checks the live registry independently, so the
+    READ stays honest even when this fails.
+    """
+    from millm.db.models.probe import Probe
+    from sqlalchemy import select, update as sa_update
+
+    try:
+        async with session_factory() as session:
+            armed = (
+                await session.execute(select(Probe.id).where(Probe.armed.is_(True)))
+            ).scalars().all()
+            if not armed:
+                return []
+            await session.execute(
+                sa_update(Probe)
+                .where(Probe.armed.is_(True))
+                .values(
+                    armed=False,
+                    paused_reason=(
+                        "disarmed by a restart — the hook did not survive the process"
+                    ),
+                )
+            )
+            await session.commit()
+            logger.info(
+                "probes_disarmed_on_startup",
+                count=len(armed),
+                probes=sorted(armed),
+                detail=(
+                    "nothing is hooked after a restart, so no probe can be scoring — "
+                    "these rows would otherwise report a monitor that is not monitoring"
+                ),
+            )
+            return sorted(armed)
+    except Exception as e:  # pragma: no cover - exercised by its own test
+        logger.error(
+            "probe_startup_disarm_failed",
+            error=str(e),
+            error_type=type(e).__name__,
+            detail=(
+                "armed probe rows may survive with no hook installed; /api/probes/status "
+                "cross-checks the live registry and will mark them stale, so the read stays "
+                "honest, but the rows themselves are wrong until something re-arms or disarms"
+            ),
+            exc_info=True,
+        )
+        return []
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     """
@@ -302,6 +370,13 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
             ),
             exc_info=True,
         )
+
+    # ⚠ THE SAME FACT, FOR PROBES, AND IT WAS MISSED WHEN THEY WERE ADDED.
+    # See `disarm_probes_on_startup` for why, and why it is a named function rather than a block
+    # inlined here like the claim release above: a block can only be tested by reading the source,
+    # and a test that reads source cannot tell a statement that RUNS from one that is merely
+    # present. Gating this whole block behind `if False:` left my first version of that test green.
+    await disarm_probes_on_startup(async_session_factory)
 
     # F19 R3-15: `reconcile()` is NOT called here, deliberately.
     #

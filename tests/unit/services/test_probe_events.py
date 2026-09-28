@@ -139,23 +139,57 @@ class TestThePayloadNeverCarriesPromptText:
         assert (await events.list_events(probe_id=probe.id))[0].context_text == "user words"
 
 
+def _install_hook(probe_id: str):
+    """Put the probe in the LIVE registry, which is what `armed_count` now counts.
+
+    ⚠ These tests used to set `armed=True` on the row alone and assert `armed_count == 1`. That
+    pinned a defect rather than preventing one: the hook lives in `ProbeRuntimeState`, so a row
+    saying armed with nothing installed is precisely the post-restart state where status reported a
+    monitor that was not monitoring (observed live 2026-09-28). The stale case now has its own
+    coverage in `test_probe_survives_no_restart.py`; here the probe is genuinely armed.
+    """
+    from unittest.mock import MagicMock
+
+    from millm.services.probe_runtime import ProbeRuntimeState
+
+    ProbeRuntimeState.reset_for_tests()
+    armed = MagicMock()
+    armed.probe_id = probe_id
+    ProbeRuntimeState()._armed[probe_id] = armed
+
+
 class TestStatus:
     async def test_it_reports_the_armed_probes_with_their_language(self, ctx):
         repo, _events, service, probe = ctx
         await repo.update(probe, armed=True)
-        status = await service.status()
-        assert status["armed_count"] == 1
-        assert status["armed"][0]["rung_language"] == "detects on unseen tasks"
-        assert status["armed"][0]["next_step"]
+        _install_hook(probe.id)
+        try:
+            status = await service.status()
+            assert status["armed_count"] == 1
+            assert status["armed_rows"] == 1
+            assert status["stale_armed"] == []
+            assert status["armed"][0]["hook_installed"] is True
+            assert status["armed"][0]["rung_language"] == "detects on unseen tasks"
+            assert status["armed"][0]["next_step"]
+        finally:
+            from millm.services.probe_runtime import ProbeRuntimeState
+
+            ProbeRuntimeState.reset_for_tests()
 
     async def test_a_paused_probe_says_WHY(self, ctx):
         """⚠ "A probe never goes silently quiet" applies to status above all. An armed probe
         listed with no further comment IS that silence."""
         repo, _events, service, probe = ctx
         await repo.update(probe, armed=True, paused_reason="speculative_decoding")
-        status = await service.status()
-        assert status["armed"][0]["paused_reason"] == "speculative_decoding"
-        assert status["paused_reasons"] == ["speculative_decoding"]
+        _install_hook(probe.id)
+        try:
+            status = await service.status()
+            assert status["armed"][0]["paused_reason"] == "speculative_decoding"
+            assert status["paused_reasons"] == ["speculative_decoding"]
+        finally:
+            from millm.services.probe_runtime import ProbeRuntimeState
+
+            ProbeRuntimeState.reset_for_tests()
 
     async def test_the_overhead_field_is_present_even_when_nothing_has_run(self, ctx):
         """So an operator can tell "nothing is wrong" from "this field is missing"."""

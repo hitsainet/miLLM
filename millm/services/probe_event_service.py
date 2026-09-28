@@ -136,6 +136,30 @@ class ProbeEventService:
         """
         probes = await self.repository.list()
         armed = [p for p in probes if p.armed]
+
+        # ⚠ THE ROW IS NOT THE AUTHORITY ON WHETHER A HOOK EXISTS. `armed` is a database column
+        # and the hook lives in process memory, so every restart leaves rows claiming to be armed
+        # with nothing installed — and this method reported them as armed, silently, which is the
+        # precise silence its own docstring forbids. Observed live 2026-09-28: a rollout landed
+        # under an armed probe, `/api/probes/status` kept listing it, and a real generation
+        # produced no verdict header.
+        #
+        # So the live registry is consulted and disagreement is REPORTED rather than reconciled
+        # here — a read path that quietly writes would hide how often this happens. `main.py`
+        # reconciles at startup, which is where the state actually becomes wrong.
+        live = set(_live_armed_ids())
+        stale = [p.id for p in armed if p.id not in live]
+
+        def _paused_reason(row: Any) -> Optional[str]:
+            if row.paused_reason:
+                return row.paused_reason
+            if row.id in stale:
+                return (
+                    "no hook is installed — this process restarted since the probe was armed, "
+                    "so it is NOT scoring; re-arm it"
+                )
+            return None
+
         return {
             "armed": [
                 {
@@ -148,15 +172,21 @@ class ProbeEventService:
                     "next_step": probe_rung_next_step(p.rung),
                     "streamable": p.streamable,
                     "basis": p.basis,
-                    "paused_reason": p.paused_reason,
+                    "paused_reason": _paused_reason(p),
+                    "hook_installed": p.id in live,
                 }
                 for p in armed
             ],
-            "armed_count": len(armed),
+            #: Probes actually hooked and able to score. Deliberately NOT the number of rows
+            #: saying `armed`, which is what this reported before.
+            "armed_count": len(armed) - len(stale),
+            #: Rows claiming to be armed, so the discrepancy is visible rather than netted out.
+            "armed_rows": len(armed),
+            "stale_armed": sorted(stale),
             "max_armed": settings.PROBE_MAX_ARMED,
             "imported_count": len(probes),
             "paused_reasons": sorted(
-                {p.paused_reason for p in armed if p.paused_reason}
+                {r for r in (_paused_reason(p) for p in armed) if r}
             ),
             # Reported even when nothing is paused, so an operator can tell "nothing is wrong"
             # apart from "this field is missing".
@@ -166,6 +196,17 @@ class ProbeEventService:
             "socket_events_dropped": self._ws_dropped,
             "force_serial": settings.PROBE_FORCE_SERIAL,
         }
+
+
+def _live_armed_ids() -> list[str]:
+    """Probe ids with a hook installed in THIS process.
+
+    Imported inside the function: `probe_runtime` pulls in torch, and `status()` must not be the
+    reason a lightweight import graph grows a deep-learning dependency.
+    """
+    from millm.services.probe_runtime import ProbeRuntimeState
+
+    return [p.probe_id for p in ProbeRuntimeState().armed()]
 
 
 def strip_context(payload: dict[str, Any]) -> dict[str, Any]:

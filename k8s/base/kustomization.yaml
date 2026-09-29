@@ -11,6 +11,7 @@ resources:
   - namespace.yaml
   - postgres.yaml
   - redis.yaml
+  - db-backup.yaml
   - backend.yaml
   - frontend.yaml
   - ingress.yaml

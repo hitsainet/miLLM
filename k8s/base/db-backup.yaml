@@ -1,0 +1,258 @@
+# Nightly logical backup of the miLLM database.
+#
+# WHY THIS EXISTS. miLLM had NO backup of any kind — no cronjob, no dump, nothing — while
+# miStudio has had one since 2026-09-25. Flagged on 2026-09-29 and fixed here.
+#
+# WHAT IS ACTUALLY AT RISK, because it is not what the size suggests. The database is 8.5 MB
+# across 11 tables, and most of it is reconstructible: `probes` are re-importable from a miStudio
+# export, `models` and `saes` are re-downloadable. What is NOT reconstructible is the OBSERVED
+# data — `probe_events`, `sensing_events`, `circuit_edge_sensing_events` — because those are
+# verdicts about real traffic that happened once. A probe event carries the decoded prompt window
+# a verdict was about; re-running the model does not recreate the conversation somebody had.
+#
+# WHY A SEPARATE DISK. Same reasoning as miStudio's: `/var/lib/postgresql` lives on the node's
+# NVMe, so a backup beside it survives a bad DELETE but not the disk. `mcs-lnxhost02-hdd2` is a
+# different physical spindle. Note its pair `sda` has already failed SMART, so this is one aging
+# disk — a real improvement over nothing, and not a substitute for an off-box copy.
+#
+# SIZE. 8.5 MB uncompressed, so a dump is well under a megabyte and 30 of them are negligible.
+# The volume is shared with miStudio's backups under a separate directory.
+---
+# A SECOND PV on the SAME physical disk, under its own subdirectory.
+#
+# `mcs-lnxhost02-hdd2` is ReadWriteOnce and already bound to mistudio/mistudio-db-backups, so
+# miLLM cannot share it — a `local` PV is a directory, and RWO means one claim. Pointing this at
+# `/mnt/hdd2/pv/millm` keeps both sets of dumps on the one spindle that is not the NVMe, while
+# giving each namespace its own claim. The `storage.mcs/disk` label carries the serial so two PVs
+# on one disk are identifiable as such rather than looking independent.
+apiVersion: v1
+kind: PersistentVolume
+metadata:
+  name: mcs-lnxhost02-hdd2-millm
+  labels:
+    storage.mcs/class: local-hdd
+    storage.mcs/disk: ST31000524AS-5VP85BTT
+spec:
+  accessModes:
+    - ReadWriteOnce
+  capacity:
+    storage: 50Gi
+  local:
+    path: /mnt/hdd2/pv/millm
+  nodeAffinity:
+    required:
+      nodeSelectorTerms:
+        - matchExpressions:
+            - key: kubernetes.io/hostname
+              operator: In
+              values:
+                - mcs-lnxhost02
+  # Retain, so deleting the claim never deletes the backups.
+  persistentVolumeReclaimPolicy: Retain
+  storageClassName: local-hdd
+  volumeMode: Filesystem
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: millm-db-backups
+  namespace: millm
+spec:
+  # Bound by NAME so this claim takes that disk or stays Pending, rather than binding whatever
+  # happens to fit.
+  volumeName: mcs-lnxhost02-hdd2-millm
+  storageClassName: local-hdd
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 50Gi
+---
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: millm-db-backup
+  namespace: millm
+spec:
+  # 03:50 ET — twenty minutes after miStudio's, so the two never contend for the same spindle,
+  # and in the operator's own timezone so "nightly" does not drift twice a year.
+  schedule: "50 3 * * *"
+  timeZone: "America/New_York"
+  concurrencyPolicy: Forbid
+  # Enough history to SEE a pattern. One retained failure is indistinguishable from a one-off.
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 5
+  startingDeadlineSeconds: 3600
+  jobTemplate:
+    spec:
+      backoffLimit: 1
+      template:
+        spec:
+          restartPolicy: OnFailure
+          containers:
+            - name: dump
+              # postgres:16 to match the SERVER, not miStudio's 15. A pg_dump older than its
+              # server refuses outright; the version pair is the one thing that must track the
+              # deployment rather than the sibling project.
+              image: postgres:16
+              imagePullPolicy: IfNotPresent
+              env:
+                - name: PGHOST
+                  value: postgres
+                - name: PGUSER
+                  value: millm
+                - name: PGDATABASE
+                  value: millm
+                - name: PGPASSWORD
+                  valueFrom:
+                    secretKeyRef:
+                      name: millm-secrets
+                      key: POSTGRES_PASSWORD
+                - name: KEEP
+                  value: "30"
+                # ⚠ `/backups`, NOT `/backups/millm`. This PV's path is ALREADY
+                # `/mnt/hdd2/pv/millm`, so a `millm` subdirectory here writes to
+                # `/mnt/hdd2/pv/millm/millm/` — which is where the first test run put its dump.
+                # miStudio's job mounts the whole `/mnt/hdd2/pv` and so needs the subdirectory;
+                # copying its value across without checking the mount is what doubled it.
+                - name: BACKUP_DIR
+                  value: /backups
+              command:
+                - /bin/bash
+                - -c
+                - |
+                  set -euo pipefail
+
+                  # `set -e` is load-bearing: every step must abort rather than fall through to
+                  # the prune. A prune after a failed dump deletes real history to make room for
+                  # nothing.
+
+                  stamp="$(date -u +%Y%m%dT%H%M%SZ)"
+                  mkdir -p "$BACKUP_DIR"
+                  target="$BACKUP_DIR/millm-$stamp.dump"
+                  partial="$target.partial"
+                  log="$BACKUP_DIR/backups.log"
+
+                  say() { echo "[$(date -u +%H:%M:%SZ)] $*"; }
+
+                  # ── Has anything succeeded lately? ──────────────────────────
+                  # A CronJob that quietly fails every night looks exactly like one that never
+                  # ran. The newest dump's age is the only evidence that does not depend on
+                  # somebody having watched.
+                  newest="$(ls -1t "$BACKUP_DIR"/millm-*.dump 2>/dev/null | head -1 || true)"
+                  if [ -n "$newest" ]; then
+                    age_h=$(( ( $(date -u +%s) - $(stat -c %Y "$newest") ) / 3600 ))
+                    say "newest existing dump is ${age_h}h old: $(basename "$newest")"
+                    if [ "$age_h" -gt 48 ]; then
+                      say "WARNING: more than 48h since the last dump — previous runs failed"
+                    fi
+                  else
+                    say "no existing dump: this is the first run"
+                  fi
+
+                  avail_mb=$(df -Pm "$BACKUP_DIR" | awk 'NR==2 {print $4}')
+                  say "free space: ${avail_mb} MB"
+                  if [ "$avail_mb" -lt 512 ]; then
+                    say "REFUSING: under 512 MB free. A truncated dump that looks like a backup"
+                    say "is worse than a missing one, so this run stops before writing anything."
+                    exit 1
+                  fi
+
+                  # ── Dump ───────────────────────────────────────────────────
+                  started=$(date -u +%s)
+                  say "dumping to $(basename "$partial")"
+                  pg_dump -Fc -Z6 --file="$partial"
+                  elapsed=$(( $(date -u +%s) - started ))
+                  bytes=$(stat -c %s "$partial")
+                  say "wrote ${bytes} bytes in ${elapsed}s"
+
+                  # ── Verify BEFORE it counts as a backup ────────────────────
+                  # A backup nobody has read is a hope. `pg_restore -l` parses the archive's
+                  # table of contents, so a truncated or corrupt file fails HERE rather than on
+                  # the night it is needed.
+                  toc="$(pg_restore -l "$partial")"
+                  data_entries="$(printf '%s\n' "$toc" | grep -c 'TABLE DATA' || true)"
+                  say "archive lists ${data_entries} TABLE DATA entries"
+                  if [ "$data_entries" -lt 6 ]; then
+                    say "REFUSING: only ${data_entries} tables in the archive (expected ~11)"
+                    rm -f "$partial"; exit 1
+                  fi
+                  # Payload, not just a count. `probe_events` is named deliberately: it is the
+                  # table holding observations that CANNOT be reconstructed, which is the whole
+                  # reason this job exists.
+                  for required in probes probe_events models; do
+                    printf '%s\n' "$toc" | grep -q "TABLE DATA public $required " || {
+                      say "REFUSING: no TABLE DATA entry for '$required'"
+                      rm -f "$partial"; exit 1
+                    }
+                  done
+
+                  if [ -n "$newest" ]; then
+                    prev=$(stat -c %s "$newest")
+                    if [ "$bytes" -lt $(( prev / 2 )) ]; then
+                      say "WARNING: ${bytes} bytes is under half the previous ${prev} — check what changed"
+                    fi
+                  fi
+
+                  # ── Publish atomically ────────────────────────────────────
+                  # The rename is what makes a dump visible. Until then it is `.partial`, so a
+                  # crashed run can never be mistaken for a good backup and retention never
+                  # counts one.
+                  sha="$(sha256sum "$partial" | cut -d' ' -f1)"
+                  mv "$partial" "$target"
+                  say "published $(basename "$target")"
+                  printf '%s\t%s\t%s bytes\t%ss\t%s tables\tsha256=%s\n' \
+                    "$stamp" "$(basename "$target")" "$bytes" "$elapsed" \
+                    "$data_entries" "$sha" >> "$log"
+
+                  # ── Retention ─────────────────────────────────────────────
+                  # Only ever reached after a VERIFIED, PUBLISHED dump. Matches our own name
+                  # pattern only, and never removes the newest file even if KEEP were 0.
+                  total=$(ls -1 "$BACKUP_DIR"/millm-*.dump 2>/dev/null | wc -l)
+                  keep=$(( KEEP > 1 ? KEEP : 1 ))
+                  if [ "$total" -gt "$keep" ]; then
+                    ls -1t "$BACKUP_DIR"/millm-*.dump | tail -n +$(( keep + 1 )) | while read -r old; do
+                      say "pruning $(basename "$old")"
+                      rm -f -- "$old"
+                    done
+                  fi
+                  say "retained $(ls -1 "$BACKUP_DIR"/millm-*.dump | wc -l) of ${keep}"
+
+                  cat > "$BACKUP_DIR/RESTORE.md" <<'DOC'
+                  # Restoring a miLLM dump
+
+                  Written by the backup job each run, so the file names here cannot drift from
+                  what is actually on the disk.
+
+                  ## Whole database
+
+                      microk8s kubectl -n millm exec -i deploy/postgres -- \
+                        pg_restore -U millm -d millm --clean --if-exists < millm-<stamp>.dump
+
+                  ## One table
+
+                  ⚠ Run `--schema-only` FIRST if the target is empty: `--table=` does not carry
+                  the ENUM types, and the data restore then fails on a type that does not exist.
+                  Partial restores also trip foreign keys — restore `probes` before `probe_events`.
+
+                      pg_restore -U millm -d millm --data-only --table=probe_events < millm-<stamp>.dump
+
+                  ## What is and is not recoverable
+
+                  WAL archiving is OFF, so recovery is to the last nightly dump, not
+                  point-in-time. Before anything destructive, take a manual dump:
+
+                      microk8s kubectl -n millm create job manual-dump --from=cronjob/millm-db-backup
+
+                  `probes`, `models` and `saes` are reconstructible from miStudio exports and
+                  HuggingFace. `probe_events`, `sensing_events` and `circuit_edge_sensing_events`
+                  are NOT — they are observations of traffic that happened once.
+                  DOC
+                  say "done"
+              volumeMounts:
+                - name: backups
+                  mountPath: /backups
+          volumes:
+            - name: backups
+              persistentVolumeClaim:
+                claimName: millm-db-backups

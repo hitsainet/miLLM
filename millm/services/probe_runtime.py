@@ -62,6 +62,7 @@ import torch
 
 from millm.ml.probe_head import ProbeHead, combine
 from millm.ml.probe_hooker import ProbeHooker, is_single_row
+from millm.services.probe_scope import scored_mask
 from millm.services.probe_scope import window as scope_window
 
 logger = logging.getLogger(__name__)
@@ -172,6 +173,32 @@ class ProbeRequestContext:
         #: first pass and reused, because `to_device` copies every weight when it is called.
         self._heads: dict[str, ProbeHead] = {}
         self._position = 0
+        #: Where the prompt ends, so `prompt`/`response` scopes can be honoured.
+        #:
+        #: ⚠ SET EXPLICITLY BY THE CALLER, NOT INFERRED FROM THE FIRST PASS. Taking the prefill
+        #: length would be right for an ordinary generation and silently wrong under chunked
+        #: prefill or speculative decoding — and the failure is a probe scoring the model's own
+        #: output under the name of the user's prompt, which is the exact confusion the role
+        #: mask exists to prevent. `None` means nobody said, and a non-`all` probe then reports
+        #: `prompt_boundary_unknown` rather than guessing.
+        self._n_prompt_tokens: Optional[int] = None
+
+    def set_prompt_length(self, n_prompt_tokens: int) -> None:
+        """Record where the prompt ends. Idempotent; a conflicting second call is refused.
+
+        A second, different value means two callers disagree about the boundary, and scoring
+        under either would be a guess. Refusing is the honest outcome — the verdict says why.
+        """
+        n = int(n_prompt_tokens)
+        if n < 0:
+            self.mark_not_scored(f"prompt_boundary_invalid: {n}")
+            return
+        if self._n_prompt_tokens is not None and self._n_prompt_tokens != n:
+            self.mark_not_scored(
+                f"prompt_boundary_conflict: {self._n_prompt_tokens} then {n}"
+            )
+            return
+        self._n_prompt_tokens = n
 
     @property
     def not_scored_reason(self) -> Optional[str]:
@@ -248,16 +275,47 @@ class ProbeRequestContext:
         # `scope_window` still owns the padding rule (short mask pads CLOSED), so there is one
         # definition of it and not two. When `mask` is None — which is every request the runtime
         # serves today, `scope="all"` — there is no Python list at all.
-        if mask is None:
-            window = torch.ones(n_tokens, dtype=torch.bool, device=row.device)
-        else:
-            window = torch.as_tensor(
-                scope_window(mask, self._position, n_tokens),
-                dtype=torch.bool,
-                device=row.device,
-            )
+        #
+        # ⚠ PER SCOPE, NOT ONCE PER PASS. This built a single window and shared it across every
+        # probe on the layer, which is correct only while they all agree — and scope is a
+        # per-probe field. Two probes on one layer with different scopes would both have read
+        # the first one's window. Cached by scope within the pass, because probes usually do
+        # agree and `scored_mask` should not be rebuilt per probe.
+        windows: dict[str, torch.Tensor] = {}
+
+        def window_for(scope: str) -> Optional[torch.Tensor]:
+            if scope in windows:
+                return windows[scope]
+            if scope == "all" and mask is None:
+                built = torch.ones(n_tokens, dtype=torch.bool, device=row.device)
+            else:
+                spec = mask
+                if spec is None:
+                    if self._n_prompt_tokens is None:
+                        return None
+                    # `scored_mask` is the DEFINITION of which positions a scope admits, and it
+                    # is called here so there is one of them rather than a second arithmetic
+                    # copy that can drift. `n_generated` counts only as far as this pass, which
+                    # is all that is needed: positions beyond it are not being scored yet.
+                    generated = max(0, self._position + n_tokens - self._n_prompt_tokens)
+                    spec = scored_mask(
+                        scope=scope,
+                        n_prompt_tokens=self._n_prompt_tokens,
+                        n_generated=generated,
+                    )
+                built = torch.as_tensor(
+                    scope_window(spec, self._position, n_tokens),
+                    dtype=torch.bool,
+                    device=row.device,
+                )
+            windows[scope] = built
+            return built
 
         for probe in here:
+            window = window_for(probe.scope)
+            if window is None:
+                self.mark_not_scored("prompt_boundary_unknown")
+                return
             try:
                 # ⚠ THE ENCODER IS INSIDE THE TRY. It was outside, so a k-sparse probe whose
                 # encode raised propagated to the hook — which swallows callback exceptions by

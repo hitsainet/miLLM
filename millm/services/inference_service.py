@@ -2427,6 +2427,23 @@ class InferenceService:
             logger.warning("probe_begin_failed", error=str(exc))
             return None
 
+    def _probe_note_prompt_length(self, context, n_prompt_tokens: int) -> None:
+        """Tell the open probe context where the prompt ends. Safe when nothing is armed.
+
+        ⚠ EXPLICIT RATHER THAN INFERRED. The context could take the first forward pass's length
+        as the prompt length, which is right for an ordinary generation and silently wrong under
+        chunked prefill or speculative decoding. The failure mode is a `prompt`-scoped probe
+        scoring the model's own output as though it were the user's words — the precise confusion
+        the role mask exists to prevent — so the boundary is stated by whoever tokenized the
+        prompt, and a context never told reports `prompt_boundary_unknown` instead of guessing.
+        """
+        if context is None:
+            return
+        try:
+            context.set_prompt_length(int(n_prompt_tokens))
+        except Exception as exc:  # a probe must never break generation
+            logger.warning("probe_prompt_length_failed", error=str(exc))
+
     def _probe_mark_not_scored(self, reason: str) -> None:
         """Record why the request in flight cannot be scored. Safe when nothing is armed."""
         try:
@@ -3499,6 +3516,7 @@ class InferenceService:
                 # Tokenize input
                 inputs = self._tokenizer(prompt, return_tensors="pt").to(self._get_input_device())
                 prompt_tokens = inputs.input_ids.shape[1]
+                self._probe_note_prompt_length(_probe_ctx, prompt_tokens)
                 _sensing_full_ids = inputs.input_ids  # prefill-only fallback
                 self._sensing_mark_history(_sensing_sae, inputs.input_ids)
 
@@ -4228,6 +4246,7 @@ class InferenceService:
                 # Tokenize
                 inputs = self._tokenizer(prompt, return_tensors="pt").to(self._get_input_device())
                 prompt_tokens = inputs["input_ids"].shape[1]
+                self._probe_note_prompt_length(_probe_ctx, prompt_tokens)
                 self._sensing_mark_history(_sensing_sae, inputs["input_ids"])
 
                 # Set up streamer
@@ -4656,6 +4675,7 @@ class InferenceService:
                         self._get_input_device()
                     )
                     prompt_tokens = inputs.input_ids.shape[1]
+                    self._probe_note_prompt_length(_probe_ctx, prompt_tokens)
                     self._sensing_mark_history(_sensing_ctx, inputs.input_ids)
                     self._check_context_length(prompt_tokens, gen_config.max_new_tokens)
 
@@ -4980,6 +5000,7 @@ class InferenceService:
             request.messages, request.chat_template_kwargs
         )
         input_ids = self._tokenizer.encode(prompt, return_tensors="pt")[0].tolist()
+        self._probe_note_prompt_length(probe_ctx, len(input_ids))
         gen_config = GenerationConfig.from_request(request)
         try:
             # The route's check_stream_admission refuses this first; after the

@@ -396,12 +396,22 @@ class TestAnUnverifiableScopeSaysSo:
         text = str(exc.value)
         assert "'prompt'" in text, "the operator must be told which scope they exported"
         assert "scope 'all'" in text, "the remedy is producer-side and must be named"
-        # ⚠ The sentence that matters. The reported defect was a message that sent the operator
-        # to debug a build that was fine.
-        assert "neither is a problem with your build" in text
+        # ⚠ WHICH GATE REFUSES IT CHANGED ON 2026-09-29, AND THE CHANGE IS THE POINT.
+        #
+        # Before `scored_mask` was wired, a `prompt` probe was refused by the RUNTIME gate: this
+        # runtime could not restrict scoring to a scope's positions at all. It can now, so that
+        # gate admits it and the refusal comes from PARITY instead — the recorded vectors still
+        # cannot be replayed, because miStudio's `user` mask excludes a system preamble the
+        # contract's `prompt` includes.
+        #
+        # Same error class, same remedy, different ground. The two conditions were deliberately
+        # separated so that closing one could not silently open the other, and this assertion is
+        # what proves only one moved.
+        assert "not a disagreement about the numbers" in text
         assert exc.value.details["scope"] == "prompt"
-        assert exc.value.details["reason"] == "scope_not_runtime_scorable"
-        assert exc.value.details["runtime_scorable_scopes"] == ["all"]
+        assert "runtime_scorable_scopes" not in exc.value.details, (
+            "still being refused by the runtime gate — the scored_mask wiring did not take effect"
+        )
 
     @pytest.mark.asyncio
     async def test_a_REAL_parity_failure_still_reports_as_one(self):

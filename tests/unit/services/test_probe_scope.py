@@ -156,8 +156,8 @@ class TestRuntimeAdmissionTracksTheWiring:
         wired = self._production_callers_of("scored_mask")
         if wired:
             assert set(RUNTIME_SCORABLE_SCOPES) == set(SCOPES), (
-                f"scored_mask now has production caller(s) {wired}, so the runtime can honour "
-                f"every scope — widen RUNTIME_SCORABLE_SCOPES, or the capability is unreachable"
+                f"scored_mask has production caller(s) {wired}, so the runtime can honour every "
+                f"scope — widen RUNTIME_SCORABLE_SCOPES, or the capability is unreachable"
             )
         else:
             assert set(RUNTIME_SCORABLE_SCOPES) == {"all"}, (
@@ -165,6 +165,19 @@ class TestRuntimeAdmissionTracksTheWiring:
                 "probe scores every position. Admitting a narrower scope here would arm a "
                 "detector that reads positions it was never fitted on."
             )
+
+    def test_it_is_wired_now(self):
+        """⚠ Direction, not just consistency. The branch above is satisfied by BOTH states, so
+        on its own it would stay green if the wiring were removed and the set narrowed back
+        together — a consistent retreat. This pins which side we are on."""
+        from millm.services.probe_scope import RUNTIME_SCORABLE_SCOPES, SCOPES
+
+        wired = self._production_callers_of("scored_mask")
+        assert wired, (
+            "scored_mask has lost its production caller; the runtime is back to scoring every "
+            "position regardless of scope"
+        )
+        assert set(RUNTIME_SCORABLE_SCOPES) == set(SCOPES)
 
     def test_the_request_context_is_still_built_without_a_mask(self):
         """The other half of the same fact, read from the construction site rather than the

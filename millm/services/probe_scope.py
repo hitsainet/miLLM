@@ -75,26 +75,29 @@ def scope_is_reproducible(scope: str) -> bool:
 #: Scopes the RUNTIME can actually honour, which is a different question from whether a scope's
 #: test vectors can be reproduced.
 #:
-#: ⚠ **THIS IS `{"all"}` BECAUSE `scored_mask` HAS NO PRODUCTION CALLER, NOT BECAUSE THE OTHER TWO
-#: ARE UNCOMPUTABLE.** `scored_mask` above is complete and correct and needs nothing but the two
-#: token counts — but nothing builds a mask from it, and `ProbeRequestContext` is constructed at
-#: `probe_runtime.py` with `mask=None`, so `window(None, ...)` returns all-True. A `prompt`-scoped
-#: probe armed today would score the model's own output with weights that never saw one, which is
-#: precisely what this module's opening paragraph says makes it a different detector.
+#: ⚠ THIS WAS `{"all"}` FROM 2026-09-28 TO 2026-09-29, BECAUSE `scored_mask` HAD NO PRODUCTION
+#: CALLER. The function was complete and correct the whole time; nothing built a mask from it, and
+#: `ProbeRequestContext` was constructed with `mask=None`, so `window(None, ...)` returned all-True
+#: and every armed probe scored every position whatever its scope said. A `prompt`-scoped probe
+#: would have scored the model's own output with weights that never saw one.
 #:
-#: Until 2026-09-28 the only thing stopping that was the parity gate incidentally refusing
-#: non-reproducible scopes. That is protection by coincidence: it would evaporate the moment
-#: parity learned to verify a `prompt` vector, and the arming path would open onto a runtime that
-#: still scores everything. So the refusal is now primary and keyed on runtime capability.
+#: It is now wired: `ProbeRequestContext.observe` builds a per-scope window from `scored_mask`,
+#: and the prompt boundary is stated explicitly by whoever tokenized the prompt rather than
+#: inferred from the first pass — inference would be right for an ordinary generation and
+#: silently wrong under chunked prefill. A context never told the boundary reports
+#: `prompt_boundary_unknown` rather than scoring the wrong window.
 #:
-#: The two conditions are genuinely independent and both must widen on their own evidence —
-#: reproducibility cannot be fixed here at all, because miStudio's `user` mask excludes a system
-#: preamble that the contract's `prompt` includes (see the module docstring).
+#: ⚠ REPRODUCIBILITY IS A SEPARATE GATE AND HAS NOT MOVED. `scope_is_reproducible` is still
+#: `all` only, because miStudio's `user` mask excludes a system preamble the contract's `prompt`
+#: includes, so a narrower scope's recorded vectors cannot be replayed here at all. A `prompt`
+#: probe can now be SCORED correctly and still cannot be PARITY-CHECKED, and `ProbeArmingService`
+#: refuses it on that second ground. The two conditions were deliberately separated so widening
+#: one could not silently widen the other; this commit widens exactly one.
 #:
-#: `test_probe_scope.py::TestRuntimeAdmissionTracksTheWiring` fails if this set widens while
-#: `scored_mask` is still uncalled, and fails if `scored_mask` gains a caller while this set stays
-#: narrow — so the constant cannot drift away from the code in either direction.
-RUNTIME_SCORABLE_SCOPES = frozenset({"all"})
+#: `test_probe_scope.py::TestRuntimeAdmissionTracksTheWiring` holds the pair together: it fails
+#: if this set narrows while `scored_mask` has a caller, and fails if it widens while it does
+#: not.
+RUNTIME_SCORABLE_SCOPES = frozenset(SCOPES)
 
 
 def scope_is_runtime_scorable(scope: str) -> bool:

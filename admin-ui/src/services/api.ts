@@ -1008,12 +1008,19 @@ export const probesApi = {
    * (`PROBE_MODEL_MISMATCH`, `UNVALIDATED_PROBE`, `PROBE_PARITY_FAILED`, `PROBE_LIMIT`), so the UI
    * can tell "wrong model" from "needs your say-so".
    */
-  arm: (id: string, opts?: { acknowledgeBelowRung2?: boolean; reason?: string }) =>
+  arm: (
+    id: string,
+    opts?: { acknowledgeBelowRung2?: boolean; reason?: string; windows?: string[] }
+  ) =>
     request<Probe>(`/probes/${encodeURIComponent(id)}/arm`, {
       method: 'POST',
       body: JSON.stringify({
         acknowledge_below_rung2: opts?.acknowledgeBelowRung2 ?? false,
         reason: opts?.reason ?? '',
+        // ⚠ OMITTED, NOT `[]`, when the caller says nothing. The server reads `null` as "the
+        // default set" and an explicit empty list as "the probe's own scope alone" — sending
+        // `[]` here would silently arm every probe on one window.
+        ...(opts?.windows ? { windows: opts.windows } : {}),
       }),
     }),
 

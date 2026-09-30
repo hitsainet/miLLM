@@ -259,7 +259,33 @@ describe('ProbeMonitorsPage', () => {
     // ⚠ The PAYLOAD: arming from the row must NOT pre-acknowledge. Passing
     // acknowledgeBelowRung2: true here would make the gate unreachable by clicking Arm.
     expect(calls.arm).toHaveBeenCalledTimes(1);
-    expect(calls.arm).toHaveBeenCalledWith({ id: 'pr_1' });
+    // ⚠ The PAYLOAD, still exact. `windows` joined it on 2026-09-30 and defaults to all three —
+    // the capability is useless if it only works for someone who remembers it exists. Asserting
+    // the default explicitly is what would catch it silently becoming one window, or none.
+    expect(calls.arm).toHaveBeenCalledWith({
+      id: 'pr_1',
+      windows: ['all', 'prompt', 'response'],
+    });
+  });
+
+  it('the window picker changes what Arm sends', async () => {
+    state.probes = [probe()];
+    renderPage();
+    await userEvent.click(screen.getByRole('button', { name: 'response' }));
+    await userEvent.click(screen.getByRole('button', { name: 'Arm' }));
+    expect(calls.arm).toHaveBeenCalledWith({ id: 'pr_1', windows: ['all', 'prompt'] });
+  });
+
+  it('Arm is refused when every window is deselected', async () => {
+    // Not an empty list to the server — an empty list MEANS something there ("the probe's own
+    // scope alone"), so a UI that sent one would arm a probe the operator did not ask for.
+    state.probes = [probe()];
+    renderPage();
+    for (const name of ['all', 'prompt', 'response']) {
+      await userEvent.click(screen.getByRole('button', { name }));
+    }
+    expect(screen.getByRole('button', { name: 'Arm' })).toBeDisabled();
+    expect(calls.arm).not.toHaveBeenCalled();
   });
 
   it('parity can be re-checked without arming', async () => {
@@ -704,5 +730,69 @@ describe('the parity badge shows the numbers that DECIDED the verdict', () => {
     expect(text).toContain('parity passed');
     expect(text).not.toMatch(/of 0\.05/);
     expect(text).toContain('informational');
+  });
+});
+
+describe('one probe, several windows, told apart', () => {
+  /* ⚠ THE PROBE NAME STOPPED BEING A DISCRIMINATOR ON 2026-09-30.
+   *
+   * A probe reports up to three windows per request — `all`, `prompt`, `response` — so a request
+   * group can hold three rows that share a probe, a name and a request id, differing only in a
+   * number. The page's own note used to say the pair was told apart BY NAME, which is exactly
+   * what stops working.
+   *
+   * `provisional` matters more than it looks: the `response` window is not merely uncalibrated,
+   * it is UNTRAINED — miStudio's corpus is prose wrapped as a single user turn, so those weights
+   * never saw a model reply. The operator chose to let it fire anyway. The marker is the
+   * condition that choice was made under.
+   */
+
+  it('shows the window on every row', () => {
+    state.probes = [probe()];
+    state.events = [
+      event({ id: 1, window: 'all', score: 2.31 }),
+      event({ id: 2, window: 'prompt', score: 9.86 }),
+      event({ id: 3, window: 'response', score: -4.2, verdict: false }),
+    ];
+    renderPage();
+    const windows = screen.getAllByTestId('event-window').map((e) => e.textContent);
+    expect(windows).toEqual(['all', 'prompt', 'response']);
+  });
+
+  it('marks a provisional verdict, and only a provisional one', () => {
+    state.probes = [probe()];
+    state.events = [
+      event({ id: 1, window: 'all', provisional: false }),
+      event({ id: 2, window: 'response', provisional: true }),
+    ];
+    renderPage();
+    // Specificity: a marker on every row says nothing.
+    expect(screen.getAllByTestId('event-provisional')).toHaveLength(1);
+    const rows = screen.getAllByTestId('event-row');
+    expect(rows[1]).toHaveTextContent('provisional');
+    expect(rows[0]).not.toHaveTextContent('provisional');
+  });
+
+  it('three windows of one probe still group under one request', () => {
+    state.probes = [probe()];
+    state.events = [
+      event({ id: 1, window: 'all' }),
+      event({ id: 2, window: 'prompt' }),
+      event({ id: 3, window: 'response' }),
+    ];
+    renderPage();
+    expect(screen.getByTestId('request-group')).toHaveTextContent('3 verdicts');
+  });
+
+  it('⚠ renders when the backend sends no window at all', () => {
+    // A backend from before this shipped omits both fields, and a rolling deploy puts this
+    // bundle in front of one. A strict check on an absent field has already taken this page
+    // down once this week.
+    state.probes = [probe()];
+    state.events = [event({ id: 1 })];
+    renderPage();
+    expect(screen.getByTestId('event-row')).toBeInTheDocument();
+    expect(screen.queryByTestId('event-window')).not.toBeInTheDocument();
+    expect(screen.queryByTestId('event-provisional')).not.toBeInTheDocument();
   });
 });

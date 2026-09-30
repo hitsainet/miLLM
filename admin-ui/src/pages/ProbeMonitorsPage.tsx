@@ -66,6 +66,16 @@ function ParitySummary({ probe }: { probe: Probe }) {
   );
 }
 
+/** The windows a probe can be asked to report, in the order they read. */
+const WINDOWS = ['all', 'prompt', 'response'] as const;
+
+/** Why each window is worth having, said once, where the operator chooses. */
+const WINDOW_HELP: Record<string, string> = {
+  all: "the whole request — what this did before windows existed. A long reply drags the mean down, so the same conversation scores differently depending on how much the model said.",
+  prompt: "the person's words only. Independent of how much the model then said, and closest to what these weights were trained on.",
+  response: "the model's own output. ⚠ UNCALIBRATED AND UNTRAINED — miStudio's training corpus is prose wrapped as a single user turn, so these weights never saw a model reply. Reported as provisional.",
+};
+
 function ProbeRow({
   probe,
   onArm,
@@ -75,12 +85,19 @@ function ProbeRow({
   busy,
 }: {
   probe: Probe;
-  onArm: (id: string) => void;
+  onArm: (id: string, windows: string[]) => void;
   onDisarm: (id: string) => void;
   onDelete: (id: string) => void;
   onCheckParity: (id: string) => void;
   busy: boolean;
 }) {
+  // Defaults to every window. A probe armed without a thought still gets both halves, which is
+  // the point — the capability is useless if it only works for someone who remembers it exists.
+  const [windows, setWindows] = useState<string[]>([...WINDOWS]);
+  const toggle = (name: string) =>
+    setWindows((current) =>
+      current.includes(name) ? current.filter((w) => w !== name) : [...current, name]
+    );
   return (
     <div
       data-testid="probe-row"
@@ -114,13 +131,37 @@ function ProbeRow({
               Disarm
             </button>
           ) : (
+            <>
+            <span data-testid="window-picker" className="flex items-center gap-1">
+              {WINDOWS.map((name) => {
+                const on = windows.includes(name);
+                return (
+                  <button
+                    key={name}
+                    type="button"
+                    aria-pressed={on}
+                    onClick={() => toggle(name)}
+                    title={WINDOW_HELP[name]}
+                    className={`text-[10px] font-mono px-1.5 py-0.5 rounded border ${
+                      on
+                        ? 'border-emerald-600 bg-emerald-900/40 text-emerald-200'
+                        : 'border-slate-700 text-slate-500'
+                    }`}
+                  >
+                    {name}
+                  </button>
+                );
+              })}
+            </span>
             <button
-              onClick={() => onArm(probe.id)}
-              disabled={busy}
+              onClick={() => onArm(probe.id, windows)}
+              disabled={busy || windows.length === 0}
+              title={windows.length === 0 ? 'Choose at least one window to report' : undefined}
               className="text-xs px-2 py-1 rounded bg-emerald-700 text-emerald-50 hover:bg-emerald-600 disabled:opacity-50"
             >
               {busy ? 'Arming…' : 'Arm'}
             </button>
+            </>
           )}
           {/* Parity without arming — the case after a model reload. */}
           <button
@@ -323,6 +364,28 @@ function EventRow({
             time, so the pair was indistinguishable. */}
         <span data-testid="event-probe-name" className="text-xs text-slate-300 truncate">
           {probeName}
+          {/* ⚠ WHICH SLICE THIS READ. One probe now reports several windows, so the probe's
+              name no longer identifies a row — two rows in one request group share it. */}
+          {event.window && (
+            <span
+              data-testid="event-window"
+              className="ml-2 px-1.5 py-0.5 rounded bg-slate-800 text-slate-400 font-mono text-[10px]"
+            >
+              {event.window}
+            </span>
+          )}
+          {/* ⚠ FIRED AGAINST A BAR NEVER CUT FOR THIS WINDOW. The operator chose alerts from
+              uncalibrated windows over silence; this marker is the condition that choice was
+              made under, so it is never hidden behind a hover or a detail view. */}
+          {event.provisional && (
+            <span
+              data-testid="event-provisional"
+              title="This window has no calibrated threshold — the score is judged against the probe's own scope's bar"
+              className="ml-2 px-1.5 py-0.5 rounded bg-amber-900/40 text-amber-300 text-[10px]"
+            >
+              provisional
+            </span>
+          )}
         </span>
         {event.scored ? (
           <span
@@ -365,7 +428,9 @@ function EventRow({
 /** Verdicts from ONE request, which is the unit an operator reasons about.
  *
  * ⚠ The request id is the only link between a response and its verdicts, and one prompt produces
- * one verdict PER ARMED PROBE. Listed flat, two verdicts for the same prompt look like two
+ * one verdict PER ARMED PROBE **PER WINDOW** — a probe armed on all three reports three, and they
+ * share a name. The window chip on each row is what tells them apart. Listed flat, verdicts for
+ * the same prompt look like
  * unrelated observations — which is exactly how a firing and a non-firing verdict on one prompt
  * read before this. The prompt text itself stays out of the list by design; it is fetched per
  * event from the detail route, so the group header names the request and the rows link to it.
@@ -543,7 +608,13 @@ export function ProbeMonitorsPage() {
         <AcknowledgeDialog
           details={pendingAck.details}
           onConfirm={(reason) =>
-            arm({ id: pendingAck.id, acknowledgeBelowRung2: true, reason })
+            arm({
+              id: pendingAck.id,
+              acknowledgeBelowRung2: true,
+              reason,
+              // The choice made before the refusal, not a silent reset to the default.
+              windows: pendingAck.windows,
+            })
           }
           onCancel={dismissAck}
           busy={arming}
@@ -602,7 +673,7 @@ export function ProbeMonitorsPage() {
               <ProbeRow
                 key={probe.id}
                 probe={probe}
-                onArm={(id) => arm({ id })}
+                onArm={(id, windows) => arm({ id, windows })}
                 onDisarm={disarm}
                 onDelete={remove}
                 onCheckParity={checkParity}

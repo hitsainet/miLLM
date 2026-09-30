@@ -117,7 +117,14 @@ export function useProbes(probeId?: string) {
    * caller through `pendingAck` rather than a toast, because a toast is dismissed and the decision
    * is not made. Every other code is a real refusal and names its gate.
    */
-  const [pendingAck, setPendingAck] = useState<{ id: string; details: ProbeAckDetails } | null>(
+  // ⚠ `windows` IS CARRIED THROUGH THE REFUSAL. The acknowledge dialog re-arms, and without this
+  // the operator's window choice is silently discarded on exactly the probes that needed a
+  // deliberate decision to arm at all.
+  const [pendingAck, setPendingAck] = useState<{
+    id: string;
+    details: ProbeAckDetails;
+    windows?: string[];
+  } | null>(
     null
   );
 
@@ -126,11 +133,14 @@ export function useProbes(probeId?: string) {
       id,
       acknowledgeBelowRung2,
       reason,
+      windows,
     }: {
       id: string;
       acknowledgeBelowRung2?: boolean;
       reason?: string;
-    }) => probesApi.arm(id, { acknowledgeBelowRung2, reason }),
+      /** Which slices to report. Omitted means the server's default (all three). */
+      windows?: string[];
+    }) => probesApi.arm(id, { acknowledgeBelowRung2, reason, windows }),
     onSuccess: (probe: Probe) => {
       setPendingAck(null);
       queryClient.invalidateQueries({ queryKey: PROBES_KEY });
@@ -143,6 +153,7 @@ export function useProbes(probeId?: string) {
         setPendingAck({
           id: variables.id,
           details: (error.details ?? {}) as ProbeAckDetails,
+          windows: armMutation.variables?.windows,
         });
         return;
       }

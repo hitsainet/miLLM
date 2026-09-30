@@ -91,6 +91,18 @@ export interface ProbeEvent {
   top_positions: number[] | null;
   n_scored_tokens: number | null;
   summary: string | null;
+  /**
+   * Which slice of the request this verdict read. One probe reports several — the prompt says
+   * something about the USER, the response about the MODEL — and without this the rows are
+   * indistinguishable, since they share a probe and a request.
+   *
+   * ⚠ OPTIONAL ON THE WIRE. A backend from before 2026-09-30 does not send it, and during a
+   * rolling deploy this bundle meets one. A strict check on an absent field has already taken
+   * this page down once this week.
+   */
+  window?: string;
+  /** The threshold was calibrated under the probe's own scope, and this window is not it. */
+  provisional?: boolean;
   created_at: string;
   /**
    * ⚠ ONLY EVER PRESENT ON THE DETAIL ROUTE. The list route and the socket omit it: it is the

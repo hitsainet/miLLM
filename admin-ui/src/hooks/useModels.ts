@@ -16,7 +16,11 @@ export function useModels() {
       const models = await modelApi.list();
       setModels(models);
       const loaded = models.find((m) => m.status === 'loaded');
-      if (loaded) setLoadedModel(loaded);
+      // ⚠ `?? null`, NOT `if (loaded)`. This used to only ever SET, so the store kept showing a
+      // model the server had already unloaded until a socket event happened to arrive. A read
+      // that can only add is not a reconciliation — this estate has shipped that exact shape
+      // before, where a stale in-memory flag outlived restarts and hid live models for months.
+      setLoadedModel(loaded ?? null);
       return models;
     },
     // Prevent unnecessary refetches that could cause state issues

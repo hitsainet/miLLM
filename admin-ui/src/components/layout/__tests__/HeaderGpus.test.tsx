@@ -4,9 +4,10 @@
  * MUTATION CONTROL: drop the per-card chips -> "each card" fails.
  */
 
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { render, screen } from '@testing-library/react';
 import { MemoryRouter } from 'react-router-dom';
+import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 
 import { Header } from '../Header';
 import { useServerStore } from '@/stores/serverStore';
@@ -17,11 +18,21 @@ const GPUS: GpuMetrics[] = [
   { index: 1, uuid: 'GPU-1', name: 'NVIDIA GeForce RTX 3090', utilization: 91, memory_used_mb: 2_048, memory_total_mb: 24_576, temperature: 81 },
 ];
 
+// The header now fetches the model list itself, so it needs a query client. It used to read
+// `loadedModel` from a store that only three PAGES ever seeded, which is why it displayed
+// "No Model" on every other page while a model was loaded — see useModels.test.ts.
+vi.mock('@/services/api', () => ({
+  modelApi: { list: vi.fn().mockResolvedValue([]) },
+}));
+
 function renderHeader() {
+  const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
   return render(
-    <MemoryRouter>
-      <Header />
-    </MemoryRouter>,
+    <QueryClientProvider client={client}>
+      <MemoryRouter>
+        <Header />
+      </MemoryRouter>
+    </QueryClientProvider>,
   );
 }
 

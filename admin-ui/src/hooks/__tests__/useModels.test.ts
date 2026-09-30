@@ -298,3 +298,54 @@ describe('useModels', () => {
     expect(result.current.error).toBe('Network error');
   });
 });
+
+describe('the loaded model is RECONCILED, not only ever set', () => {
+  // ⚠ REPORTED FROM THE RUNNING UI 2026-09-30, where the header read "No Model" while
+  // Llama-3.1-8B was loaded, holding 15.7 GB, and scoring live traffic through an armed probe.
+  //
+  // Two defects met in one line, `if (loaded) setLoadedModel(loaded)`:
+  //
+  //   1. It only ever SET. A model unloaded on the server left the old name in the store until
+  //      a socket event happened to arrive — the header could show a model that was gone.
+  //   2. It is the ONLY seeder, and `useModels()` was called by just three pages. Landing
+  //      anywhere else showed "No Model" forever. The badge described which pages you had
+  //      visited, not the server.
+  //
+  // A read that can only add is not a reconciliation. This estate has shipped that exact shape
+  // before: a stale in-memory flag outlived restarts and hid thirteen models from /v1/models for
+  // three months.
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
+  it('sets the loaded model when the server reports one', async () => {
+    mockModelApi.list.mockResolvedValue([
+      { id: 1, name: 'Other', status: 'ready' },
+      { id: 9, name: 'Llama-3.1-8B-Instruct', status: 'loaded' },
+    ] as unknown as ModelInfo[]);
+    renderHook(() => useModels(), { wrapper: createWrapper() });
+    await waitFor(() => expect(mockSetLoadedModel).toHaveBeenCalled());
+    expect(mockSetLoadedModel).toHaveBeenCalledWith(
+      expect.objectContaining({ id: 9, name: 'Llama-3.1-8B-Instruct' })
+    );
+  });
+
+  it('⚠ CLEARS it when the server reports none', async () => {
+    // The half that was missing. Against `if (loaded) …` this never fires and the header keeps
+    // displaying a model the server has unloaded.
+    mockModelApi.list.mockResolvedValue([
+      { id: 1, name: 'Other', status: 'ready' },
+      { id: 9, name: 'Llama-3.1-8B-Instruct', status: 'ready' },
+    ] as unknown as ModelInfo[]);
+    renderHook(() => useModels(), { wrapper: createWrapper() });
+    await waitFor(() => expect(mockSetLoadedModel).toHaveBeenCalled());
+    expect(mockSetLoadedModel).toHaveBeenCalledWith(null);
+  });
+
+  it('an empty model list clears it too', async () => {
+    mockModelApi.list.mockResolvedValue([] as unknown as ModelInfo[]);
+    renderHook(() => useModels(), { wrapper: createWrapper() });
+    await waitFor(() => expect(mockSetLoadedModel).toHaveBeenCalledWith(null));
+  });
+});

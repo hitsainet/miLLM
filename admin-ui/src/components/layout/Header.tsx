@@ -2,6 +2,7 @@ import { useLocation } from 'react-router-dom';
 import { Wifi, WifiOff, Moon, Sun, Cpu, HardDrive, Thermometer, Server, Layers, Zap } from 'lucide-react';
 import { useUIStore } from '@/stores/uiStore';
 import { useServerStore } from '@/stores/serverStore';
+import { useModels } from '@hooks/useModels';
 
 const pageTitles: Record<string, string> = {
   '/': 'Dashboard',
@@ -16,6 +17,12 @@ const pageTitles: Record<string, string> = {
 
 export function Header() {
   const location = useLocation();
+  // ⚠ THE HEADER FETCHES WHAT IT DISPLAYS. `loadedModel` was seeded ONLY by `useModels()`, and
+  // only ModelsPage, SteeringPage and MonitoringPage call it — so landing on any other page,
+  // Probe Monitors included, showed "No Model" while a model was loaded and scoring live
+  // traffic. The badge described which pages you had visited, not the server's state.
+  // The query key is shared, so pages that already call this hit the same cache.
+  useModels();
   const { theme, toggleTheme } = useUIStore();
   const {
     connectionStatus,

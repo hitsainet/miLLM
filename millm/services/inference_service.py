@@ -2519,9 +2519,28 @@ class InferenceService:
 
             import millm.api.dependencies as deps
 
-            service = getattr(deps, "_probe_event_service", None)
-            if service is None:
-                return
+            # ⚠ THE SERVICE MUST NOT DEPEND ON A ROUTE HAVING RUN FIRST. This read used to be
+            # `service = getattr(deps, "_probe_event_service", None)` followed by
+            # `if service is None: return` — and that global is populated by exactly ONE thing in
+            # the product, the `ProbeEventServiceDep` on `GET /api/probes/status`. So after every
+            # restart, a probe could be armed and serving verdicts in the response header while
+            # every event was dropped, with no log line and no counter, until something happened
+            # to poll status. A deploy restarts the pod, and a caller using the OpenAI API with no
+            # admin UI open never polls it at all — so the events were lost indefinitely.
+            # Found on hardware 2026-09-30: verdicts in the header, `events_recorded: 0`, and the
+            # identical request recorded once `/status` had been called in between.
+            #
+            # ⚠ AND THE SESSION IS OURS. Rebinding is not optional even when the singleton exists:
+            # its repositories belong to whichever REQUEST last resolved the dependency, and that
+            # request has finished. It happened to still work, which is luck, not a guarantee.
+            # The INSTANCE is still reused, because the socket throttle and the dropped-event
+            # counter live on it — a fresh service per request is the same as having no throttle.
+            from millm.db.base import async_session_factory
+            from millm.db.repositories.probe_repository import (
+                ProbeEventRepository,
+                ProbeRepository,
+            )
+            from millm.services.probe_event_service import ProbeEventService
             # ⚠ THE OVERHEAD IS PASSED. `note_request_overhead` existed, was unit-tested by
             # direct call, and had NO production caller — so `GET /api/probes/status` reported
             # `last_request_overhead_ms: null` on every request ever served, the
@@ -2543,12 +2562,22 @@ class InferenceService:
                 _settings.PROBE_EVENT_CONTEXT_TOKENS,
                 self._tokenizer if self.is_model_loaded() else None,
             )
-            await service.record(
-                context.request_id,
-                verdicts,
-                overhead_ms=context.overhead_ms,
-                contexts=contexts or None,
-            )
+            async with async_session_factory() as session:
+                service = getattr(deps, "_probe_event_service", None)
+                if service is None:
+                    service = ProbeEventService(
+                        ProbeRepository(session), ProbeEventRepository(session)
+                    )
+                    deps._probe_event_service = service
+                else:
+                    service.repository = ProbeRepository(session)
+                    service.events = ProbeEventRepository(session)
+                await service.record(
+                    context.request_id,
+                    verdicts,
+                    overhead_ms=context.overhead_ms,
+                    contexts=contexts or None,
+                )
         except Exception as exc:
             logger.warning("probe_record_failed", error=str(exc))
 

@@ -71,7 +71,7 @@ import torch
 
 from millm.ml.probe_head import ProbeHead, combine
 from millm.ml.probe_hooker import ProbeHooker, is_single_row
-from millm.services.probe_scope import scored_mask
+from millm.services.probe_scope import scored_mask, window_is_calibrated
 from millm.services.probe_scope import window as scope_window
 
 logger = logging.getLogger(__name__)
@@ -119,6 +119,17 @@ class ArmedProbe:
     rule_params: dict[str, Any] = field(default_factory=dict)
     #: For a k-sparse probe: maps (tokens, d_model) -> (tokens, k). `None` for a dense probe.
     encoder: Optional[Callable[[torch.Tensor], torch.Tensor]] = None
+    #: WHICH WINDOWS THIS PROBE REPORTS — chosen at arm time, empty meaning "just my own scope".
+    #:
+    #: ⚠ THIS IS NOT THE PROBE'S SCOPE AND MUST NEVER BE CONFUSED WITH IT. `scope` is the probe's
+    #: IDENTITY: what it was trained on, what its threshold was cut under, and the only thing
+    #: parity can verify. `windows` is a reporting choice: the same weights read over a different
+    #: slice of the same request, for an operator who wants the user's half and the model's half
+    #: separately rather than averaged together.
+    #:
+    #: Scoring a second window costs no forward pass and no matvec — `observe` already stores
+    #: every position's score UNMASKED, and the window is applied in `combine`.
+    windows: tuple[str, ...] = ()
 
 
 @dataclass
@@ -138,6 +149,15 @@ class Verdict:
     not_scored_reason: Optional[str] = None
     n_scored_tokens: int = 0
     top_positions: list[int] = field(default_factory=list)
+    #: WHICH WINDOW THIS VERDICT READ. Without it nothing downstream can tell two verdicts from
+    #: one probe apart — not the header, which keys on `name`; not the event row, which shows the
+    #: probe's name; not `contexts_for`, which keyed by `probe_id` alone and would have given both
+    #: verdicts the same context text.
+    window: str = "all"
+    #: The threshold was calibrated under `probe.scope`, and this verdict was not read under it.
+    #: The number is still reported and still fires, by operator decision — but every surface it
+    #: reaches must say so, or a reader takes an untrained window's alert for a measured one.
+    provisional: bool = False
 
 
 class ProbeRequestContext:
@@ -433,53 +453,70 @@ class ProbeRequestContext:
         started = time.perf_counter()
         verdicts: list[Verdict] = []
         for probe in self.probes:
-            base = dict(
-                probe_id=probe.probe_id,
-                name=probe.name,
-                rung=probe.rung,
-                rung_language=probe.rung_language,
-                threshold=probe.threshold,
-            )
-            if self._not_scored_reason is not None:
-                verdicts.append(
-                    Verdict(scored=False, not_scored_reason=self._not_scored_reason, **base)
-                )
-                continue
+            # ⚠ ONE VERDICT PER (PROBE, WINDOW). The default is the probe's own scope, so a probe
+            # armed without a window choice behaves exactly as before. Each extra window re-reads
+            # scores that are ALREADY COMPUTED and already on the host — `observe` stores them
+            # unmasked — so the cost is one mask and one `combine`, not another pass.
+            for window in (probe.windows or (probe.scope,)):
+                verdicts.append(self._verdict_for(probe, window))
+        self.overhead_ms += (time.perf_counter() - started) * 1000.0
+        return verdicts
 
-            score_parts = self._scores[probe.probe_id]
-            mask_parts = self._mask[probe.probe_id]
-            if not score_parts:
-                # The probe never looked. Not an error and not a zero.
-                verdicts.append(Verdict(scored=False, not_scored_reason="no_scored_tokens", **base))
-                continue
+    def _verdict_for(self, probe: ArmedProbe, window: str) -> Verdict:
+        """One probe's verdict over one window."""
+        base = dict(
+            probe_id=probe.probe_id,
+            name=probe.name,
+            rung=probe.rung,
+            rung_language=probe.rung_language,
+            threshold=probe.threshold,
+            window=window,
+            # Recorded per verdict rather than derived by a reader, because the reader is a
+            # header, a socket payload, a DB row and a React component — four chances to forget.
+            provisional=not window_is_calibrated(probe.scope, window),
+        )
+        if self._not_scored_reason is not None:
+            return Verdict(scored=False, not_scored_reason=self._not_scored_reason, **base)
 
-            # One `cat` and one host crossing per probe per request, over one tensor per pass.
-            score_row = _row(score_parts)
-            mask_row = _row(mask_parts)
-            #: Ascending positions that are in scope. Also the `no_scored_tokens` test and the
-            #: `n_scored_tokens` count, so it replaces three separate walks over the mask.
-            scored_index = mask_row.nonzero(as_tuple=True)[0]
-            if scored_index.numel() == 0:
-                # A mask that selects nothing is not a score of 0 — the probe never looked.
-                verdicts.append(Verdict(scored=False, not_scored_reason="no_scored_tokens", **base))
-                continue
+        score_parts = self._scores[probe.probe_id]
+        mask_parts = self._mask[probe.probe_id]
+        if not score_parts:
+            # The probe never looked. Not an error and not a zero.
+            return Verdict(scored=False, not_scored_reason="no_scored_tokens", **base)
 
-            score_tensor = score_row.unsqueeze(0)
-            mask_tensor = mask_row.unsqueeze(0)
-            logit_parts = self._logits[probe.probe_id]
-            logit_tensor = _row(logit_parts).unsqueeze(0) if logit_parts else None
-            params = {
-                k: v for k, v in (probe.rule_params or {}).items() if k in ("tau", "window")
-            }
-            value = float(
-                combine(
-                    probe.rule,
-                    score_tensor,
-                    mask=mask_tensor,
-                    attention_logits=logit_tensor,
-                    **params,
-                ).item()
-            )
+        # One `cat` and one host crossing per probe per request, over one tensor per pass.
+        score_row = _row(score_parts)
+        mask_row = self._mask_for_window(probe, window, mask_parts, int(score_row.numel()))
+        if mask_row is None:
+            # ⚠ THIS WINDOW ONLY. The boundary-unknown path used to abort the WHOLE request via
+            # `mark_not_scored`, so one probe's unresolvable window silenced every other probe's
+            # verdict too. A window that cannot be resolved is one missing verdict, not a blind
+            # request.
+            return Verdict(scored=False, not_scored_reason="prompt_boundary_unknown", **base)
+        #: Ascending positions that are in scope. Also the `no_scored_tokens` test and the
+        #: `n_scored_tokens` count, so it replaces three separate walks over the mask.
+        scored_index = mask_row.nonzero(as_tuple=True)[0]
+        if scored_index.numel() == 0:
+            # A mask that selects nothing is not a score of 0 — the probe never looked. A
+            # `response` window on a request that generated nothing lands here, correctly.
+            return Verdict(scored=False, not_scored_reason="no_scored_tokens", **base)
+
+        score_tensor = score_row.unsqueeze(0)
+        mask_tensor = mask_row.unsqueeze(0)
+        logit_parts = self._logits[probe.probe_id]
+        logit_tensor = _row(logit_parts).unsqueeze(0) if logit_parts else None
+        params = {
+            k: v for k, v in (probe.rule_params or {}).items() if k in ("tau", "window")
+        }
+        value = float(
+            combine(
+                probe.rule,
+                score_tensor,
+                mask=mask_tensor,
+                attention_logits=logit_tensor,
+                **params,
+            ).item()
+        )
 
             # ⚠ `stable=True` IS LOAD-BEARING, not tidiness. This replaced
             # `sorted(scored_positions, key=scores.__getitem__, reverse=True)`, and Python's sort
@@ -488,22 +525,46 @@ class ProbeRequestContext:
             # reported positions would drift between runs on the same input, which is the kind of
             # difference nobody notices and nobody can reproduce. Measured at 0.431 ms per probe
             # as a Python sort at 4k tokens, against 0.42 ms for the matvec it was sorting.
-            order = torch.sort(score_row[scored_index], descending=True, stable=True).indices
-            top = scored_index[order[:TOP_POSITIONS]].tolist()
-            verdicts.append(
-                Verdict(
-                    scored=True,
-                    score=value,
-                    # ⚠ `None`, not `False`, when no threshold was placed: the probe ranks but
-                    # does not decide, and reporting `False` would be a verdict it never gave.
-                    fires=None if probe.threshold is None else value > probe.threshold,
-                    n_scored_tokens=int(scored_index.numel()),
-                    top_positions=top,
-                    **base,
-                )
-            )
-        self.overhead_ms += (time.perf_counter() - started) * 1000.0
-        return verdicts
+        order = torch.sort(score_row[scored_index], descending=True, stable=True).indices
+        top = scored_index[order[:TOP_POSITIONS]].tolist()
+        return Verdict(
+            scored=True,
+            score=value,
+            # ⚠ `None`, not `False`, when no threshold was placed: the probe ranks but
+            # does not decide, and reporting `False` would be a verdict it never gave.
+            #
+            # A provisional window fires on this same threshold by operator decision
+            # (2026-09-30). `base` carries `provisional=True` so the alert cannot be read as a
+            # calibrated one.
+            fires=None if probe.threshold is None else value > probe.threshold,
+            n_scored_tokens=int(scored_index.numel()),
+            top_positions=top,
+            **base,
+        )
+
+    def _mask_for_window(
+        self, probe: ArmedProbe, window: str, mask_parts: list, n_total: int
+    ) -> Optional[torch.Tensor]:
+        """The per-position mask for one window, or `None` if it cannot be resolved.
+
+        The probe's OWN scope reuses the per-pass windows `observe` recorded, so the existing
+        single-window path is byte-for-byte what it was. Any other window is rebuilt from
+        `scored_mask`, which is the one definition of a scope's positions — deriving it a second
+        way here is how two arithmetic copies drift apart.
+        """
+        if window == probe.scope:
+            return _row(mask_parts)
+        if window == "all":
+            return torch.ones(n_total, dtype=torch.bool)
+        if self._n_prompt_tokens is None:
+            return None
+        n_prompt = min(self._n_prompt_tokens, n_total)
+        spec = scored_mask(
+            scope=window,
+            n_prompt_tokens=n_prompt,
+            n_generated=max(0, n_total - n_prompt),
+        )
+        return torch.as_tensor(spec, dtype=torch.bool)
 
 
 class ProbeRuntimeState:

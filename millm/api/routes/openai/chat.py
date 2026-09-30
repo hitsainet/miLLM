@@ -55,11 +55,24 @@ def build_probe_verdicts_header(verdicts: list) -> str:
     server's response must be byte-identical to what it was before this feature existed.
     """
     members: list[str] = []
-    for verdict in sorted(verdicts, key=lambda v: v.name):
+    # ⚠ SORTED BY (name, window), NOT name. One probe now reports several windows, so sorting by
+    # name alone leaves the order of a probe's own members to dict iteration — the exact
+    # non-determinism the sort exists to remove.
+    for verdict in sorted(verdicts, key=lambda v: (v.name, v.window)):
         name = str(verdict.name).replace('"', "")
+        window = str(verdict.window).replace('"', "")
+        # The window is a PARAMETER, not part of the name token: a consumer that only knows
+        # v1.6 keeps reading the name it already reads, and ignores parameters it does not know.
+        # Without it, three verdicts from one probe emit three members with an identical name.
+        tail = [f"window={window}"]
+        if verdict.provisional:
+            tail.append("provisional=?1")
         if not verdict.scored:
             reason = str(verdict.not_scored_reason or "unknown").replace('"', "")
-            members.append(f'"{name}";not-scored;reason="{reason}";rung={verdict.rung}')
+            members.append(
+                f'"{name}";not-scored;reason="{reason}";rung={verdict.rung};'
+                + ";".join(tail)
+            )
             continue
         parts = [f'"{name}"', f"score={verdict.score:.6g}"]
         if verdict.threshold is not None:
@@ -69,6 +82,7 @@ def build_probe_verdicts_header(verdicts: list) -> str:
         if verdict.fires is not None:
             parts.append(f"verdict={'?1' if verdict.fires else '?0'}")
         parts.append(f"rung={verdict.rung}")
+        parts.extend(tail)
         members.append(";".join(parts))
     return ", ".join(members)
 

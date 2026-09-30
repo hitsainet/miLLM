@@ -62,6 +62,34 @@ def scored_mask(
     return [False] * n_prompt_tokens + [True] * n_generated
 
 
+def window_is_calibrated(probe_scope: str, window: str) -> bool:
+    """Whether this probe's threshold means anything over this window.
+
+    A threshold is the `(1 - target_fpr)` quantile of negatives **aggregated under one window**.
+    Move the window and the quantile is a quantile of something else, so the same number no longer
+    names the same false-positive rate.
+
+    ⚠ THIS IS NOT PEDANTRY, AND THE ESTATE HAS ALREADY PAID FOR THE GENERAL VERSION OF IT. A
+    high-stakes probe once fired on *"What is the capital of France?"* because its 1% budget had
+    been spent on plain-prose negatives and then applied to chat. The recorded lesson was that
+    *"a false-positive rate is a property of the negative distribution the monitor will actually
+    see. Calibrating on one distribution and serving on another does not transfer, and nothing in
+    the numbers says so."* A narrower window is a different negative distribution by exactly that
+    argument.
+
+    ⚠ AND FOR `response` IT IS WORSE THAN UNCALIBRATED — IT IS UNTRAINED. miStudio's training
+    corpus is plain prose wrapped as a single user turn, and its capture refuses a response scope
+    outright: *"no scored tokens at all under scope 'response'; every row's mask is empty, so
+    there is nothing to train on"*. Weights fitted on user statements are being pointed at model
+    output.
+
+    A window this returns `False` for still produces a verdict and still fires — the operator
+    chose alerts now over silence on 2026-09-30 — but it is marked `provisional` everywhere it
+    surfaces, which is the condition that choice was made under.
+    """
+    return window == probe_scope
+
+
 def scope_is_reproducible(scope: str) -> bool:
     """Whether a test vector under this scope can be scored exactly from its `token_ids`.
 

@@ -87,14 +87,21 @@ def contexts_for(
     full_ids: Any,
     k: int,
     tokenizer: Any,
-) -> dict[str, dict[str, Any]]:
-    """`{probe_id: {context_text, context_token_ids}}` for every verdict that has a top position.
+) -> dict[tuple[str, str], dict[str, Any]]:
+    """`{(probe_id, window): {context_text, context_token_ids}}` for verdicts with a top position.
 
     A verdict with no `top_positions` (not scored, or scored with no firing position) contributes
     no entry rather than an empty one, so `context_text IS NULL` keeps meaning "no window", not
     "a window we could not fill".
+
+    ⚠ KEYED BY (probe_id, window), NOT probe_id. One probe now reports several windows, and each
+    one's top position is somewhere different — the prompt window's peak is in the person's
+    words, the response window's is in the model's. Keyed by probe id alone the second verdict
+    would SILENTLY OVERWRITE the first, and both events would open on the same text while showing
+    different scores. Nothing would have raised; the reader would simply have been shown the
+    wrong evidence for one of them.
     """
-    out: dict[str, dict[str, Any]] = {}
+    out: dict[tuple[str, str], dict[str, Any]] = {}
     for verdict in verdicts or []:
         positions = getattr(verdict, "top_positions", None) or []
         if not positions:
@@ -102,7 +109,7 @@ def contexts_for(
         text, window = context_window(full_ids, int(positions[0]), k, tokenizer)
         if text is None and window is None:
             continue
-        out[verdict.probe_id] = {
+        out[(verdict.probe_id, verdict.window)] = {
             "context_text": text,
             "context_token_ids": window,
         }

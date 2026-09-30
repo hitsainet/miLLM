@@ -183,9 +183,23 @@ class TestTheVerdictContextVar:
 
 class TestTheHeader:
     def test_the_documented_example_is_produced_exactly(self):
+        # ⚠ `window` is a PARAMETER on the member, not part of the name token, so a v1.6
+        # consumer reading the name and the score is unaffected. It cannot be omitted: one probe
+        # now emits several members and they would otherwise share an identical name.
         assert build_probe_verdicts_header([verdict()]) == (
-            '"high-stakes";score=2.31;threshold=1.07;verdict=?1;rung=3'
+            '"high-stakes";score=2.31;threshold=1.07;verdict=?1;rung=3;window=all'
         )
+
+    def test_a_provisional_window_SAYS_SO_in_the_header(self):
+        """The operator chose alerts from uncalibrated windows over silence. The flag is the
+        condition that choice was made under, so it has to reach the wire."""
+        header = build_probe_verdicts_header([verdict(window="prompt", provisional=True)])
+        assert "window=prompt" in header
+        assert "provisional=?1" in header
+
+    def test_a_calibrated_window_carries_no_provisional_flag(self):
+        """Specificity: a flag that is always present says nothing."""
+        assert "provisional" not in build_probe_verdicts_header([verdict()])
 
     def test_nothing_armed_means_no_header_at_all(self):
         """An unarmed server's response must be byte-identical to what it was before F024."""
@@ -227,8 +241,13 @@ class TestTheHeader:
 class TestTheStreamPayload:
     def test_a_scored_verdict_carries_its_numbers(self):
         payload = _verdict_payload(verdict())
+        # ⚠ EXACT EQUALITY, DELIBERATELY. `probe_id` and `window` joined this payload on
+        # 2026-09-30: a probe now reports several windows, and without them a streaming consumer
+        # sees N entries distinguishable only by their numbers. `provisional` says whether the
+        # threshold it fired against was ever calibrated for that window.
         assert payload == {
-            "name": "high-stakes", "scored": True, "score": 2.31, "threshold": 1.07,
+            "name": "high-stakes", "probe_id": "pr_1", "window": "all", "provisional": False,
+            "scored": True, "score": 2.31, "threshold": 1.07,
             "verdict": True, "rung": 3,
             "rung_language": "detects on unseen tasks, compared with a judge",
         }

@@ -121,7 +121,7 @@ class TestThePayloadNeverCarriesPromptText:
             await service.record(
                 "chatcmpl-a",
                 [verdict(probe_id=probe.id)],
-                contexts={probe.id: {"context_text": "user words", "context_token_ids": [7]}},
+                contexts={(probe.id, "all"): {"context_text": "user words", "context_token_ids": [7]}},
             )
         assert emitter.emit_probe_event.called
         sent = emitter.emit_probe_event.call_args[0][0]
@@ -134,7 +134,7 @@ class TestThePayloadNeverCarriesPromptText:
         await service.record(
             "chatcmpl-a",
             [verdict(probe_id=probe.id)],
-            contexts={probe.id: {"context_text": "user words", "context_token_ids": [7]}},
+            contexts={(probe.id, "all"): {"context_text": "user words", "context_token_ids": [7]}},
         )
         assert (await events.list_events(probe_id=probe.id))[0].context_text == "user words"
 

@@ -315,7 +315,19 @@ class ProbeParityEngine:
             context = ProbeRequestContext(f"parity:{index}", [probe], collect_flip_risk=True)
             self._forward(torch.tensor([token_ids], dtype=torch.long), context)
             verdicts = context.finish()
-            verdict = verdicts[0]
+            # ⚠ SELECTED BY WINDOW, NOT BY POSITION. `verdicts[0]` was safe only while a probe
+            # produced exactly one verdict. Parity compares against miStudio's recorded scores,
+            # which were computed under the probe's CONTRACT scope — reading a different window
+            # here would report a disagreement that is really a comparison of two different
+            # things, on the one check a consumer leans on to trust its own implementation.
+            verdict = next(
+                (v for v in verdicts if v.window == probe.scope), verdicts[0] if verdicts else None
+            )
+            if verdict is None:
+                result.comparable = False
+                result.reason = "no verdict was produced for the probe's own scope"
+                report.vectors.append(result)
+                continue
 
             if not verdict.scored:
                 result.comparable = False

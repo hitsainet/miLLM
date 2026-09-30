@@ -67,7 +67,10 @@ class ProbeEventService:
 
         rows: list[dict[str, Any]] = []
         for verdict in verdicts:
-            extra = (contexts or {}).get(verdict.probe_id, {})
+            window = verdict.window
+            # ⚠ The key is the PAIR. See `contexts_for`: keyed by probe id alone, two windows of
+            # one probe collide and the reader is shown the wrong evidence for one of them.
+            extra = (contexts or {}).get((verdict.probe_id, window), {})
             rows.append(
                 {
                     "probe_id": verdict.probe_id,
@@ -82,6 +85,10 @@ class ProbeEventService:
                     "rung": verdict.rung,
                     "top_positions": list(verdict.top_positions or []),
                     "n_scored_tokens": verdict.n_scored_tokens,
+                    # Which slice of the request this verdict read, and whether the threshold it
+                    # was judged against was ever calibrated for that slice.
+                    "window": window,
+                    "provisional": bool(verdict.provisional),
                     "context_text": extra.get("context_text"),
                     "context_token_ids": extra.get("context_token_ids"),
                     "summary": _summary(verdict),
@@ -281,6 +288,12 @@ def event_summary(event: Any) -> dict[str, Any]:
         "top_positions": event.top_positions,
         "n_scored_tokens": event.n_scored_tokens,
         "summary": event.summary,
+        # Two verdicts from one probe are otherwise identical on this shape — same probe_id, same
+        # name upstream, same request. Without `window` the UI shows two rows it cannot tell
+        # apart, and `provisional` is the operator's only signal that one of them fired against a
+        # bar never cut for it.
+        "window": getattr(event, "window", "all"),
+        "provisional": bool(getattr(event, "provisional", False)),
         # ⚠ isoformat, not the datetime: this goes through socket.io's JSON encoder, which has no
         # datetime support, and a raised encoder error is swallowed by the fire-and-forget wrapper.
         "created_at": created.isoformat() if hasattr(created, "isoformat") else created,

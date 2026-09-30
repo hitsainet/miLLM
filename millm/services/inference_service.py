@@ -243,9 +243,16 @@ def _verdict_payload(verdict: Any) -> dict:
     `not_scored` entries carry their reason and nothing else numeric — reporting a score of 0 for
     a request nobody scored would be a measurement that was never taken.
     """
+    # ⚠ `probe_id` and `window` are both here now. This emitted neither, so three verdicts from
+    # one probe reached a streaming consumer as three entries distinguishable only by their
+    # numbers — and `provisional` is the difference between a calibrated alert and one fired
+    # against a bar that was never cut for that window.
     if not verdict.scored:
         return {
             "name": verdict.name,
+            "probe_id": verdict.probe_id,
+            "window": verdict.window,
+            "provisional": bool(verdict.provisional),
             "scored": False,
             "reason": verdict.not_scored_reason,
             "rung": verdict.rung,
@@ -253,6 +260,9 @@ def _verdict_payload(verdict: Any) -> dict:
         }
     return {
         "name": verdict.name,
+        "probe_id": verdict.probe_id,
+        "window": verdict.window,
+        "provisional": bool(verdict.provisional),
         "scored": True,
         "score": verdict.score,
         "threshold": verdict.threshold,

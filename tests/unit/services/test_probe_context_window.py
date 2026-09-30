@@ -36,10 +36,14 @@ class FakeTokenizer:
         return " ".join(f"t{int(i)}" for i in ids)
 
 
-def _verdict(probe_id="pr_1", top=None):
+def _verdict(probe_id="pr_1", top=None, window="all"):
     v = MagicMock()
     v.probe_id = probe_id
     v.top_positions = [] if top is None else list(top)
+    # ⚠ SET EXPLICITLY. A MagicMock answers every attribute, so a `getattr(v, "window", "all")`
+    # in production would read a Mock here and the test would pass while the real key was
+    # garbage. Stating it is what makes this fixture able to fail.
+    v.window = window
     return v
 
 
@@ -95,16 +99,16 @@ class TestTheWindow:
 
 
 class TestContextsFor:
-    def test_it_keys_by_probe_id(self):
+    def test_it_keys_by_probe_id_AND_window(self):
         out = contexts_for(
             [_verdict("pr_a", [10]), _verdict("pr_b", [20])],
             torch.arange(100),
             1,
             FakeTokenizer(),
         )
-        assert set(out) == {"pr_a", "pr_b"}
-        assert out["pr_a"]["context_token_ids"] == [9, 10, 11]
-        assert out["pr_b"]["context_token_ids"] == [19, 20, 21]
+        assert set(out) == {("pr_a", "all"), ("pr_b", "all")}
+        assert out[("pr_a", "all")]["context_token_ids"] == [9, 10, 11]
+        assert out[("pr_b", "all")]["context_token_ids"] == [19, 20, 21]
 
     def test_a_verdict_with_no_top_position_contributes_nothing(self):
         """⚠ No entry, not an empty one: `context_text IS NULL` must keep meaning "no window",
@@ -112,11 +116,25 @@ class TestContextsFor:
         out = contexts_for([_verdict("pr_a", None)], torch.arange(100), 2, FakeTokenizer())
         assert out == {}
 
+    def test_two_windows_of_ONE_probe_keep_separate_contexts(self):
+        """⚠ THE REASON THE KEY IS A PAIR. One probe reports several windows and each one's top
+        position is somewhere different — the prompt window peaks in the person's words, the
+        response window in the model's. Keyed by probe id alone the second silently overwrote the
+        first and both events opened on the same text while showing different scores. Nothing
+        raised; the reader was simply shown the wrong evidence for one of them."""
+        out = contexts_for(
+            [_verdict("pr_a", [10], window="prompt"), _verdict("pr_a", [90], window="response")],
+            torch.arange(100), 1, FakeTokenizer(),
+        )
+        assert set(out) == {("pr_a", "prompt"), ("pr_a", "response")}
+        assert out[("pr_a", "prompt")]["context_token_ids"] == [9, 10, 11]
+        assert out[("pr_a", "response")]["context_token_ids"] == [89, 90, 91]
+
     def test_it_uses_the_FIRST_top_position(self):
         """`top_positions` is sorted descending by score, so [0] is the top firing position —
         which is what the setting's own comment describes."""
         out = contexts_for([_verdict("pr_a", [40, 10, 90])], torch.arange(100), 0 + 1, FakeTokenizer())
-        assert out["pr_a"]["context_token_ids"] == [39, 40, 41]
+        assert out[("pr_a", "all")]["context_token_ids"] == [39, 40, 41]
 
 
 class TestItActuallyReachesTheEvent:
@@ -169,9 +187,9 @@ class TestItActuallyReachesTheEvent:
             "the UI's prompt window opens empty"
         )
         got = kwargs["contexts"]
-        assert got and "pr_1" in got, f"contexts was {got!r}"
-        assert got["pr_1"]["context_text"], "the window carries no decoded text"
-        assert got["pr_1"]["context_token_ids"]
+        assert got and ("pr_1", "all") in got, f"contexts was {got!r}"
+        assert got[("pr_1", "all")]["context_text"], "the window carries no decoded text"
+        assert got[("pr_1", "all")]["context_token_ids"]
 
     @pytest.mark.asyncio
     async def test_it_sends_None_rather_than_an_empty_dict_when_there_is_no_window(self):
@@ -238,7 +256,7 @@ class TestItActuallyReachesTheEvent:
             finally:
                 deps._probe_event_service = original
             widths[k] = len(
-                service.record.await_args.kwargs["contexts"]["pr_1"]["context_token_ids"]
+                service.record.await_args.kwargs["contexts"][("pr_1", "all")]["context_token_ids"]
             )
 
         assert widths == {1: 3, 7: 15}, (

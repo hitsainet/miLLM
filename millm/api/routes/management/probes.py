@@ -58,6 +58,17 @@ class ProbeArmRequest(BaseModel):
 
     acknowledge_below_rung2: bool = False
     reason: str = Field("", max_length=500)
+    #: WHICH WINDOWS THIS PROBE REPORTS — `all`, `prompt`, `response`. `None` means the default
+    #: (all three); an explicit `[]` means the probe's own scope alone, which is what it did
+    #: before windows existed.
+    #:
+    #: ⚠ THIS IS NOT THE PROBE'S SCOPE AND DOES NOT CHANGE IT. `scope` is identity: what the
+    #: probe was trained on and what its threshold was cut under. A probe whose contract scope is
+    #: `prompt` or `response` is still refused at arm time on reproducibility grounds. This
+    #: chooses which slices of a request the same weights are READ over, because the prompt says
+    #: something about the user and the response says something about the model, and a mean over
+    #: both answers neither.
+    windows: Optional[list[str]] = None
 
 
 def _probe_summary(probe: Any) -> dict[str, Any]:
@@ -267,6 +278,7 @@ async def arm_probe(
         acknowledge_below_rung2=request.acknowledge_below_rung2,
         reason=request.reason,
         encoder=await build_probe_encoder(probe),
+        windows=request.windows,
     )
     # ⚠ `armed` is an `ArmedProbe`, which has NO `basis` — the basis lives on the row. This read
     # `armed.basis` and raised AttributeError AFTER the probe was already armed and hooked, so
@@ -296,7 +308,9 @@ async def check_parity(
         raise ProbeNotFoundError(f"No probe {probe_id}")
 
     _identity, model, tokenizer = await loaded_identity(session)
-    armed = armed_probe_from_row(probe, encoder=await build_probe_encoder(probe))
+    # `windows=[]` — the probe's own scope alone. Parity compares against miStudio's recorded
+    # scores, which were computed under that scope; other windows would be work with no reader.
+    armed = armed_probe_from_row(probe, encoder=await build_probe_encoder(probe), windows=[])
     tolerance = max(
         float((probe.definition.get("test_vectors") or {}).get("tolerance", 0.0) or 0.0),
         settings.PROBE_PARITY_TOLERANCE,

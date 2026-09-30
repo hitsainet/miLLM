@@ -42,6 +42,7 @@ from millm.services.probe_identity import LoadedIdentity, check_identity
 from millm.services.probe_parity import NOT_COMPARABLE_SCOPE, ProbeParityEngine
 from millm.services.probe_scope import (
     RUNTIME_SCORABLE_SCOPES,
+    SCOPES,
     scope_is_runtime_scorable,
 )
 from millm.services.probe_runtime import ArmedProbe, ProbeRuntimeState
@@ -70,8 +71,43 @@ def head_from_definition(
     )
 
 
+#: What a probe reports when the operator names no windows. All three by decision (2026-09-30):
+#: `all` keeps continuity with every event recorded before this existed, and having it beside the
+#: other two makes the dilution the feature exists to fix directly visible.
+DEFAULT_WINDOWS: tuple[str, ...] = ("all", "prompt", "response")
+
+
+def resolve_windows(requested: Any, *, probe_scope: str) -> tuple[str, ...]:
+    """The windows a probe will report, validated.
+
+    ⚠ THIS IS A REPORTING CHOICE, NOT THE PROBE'S SCOPE. `scope` is identity — what the probe was
+    trained on, what its threshold was cut under, the only thing parity can verify — and nothing
+    here may change it. A probe whose CONTRACT scope is `prompt` or `response` is still refused at
+    arm time on reproducibility grounds, exactly as before.
+
+    Order is preserved and duplicates collapse, so a caller asking for the same window twice gets
+    one verdict rather than two identical rows.
+    """
+    if requested is None:
+        return DEFAULT_WINDOWS
+    seen: list[str] = []
+    for name in requested:
+        if name not in SCOPES:
+            raise ValueError(f"unknown window {name!r}; known: {', '.join(SCOPES)}")
+        if name not in seen:
+            seen.append(name)
+    if not seen:
+        # An explicit empty list means "just my own scope" — the pre-feature behaviour, reachable
+        # deliberately rather than only by omission.
+        return (probe_scope,)
+    return tuple(seen)
+
+
 def armed_probe_from_row(
-    probe: Any, *, encoder: Optional[Callable[[torch.Tensor], torch.Tensor]] = None
+    probe: Any,
+    *,
+    encoder: Optional[Callable[[torch.Tensor], torch.Tensor]] = None,
+    windows: Any = None,
 ) -> ArmedProbe:
     """Resolve a stored row into the runtime shape, once, at arm time."""
     definition = probe.definition
@@ -87,6 +123,7 @@ def armed_probe_from_row(
         rung_language=probe_rung_language(probe.rung),
         threshold=probe.threshold,
         encoder=encoder,
+        windows=resolve_windows(windows, probe_scope=probe.scope),
     )
 
 
@@ -108,6 +145,7 @@ class ProbeArmingService:
         acknowledge_below_rung2: bool = False,
         reason: str = "",
         encoder: Optional[Callable[[torch.Tensor], torch.Tensor]] = None,
+        windows: Any = None,
         by: str = "operator",
     ) -> ArmedProbe:
         # ── 1. the limit ────────────────────────────────────────────────────────────
@@ -164,7 +202,10 @@ class ProbeArmingService:
                 },
             )
 
-        armed = armed_probe_from_row(probe, encoder=encoder)
+        # ⚠ The PARITY gate below runs against this same object, and parity must read the
+        # probe's own scope. `_verdict_for` produces one verdict per window and the engine now
+        # selects the scope's one explicitly, so extra windows cannot move a parity result.
+        armed = armed_probe_from_row(probe, encoder=encoder, windows=windows)
 
         # ── 4. parity — the only gate that costs a forward pass ─────────────────────
         tolerance = max(

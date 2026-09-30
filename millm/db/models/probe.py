@@ -155,6 +155,15 @@ class ProbeEvent(Base):
     context_token_ids: Mapped[Optional[list[int]]] = mapped_column(JSONVariant, nullable=True)
     summary: Mapped[Optional[str]] = mapped_column(String(300), nullable=True)
 
+    #: WHICH SLICE OF THE REQUEST THIS VERDICT READ — `all`, `prompt` or `response`. One probe now
+    #: reports several, because averaging the person's words together with the model's answer
+    #: answers neither question: a long reply drags the mean down and the same conversation
+    #: scores differently depending on how much the model said.
+    window: Mapped[str] = mapped_column(String(16), nullable=False, server_default="all")
+    #: The threshold was calibrated under the probe's own scope. This verdict was not read under
+    #: it, so the number fires against a bar that was never cut for this slice.
+    provisional: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default=sa_false())
+
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()
     )

@@ -28,12 +28,13 @@ import pytest
 import torch
 
 from millm.ml.probe_head import ProbeHead
+from millm.services.probe_arming import window_thresholds_from_definition
 from millm.services.probe_runtime import ArmedProbe, ProbeRequestContext
 
 D = 4
 
 
-def probe(*, scope="all", windows=(), threshold=1.0, probe_id="pr_1"):
+def probe(*, scope="all", windows=(), threshold=1.0, probe_id="pr_1", window_thresholds=None):
     return ArmedProbe(
         probe_id=probe_id,
         name=probe_id,
@@ -45,6 +46,7 @@ def probe(*, scope="all", windows=(), threshold=1.0, probe_id="pr_1"):
         rung_language="detects on unseen tasks",
         threshold=threshold,
         windows=windows,
+        window_thresholds=window_thresholds or {},
     )
 
 
@@ -219,3 +221,105 @@ class TestTheExtraWindowsAreCheap:
             "observing cost materially more with three windows, which means a window is doing "
             "work during the forward pass rather than at finish()"
         )
+
+
+class TestAWindowsOwnThresholdRetiresTheProvisionalFlag:
+    """⚠ THE POINT OF PHASE 2. `provisional` means "judged against a bar cut for a different
+    distribution" — a threshold is the (1 - target_fpr) quantile of negatives aggregated under ONE
+    window, so read over another it no longer names the same false-positive rate.
+
+    Once miStudio has cut a bar from THIS window's own negatives that is no longer true. The flag
+    must then come off, or the operator learns to ignore the marker that still matters on the
+    windows nobody calibrated — and a warning nobody reads is worse than none, because it still
+    looks like coverage.
+    """
+
+    def test_a_calibrated_window_is_not_provisional(self):
+        ctx = ProbeRequestContext(
+            "r",
+            [probe(scope="all", windows=("all", "prompt", "response"),
+                   window_thresholds={"prompt": 4.0})],
+        )
+        run(ctx, prompt_tokens=8, generated=4)
+        got = by_window(ctx.finish())
+        assert got["prompt"].provisional is False, "a calibrated window is still flagged"
+        assert got["response"].provisional is True, "an uncalibrated window lost its flag"
+        assert got["all"].provisional is False
+
+    def test_it_is_JUDGED_against_its_own_threshold(self):
+        """Not merely reported: the window's own bar must decide `fires`, or the flag came off a
+        verdict that is still being made the old way."""
+        low = ProbeRequestContext(
+            "a", [probe(scope="all", windows=("prompt",), threshold=100.0,
+                        window_thresholds={"prompt": 1.0})],
+        )
+        run(low, prompt_tokens=8, generated=4, prompt_value=3.0)
+        got = by_window(low.finish())["prompt"]
+        # The probe's own threshold is 100 and would not fire; the window's is 1 and does.
+        assert got.threshold == 1.0
+        assert got.fires is True
+
+    def test_a_window_with_no_entry_falls_back_and_stays_flagged(self):
+        ctx = ProbeRequestContext(
+            "r", [probe(scope="all", windows=("response",), threshold=2.0,
+                        window_thresholds={"prompt": 4.0})],
+        )
+        run(ctx, prompt_tokens=8, generated=4)
+        got = by_window(ctx.finish())["response"]
+        assert got.threshold == 2.0
+        assert got.provisional is True
+
+
+class TestReadingTheWindowThresholdsOutOfADefinition:
+    """⚠ WRITTEN BECAUSE A MUTATION SURVIVED. Replacing the type check with
+    `float(value or 0.0)` left the whole suite green — 592 passed — while turning every window
+    that placed NO bar into one with a threshold of 0.0.
+
+    That is the worst available failure: a probe that said nothing becomes a probe that fires on
+    roughly half its input, confidently, with a number beside it. `Decision`'s own docstring
+    makes the same point about the top-level threshold — "a runtime that treats it as one turns a
+    probe that has said nothing into one that fires on half its input" — and the per-window path
+    reached production without the assertion that holds it.
+    """
+
+    def test_it_reads_the_thresholds_it_is_given(self):
+        got = window_thresholds_from_definition(
+            {"decision": {"windows": {
+                "prompt": {"threshold": 4.5, "target_fpr": 0.01},
+                "response": {"threshold": -1.25},
+            }}}
+        )
+        assert got == {"prompt": 4.5, "response": -1.25}
+
+    def test_a_null_threshold_is_ABSENT_not_zero(self):
+        """A window that placed no bar must not acquire one. 0.0 is a real operating point and a
+        catastrophic default."""
+        got = window_thresholds_from_definition(
+            {"decision": {"windows": {"prompt": {"threshold": None, "n_negatives": 0}}}}
+        )
+        assert got == {}, f"a null threshold became {got} — that window now fires on half its input"
+
+    def test_a_missing_threshold_key_is_absent_too(self):
+        got = window_thresholds_from_definition(
+            {"decision": {"windows": {"prompt": {"target_fpr": 0.01}}}}
+        )
+        assert got == {}
+
+    def test_a_boolean_is_not_a_threshold(self):
+        """`isinstance(True, int)` is True in Python, so a bool slips through a naive numeric
+        check and becomes a threshold of 1.0."""
+        got = window_thresholds_from_definition(
+            {"decision": {"windows": {"prompt": {"threshold": True}}}}
+        )
+        assert got == {}
+
+    @pytest.mark.parametrize(
+        "definition",
+        [None, {}, {"decision": None}, {"decision": {}}, {"decision": {"windows": None}},
+         {"decision": {"windows": []}}, {"decision": {"windows": {"prompt": "nonsense"}}}],
+    )
+    def test_a_malformed_block_costs_the_thresholds_not_the_arming(self, definition):
+        """The definition is another repository's document. A shape we did not expect should
+        lose the per-window bars — leaving those windows provisional, which is honest — rather
+        than refusing to arm a probe that is otherwise fine."""
+        assert window_thresholds_from_definition(definition) == {}

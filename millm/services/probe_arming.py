@@ -103,6 +103,31 @@ def resolve_windows(requested: Any, *, probe_scope: str) -> tuple[str, ...]:
     return tuple(seen)
 
 
+def window_thresholds_from_definition(definition: Any) -> dict[str, float]:
+    """`{window: threshold}` from `decision.windows`, for windows that placed a bar.
+
+    ⚠ ABSENT IS NOT ZERO AND NOT THE TOP-LEVEL THRESHOLD. A window with no entry, or an entry
+    whose threshold is null, is one this producer never calibrated — the caller then falls back to
+    the probe's own threshold and marks the verdict provisional. Defaulting to `0.0` here would
+    make such a window fire on half its input, silently and confidently.
+
+    Tolerant of shape: the definition is another repository's document, and a malformed `windows`
+    block should cost the per-window thresholds, not the arming.
+    """
+    decision = (definition or {}).get("decision") or {}
+    windows = decision.get("windows")
+    if not isinstance(windows, dict):
+        return {}
+    out: dict[str, float] = {}
+    for name, entry in windows.items():
+        if not isinstance(entry, dict):
+            continue
+        value = entry.get("threshold")
+        if isinstance(value, (int, float)) and not isinstance(value, bool):
+            out[str(name)] = float(value)
+    return out
+
+
 def armed_probe_from_row(
     probe: Any,
     *,
@@ -124,6 +149,7 @@ def armed_probe_from_row(
         threshold=probe.threshold,
         encoder=encoder,
         windows=resolve_windows(windows, probe_scope=probe.scope),
+        window_thresholds=window_thresholds_from_definition(definition),
     )
 
 

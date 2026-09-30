@@ -130,6 +130,10 @@ class ArmedProbe:
     #: Scoring a second window costs no forward pass and no matvec — `observe` already stores
     #: every position's score UNMASKED, and the window is applied in `combine`.
     windows: tuple[str, ...] = ()
+    #: `{window: threshold}` where the producer calibrated that window's own negatives. A window
+    #: present here is NOT provisional: its bar was cut from the distribution it is judged
+    #: against, which is the whole difference between a rate and a ranking.
+    window_thresholds: dict[str, float] = field(default_factory=dict)
 
 
 @dataclass
@@ -464,16 +468,22 @@ class ProbeRequestContext:
 
     def _verdict_for(self, probe: ArmedProbe, window: str) -> Verdict:
         """One probe's verdict over one window."""
+        # ⚠ A WINDOW'S OWN THRESHOLD RETIRES ITS PROVISIONAL FLAG, and nothing else does. The
+        # flag means "judged against a bar cut for a different distribution"; once miStudio has
+        # cut a bar from THIS window's negatives that is no longer true, and continuing to mark
+        # it would train the operator to ignore the marker that still matters elsewhere.
+        own = probe.window_thresholds.get(window)
+        threshold = own if own is not None else probe.threshold
         base = dict(
             probe_id=probe.probe_id,
             name=probe.name,
             rung=probe.rung,
             rung_language=probe.rung_language,
-            threshold=probe.threshold,
+            threshold=threshold,
             window=window,
             # Recorded per verdict rather than derived by a reader, because the reader is a
             # header, a socket payload, a DB row and a React component — four chances to forget.
-            provisional=not window_is_calibrated(probe.scope, window),
+            provisional=own is None and not window_is_calibrated(probe.scope, window),
         )
         if self._not_scored_reason is not None:
             return Verdict(scored=False, not_scored_reason=self._not_scored_reason, **base)
@@ -536,7 +546,7 @@ class ProbeRequestContext:
             # A provisional window fires on this same threshold by operator decision
             # (2026-09-30). `base` carries `provisional=True` so the alert cannot be read as a
             # calibrated one.
-            fires=None if probe.threshold is None else value > probe.threshold,
+            fires=None if threshold is None else value > threshold,
             n_scored_tokens=int(scored_index.numel()),
             top_positions=top,
             **base,

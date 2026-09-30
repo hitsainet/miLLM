@@ -139,6 +139,17 @@ class Decision(_Contract):
     realised_fpr: float | None = None
     threshold_source: str | None = None
     calibration: dict[str, Any] | None = None
+    #: A threshold per contract window: `{all|prompt|response: {threshold, target_fpr, ...}}`.
+    #:
+    #: ⚠ `None` AND `{}` ARE DIFFERENT. `None` means the producer never calibrated per window, so
+    #: a verdict on any window but the probe's own scope is judged against a bar cut for a
+    #: different distribution and must be reported PROVISIONAL. `{}` would mean it tried and
+    #: placed none. Only the first is a reason to assume the single `threshold` transfers.
+    #:
+    #: Mirrored explicitly rather than left to `extra="allow"`: this one is READ, and a field the
+    #: runtime depends on should fail loudly on a shape change rather than silently vanish into
+    #: an untyped bag. `circuit_contract_mirror_drift` is the recorded case of the opposite.
+    windows: dict[str, dict[str, Any]] | None = None
 
 
 class Acknowledgement(_Contract):

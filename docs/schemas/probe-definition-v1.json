@@ -191,6 +191,28 @@
             }
           ],
           "default": null
+        },
+        "windows": {
+          "anyOf": [
+            {
+              "additionalProperties": {
+                "$ref": "#/$defs/WindowDecision"
+              },
+              "propertyNames": {
+                "enum": [
+                  "all",
+                  "prompt",
+                  "response"
+                ]
+              },
+              "type": "object"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Windows"
         }
       },
       "title": "Decision",
@@ -802,6 +824,80 @@
         "vectors"
       ],
       "title": "TestVectors",
+      "type": "object"
+    },
+    "WindowDecision": {
+      "additionalProperties": false,
+      "description": "An operating point for ONE window, cut from that window's own negatives.\n\n\u26a0 A THRESHOLD IS A QUANTILE OF ONE WINDOW'S NEGATIVES. A consumer may read the same weights\nover the prompt alone or the response alone \u2014 the prompt says something about the user, the\nresponse about the model \u2014 and over a different window the top-level `threshold` no longer\nnames the same false-positive rate, because it is a quantile of a different distribution. A\nverdict judged against the wrong one is a ranking, not a rate.\n\n`scope` records which of the producer's INTERNAL scopes this window was cut under, so a reader\ncan tell what `prompt` meant here without re-deriving anyone's mapping. It matters: the\ncontract's `prompt` is positional, `[0, n_prompt)`, which includes a system preamble and every\nearlier assistant turn \u2014 a producer that calibrated a role-based \"user\" mask has cut a bar for\na narrower window than the consumer reads, and this field is where that shows.",
+      "properties": {
+        "threshold": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Threshold"
+        },
+        "target_fpr": {
+          "anyOf": [
+            {
+              "exclusiveMaximum": 1.0,
+              "exclusiveMinimum": 0.0,
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Target Fpr"
+        },
+        "realised_fpr": {
+          "anyOf": [
+            {
+              "maximum": 1.0,
+              "minimum": 0.0,
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Realised Fpr"
+        },
+        "n_negatives": {
+          "anyOf": [
+            {
+              "minimum": 0,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "N Negatives"
+        },
+        "scope": {
+          "anyOf": [
+            {
+              "maxLength": 200,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Scope"
+        }
+      },
+      "title": "WindowDecision",
       "type": "object"
     },
     "ProbeDefinitionV1": {

@@ -175,7 +175,7 @@ sub-collection of a circuit, and the flat prefix matches `/api/sensing`.
 | `millm_release_circuit_claims` | `POST /api/circuits/claims/release?circuit_id=` (**recovery** — release ONE circuit's stuck claims; scoped deliberately, there is no "release everything") | REST ✅ · MCP ✅ |
 | `millm_delete_circuit` | `DELETE /api/circuits/{id}` (deactivates first if serving) | REST ✅ · MCP ✅ |
 
-### `millm_probes` (v1.6 — Feature 24, Probe Monitor Runtime)
+### `millm_probes` (v1.7 — Feature 24, Probe Monitor Runtime)
 
 > **STATUS: routes served, tools registered.** Both halves shipped 2026-09-27. The
 > three-state convention this file uses elsewhere applies: *served* means a path in
@@ -193,7 +193,7 @@ sub-collection of a circuit, and the flat prefix matches `/api/sensing`.
 |---|---|
 | `millm_import_probe` | `POST /api/probes/import?on_conflict=rename\|fail` (body = the `mistudio.probe-definition/v1` document) **or** `POST /api/probes/hub/import` (`{repo_id, filename, revision?, on_conflict?}`) |
 | `millm_list_probes` | `GET /api/probes?armed=` |
-| `millm_arm_probe` | `POST /api/probes/{probe_id}/arm` (`{acknowledge_below_rung2?: bool, reason?: str}`) |
+| `millm_arm_probe` | `POST /api/probes/{probe_id}/arm` (`{acknowledge_below_rung2?: bool, reason?: str, windows?: list[str]\|null}`) |
 | `millm_disarm_probe` | `POST /api/probes/{probe_id}/disarm` |
 | `millm_probe_status` | `GET /api/probes/status` |
 | `millm_probe_events` | `GET /api/probes/events?probe_id=&request_id=&limit=` |
@@ -218,11 +218,42 @@ words, and they are served only by `GET /api/probes/events/{event_id}` — which
 v1.6 tool consumes. An agent that needs one asks for it explicitly; it does not
 receive a feed of prompts.
 
+**Windows, and why a request now yields several verdicts (v1.7).** A probe scores the
+tokens in a window and takes the **mean**. Scored over the whole request that mean mixes
+the person's prompt with the model's reply, and the reply is long and low-scoring, so the
+same conversation scores differently depending on how much the model happened to say.
+Measured 2026-09-30: one sentence scored **+9.86 (fires)** against an 8-token reply and
+**−0.32 (silent)** against a full one.
+
+`windows` selects which slices the same weights are read over — any of `all`, `prompt`,
+`response`. `null` (or an absent key) means all three; an explicit `[]` means the probe's
+own scope alone, which is what it did before v1.7. Each window yields **its own verdict and
+its own event**, so one request can produce three.
+
+⚠ **`windows` IS NOT `scope`, AND DOES NOT CHANGE IT.** `scope` is the probe's identity:
+what it was trained on, what its threshold was cut under, and the only thing the parity gate
+can verify. A probe whose CONTRACT scope is `prompt` or `response` is still refused at arm
+time on reproducibility grounds, exactly as in v1.6.
+
+⚠ **ANY WINDOW OTHER THAN THE PROBE'S OWN SCOPE COMES BACK `provisional`.** A threshold is
+the `(1 - target_fpr)` quantile of negatives aggregated under **one** window; read over a
+different one the same number no longer names the same false-positive rate. For `response`
+it is worse than uncalibrated — miStudio's training corpus is prose wrapped as a single user
+turn, so weights fitted there have never seen a model reply. A provisional verdict still
+fires, by operator decision, and is a **ranking, not a rate**.
+
 **What a probe verdict is, on the `/v1` side.** Non-streaming responses carry
 `X-miLLM-Probe-Verdicts` (RFC 8941 structured field); streaming responses carry a
 final chunk with `choices: []` and a `millm_probe_verdicts` extension before
 `[DONE]`. Both are additive: a v1.5 client ignores the header and skips the
 empty-choices chunk, which is what the OpenAI SDK and Open WebUI both already do.
+
+Since v1.7 each header member carries `window=<all|prompt|response>`, and
+`provisional=?1` where it applies — both as **parameters**, so a v1.6 consumer reading the
+name and the score is unaffected. The parameters cannot be omitted: one probe now emits
+several members and they would otherwise share an identical name token. The streaming
+payload gained `probe_id`, `window` and `provisional` for the same reason; it carried no
+probe id at all before.
 
 ### 4d-bis. Probe evidence-rung rule (v1.6 — Feature 24)
 

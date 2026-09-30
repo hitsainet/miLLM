@@ -149,6 +149,36 @@ class TestArming:
         assert kwargs["reason"] == "triage only"
         assert kwargs["loaded"] is patched_bridge
 
+    def test_the_window_choice_REACHES_the_arming_service(self, patched_bridge):
+        """⚠ REACHABILITY, NOT SHAPE. `ProbeArmRequest` gaining a field proves nothing; the
+        question is whether the route hands it on. A body field that parses and is then dropped
+        is the defect this estate keeps shipping — a whole MCP tool surface was once fully
+        implemented, unit-tested and documented while never registered, and every test passed by
+        importing the module directly.
+
+        MUTATION CONTROL: delete `windows=request.windows` from the route -> this goes red.
+        """
+        client, _repo, arming, *_ = _client(probe=_probe_row())
+        response = client.post(
+            "/api/probes/pr_1/arm", json={"windows": ["prompt", "response"]}
+        )
+        assert response.status_code == 200
+        assert arming.arm.await_args.kwargs["windows"] == ["prompt", "response"]
+
+    def test_saying_nothing_about_windows_sends_None_not_an_empty_list(self, patched_bridge):
+        """⚠ `None` AND `[]` MEAN DIFFERENT THINGS. Null is "the default set — all three"; an
+        explicit empty list is "the probe's own scope alone". A route that normalised the absent
+        case to `[]` would silently arm every probe on one window, and nothing would look wrong.
+        """
+        client, _repo, arming, *_ = _client(probe=_probe_row())
+        client.post("/api/probes/pr_1/arm", json={})
+        assert arming.arm.await_args.kwargs["windows"] is None
+
+    def test_an_explicit_empty_list_survives_as_an_empty_list(self, patched_bridge):
+        client, _repo, arming, *_ = _client(probe=_probe_row())
+        client.post("/api/probes/pr_1/arm", json={"windows": []})
+        assert arming.arm.await_args.kwargs["windows"] == []
+
     def test_the_default_is_NOT_acknowledged(self, patched_bridge):
         """An omitted field must not read as consent."""
         client, _repo, arming, *_ = _client(probe=_probe_row(rung=1))

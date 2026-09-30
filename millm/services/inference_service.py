@@ -2576,6 +2576,9 @@ class InferenceService:
                     context.request_id,
                     verdicts,
                     overhead_ms=context.overhead_ms,
+                    # The denominator. Without it the service has a total and no rate, and the
+                    # budget goes back to judging long answers.
+                    n_passes=context.n_passes,
                     contexts=contexts or None,
                 )
         except Exception as exc:

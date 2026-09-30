@@ -62,9 +62,11 @@ def verdict(probe_id: str, **over) -> Verdict:
 class _Context:
     """The minimum `_probe_record` reads off a request context."""
 
-    def __init__(self, request_id="chatcmpl-cold", overhead_ms=5.94):
+    def __init__(self, request_id="chatcmpl-cold", overhead_ms=5.94, n_passes=61):
         self.request_id = request_id
         self.overhead_ms = overhead_ms
+        #: 61 = one prefill + 60 decode steps, the shape of the request that exposed the defect.
+        self.n_passes = n_passes
 
     def finish(self):                       # only reached when verdicts are not passed in
         raise AssertionError("verdicts were passed; finish() must not be called again")

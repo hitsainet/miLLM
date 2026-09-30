@@ -97,14 +97,39 @@ class TestTheShapesAreTheCriterions:
         """A performance test at the wrong size is a number about nothing."""
         assert (N_TOKENS, D_MODEL, N_PROBES) == (4096, 2048, 2)
 
-    def test_the_budget_setting_exists_and_is_the_stated_one(self):
-        """The threshold an operator sees in `GET /api/probes/status` is this number.
+    def test_the_budget_is_PER_PASS_because_that_is_where_the_cost_IS(self):
+        """⚠ THIS ASSERTION USED TO READ `PROBE_MAX_OVERHEAD_MS == 5.0`, AND THE CRITERION IT
+        PINNED NAMED THE WRONG VARIABLE.
 
-        Not asserted as a timing here — see the module docstring — but pinned, because the
-        hardware measurement is taken against it and a silent change would invalidate the
-        recorded result.
+        FR-24.14 said "under 5 ms at 4k-token contexts with 2 armed probes on LFM2". Measured on
+        Llama-3.1-8B 2026-09-30, one probe, varying ONLY `max_tokens` on an identical prompt:
+
+            4 generated -> 0.837 ms      30 -> 3.425 ms      120 -> 11.223 ms
+
+        while **2820 prompt tokens with 8 generated cost 1.94 ms**. Twenty-one times the tokens
+        for a third of the overhead. Prefill scores the whole prompt in ONE call; decode scores one
+        token per call, so a prompt token is ~300x cheaper than a generated one.
+
+        So the criterion was measurable on its cheapest case, and the per-request threshold was
+        crossed by any completion over ~50 tokens on ANY model — including the LFM2 it was set
+        against. A warning that fires on normal use is noise, not signal.
+
+        Per pass, one number describes every request shape. The measured rate is ~0.09 ms; 0.25
+        leaves room for variation while still catching the regression this file exists for — the
+        whole-residual host copy measured 25-37 ms for two probes, which is ~140x the budget.
         """
-        assert settings.PROBE_MAX_OVERHEAD_MS == 5.0
+        assert settings.PROBE_MAX_OVERHEAD_MS_PER_PASS == 0.25
+
+    def test_the_absolute_backstop_is_pathology_only(self):
+        """It is kept LIVE rather than reported-and-unused, and set where it means "something is
+        wrong" rather than "that was a long answer": at ~0.09 ms/pass a 2000-token completion is
+        ~180 ms, so 500 ms is not reachable by length alone.
+        """
+        assert settings.PROBE_MAX_OVERHEAD_MS == 500.0
+        assert settings.PROBE_MAX_OVERHEAD_MS > 180.0, (
+            "the backstop is inside the range a long completion reaches legitimately, so it will "
+            "fire on normal use — which is what made the old per-request threshold noise"
+        )
 
 
 class TestTheActivationsAreNotCopiedToTheHost:
@@ -502,3 +527,82 @@ class TestScalingIsAffordable:
             torch.manual_seed(1)
             cls._CACHED = torch.randn(1, N_TOKENS, D_MODEL, dtype=torch.float16)
         return cls._CACHED
+
+class TestTheWarningFiresOnTheRateAndNotOnTheLENGTH:
+    """⚠ THE WHOLE POINT OF THE RESHAPE, and the only tests here that would fail against the old
+    per-request threshold.
+
+    Under `PROBE_MAX_OVERHEAD_MS == 5.0` per request, a perfectly healthy 400-token answer cost
+    ~36 ms and warned; a 4k-token prompt with a 4-token answer cost ~0.8 ms and passed. The
+    operator therefore learned to ignore the warning, which is the failure mode — a guard nobody
+    reads is worse than no guard, because it still looks like coverage.
+    """
+
+    @staticmethod
+    def _service():
+        from unittest.mock import MagicMock
+
+        from millm.services.probe_event_service import ProbeEventService
+
+        return ProbeEventService(MagicMock(), MagicMock())
+
+    def test_a_long_healthy_completion_does_NOT_warn(self, caplog):
+        """401 passes at the measured ~0.09 ms/pass = 36 ms. Healthy, and over seven times the
+        old per-request threshold."""
+        service = self._service()
+        with caplog.at_level("WARNING"):
+            service.note_request_overhead(36.0, n_passes=401)
+        assert "probe_overhead_above_threshold" not in caplog.text, (
+            "a normal long answer at the measured rate warned — this is the noise the reshape "
+            "exists to remove"
+        )
+        assert "probe_overhead_request_backstop" not in caplog.text
+
+    def test_a_slow_PASS_warns_even_on_a_short_request(self, caplog):
+        """Specificity: the test above must not pass by never warning at all.
+
+        Two passes at 5 ms each is 10 ms total — a small number, and 25x the per-pass budget. The
+        old threshold would have warned here too, but for the wrong reason (the total), and would
+        have said nothing if the same rate arrived over one pass.
+        """
+        service = self._service()
+        with caplog.at_level("WARNING"):
+            service.note_request_overhead(10.0, n_passes=2)
+        assert "probe_overhead_above_threshold" in caplog.text
+        assert "overhead_ms_per_pass=5.0000" in caplog.text, (
+            "the warning must report the RATE it judged, or an operator cannot tell which guard "
+            "fired or what to compare it against"
+        )
+
+    def test_one_slow_pass_warns(self, caplog):
+        """The regression this file exists for arrives as ONE expensive pass: the whole-residual
+        host copy measured 25-37 ms for two probes. A per-request threshold of 500 ms would miss
+        it entirely on a short request."""
+        service = self._service()
+        with caplog.at_level("WARNING"):
+            service.note_request_overhead(30.0, n_passes=1)
+        assert "probe_overhead_above_threshold" in caplog.text
+
+    def test_the_backstop_still_catches_pathology(self, caplog):
+        """Both guards are live. A total that no completion length explains is reported as its own
+        thing, so it is not mistaken for a rate problem."""
+        service = self._service()
+        with caplog.at_level("WARNING"):
+            service.note_request_overhead(900.0, n_passes=40000)   # rate is fine, total is not
+        assert "probe_overhead_request_backstop" in caplog.text
+        assert "probe_overhead_above_threshold" not in caplog.text
+
+    def test_nothing_scored_is_not_a_rate_of_zero(self):
+        """`n_passes=0` has no rate. Reporting 0.0 would read as "free", which is a different
+        claim from "not measured" — the same distinction `last_request_overhead_ms` already makes
+        with `None`.
+        """
+        service = self._service()
+        service.note_request_overhead(4.0, n_passes=0)
+        assert service._last_overhead_ms_per_pass is None
+
+    def test_the_rate_is_reported_not_just_judged(self):
+        service = self._service()
+        service.note_request_overhead(12.0, n_passes=120)
+        assert service._last_overhead_ms_per_pass == pytest.approx(0.1)
+        assert service._last_request_n_passes == 120

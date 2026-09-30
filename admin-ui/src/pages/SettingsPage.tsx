@@ -1,3 +1,4 @@
+import { useEffect, useState } from 'react';
 import { Sun, Moon, Wifi, WifiOff, RefreshCw, Server, Info } from 'lucide-react';
 import { useUIStore } from '@stores/uiStore';
 import { useServerStore } from '@stores/serverStore';
@@ -7,6 +8,27 @@ import { Card, CardHeader, Button, Badge } from '@components/common';
 export function SettingsPage() {
   const { theme, setTheme } = useUIStore();
   const { connectionStatus, serverUrl } = useServerStore();
+
+  // ⚠ THIS USED TO BE THE LITERAL `1.0.0` IN THE MARKUP, under a card headed "About the miLLM
+  // server" — so it described nothing, matched no other version in the repo, and could never go
+  // stale because it was never right. The server has served its own version at
+  // /api/health/version all along. `null` renders as an em dash: "not reported" is a different
+  // fact from a version number, and inventing one here is what caused this.
+  const [serverVersion, setServerVersion] = useState<string | null>(null);
+  useEffect(() => {
+    let cancelled = false;
+    fetch('/api/health/version')
+      .then((r) => (r.ok ? r.json() : null))
+      .then((d) => {
+        if (!cancelled && d?.version) setServerVersion(d.version);
+      })
+      .catch(() => {
+        /* leave it unreported rather than guess */
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   const handleReconnect = () => {
     socketClient.reconnect();
@@ -102,7 +124,7 @@ export function SettingsPage() {
         <div className="space-y-3 text-sm">
           <div className="flex justify-between">
             <span className="text-slate-400">Version</span>
-            <span className="text-slate-200 font-mono">1.0.0</span>
+            <span className="text-slate-200 font-mono">{serverVersion ?? '—'}</span>
           </div>
           <div className="flex justify-between">
             <span className="text-slate-400">API Base</span>

@@ -539,10 +539,21 @@ then, build against a draft copy and re-vendor before release.
         the above-threshold warning would never stop firing. Fixed by synchronising before the
         clock starts, which costs nothing the forward was not going to pay anyway.
         **The remaining 11.2 ms is host-side marshalling, not arithmetic** — the scoring itself
-        is on-device and small. Per pass at 4k tokens the probe builds a 4096-float Python list
-        via `.tolist()`, a 4096-bool scope mask, and then rebuilds a tensor from the list in
-        `finish()`. Keeping per-token scores as tensors end to end is the fix; it is a real
-        change to `ProbeRequestContext`, and it is **tracked debt, not done**.
+        is on-device and small.
+        ⚠ **THE ATTRIBUTION BELOW WAS WRONG, AND SO WAS THE CRITERION IT WAS MEASURED AGAINST.**
+        It read: *"Per pass at 4k tokens the probe builds a 4096-float Python list via `.tolist()`,
+        a 4096-bool scope mask, and then rebuilds a tensor from the list in `finish()`. Keeping
+        per-token scores as tensors end to end is the fix."* A DECODE PASS IS ONE TOKEN WIDE. The
+        4096-wide marshalling happens once, at prefill, and prefill is cheap: measured 2026-09-30,
+        **2820 prompt tokens with 8 generated cost 1.94 ms**. The 11.2 ms was the COMPLETION's
+        length — 120 generated tokens at ~0.09 ms of per-call dispatch each, which reproduces
+        11.223 ms exactly. Context width was never the driver, so the prescribed fix pointed at
+        the wrong place and a tensor rewrite of the prefill path would have moved nothing.
+        The debt that remains is **per-call dispatch in the decode loop**, and it is small in
+        absolute terms: 11.36 ms on a 2.855 s request is 0.40%. **Tracked, not done.**
+        SC-4 itself is re-specified per pass — see FR-24.14, amended 2026-09-30 — because
+        "under 5 ms at 4k-token contexts" both measured the cheap case and warned on every normal
+        completion on every model.
   - [x] 10.5 **SC-5 PASSES — all seven FTID §6 controls bite.** Baseline 464 passed / 0 failed.
         `prepend=True` removed → 1 red (the probe would read post-steer); the router include
         removed → 17 red; one byte of the vendored schema → 2 red; **one word of the rung

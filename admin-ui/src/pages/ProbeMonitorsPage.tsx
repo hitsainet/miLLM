@@ -485,11 +485,30 @@ export function ProbeMonitorsPage() {
               {status.last_request_overhead_ms === null
                 ? '—'
                 : `${status.last_request_overhead_ms.toFixed(2)} ms`}
-              <span className="text-slate-500 text-xs">
-                {' '}
-                / {status.overhead_warn_threshold_ms} ms
-              </span>
+              {/* ⚠ The TOTAL is shown against the pass count, never against a budget: it scales
+                  with the answer's length, so pairing it with a threshold invited reading a long
+                  reply as a fault. The RATE below is the figure that is actually judged. */}
+              {(status.last_request_n_passes ?? 0) > 0 && (
+                <span className="text-slate-500 text-xs">
+                  {' '}
+                  over {status.last_request_n_passes} pass
+                  {status.last_request_n_passes === 1 ? '' : 'es'}
+                </span>
+              )}
             </p>
+            {status.last_overhead_ms_per_pass != null && (   // != covers undefined too
+              <p
+                className={
+                  status.overhead_warn_threshold_ms_per_pass != null &&
+                  status.last_overhead_ms_per_pass > status.overhead_warn_threshold_ms_per_pass
+                    ? 'text-amber-400 font-mono text-xs mt-1'
+                    : 'text-slate-400 font-mono text-xs mt-1'
+                }
+              >
+                {status.last_overhead_ms_per_pass.toFixed(3)} /
+                {status.overhead_warn_threshold_ms_per_pass ?? '?'} ms per pass
+              </p>
+            )}
           </div>
           <div className="border border-slate-700 rounded p-3">
             <p className="text-slate-400 text-xs">Events recorded</p>

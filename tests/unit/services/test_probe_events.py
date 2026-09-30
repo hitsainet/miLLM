@@ -196,7 +196,17 @@ class TestStatus:
         _repo, _events, service, _probe = ctx
         status = await service.status()
         assert "last_request_overhead_ms" in status
-        assert status["overhead_warn_threshold_ms"] == 5.0
+        # ⚠ The RATE is what decides the warning as of 2026-09-30; the absolute pair stays for the
+        # tile that renders it and as a pathology backstop. Both are asserted, because a payload
+        # that carries only the total sends an operator back to judging long answers.
+        assert status["overhead_warn_threshold_ms"] == 500.0
+        assert status["overhead_warn_threshold_ms_per_pass"] == 0.25
+        assert "last_overhead_ms_per_pass" in status
+        assert status["last_overhead_ms_per_pass"] is None, (
+            "nothing has been scored, so there is no rate — 0.0 would read as 'free', which is a "
+            "different claim from 'not yet measured'"
+        )
+        assert status["last_request_n_passes"] == 0
 
     async def test_dropped_socket_events_are_reported_not_hidden(self, ctx):
         _repo, _events, service, probe = ctx

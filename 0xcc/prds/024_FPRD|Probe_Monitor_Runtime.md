@@ -196,9 +196,34 @@ list, arm, disarm, status, events) with a three-state status column, a §4 probe
 error codes (`PROBE_MODEL_MISMATCH`, `PROBE_PARITY_FAILED`, `UNVALIDATED_PROBE`, `PROBE_LIMIT`,
 `PROBE_NOT_FOUND`). Co-released with miStudio 033 phase 7. (BR-008)
 
-**FR-24.14 Overhead.** Scoring overhead per request is measured and stays under
-`PROBE_MAX_OVERHEAD_MS` (default 5 ms, NFR-1.4) at 4k-token contexts with 2 armed probes on LFM2. It
-warns above that. (BR-009)
+**FR-24.14 Overhead.** Scoring overhead is measured and stays under
+`PROBE_MAX_OVERHEAD_MS_PER_PASS` (default 0.25 ms, NFR-1.4) **per forward pass**, on any model and
+any request shape. It warns above that. A per-request backstop, `PROBE_MAX_OVERHEAD_MS` (500 ms),
+catches pathology. (BR-009)
+
+> **⚠ RE-SPECIFIED 2026-09-30 — THE ORIGINAL NAMED THE WRONG VARIABLE.** It read *"stays under
+> `PROBE_MAX_OVERHEAD_MS` (default 5 ms) at 4k-token contexts with 2 armed probes on LFM2"*.
+> Measured on Llama-3.1-8B, one probe, layer 11, varying ONLY `max_tokens` on an identical prompt:
+>
+> | generated tokens | overhead |
+> |---|---|
+> | 4 | 0.837 ms |
+> | 30 | 3.425 ms |
+> | 120 | 11.223 ms |
+>
+> while **2820 prompt tokens with 8 generated cost 1.94 ms** — twenty-one times the tokens for a
+> third of the overhead. Prefill scores the whole prompt in ONE call; decode scores one token per
+> call. A prompt token is roughly **300x cheaper** than a generated one, and the total is the pass
+> count times a near-constant (~0.09 ms).
+>
+> Two consequences. **The criterion was measurable on its cheapest case** — a 4k context with a
+> short completion is nearly free, so "under 5 ms at 4k tokens" could be satisfied while normal use
+> was far above it. And **the threshold warned on normal use on every model**, LFM2 included: it is
+> crossed at ~50 generated tokens with one probe, ~25 with two. A warning that fires on healthy
+> requests is noise, and an operator who learns to ignore it has lost the guard while it still
+> looks like coverage.
+>
+> In absolute terms the cost was never the problem: 11.36 ms on a 2.855 s request is **0.40%**.
 
 ## 4. User Experience Requirements
 - The new page follows existing admin-ui patterns (react-query, toasts, the Tailwind dark theme).
@@ -248,7 +273,8 @@ OpenAI routes: only the headers and the final chunk change. The request body is 
 (no per-request probe selection).
 
 ## 8. Non-Functional Requirements
-- **Overhead:** under 5 ms per request at 4k tokens with 2 probes (FR-24.14).
+- **Overhead:** under 0.25 ms **per forward pass** (FR-24.14), on any model and any request
+  shape. Re-specified 2026-09-30; the original per-request form named the wrong variable.
 - **Correctness:** parity at 1e-3 on LFM2 fp16.
 - **Privacy:** no prompt or context text on the socket, pinned by a test.
 - **Durability:** events are pruned by count and age.
@@ -277,7 +303,9 @@ OpenAI routes: only the headers and the final chunk change. The request body is 
 - **SC-2:** arming refuses on Qwen2.5-7B (mismatch named) and on a GGUF model.
 - **SC-3:** live requests produce events, the page updates live, and the header / final chunk carry
   verdicts. Non-streaming and streaming agree on the verdict for the same prompt.
-- **SC-4:** overhead is under 5 ms at 4k tokens with 2 probes (measured, recorded).
+- **SC-4:** overhead is under 0.25 ms per forward pass, measured across at least two
+  completion lengths **and** one long-prompt/short-completion request, so the figure cannot
+  come from the cheap case alone (measured, recorded).
 - **SC-5:** every wiring point (hook install, begin/finish in each generation path, record, emit,
   header, chunk, routes, sidebar, MCP registration) has a removal test that fails. The socket-privacy
   test fails if context text is emitted.

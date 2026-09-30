@@ -12,8 +12,17 @@ about 128 KB, as float32 **tensors**. That is not a trade worth making for a dri
 
 ## One hook per layer, and ONE host crossing per probe per REQUEST
 
-The budget is `PROBE_MAX_OVERHEAD_MS` (5 ms), and the way it is reached is that a forward pass
-costs the probe no host-side work proportional to the tokens in it. The row crosses to the host
+The budget is `PROBE_MAX_OVERHEAD_MS_PER_PASS` (0.25 ms) — **per forward pass, not per request**,
+because that is the unit the cost is incurred in. Measured 2026-09-30 on Llama-3.1-8B with one
+probe, varying only `max_tokens`: 4 generated tokens cost 0.837 ms, 30 cost 3.425, 120 cost
+11.223, while 2820 PROMPT tokens with 8 generated cost 1.94. Prefill scores the whole prompt in
+one call and decode scores one token per call, so a prompt token is ~300x cheaper than a
+generated one and the total is essentially the pass count times a constant. Judging the TOTAL
+therefore means warning on long answers; the old 5 ms per-request threshold fired above roughly
+50 generated tokens on any model.
+
+The way the budget is met is that a forward pass costs the probe no host-side work proportional
+to the tokens in it. The row crosses to the host
 once, in `finish()`, where `_row` explains why it crosses at all rather than staying on the card.
 
 Scores, attention logits and the scope mask are accumulated as **tensors on the activations' own
@@ -156,6 +165,11 @@ class ProbeRequestContext:
         #: `null` for every request ever served, the above-threshold warning could never fire,
         #: and SC-4 was unmeasurable from the product itself. Found on the node, by measuring.
         self.overhead_ms = 0.0
+        #: How many forward passes did probe work. THE DENOMINATOR OF THE BUDGET: the cost is
+        #: per-call dispatch, so a 120-token completion pays it 121 times (one prefill, 120
+        #: decode steps) while a 2820-token prompt pays it once. Reported per pass by
+        #: `GET /api/probes/status` and compared against `PROBE_MAX_OVERHEAD_MS_PER_PASS`.
+        self.n_passes = 0
         self._not_scored_reason: Optional[str] = None
         #: probe_id -> one (n_tokens,) float32 score tensor PER FORWARD PASS, in arrival order.
         #: Tensors, not floats: see the module docstring. `finish()` cats them once.
@@ -230,6 +244,11 @@ class ProbeRequestContext:
         here = [p for p in self.probes if p.layer == layer]
         if not here:
             return
+
+        # Counted where the work is DONE, after both early returns — a pass that scored nothing
+        # must not dilute the per-pass figure, or the budget flatters itself on a probe that is
+        # armed for another layer.
+        self.n_passes += 1
 
         # ⚠ SYNCHRONISE BEFORE STARTING THE CLOCK, or this measures the MODEL.
         #

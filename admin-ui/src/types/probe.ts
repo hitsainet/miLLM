@@ -108,7 +108,16 @@ export interface ProbeStatus {
   paused_reasons: string[];
   /** `null` when no request has been scored yet — distinguishable from "field missing". */
   last_request_overhead_ms: number | null;
+  /** Absolute per-request backstop (pathology only). The RATE below is what decides the warning. */
   overhead_warn_threshold_ms: number;
+  /** Forward passes that did probe work: one prefill plus one per generated token.
+   *  ⚠ OPTIONAL ON THE WIRE. A backend from before 2026-09-30 does not send these three, and
+   *  during a rolling deploy this bundle can meet one. `!== null` is TRUE for `undefined`, so a
+   *  strict check here crashed the whole status tile on `.toFixed`. */
+  last_request_n_passes?: number;
+  /** null when nothing has been scored — distinct from a rate of 0. */
+  last_overhead_ms_per_pass?: number | null;
+  overhead_warn_threshold_ms_per_pass?: number;
   events_recorded: number;
   socket_events_dropped: number;
   /** While true, continuous batching is off whenever anything is armed. */

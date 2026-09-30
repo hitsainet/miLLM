@@ -200,7 +200,24 @@ class Settings(BaseSettings):
     #: robust subset is noisy, not blind: a basis error is present at EVERY position, so it
     #: survives subsetting (measured 0.945 over 94% of positions, 0.356 over 86%).
     PROBE_PARITY_MIN_ROBUST_FRACTION: float = 0.25
-    PROBE_MAX_OVERHEAD_MS: float = 5.0        # warn threshold per request
+    # ⚠ THE BUDGET IS PER FORWARD PASS, NOT PER REQUEST, because that is the unit the cost is
+    # incurred in. Measured on Llama-3.1-8B, one probe, layer 11, varying ONLY `max_tokens` on an
+    # identical prompt: 4 tokens -> 0.837 ms, 30 -> 3.425 ms, 120 -> 11.223 ms. Fits
+    # 0.45 ms + ~0.09 ms per pass. Meanwhile 2820 PROMPT tokens with 8 generated cost 1.94 ms —
+    # twenty-one times the tokens for a third of the overhead, because prefill scores the whole
+    # prompt in ONE call while decode scores one token per call. A prompt token is ~300x cheaper
+    # than a generated one.
+    #
+    # So the old per-REQUEST threshold of 5 ms was crossed by any completion longer than ~50
+    # tokens on ANY model, including the LFM2 it was specified against — it warned on normal use,
+    # which is noise rather than signal. It also made the criterion measurable on its cheapest
+    # case: "under 5 ms at 4k-token contexts" is nearly free.
+    PROBE_MAX_OVERHEAD_MS_PER_PASS: float = 0.25   # warn threshold per forward pass
+    # An absolute per-request backstop, kept live rather than reported-and-unused. It exists for
+    # pathology only: at ~0.09 ms/pass a 2000-token completion is ~180 ms, so 500 ms means
+    # "something is wrong", not "this was a long answer". The regression this guards against is
+    # real — copying the whole residual to the CPU once measured 25-37 ms for two probes.
+    PROBE_MAX_OVERHEAD_MS: float = 500.0      # absolute per-request backstop
     PROBE_MAX_EVENTS_PER_PROBE: int = 5000
     PROBE_MAX_AGE_DAYS: int = 30
     PROBE_EVENT_CONTEXT_TOKENS: int = 24      # +-K decoded tokens around the top firing position

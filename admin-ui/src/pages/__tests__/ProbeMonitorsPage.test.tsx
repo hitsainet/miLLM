@@ -568,3 +568,63 @@ describe('the prompt window opens inline, per event', () => {
     expect(await screen.findByText(/Could not load/)).toBeTruthy();
   });
 });
+
+describe('the overhead tile judges the RATE, and survives a backend that does not send it', () => {
+  // ⚠ SELF-INFLICTED, CAUGHT BY THE SUITE 2026-09-30. The per-pass fields were added to the
+  // status payload and the tile guarded them with `!== null` — which is TRUE for `undefined`,
+  // so `.toFixed(3)` threw and took the WHOLE PAGE down, not just the tile. Thirteen tests went
+  // red at once. During a rolling deploy this bundle can meet a backend from before the change,
+  // which is exactly the fixture below.
+  //
+  // The old fixtures cover this only by accident, because they predate the fields. An accident
+  // stops covering the moment someone updates a fixture, so it is asserted here on purpose.
+
+  it('renders when the backend sends none of the per-pass fields', () => {
+    state.probes = [];
+    state.events = [];
+    state.status = {
+      armed: [],
+      armed_count: 1,
+      max_armed: 8,
+      imported_count: 1,
+      paused_reasons: [],
+      last_request_overhead_ms: 11.36,
+      overhead_warn_threshold_ms: 500,
+      events_recorded: 2,
+      socket_events_dropped: 0,
+      force_serial: true,
+      // last_request_n_passes, last_overhead_ms_per_pass and
+      // overhead_warn_threshold_ms_per_pass deliberately ABSENT.
+    } as never;
+    renderPage();
+    const status = screen.getByTestId('probe-status');
+    expect(status).toHaveTextContent('11.36 ms');
+    expect(status).not.toHaveTextContent('per pass');
+  });
+
+  it('shows the rate against its budget when the backend does send it', () => {
+    state.probes = [];
+    state.events = [];
+    state.status = {
+      armed: [],
+      armed_count: 1,
+      max_armed: 8,
+      imported_count: 1,
+      paused_reasons: [],
+      last_request_overhead_ms: 11.36,
+      overhead_warn_threshold_ms: 500,
+      last_request_n_passes: 121,
+      last_overhead_ms_per_pass: 0.0939,
+      overhead_warn_threshold_ms_per_pass: 0.25,
+      events_recorded: 2,
+      socket_events_dropped: 0,
+      force_serial: true,
+    } as never;
+    renderPage();
+    const status = screen.getByTestId('probe-status');
+    // ⚠ The total is shown against the PASS COUNT, never against a budget — pairing it with a
+    // threshold is what made a long healthy answer look like a fault.
+    expect(status).toHaveTextContent('over 121 passes');
+    expect(status).toHaveTextContent('0.094 /0.25 ms per pass');
+  });
+});

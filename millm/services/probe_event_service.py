@@ -38,6 +38,12 @@ class ProbeEventService:
         self._last_ws_emit_ts = 0.0
         self._ws_dropped = 0
         self._last_request_overhead_ms: Optional[float] = None
+        #: Declared HERE, not defaulted at the read site. A `getattr(self, x, 0)` in `status()`
+        #: would report a plausible 0 for an attribute that is simply missing, which is a
+        #: fabricated value wearing a fallback's clothes — and `None` vs `0` is exactly the
+        #: distinction this payload already makes for "nothing scored yet".
+        self._last_request_n_passes: int = 0
+        self._last_overhead_ms_per_pass: Optional[float] = None
 
     async def record(
         self,
@@ -45,6 +51,7 @@ class ProbeEventService:
         verdicts: Sequence[Any],
         *,
         overhead_ms: Optional[float] = None,
+        n_passes: int = 0,
         contexts: Optional[dict[str, dict[str, Any]]] = None,
     ) -> int:
         """Write one event per verdict, prune, and emit. Never raises.
@@ -56,7 +63,7 @@ class ProbeEventService:
         if not verdicts:
             return 0
         if overhead_ms is not None:
-            self.note_request_overhead(overhead_ms)
+            self.note_request_overhead(overhead_ms, n_passes)
 
         rows: list[dict[str, Any]] = []
         for verdict in verdicts:
@@ -120,13 +127,38 @@ class ProbeEventService:
         except Exception as exc:
             logger.warning("probe_ws_emit_failed", extra={"error": str(exc)})
 
-    def note_request_overhead(self, overhead_ms: float) -> None:
+    def note_request_overhead(self, overhead_ms: float, n_passes: int = 0) -> None:
+        """Record this request's probe cost, and warn PER FORWARD PASS.
+
+        ⚠ THE DENOMINATOR IS THE POINT. The cost is per-call dispatch, so a request's total is
+        just the pass count times a near-constant. Judging the total means warning on long
+        answers — the old 5 ms per-request threshold fired above ~50 generated tokens on any
+        model — while a 4k-token prompt with a short completion passes comfortably. Per pass,
+        one number describes every request shape.
+
+        `n_passes` of 0 means nothing was scored; there is then no rate to judge, and the
+        absolute backstop still applies.
+        """
         self._last_request_overhead_ms = float(overhead_ms)
+        self._last_request_n_passes = int(n_passes)
+        per_pass = (float(overhead_ms) / n_passes) if n_passes > 0 else None
+        self._last_overhead_ms_per_pass = per_pass
+
+        if per_pass is not None and per_pass > settings.PROBE_MAX_OVERHEAD_MS_PER_PASS:
+            logger.warning(
+                "probe_overhead_above_threshold overhead_ms_per_pass=%.4f threshold_ms=%.4f "
+                "overhead_ms=%.2f n_passes=%d",
+                per_pass,
+                settings.PROBE_MAX_OVERHEAD_MS_PER_PASS,
+                overhead_ms,
+                n_passes,
+            )
         if overhead_ms > settings.PROBE_MAX_OVERHEAD_MS:
             logger.warning(
-                "probe_overhead_above_threshold overhead_ms=%.2f threshold_ms=%.2f",
+                "probe_overhead_request_backstop overhead_ms=%.2f threshold_ms=%.2f n_passes=%d",
                 overhead_ms,
                 settings.PROBE_MAX_OVERHEAD_MS,
+                n_passes,
             )
 
     async def status(self) -> dict[str, Any]:
@@ -194,6 +226,12 @@ class ProbeEventService:
             # apart from "this field is missing".
             "last_request_overhead_ms": self._last_request_overhead_ms,
             "overhead_warn_threshold_ms": settings.PROBE_MAX_OVERHEAD_MS,
+            # The rate and its budget — what actually decides the warning. The two absolute
+            # figures above stay for the tile that already renders them, and because a
+            # per-request backstop is still a real guard.
+            "last_request_n_passes": self._last_request_n_passes,
+            "last_overhead_ms_per_pass": self._last_overhead_ms_per_pass,
+            "overhead_warn_threshold_ms_per_pass": settings.PROBE_MAX_OVERHEAD_MS_PER_PASS,
             "events_recorded": await self.events.count(),
             "socket_events_dropped": self._ws_dropped,
             "force_serial": settings.PROBE_FORCE_SERIAL,

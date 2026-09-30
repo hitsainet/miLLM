@@ -38,14 +38,30 @@ function RungBadge({ rung, language }: { rung: number; language: string }) {
 
 function ParitySummary({ probe }: { probe: Probe }) {
   if (!probe.parity) return <span className="text-slate-500 text-xs">not checked</span>;
-  const { passed, max_abs_diff, tolerance } = probe.parity;
+  const { passed, max_abs_diff, max_gated_diff, score_tolerance } = probe.parity;
+  // ⚠ SHOW THE PAIR THAT DECIDED IT. This read `max_abs_diff` against `tolerance` — both
+  // PER-TOKEN, both flagged informational by the engine — and rendered
+  // "parity passed · max Δ 9.37e+0 of 0.05": a figure 187x its stated limit sitting beside the
+  // word "passed". A reader then either distrusts a correct pass or believes a drift that
+  // decided nothing. This estate has already shipped a parity check that told a correct
+  // consumer it was wrong, and it was believed the first time.
+  //
+  // `passed` comes from the aggregate score difference against `score_tolerance`. The per-token
+  // maximum is still worth showing — one token drifting far is worth knowing — but only when it
+  // is labelled as what it is.
+  const decided =
+    max_gated_diff != null && score_tolerance != null
+      ? `${max_gated_diff.toFixed(3)} / ${score_tolerance}`
+      : null;
   return (
     <span
       data-testid="parity"
       className={`text-xs ${passed ? 'text-emerald-400' : 'text-rose-400'}`}
     >
       parity {passed ? 'passed' : 'FAILED'}
-      {max_abs_diff !== null && ` · max Δ ${max_abs_diff.toExponential(2)} of ${tolerance}`}
+      {decided !== null && ` · ${decided}`}
+      {max_abs_diff !== null &&
+        ` · per-token max Δ ${max_abs_diff.toPrecision(3)} (informational)`}
     </span>
   );
 }

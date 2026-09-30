@@ -628,3 +628,81 @@ describe('the overhead tile judges the RATE, and survives a backend that does no
     expect(status).toHaveTextContent('0.094 /0.25 ms per pass');
   });
 });
+
+describe('the parity badge shows the numbers that DECIDED the verdict', () => {
+  // ⚠ REPORTED FROM THE RUNNING UI 2026-09-30. The badge read
+  //     parity passed · max Δ 9.37e+0 of 0.05
+  // — a figure 187x its stated tolerance, printed beside the word "passed". Both numbers were
+  // real and neither decided anything: they are the PER-TOKEN pair, which the parity engine
+  // marks `per_token_is_informational: true`. `passed` came from the aggregate score difference,
+  // 0.0789 against a `score_tolerance` of 0.1.
+  //
+  // The UI type did not even carry the deciding fields, which is why the wrong pair was shown.
+  //
+  // This matters more than a cosmetic mislabel: a reader either distrusts a correct pass, or
+  // believes a 9.37 drift is meaningful. A parity check that reports the wrong thing is believed
+  // the first time — this estate shipped one that told a correct consumer it was wrong on every
+  // vector, against a tolerance it was never measured against.
+
+  const parity = {
+    passed: true,
+    tolerance: 0.05,
+    max_abs_diff: 9.374565124511719,
+    score_tolerance: 0.1,
+    max_gated_diff: 0.07888734340667725,
+    max_combined_diff: 0.07888734340667725,
+    per_token_is_informational: true,
+    at_risk_tokens: 0,
+    scored_tokens: 6301,
+    vector_index: 12,
+    vectors: [],
+    tokenization_drift: {},
+    error: null,
+  };
+
+  it('shows the gated difference against the tolerance that gated it', () => {
+    state.probes = [probe({ parity } as never)];
+    renderPage();
+    expect(screen.getByTestId('parity')).toHaveTextContent('0.079 / 0.1');
+  });
+
+  it('⚠ never pairs the per-token maximum with a tolerance', () => {
+    // The exact string that started this. "9.37e+0 of 0.05" reads as a failed check.
+    state.probes = [probe({ parity } as never)];
+    renderPage();
+    const text = screen.getByTestId('parity').textContent ?? '';
+    expect(text).not.toMatch(/9\.37e\+0 of 0\.05/);
+    expect(text).not.toMatch(/of 0\.05/);
+  });
+
+  it('still shows the per-token figure, LABELLED as informational', () => {
+    // Not hidden: one token drifting far is worth knowing. It just must not read as the verdict.
+    state.probes = [probe({ parity } as never)];
+    renderPage();
+    const text = screen.getByTestId('parity').textContent ?? '';
+    expect(text).toContain('per-token max Δ 9.37');
+    expect(text).toContain('informational');
+  });
+
+  it('a FAILED check still reads as failed', () => {
+    state.probes = [probe({ parity: { ...parity, passed: false, max_gated_diff: 0.4 } } as never)];
+    renderPage();
+    const text = screen.getByTestId('parity').textContent ?? '';
+    expect(text).toContain('FAILED');
+    expect(text).toContain('0.400 / 0.1');
+  });
+
+  it('omits the pair entirely when the backend does not send it', () => {
+    // ⚠ A report stored before these fields existed, or an older backend mid-deploy. Falling
+    // back to the per-token pair would reinstate the exact defect; showing nothing is honest.
+    const older = { ...parity };
+    delete (older as Record<string, unknown>).max_gated_diff;
+    delete (older as Record<string, unknown>).score_tolerance;
+    state.probes = [probe({ parity: older } as never)];
+    renderPage();
+    const text = screen.getByTestId('parity').textContent ?? '';
+    expect(text).toContain('parity passed');
+    expect(text).not.toMatch(/of 0\.05/);
+    expect(text).toContain('informational');
+  });
+});

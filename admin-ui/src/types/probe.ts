@@ -20,9 +20,22 @@ export type ProbeRule =
 
 export interface ProbeParityReport {
   passed: boolean;
+  /** ⚠ THE PER-TOKEN TOLERANCE, WHICH DECIDES NOTHING. Pairs with `max_abs_diff` below, and both
+   *  are informational — see `per_token_is_informational`. The badge rendered exactly this pair
+   *  and printed "parity passed · max Δ 9.37e+0 of 0.05", a number 187x its stated limit beside
+   *  the word passed. */
   tolerance: number;
-  /** `null` when no vector could be compared at all. */
+  /** `null` when no vector could be compared at all. Informational: a single token can drift far
+   *  while the aggregate a probe actually scores on does not. */
   max_abs_diff: number | null;
+  /** ⚠ THE PAIR THAT DECIDES `passed`: the aggregate score difference against its own tolerance.
+   *  Optional because a backend or a stored report from before these existed omits them. */
+  score_tolerance?: number;
+  max_gated_diff?: number | null;
+  max_combined_diff?: number | null;
+  per_token_is_informational?: boolean;
+  at_risk_tokens?: number;
+  scored_tokens?: number;
   vector_index: number | null;
   vectors: Array<{
     index: number;

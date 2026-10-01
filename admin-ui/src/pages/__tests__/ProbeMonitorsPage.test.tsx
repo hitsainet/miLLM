@@ -66,6 +66,7 @@ vi.mock('@/hooks/useProbes', () => ({
 
 // Imported after the mock so the page picks it up.
 const { ProbeMonitorsPage, groupByRequest } = await import('../ProbeMonitorsPage');
+import { labelSeparation, trainingLabels } from '@/utils/probeLabels';
 
 function probe(over: Partial<Probe> = {}): Probe {
   return {
@@ -794,5 +795,72 @@ describe('one probe, several windows, told apart', () => {
     expect(screen.getByTestId('event-row')).toBeInTheDocument();
     expect(screen.queryByTestId('event-window')).not.toBeInTheDocument();
     expect(screen.queryByTestId('event-provisional')).not.toBeInTheDocument();
+  });
+});
+
+/*
+ * ⚠ THE TILE SAID WHERE A PROBE READS AND NEVER WHAT IT DETECTS. The row carried
+ * `LiquidAI/LFM2.5-1.2B-Instruct · L11 · mean · dense residual · scope all` — the read point,
+ * identical across probes that differ only in the corpus they were fitted on. The operator
+ * asked for the training labels on 2026-10-01.
+ */
+describe('a probe row states the separation it was fitted to make', () => {
+  const MAPPING = { 'low-stakes': 'negative', 'high-stakes': 'positive' };
+
+  it('names both sides, positive first', () => {
+    /*
+     * ⚠ THIS EXACT PAIR IS PINNED IN miStudio TOO (`probeTile.test.tsx`). The two repos do not
+     * share a frontend, so the format string is what can drift; the same real mapping must
+     * produce the same caption on both sides or one of these fails.
+     */
+    expect(labelSeparation(MAPPING)).toBe('high-stakes vs low-stakes');
+  });
+
+  it('joins several labels on either side rather than showing the first', () => {
+    expect(
+      labelSeparation({ critical: 'positive', 'high-stakes': 'positive', calm: 'negative', idle: 'negative' })
+    ).toBe('critical or high-stakes vs calm or idle');
+  });
+
+  it('refuses to print half a contrast', () => {
+    expect(labelSeparation({ 'high-stakes': 'positive' })).toBeNull();
+    expect(labelSeparation({ 'low-stakes': 'negative' })).toBeNull();
+    expect(labelSeparation({})).toBeNull();
+    expect(labelSeparation(null)).toBeNull();
+    expect(labelSeparation(undefined)).toBeNull();
+  });
+
+  it('does not count an excluded label as either side', () => {
+    expect(labelSeparation({ 'high-stakes': 'positive', ambiguous: 'excluded' })).toBeNull();
+    expect(trainingLabels({ 'high-stakes': 'positive', ambiguous: 'excluded' })).toEqual({
+      positive: ['high-stakes'],
+      negative: [],
+      excluded: ['ambiguous'],
+    });
+  });
+
+  it('renders on the row', () => {
+    state.probes = [probe({ label_mapping: MAPPING })];
+    render(<ProbeMonitorsPage />);
+    expect(screen.getByTestId('probe-labels')).toHaveTextContent(
+      'trained on high-stakes vs low-stakes'
+    );
+  });
+
+  it('puts the whole mapping in the tooltip, including a label on neither side', () => {
+    // The caption shows the boundary; the title must hide nothing the operator decided.
+    state.probes = [probe({ label_mapping: { ...MAPPING, ambiguous: 'excluded' } })];
+    render(<ProbeMonitorsPage />);
+    const title = screen.getByTestId('probe-labels').getAttribute('title') ?? '';
+    expect(title).toContain('ambiguous → excluded');
+    expect(title).toContain('high-stakes → positive');
+    expect(title).toContain('low-stakes → negative');
+  });
+
+  it('renders nothing at all when the backend sends no mapping', () => {
+    // An older backend mid-deploy omits the field. A blank is honest; a placeholder word is not.
+    state.probes = [probe({ label_mapping: undefined })];
+    render(<ProbeMonitorsPage />);
+    expect(screen.queryByTestId('probe-labels')).toBeNull();
   });
 });

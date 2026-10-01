@@ -30,6 +30,7 @@ from millm.api.schemas.common import ApiResponse
 from millm.services.probe_event_service import event_summary
 from millm.core.errors import ProbeNotFoundError
 from millm.core.probe_evidence import probe_rung_language, probe_rung_next_step
+from millm.core.probe_labels import concept_of, label_mapping_of
 from millm.core.config import settings
 from millm.services.probe_arm_bridge import (
     build_parity_forward,
@@ -88,6 +89,13 @@ def _probe_summary(probe: Any) -> dict[str, Any]:
         # number. miLLM and miStudio must describe the same probe with the same words.
         "rung_language": probe_rung_language(probe.rung),
         "next_step": probe_rung_next_step(probe.rung),
+        # ⚠ WHAT IT WAS FITTED ON. The tile used to carry the read point and nothing else, so a
+        # list of probes said where each one reads and never what it detects. `label_mapping` is
+        # sent RAW — the client names both sides of the boundary, and formatting it here would
+        # put a presentation decision on the wire where nothing could check it against the
+        # corpus. `concept` is miStudio's own sentence, carried through rather than recomposed.
+        "concept": concept_of(probe.definition),
+        "label_mapping": label_mapping_of(probe.definition),
         "armed": probe.armed,
         "paused_reason": probe.paused_reason,
         "parity": probe.parity,

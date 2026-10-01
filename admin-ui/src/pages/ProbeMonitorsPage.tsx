@@ -20,6 +20,7 @@ import { ProbeHubBrowser } from '@/components/probes/ProbeHubBrowser';
 import { useProbeEventDetail, useProbes } from '@/hooks/useProbes';
 import type { Probe, ProbeEvent } from '@/types/probe';
 import { ARM_WITHOUT_ACK_MIN_RUNG } from '@/types/probe';
+import { labelSeparation } from '@/utils/probeLabels';
 
 function RungBadge({ rung, language }: { rung: number; language: string }) {
   const weak = rung < ARM_WITHOUT_ACK_MIN_RUNG;
@@ -97,6 +98,13 @@ function ProbeRow({
   // Defaults to every window. A probe armed without a thought still gets both halves, which is
   // the point — the capability is useless if it only works for someone who remembers it exists.
   const [windows, setWindows] = useState<string[]>([...WINDOWS]);
+  const separation = labelSeparation(probe.label_mapping);
+  // The full mapping in the tooltip, so the caption's formatting hides nothing — including an
+  // `excluded` label, which is on neither side of the boundary but is still an operator decision.
+  const mappingDetail = Object.entries(probe.label_mapping ?? {})
+    .sort(([a], [b]) => a.localeCompare(b))
+    .map(([label, side]) => `${label} → ${side}`)
+    .join(', ');
   const toggle = (name: string) =>
     setWindows((current) =>
       current.includes(name) ? current.filter((w) => w !== name) : [...current, name]
@@ -114,6 +122,24 @@ function ProbeRow({
             {probe.basis === 'sae_features' ? 'SAE basis' : 'dense residual'} · scope{' '}
             {probe.scope}
           </p>
+          {/* ⚠ WHAT IT WAS FITTED ON. The line above is the READ POINT; it says nothing about
+              the concept, and two probes here differed only in their run. A probe is a boundary
+              between two sets of labelled rows, so both sides are named — the same positive
+              label fitted against a different negative one is a different detector. The strings
+              are the corpus's own; `labelSeparation` returns null rather than print half. */}
+          {separation ? (
+            <p
+              className="text-xs text-slate-400 truncate"
+              data-testid="probe-labels"
+              title={
+                'The training view\'s label mapping, as miStudio recorded it: ' +
+                mappingDetail +
+                '. The probe is a boundary between these sets and nothing else — it says nothing about any label it was never shown.'
+              }
+            >
+              trained on <span className="font-mono text-slate-300">{separation}</span>
+            </p>
+          ) : null}
         </div>
         <div className="flex items-center gap-2 shrink-0">
           {probe.armed ? (

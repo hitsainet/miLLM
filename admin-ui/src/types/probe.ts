@@ -65,6 +65,16 @@ export interface Probe {
   /** Server-rendered. Never derived from `rung` here. */
   rung_language: string;
   next_step: string;
+  /**
+   * miStudio's own sentence for what positive means (`"positive = high-stakes"`), carried
+   * through from the definition. Optional on the wire: a backend predating 2026-10-01 omits it.
+   */
+  concept?: string | null;
+  /**
+   * `{raw_label: "positive" | "negative" | "excluded"}` from the training view, verbatim.
+   * Sent RAW so the client names both sides; the server does not format it.
+   */
+  label_mapping?: Record<string, string> | null;
   armed: boolean;
   /** Why an armed probe is not scoring. Displayed whenever present. */
   paused_reason: string | null;

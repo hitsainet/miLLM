@@ -155,6 +155,11 @@ def _install_hook(probe_id: str):
     ProbeRuntimeState.reset_for_tests()
     armed = MagicMock()
     armed.probe_id = probe_id
+    # ⚠ STATED, NOT LEFT TO THE MOCK. A MagicMock answers every attribute, so `p.windows` came
+    # back as a Mock and `status()` reported it — a stand-in must never be more forgiving than
+    # the thing it stands in for. `()` is the real default: report my own scope.
+    armed.windows = ()
+    armed.scope = "all"
     ProbeRuntimeState()._armed[probe_id] = armed
 
 
@@ -336,3 +341,42 @@ class TestTheSocketAndTheRestListAgree:
         from millm.services.probe_event_service import event_summary
 
         assert _event_summary is event_summary
+
+
+class TestStatusSaysWhichWindowsAreLive:
+    """⚠ "I see the one armed, but I don't see which windows were selected when it was armed."
+
+    Arming took a window choice and NOTHING reported it back — not this payload, not the UI. The
+    picker shows an intention that resets on re-render, which is not state. A capability you can
+    set and cannot read is the same shape as one that is not wired at all: from outside, they are
+    indistinguishable.
+
+    Read from the LIVE REGISTRY for the same reason `hook_installed` is — the windows live on the
+    in-memory `ArmedProbe`, the row knows nothing about them, and after a restart a row claiming
+    to be armed is scoring nothing.
+    """
+
+    async def test_it_reports_the_windows_a_probe_is_scoring(self, ctx):
+        _repo, _events, service, probe = ctx
+        _install_hook(probe.id)
+        probe.armed = True
+        status = await service.status()
+        entry = next(a for a in status["armed"] if a["id"] == probe.id)
+        assert "windows" in entry, "the status payload still cannot answer which windows are live"
+        assert entry["windows"], "an armed probe reports no windows at all"
+
+    async def test_an_empty_windows_tuple_reports_the_probes_own_scope(self, ctx):
+        """`()` is the ENCODING of "my own scope"; a reader wants the answer, not the encoding."""
+        _repo, _events, service, probe = ctx
+        _install_hook(probe.id)
+        probe.armed = True
+        entry = next(a for a in (await service.status())["armed"] if a["id"] == probe.id)
+        assert entry["windows"] == ["all"]
+
+    async def test_a_stale_row_reports_no_windows(self, ctx):
+        """A row claiming armed with no live hook is scoring nothing — `None`, not a guess."""
+        _repo, _events, service, probe = ctx
+        probe.armed = True            # row only; no hook installed
+        entry = next(a for a in (await service.status())["armed"] if a["id"] == probe.id)
+        assert entry["windows"] is None
+        assert entry["hook_installed"] is False

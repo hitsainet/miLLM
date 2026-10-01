@@ -113,6 +113,14 @@ export interface ProbeEvent {
 }
 
 export interface ProbeStatusEntry {
+  /**
+   * Which windows this probe is actually reporting, from the LIVE registry — not what the
+   * picker currently shows, which is an intention that resets on re-render.
+   *
+   * ⚠ Optional on the wire: a backend from before 2026-10-01 omits it. `null`/absent means no
+   * live ArmedProbe, i.e. it is scoring nothing.
+   */
+  windows?: string[] | null;
   id: string;
   name: string;
   layer: number;

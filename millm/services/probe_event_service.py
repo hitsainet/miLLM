@@ -190,6 +190,18 @@ class ProbeEventService:
         # reconciles at startup, which is where the state actually becomes wrong.
         live = set(_live_armed_ids())
         stale = [p.id for p in armed if p.id not in live]
+        # ⚠ WHICH WINDOWS A PROBE IS ACTUALLY REPORTING, FROM THE LIVE REGISTRY.
+        #
+        # Arming takes a window choice and NOTHING reported it back — not this payload, not the
+        # UI. An operator could choose the windows and then had no way to confirm what was
+        # chosen; the picker shows an intention that resets on re-render, which is a different
+        # thing from state. Reported 2026-10-01: "I see the one armed, but I don't see which
+        # windows were selected when it was armed."
+        #
+        # Read from the REGISTRY rather than the row, for the same reason `hook_installed` is:
+        # the windows live in process memory on the `ArmedProbe`, the row knows nothing about
+        # them, and after a restart a row claiming to be armed is not scoring anything at all.
+        windows_by_id = _live_armed_windows()
 
         def _paused_reason(row: Any) -> Optional[str]:
             if row.paused_reason:
@@ -215,6 +227,9 @@ class ProbeEventService:
                     "basis": p.basis,
                     "paused_reason": _paused_reason(p),
                     "hook_installed": p.id in live,
+                    #: `None` for a row with no live ArmedProbe — it is not scoring any window,
+                    #: which is a different claim from "it is scoring an empty set".
+                    "windows": windows_by_id.get(p.id),
                 }
                 for p in armed
             ],
@@ -254,6 +269,21 @@ def _live_armed_ids() -> list[str]:
     from millm.services.probe_runtime import ProbeRuntimeState
 
     return [p.probe_id for p in ProbeRuntimeState().armed()]
+
+
+def _live_armed_windows() -> dict[str, list[str]]:
+    """`{probe_id: [window, ...]}` from the live registry.
+
+    An `ArmedProbe` with an empty `windows` reports its own scope, which is what the runtime
+    actually does — so that is what is reported here, rather than the empty tuple that encodes
+    it. A reader asking "which windows is this scoring?" wants the answer, not the encoding.
+    """
+    from millm.services.probe_runtime import ProbeRuntimeState
+
+    return {
+        p.probe_id: list(p.windows) if p.windows else [p.scope]
+        for p in ProbeRuntimeState().armed()
+    }
 
 
 def event_summary(event: Any) -> dict[str, Any]:

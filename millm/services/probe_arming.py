@@ -103,6 +103,45 @@ def resolve_windows(requested: Any, *, probe_scope: str) -> tuple[str, ...]:
     return tuple(seen)
 
 
+def parity_scored_nothing(details: Any) -> bool:
+    """True when parity compared NOTHING — every vector failed before producing a number.
+
+    ⚠ EXTRACTED SO IT CAN BE TESTED BY BEHAVIOUR. This lived inline in `arm`, and a control that
+    replaced its `if` with `if False:` left the suite green: the test scraped the source for the
+    message text, which `if False:` leaves perfectly intact. A guard matched by the wrong
+    occurrence is the recurring failure in this estate, and the recorded remedy is this one —
+    extract the decision, unit-test it, and assert the CALL by walking the AST.
+    """
+    vectors = (details or {}).get("vectors") or []
+    if not vectors:
+        return True
+    return all(v.get("max_abs_diff") is None for v in vectors)
+
+
+def parity_refusal_message(details: Any) -> str:
+    """What to tell the operator when parity refuses.
+
+    ⚠ "COULD NOT SCORE ANYTHING" IS NOT "THE NUMBERS DISAGREE". Reported 2026-10-01: five arm
+    attempts refused with "does not reproduce the recorded scores" while every vector carried
+    `max_abs_diff: null` and `scored_tokens: 0`. Nothing had been compared; the number the
+    message was about did not exist. The two failures send an operator to different places — one
+    to the model identity, the other to whatever stopped the vectors being scored — so they must
+    not share wording.
+    """
+    if not parity_scored_nothing(details):
+        return "This build does not reproduce the scores miStudio recorded for this probe"
+    reasons = sorted({
+        str(v.get("reason"))
+        for v in ((details or {}).get("vectors") or [])
+        if v.get("reason")
+    })
+    tail = f" Reported reason: {', '.join(reasons)}." if reasons else ""
+    return (
+        "Parity could not score any test vector, so nothing was compared — this is not a "
+        "disagreement about the numbers." + tail
+    )
+
+
 def window_thresholds_from_definition(definition: Any) -> dict[str, float]:
     """`{window: threshold}` from `decision.windows`, for windows that placed a bar.
 
@@ -228,10 +267,27 @@ class ProbeArmingService:
                 },
             )
 
-        # ⚠ The PARITY gate below runs against this same object, and parity must read the
-        # probe's own scope. `_verdict_for` produces one verdict per window and the engine now
-        # selects the scope's one explicitly, so extra windows cannot move a parity result.
         armed = armed_probe_from_row(probe, encoder=encoder, windows=windows)
+
+        # ⚠ PARITY RUNS ON THE PROBE'S OWN SCOPE, NEVER THE OPERATOR'S WINDOWS, AND THAT NEEDS A
+        # SEPARATE OBJECT.
+        #
+        # A test vector is a bare `token_ids` sequence: it has no prompt/response split, so the
+        # parity context never calls `set_prompt_length`. Hand it a probe armed on
+        # `['all','prompt','response']` and two of the three verdicts come back
+        # `prompt_boundary_unknown` with zero scored tokens — permanently, by construction.
+        #
+        # Reproduced in the pod 2026-10-01:
+        #     window=all       scored=True   n=12
+        #     window=prompt    scored=False  reason=prompt_boundary_unknown  n=0
+        #     window=response  scored=False  reason=prompt_boundary_unknown  n=0
+        #
+        # The engine selects the scope's verdict explicitly so those two cannot change a result,
+        # but generating them at all is noise one selection bug away from refusing every arm —
+        # and `POST /probes/{id}/parity` already passes `windows=[]` for exactly this reason.
+        # That asymmetry between the two entry points was the defect: the same check reached two
+        # different conclusions depending on which door you came through.
+        for_parity = armed_probe_from_row(probe, encoder=encoder, windows=[])
 
         # ── 4. parity — the only gate that costs a forward pass ─────────────────────
         tolerance = max(
@@ -239,7 +295,7 @@ class ProbeArmingService:
             settings.PROBE_PARITY_TOLERANCE,
         )
         parity = ProbeParityEngine(forward).run(
-            armed, probe.definition, tolerance=tolerance, tokenizer=tokenizer
+            for_parity, probe.definition, tolerance=tolerance, tokenizer=tokenizer
         )
         await self.repository.update(probe, parity=parity.as_details())
         if not parity.passed:
@@ -264,10 +320,14 @@ class ProbeArmingService:
                     f"numbers. Re-export the probe with scope 'all' to arm it here.",
                     details={**details, "scope": probe.scope},
                 )
-            raise ProbeParityFailedError(
-                "This build does not reproduce the scores miStudio recorded for this probe",
-                details=details,
-            )
+            # ⚠ "NOTHING COULD BE SCORED" IS NOT "THE NUMBERS DISAGREE", AND SAYING THE SECOND
+            # SENDS AN OPERATOR HUNTING A MODEL MISMATCH THAT IS NOT THERE.
+            #
+            # Reported 2026-10-01: five arm attempts refused with "does not reproduce the
+            # recorded scores" while every vector carried `max_abs_diff: null` and
+            # `scored_tokens: 0`. Nothing had been compared at all. The number the message is
+            # about did not exist, and the operator reasonably read it as "my build is wrong".
+            raise ProbeParityFailedError(parity_refusal_message(details), details=details)
 
         # ── all gates passed ────────────────────────────────────────────────────────
         self.state.arm(armed, model)

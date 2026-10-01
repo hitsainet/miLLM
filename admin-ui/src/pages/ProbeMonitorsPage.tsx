@@ -82,6 +82,7 @@ function ProbeRow({
   onDisarm,
   onDelete,
   onCheckParity,
+  liveWindows,
   busy,
 }: {
   probe: Probe;
@@ -89,6 +90,8 @@ function ProbeRow({
   onDisarm: (id: string) => void;
   onDelete: (id: string) => void;
   onCheckParity: (id: string) => void;
+  /** Windows this probe is LIVE on, from the registry. `undefined` when nothing reports it. */
+  liveWindows?: string[] | null;
   busy: boolean;
 }) {
   // Defaults to every window. A probe armed without a thought still gets both halves, which is
@@ -119,6 +122,14 @@ function ProbeRow({
               className="px-2 py-0.5 rounded text-xs bg-emerald-900/50 text-emerald-300"
             >
               armed
+              {/* ⚠ WHICH WINDOWS IT IS ACTUALLY SCORING, from the live registry. The picker
+                  below shows an INTENTION that resets on re-render; this is state. Arming took
+                  a window choice and nothing reported it back until 2026-10-01. */}
+              {liveWindows && liveWindows.length > 0 && (
+                <span data-testid="armed-windows" className="ml-1 font-mono text-[10px] opacity-80">
+                  · {liveWindows.join(' ')}
+                </span>
+              )}
             </span>
           ) : (
             <span className="px-2 py-0.5 rounded text-xs bg-slate-700 text-slate-400">idle</span>
@@ -674,6 +685,7 @@ export function ProbeMonitorsPage() {
                 key={probe.id}
                 probe={probe}
                 onArm={(id, windows) => arm({ id, windows })}
+                liveWindows={status?.armed.find((a) => a.id === probe.id)?.windows}
                 onDisarm={disarm}
                 onDelete={remove}
                 onCheckParity={checkParity}

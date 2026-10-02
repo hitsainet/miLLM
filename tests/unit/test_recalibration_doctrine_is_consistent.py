@@ -29,13 +29,30 @@ ROOT = Path(__file__).resolve().parents[2]
 
 #: Where the doctrine is written. All five, by name, because a glob would quietly stop covering a
 #: file that moved.
-SITES = (
+#:
+#: ⚠ SPLIT BY WHETHER THE PUBLIC MIRROR KEEPS THEM, AND THE SPLIT IS NOT COSMETIC. `sync-to-clean`
+#: does `rm -rf 0xcc/` and strips everything under `docs/` except `schemas/` — and the MIRROR is
+#: where the Docker image is built. The first version of this file asserted that at least four of
+#: the five sites were on disk, which is true in the source repo and FALSE on the mirror, where
+#: exactly three are. It passed locally, failed the mirror's Backend Tests, and the image build
+#: refused to publish over a red suite — so a merge to main produced no backend image at all.
+#: `test_probe_route_surface.py`'s own docstring records this exact trap for the FPRD; the
+#: contract is the second file it applies to, and this file learned it the hard way.
+ALWAYS_PRESENT = (
     "millm/services/probe_service.py",
     "millm/api/routes/management/probes.py",
-    "docs/mcp-contract.md",
     "manual/docs/features/probe-monitors.md",
+)
+
+#: Present only in the source repo. Each is SKIPPED LOUDLY when absent rather than deleted,
+#: because the agreement genuinely cannot be checked without the file — and saying "unverified
+#: here" is the honest description, not "fine".
+SOURCE_ONLY = (
+    "docs/mcp-contract.md",
     "0xcc/prds/024_FPRD|Probe_Monitor_Runtime.md",
 )
+
+SITES = ALWAYS_PRESENT + SOURCE_ONLY
 
 #: The headline of the carve-out. Present in every site or none.
 HEADLINE = "MOVING A BAR IS NOT REPLACING A DETECTOR."
@@ -67,9 +84,18 @@ def _text(rel: str) -> str:
     """
     path = ROOT / rel
     if not path.exists():
+        # ⚠ A MISSING *ALWAYS_PRESENT* SITE IS A FAILURE, NOT A SKIP. Only the source-only files
+        # may be absent; if one of the three the mirror keeps has gone missing, this guard would
+        # otherwise skip its way to green over a doctrine nobody states any more.
+        assert rel in SOURCE_ONLY, (
+            f"{rel} is listed as always present and is not on disk. Either it moved — fix the "
+            f"path rather than letting this guard skip — or the doctrine has been deleted from a "
+            f"site that ships."
+        )
         pytest.skip(
-            f"{rel} is not in this checkout — `0xcc/` is stripped from the public mirror, which "
-            "is where images are built. The other sites are still asserted."
+            f"{rel} is not in this checkout — `sync-to-clean` does `rm -rf 0xcc/` and strips "
+            "everything under `docs/` except `schemas/`, and the mirror is where images are "
+            "built. The three sites that DO ship are still asserted."
         )
     # Strip each line's own leading marker BEFORE collapsing. A markdown blockquote prefixes
     # every line with "> " and a python comment with "# ", so collapsing alone leaves those
@@ -85,12 +111,41 @@ def _text(rel: str) -> str:
 class TestTheGuardCanSeeItsOwnInputs:
     """A scrape that matches nothing passes and proves nothing."""
 
-    def test_every_site_exists_or_is_explicitly_skipped(self):
-        found = [rel for rel in SITES if (ROOT / rel).exists()]
-        assert len(found) >= 4, (
-            f"only {len(found)} of the {len(SITES)} doctrine sites are on disk — the paths are "
-            f"stale and this guard would assert almost nothing: {found}"
+    def test_every_shipping_site_is_on_disk(self):
+        """The three the mirror keeps must all be here, in EVERY checkout.
+
+        This is what stops the guard degrading to nothing: the source-only files may be skipped,
+        but if the shipping ones can be skipped too then a doctrine deleted everywhere passes.
+        """
+        missing = [rel for rel in ALWAYS_PRESENT if not (ROOT / rel).exists()]
+        assert not missing, (
+            f"{missing} are listed as always present and are not on disk — the paths are stale "
+            f"and this guard would assert almost nothing"
         )
+
+    def test_the_source_only_files_are_the_ones_the_MIRROR_strips(self):
+        """⚠ PINNED AGAINST THE WORKFLOW THAT STRIPS THEM, so the two cannot drift.
+
+        If `sync-to-clean` stops stripping a path, or starts stripping another, the split above is
+        wrong and this guard would either skip something that ships or fail on something that does
+        not. Read from the workflow rather than remembered.
+        """
+        workflow = ROOT / ".github/workflows/sync-to-clean.yml"
+        if not workflow.exists():
+            pytest.skip("the sync workflow is itself stripped from the mirror")
+        text = workflow.read_text(encoding="utf-8")
+        assert "rm -rf 0xcc/" in text, (
+            "the mirror no longer strips 0xcc/ — the FPRD now ships and should move to "
+            "ALWAYS_PRESENT"
+        )
+        assert "find docs/ -mindepth 1 -maxdepth 1 ! -name schemas" in text, (
+            "the mirror's docs/ handling changed — re-derive which contract files ship"
+        )
+        for rel in ALWAYS_PRESENT:
+            top = rel.split("/", 1)[0]
+            assert f"rm -rf {top}/" not in text, (
+                f"{rel} is listed as always present but the mirror strips {top}/"
+            )
 
     @pytest.mark.parametrize("rel", SITES)
     def test_each_site_still_carries_the_ORIGINAL_refusal(self, rel: str):

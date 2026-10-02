@@ -213,6 +213,21 @@
           ],
           "default": null,
           "title": "Windows"
+        },
+        "length_bands": {
+          "anyOf": [
+            {
+              "items": {
+                "$ref": "#/$defs/LengthBand"
+              },
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Length Bands"
         }
       },
       "title": "Decision",
@@ -370,6 +385,104 @@
         "prompt_version"
       ],
       "title": "JudgeEvidence",
+      "type": "object"
+    },
+    "LengthBand": {
+      "additionalProperties": false,
+      "description": "An operating point for ONE band of input lengths, in ABSOLUTE token counts.\n\n\u26a0 ONE CONSTANT THRESHOLD IS MISCALIBRATED AT EVERY LENGTH BUT THE ONE IT WAS CUT AT. A\nprobe's score drifts with how many tokens were scored, in a direction that depends on the\ncorpus. Measured on a `mean` probe over five out-of-distribution sets: realised FPR\nreaching 5.4x its 1% budget on the longest quartile of one set, and recall falling\n0.500 -> 0.297 on another \u2014 the direction that takes a monitor silent as a conversation\ngrows. Correcting for length recovered +0.039 mean OOD AUROC against null controls that\nall came back negative.\n\n\u26a0 `max_tokens: None` MEANS OPEN-ENDED, AND THE LAST BAND MUST BE. A consumer sees one\nrequest at a time; a table that stops short would leave the longest inputs with no bar at\nall, which is precisely the regime the drift makes worst.\n\n\u26a0 `threshold_source` DISTINGUISHES A CUT BAR FROM AN INHERITED ONE. Placing a `target_fpr`\nquantile needs at least `1/target_fpr` negatives \u2014 100 at 1%. A band below that carries\n`\"global\"` and the document's single threshold, rather than a number computed from four\nsamples. A reader must be able to tell which bands were actually measured.",
+      "properties": {
+        "min_tokens": {
+          "minimum": 0,
+          "title": "Min Tokens",
+          "type": "integer"
+        },
+        "max_tokens": {
+          "anyOf": [
+            {
+              "minimum": 0,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Max Tokens"
+        },
+        "threshold": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Threshold"
+        },
+        "threshold_source": {
+          "anyOf": [
+            {
+              "enum": [
+                "band",
+                "global"
+              ],
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Threshold Source"
+        },
+        "target_fpr": {
+          "anyOf": [
+            {
+              "exclusiveMaximum": 1.0,
+              "exclusiveMinimum": 0.0,
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Target Fpr"
+        },
+        "realised_fpr": {
+          "anyOf": [
+            {
+              "maximum": 1.0,
+              "minimum": 0.0,
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Realised Fpr"
+        },
+        "n_negatives": {
+          "anyOf": [
+            {
+              "minimum": 0,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "N Negatives"
+        }
+      },
+      "required": [
+        "min_tokens"
+      ],
+      "title": "LengthBand",
       "type": "object"
     },
     "ModelIdentity": {

@@ -142,6 +142,46 @@ def parity_refusal_message(details: Any) -> str:
     )
 
 
+def length_bands_from_definition(definition: Any) -> list[dict[str, Any]]:
+    """`decision.length_bands` from the document, or `[]`.
+
+    ⚠ A PROBE'S SCORE DRIFTS WITH INPUT LENGTH, so one constant threshold is miscalibrated at
+    every length but the one it was cut at. miStudio measured a realised FPR of 5.4x its 1%
+    budget on the longest quartile of `anthropic_hh_balanced`, and recall falling 0.500 -> 0.297
+    on `mental_health_balanced` — the latter being the direction that took a live monitor here
+    silent on turn four of a real conversation while the person's own sentence still carried the
+    probe's two highest-scoring tokens.
+
+    Tolerant of shape for the same reason as `window_thresholds_from_definition`: this is another
+    repository's document, and a malformed block should cost the per-length bars, not the arming.
+    Entries without a usable threshold are dropped — but a torn table is worse than none, so the
+    caller gets `[]` rather than a table with a hole in it.
+    """
+    decision = (definition or {}).get("decision") or {}
+    bands = decision.get("length_bands")
+    if not isinstance(bands, list) or not bands:
+        return []
+    out: list[dict[str, Any]] = []
+    for entry in bands:
+        if not isinstance(entry, dict):
+            return []
+        value = entry.get("threshold")
+        if not isinstance(value, (int, float)) or isinstance(value, bool):
+            return []
+        lo = entry.get("min_tokens")
+        if not isinstance(lo, int) or isinstance(lo, bool) or lo < 0:
+            return []
+        hi = entry.get("max_tokens")
+        if hi is not None and (not isinstance(hi, int) or isinstance(hi, bool)):
+            return []
+        out.append({"min_tokens": lo, "max_tokens": hi, "threshold": float(value)})
+    # The last band must be open-ended, or the longest inputs — the ones the drift hurts most —
+    # fall outside the table and silently inherit nothing.
+    if out[-1]["max_tokens"] is not None:
+        return []
+    return out
+
+
 def window_thresholds_from_definition(definition: Any) -> dict[str, float]:
     """`{window: threshold}` from `decision.windows`, for windows that placed a bar.
 
@@ -189,6 +229,7 @@ def armed_probe_from_row(
         encoder=encoder,
         windows=resolve_windows(windows, probe_scope=probe.scope),
         window_thresholds=window_thresholds_from_definition(definition),
+        length_bands=length_bands_from_definition(definition),
     )
 
 

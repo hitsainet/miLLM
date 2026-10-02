@@ -150,6 +150,19 @@ class Decision(_Contract):
     #: runtime depends on should fail loudly on a shape change rather than silently vanish into
     #: an untyped bag. `circuit_contract_mirror_drift` is the recorded case of the opposite.
     windows: dict[str, dict[str, Any]] | None = None
+    #: A threshold per ABSOLUTE token-length band, contiguous from 0, last one open-ended.
+    #:
+    #: ⚠ ONE CONSTANT THRESHOLD IS MISCALIBRATED AT EVERY LENGTH BUT THE ONE IT WAS CUT AT. A
+    #: probe's score drifts with how many tokens were scored. miStudio measured a realised FPR
+    #: of 5.4x its 1% budget on the longest quartile of one evaluation set, and recall falling
+    #: 0.500 -> 0.297 on another — the direction that took a live monitor silent on turn four of
+    #: a real conversation here.
+    #:
+    #: ⚠ `None` means the producer did not calibrate per length, and the runtime falls back to
+    #: `threshold` — which is what every document written before 2026-10-02 carries. Mirrored
+    #: explicitly for the same reason as `windows`: this field is READ, and a field the runtime
+    #: depends on must fail loudly on a shape change rather than vanish into an untyped bag.
+    length_bands: list[dict[str, Any]] | None = None
 
 
 class Acknowledgement(_Contract):

@@ -65,7 +65,7 @@ import logging
 import threading
 import time
 from dataclasses import dataclass, field
-from typing import Any, Callable, Optional
+from typing import Any, Callable, Optional, Sequence
 
 import torch
 
@@ -134,6 +134,33 @@ class ArmedProbe:
     #: present here is NOT provisional: its bar was cut from the distribution it is judged
     #: against, which is the whole difference between a rate and a ranking.
     window_thresholds: dict[str, float] = field(default_factory=dict)
+    #: A threshold per ABSOLUTE token-length band, contiguous from 0 with an open-ended last
+    #: band. Empty when the producer did not calibrate per length, which is every document
+    #: written before 2026-10-02 — the runtime then uses the single threshold, exactly as before.
+    length_bands: list[dict[str, Any]] = field(default_factory=list)
+
+
+def threshold_for_length(
+    bands: Sequence[dict[str, Any]], n_tokens: int, fallback: float | None
+) -> float | None:
+    """The bar a verdict over `n_tokens` scored tokens is judged against.
+
+    ⚠ THE ONE PLACE THIS LOOKUP LIVES, so arming, scoring and parity cannot disagree about
+    which band a length falls in. miStudio has the same function over the same table; a second
+    interpretation of the boundaries would be a silent cross-repo disagreement about what a
+    verdict means.
+
+    Falls back to the probe's single threshold when there is no table — which is both the
+    pre-2026-10-02 behaviour and the correct answer for a producer that did not calibrate per
+    length.
+    """
+    for band in bands or ():
+        lo = int(band.get("min_tokens") or 0)
+        hi = band.get("max_tokens")
+        if n_tokens >= lo and (hi is None or n_tokens <= int(hi)):
+            value = band.get("threshold")
+            return float(value) if value is not None else fallback
+    return fallback
 
 
 @dataclass
@@ -511,6 +538,16 @@ class ProbeRequestContext:
             # `response` window on a request that generated nothing lands here, correctly.
             return Verdict(scored=False, not_scored_reason="no_scored_tokens", **base)
 
+        # ⚠ REFINE THE BAR NOW THAT THE TOKEN COUNT IS KNOWN. The window/probe threshold chosen
+        # above is the right fallback and the right value for every not-scored return, but a
+        # probe's score drifts with how many tokens were scored, so one constant bar is
+        # miscalibrated at every length but the one it was cut at. `n_scored_tokens` is the
+        # count the producer calibrated against — the same `scored_index.numel()` recorded on
+        # the verdict, not the raw sequence length.
+        threshold = threshold_for_length(
+            probe.length_bands, int(scored_index.numel()), threshold
+        )
+
         score_tensor = score_row.unsqueeze(0)
         mask_tensor = mask_row.unsqueeze(0)
         logit_parts = self._logits[probe.probe_id]
@@ -549,7 +586,12 @@ class ProbeRequestContext:
             fires=None if threshold is None else value > threshold,
             n_scored_tokens=int(scored_index.numel()),
             top_positions=top,
-            **base,
+            # ⚠ OVERRIDE `base`'s THRESHOLD WITH THE ONE ACTUALLY USED. `base` was built before
+            # the token count was known, so it still carries the window/probe bar. Reporting
+            # that while having fired against a length-band bar would make every verdict's own
+            # `threshold` field a quiet lie, and it is the field a reader checks the score
+            # against. Dict order matters: this must come after `**base`.
+            **{**base, "threshold": threshold},
         )
 
     def _mask_for_window(

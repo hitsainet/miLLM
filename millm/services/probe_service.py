@@ -14,6 +14,35 @@ definition in the same call.
 change the detector underneath a running monitor, while every event before and after kept the same
 `probe_id` — so the event history would describe two different detectors as one. Re-importing a
 rebuilt definition goes disarm → delete → import.
+
+MOVING A BAR IS NOT REPLACING A DETECTOR.
+A probe definition carries two kinds of fact. The DETECTOR is everything that determines what
+number the probe produces: `head.weights`, `bias`, `norm_mean`, `norm_std`, `attention_query`,
+`read.layer`, `read.hook_point`, `scope`, `basis`, the `sae` block and its `feature_indices`,
+`aggregation.rule` and its `params`, `model`, and the `evidence` that says what the number is
+evidence of. The BAR is everything that determines only where that number is cut:
+`decision.threshold`, `target_fpr`, `realised_fpr`, `threshold_source`, `calibration`,
+`windows` and `length_bands`.
+
+`replace` was refused because it replaces the first kind, and the objection above stands exactly
+as written. It turns on a specific property of `probe_events`: the row records a `score` whose
+MEANING comes from the detector, and nothing on the row records which detector produced it.
+Change the weights and event #1's `score = 2.9` and event #900's `score = 2.9` are measurements
+of different quantities under one id, with nothing to tell them apart.
+
+A moved bar is not that, for one concrete reason: the event row ALREADY records the bar it was
+judged against, per verdict, at judgement time — including the length-band override — and nothing
+joins an event back to `probes.threshold`. After a re-cut, event #1 still says it was judged at
+2.8786 and event #900 says 2.4011; both are true and both remain comparable, because the score
+beneath each was produced by the same weights at the same layer under the same scope with the
+same rule. The score is the measurement; the bar is the line drawn across it.
+
+THE RULE: a probe's identity is everything that determines its SCORE; its bar is everything that
+only determines the CUT. The first may never change in place under a probe id. The second may,
+through `POST /api/probes/{probe_id}/recalibrate`, which is `extra="forbid"` and therefore
+structurally incapable of carrying a detector, refuses any cut it cannot match to
+`provenance.probe_id`, never stores the incoming object as the definition, and refuses a
+threshold with no budget and no named source. `on_conflict` remains `rename|fail`.
 """
 
 from __future__ import annotations

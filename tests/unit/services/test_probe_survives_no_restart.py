@@ -33,7 +33,25 @@ pytestmark = pytest.mark.asyncio
 
 
 class _Row:
-    def __init__(self, probe_id: str, *, armed: bool, paused_reason=None):
+    """⚠ A STAND-IN MUST NEVER BE MORE FORGIVING THAN THE THING IT STANDS IN FOR.
+
+    This raised `AttributeError: '_Row' object has no attribute 'threshold'` the moment `status()`
+    began reporting the bar in force, and that is the stub working as intended: the real `Probe`
+    row always has these columns, so `status()` reads them DIRECTLY rather than through a `getattr`
+    default. A forgiving read would turn a renamed column into a silent `None` — a probe reported
+    as having no threshold when it has one.
+    """
+
+    def __init__(
+        self,
+        probe_id: str,
+        *,
+        armed: bool,
+        paused_reason=None,
+        threshold: float | None = 2.5,
+        threshold_revision: int = 1,
+        armed_threshold_revision: int | None = None,
+    ):
         self.id = probe_id
         self.name = f"name-{probe_id}"
         self.layer = 11
@@ -43,6 +61,9 @@ class _Row:
         self.basis = "residual"
         self.armed = armed
         self.paused_reason = paused_reason
+        self.threshold = threshold
+        self.threshold_revision = threshold_revision
+        self.armed_threshold_revision = armed_threshold_revision
 
 
 def _probe_row(probe_id: str, *, armed: bool, paused_reason=None):

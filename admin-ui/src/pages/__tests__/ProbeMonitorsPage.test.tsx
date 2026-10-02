@@ -864,3 +864,164 @@ describe('a probe row states the separation it was fitted to make', () => {
     expect(screen.queryByTestId('probe-labels')).toBeNull();
   });
 });
+
+describe('a bar that can move, and verdicts judged under different ones', () => {
+  /* ⚠ A THRESHOLD IS NO LONGER A PROPERTY OF THE RUN THAT PRODUCED IT.
+   *
+   * miStudio can re-cut a probe's bar in milliseconds — a threshold is the (1 − target_fpr)
+   * quantile of negatives it already has on disk — and that cut can now reach an ALREADY
+   * IMPORTED, possibly ARMED probe in place, because the alternative (disarm → delete → import)
+   * assigns a new probe id and cascade-deletes the probe's entire verdict history.
+   *
+   * Two consequences land on this page, and both are honesty problems rather than features:
+   *
+   *   1. An event list can hold verdicts judged against DIFFERENT bars. The row showed a score
+   *      and `· fires` and never the threshold, so two rows with the same score and opposite
+   *      verdicts were indistinguishable — an omission while a bar was fixed, a lie once it can
+   *      move.
+   *   2. `GET /api/probes` serialises the ROW. If a re-cut writes the database and the in-memory
+   *      `ArmedProbe` is not replaced, this tile shows the new number while every verdict keeps
+   *      using the old one. `status()` reads the live registry and REPORTS that disagreement
+   *      rather than reconciling it; the tile renders what it says.
+   */
+
+  it('shows the bar each verdict was judged against, beside the score', () => {
+    state.probes = [probe()];
+    state.events = [event({ id: 1, score: 12.5, threshold: 11.9144, verdict: true })];
+    renderPage();
+    expect(screen.getByTestId('event-row')).toHaveTextContent('12.5000 / 11.9144');
+  });
+
+  it('marks a verdict judged under an EARLIER revision, and only that one', () => {
+    state.probes = [probe({ threshold_revision: 3 })];
+    state.events = [
+      event({ id: 1, threshold_revision: 1 }),
+      event({ id: 2, threshold_revision: 3 }),
+    ];
+    renderPage();
+    // Specificity again: a chip on every row says nothing.
+    expect(screen.getAllByTestId('event-threshold-revision')).toHaveLength(1);
+    const rows = screen.getAllByTestId('event-row');
+    expect(rows[0]).toHaveTextContent('rev 1');
+    expect(rows[1]).not.toHaveTextContent('rev');
+  });
+
+  it('OMITS the chip for an orphaned verdict rather than defaulting it', () => {
+    /* A probe that has since been deleted has no current revision, so there is nothing to
+       compare against. A chip there would warn about a bar nobody can look up. */
+    state.probes = [];
+    state.events = [event({ id: 1, probe_id: 'pr_gone', threshold_revision: 1 })];
+    renderPage();
+    expect(screen.getByTestId('event-row')).toBeInTheDocument();
+    expect(screen.queryByTestId('event-threshold-revision')).not.toBeInTheDocument();
+  });
+
+  it('says nothing about revisions on a probe whose bar has never moved', () => {
+    state.probes = [probe({ threshold_revision: 1 })];
+    state.events = [event({ id: 1, threshold_revision: 1 })];
+    renderPage();
+    expect(screen.queryByTestId('event-threshold-revision')).not.toBeInTheDocument();
+    expect(screen.getByTestId('probe-threshold')).not.toHaveTextContent('rev');
+  });
+
+  it('shows the cut on the tile once a bar HAS moved', () => {
+    state.probes = [probe({ threshold_revision: 4 })];
+    renderPage();
+    expect(screen.getByTestId('probe-threshold')).toHaveTextContent('rev 4');
+  });
+
+  it("⚠ renders a backend that sends no revision at all", () => {
+    // A rolling deploy puts this bundle in front of an older backend. A strict check on an
+    // absent field has taken this page down before.
+    state.probes = [probe()];
+    state.events = [event({ id: 1 })];
+    renderPage();
+    expect(screen.getByTestId('event-row')).toBeInTheDocument();
+    expect(screen.queryByTestId('event-threshold-revision')).not.toBeInTheDocument();
+  });
+});
+
+describe('the bar in force, when it is not the one stored', () => {
+  /* ⚠ THE DEFECT THIS RENDERS IS THE ONE THE WHOLE CROSS-REPO DESIGN EXISTS TO PREVENT.
+   *
+   * `armed_probe_from_row` resolves a row into the runtime shape ONCE, at arm time, and the
+   * request path never touches the database. So a recalibration that writes the row and fails to
+   * replace the in-memory `ArmedProbe` leaves this tile — which serialises the ROW — showing the
+   * new threshold while every verdict is still judged against the old one. Invisible-but-visible,
+   * which is worse than a plain failure.
+   *
+   * `status()` is the only surface that reads the live registry, and it reports the disagreement
+   * rather than reconciling it: a read path that quietly writes would hide how often it happens.
+   */
+
+  const statusWith = (armed: Record<string, unknown>[]): ProbeStatus =>
+    ({
+      armed,
+      armed_count: armed.length,
+      max_armed: 8,
+      imported_count: armed.length,
+      paused_reasons: [],
+      last_request_overhead_ms: 0.3,
+      overhead_warn_threshold_ms: 5,
+      events_recorded: 0,
+      socket_events_dropped: 0,
+      force_serial: true,
+    }) as unknown as ProbeStatus;
+
+  const armedEntry = (over: Record<string, unknown> = {}) => ({
+    id: 'pr_1',
+    name: 'high-stakes',
+    layer: 11,
+    rule: 'mean',
+    rung: 2,
+    rung_language: 'detects on unseen tasks',
+    next_step: '',
+    streamable: true,
+    basis: 'residual',
+    paused_reason: null,
+    hook_installed: true,
+    windows: ['all'],
+    ...over,
+  });
+
+  it("shows the server's sentence when the live bar is not the stored one", () => {
+    const warning =
+      'the stored bar is revision 2 and this probe is judging against revision 1 (11.9144) — ' +
+      'the registry was not refreshed when the threshold moved; re-arm it';
+    state.probes = [probe({ armed: true, threshold: 14.5201, threshold_revision: 2 })];
+    state.status = statusWith([
+      armedEntry({ threshold: 11.9144, threshold_revision: 1, threshold_disagreement: warning }),
+    ]);
+    renderPage();
+    expect(screen.getByTestId('threshold-disagreement')).toHaveTextContent(warning);
+  });
+
+  it('says nothing when the live bar and the row agree', () => {
+    state.probes = [probe({ armed: true, threshold: 14.5201, threshold_revision: 2 })];
+    state.status = statusWith([
+      armedEntry({ threshold: 14.5201, threshold_revision: 2, threshold_disagreement: null }),
+    ]);
+    renderPage();
+    expect(screen.queryByTestId('threshold-disagreement')).not.toBeInTheDocument();
+  });
+
+  it('keeps the disagreement OUT of paused_reason', () => {
+    /* A probe judging against a previous bar IS still scoring. Folding the two together would
+       dilute the one field whose whole job is "a probe never goes silently quiet". */
+    state.probes = [probe({ armed: true, threshold: 14.5201, threshold_revision: 2 })];
+    state.status = statusWith([
+      armedEntry({ threshold: 11.9144, threshold_revision: 1, threshold_disagreement: 'moved' }),
+    ]);
+    renderPage();
+    expect(screen.getByTestId('threshold-disagreement')).toBeInTheDocument();
+    expect(screen.queryByTestId('paused-reason')).not.toBeInTheDocument();
+  });
+
+  it('⚠ renders against a backend that reports no live bar at all', () => {
+    state.probes = [probe({ armed: true, threshold: 14.5201 })];
+    state.status = statusWith([armedEntry()]);
+    renderPage();
+    expect(screen.getByTestId('probe-threshold')).toBeInTheDocument();
+    expect(screen.queryByTestId('threshold-disagreement')).not.toBeInTheDocument();
+  });
+});

@@ -89,6 +89,11 @@ class ProbeEventService:
                     # was judged against was ever calibrated for that slice.
                     "window": window,
                     "provisional": bool(verdict.provisional),
+                    # ⚠ FROM THE VERDICT, NEVER FROM THE PROBE ROW. A bar can be re-cut while the
+                    # probe is armed; the write order is row-then-registry, so a revision read
+                    # from the row here would stamp the number that is WRONG in exactly the case
+                    # this field exists to expose — a DB write whose registry refresh failed.
+                    "threshold_revision": int(getattr(verdict, "threshold_revision", 1) or 1),
                     "context_text": extra.get("context_text"),
                     "context_token_ids": extra.get("context_token_ids"),
                     "summary": _summary(verdict),
@@ -202,6 +207,25 @@ class ProbeEventService:
         # the windows live in process memory on the `ArmedProbe`, the row knows nothing about
         # them, and after a restart a row claiming to be armed is not scoring anything at all.
         windows_by_id = _live_armed_windows()
+        bars_by_id = _live_armed_bars()
+
+        def _bar_disagreement(row: Any, bars: dict[str, tuple[Any, Any]]) -> Optional[str]:
+            """A sentence when the live bar is not the row's, or `None`.
+
+            Only meaningful for a probe armed in THIS process: a stale row has no live bar to
+            disagree with, and `paused_reason` already says that it is not scoring at all.
+            """
+            live_bar = bars.get(row.id)
+            if live_bar is None:
+                return None
+            row_revision = int(getattr(row, "threshold_revision", 1) or 1)
+            if live_bar[1] == row_revision:
+                return None
+            return (
+                f"the stored bar is revision {row_revision} and this probe is judging against "
+                f"revision {live_bar[1]} ({live_bar[0]}) — the registry was not refreshed when "
+                f"the threshold moved; re-arm it"
+            )
 
         def _paused_reason(row: Any) -> Optional[str]:
             if row.paused_reason:
@@ -230,6 +254,21 @@ class ProbeEventService:
                     #: `None` for a row with no live ArmedProbe — it is not scoring any window,
                     #: which is a different claim from "it is scoring an empty set".
                     "windows": windows_by_id.get(p.id),
+                    #: THE BAR ACTUALLY IN FORCE, and the row's, so a disagreement is visible.
+                    #: `None` when nothing is armed here — not scoring is not a bar of zero.
+                    "threshold": bars_by_id.get(p.id, (None, None))[0],
+                    "threshold_revision": bars_by_id.get(p.id, (None, None))[1],
+                    "row_threshold": p.threshold,
+                    "row_threshold_revision": int(
+                        getattr(p, "threshold_revision", 1) or 1
+                    ),
+                    "armed_threshold_revision": getattr(p, "armed_threshold_revision", None),
+                    #: ⚠ REPORTED, NOT RECONCILED — the same rule as `stale`, and the same
+                    #: reason: a read path that quietly writes hides how often this happens.
+                    #: Deliberately NOT folded into `paused_reason`: a probe judging against a
+                    #: previous bar IS still scoring, and conflating the two would dilute the
+                    #: one field whose whole job is "a probe never goes silently quiet".
+                    "threshold_disagreement": _bar_disagreement(p, bars_by_id),
                 }
                 for p in armed
             ],
@@ -269,6 +308,24 @@ def _live_armed_ids() -> list[str]:
     from millm.services.probe_runtime import ProbeRuntimeState
 
     return [p.probe_id for p in ProbeRuntimeState().armed()]
+
+
+def _live_armed_bars() -> dict[str, tuple[Optional[float], int]]:
+    """`{probe_id: (threshold, threshold_revision)}` from the live registry.
+
+    ⚠ FROM THE REGISTRY, NOT THE ROW, AND FOR THE SAME REASON AS `windows` AND `hook_installed`.
+    A threshold can now be re-cut on an armed probe, and the write order is row-then-registry: if
+    the refresh fails, the row and every read path that serialises it show the new bar while every
+    verdict is still judged against the old one. `GET /api/probes` serialises the ROW, so that
+    divergence would be invisible-but-visible — the UI showing one number and the monitor using
+    another. This is the only surface that can see it.
+    """
+    from millm.services.probe_runtime import ProbeRuntimeState
+
+    return {
+        p.probe_id: (p.threshold, int(getattr(p, "threshold_revision", 1) or 1))
+        for p in ProbeRuntimeState().armed()
+    }
 
 
 def _live_armed_windows() -> dict[str, list[str]]:
@@ -324,6 +381,11 @@ def event_summary(event: Any) -> dict[str, Any]:
         # bar never cut for it.
         "window": getattr(event, "window", "all"),
         "provisional": bool(getattr(event, "provisional", False)),
+        # Which cut of the bar judged this. Two verdicts under different bars are distinguishable
+        # by `threshold` alone only while the two cuts landed on different numbers — and a reader
+        # watching `provisional` disappear between two events cannot otherwise tell whether a
+        # window gained its own bar or never needed one.
+        "threshold_revision": int(getattr(event, "threshold_revision", 1) or 1),
         # ⚠ isoformat, not the datetime: this goes through socket.io's JSON encoder, which has no
         # datetime support, and a raised encoder error is swallowed by the fire-and-forget wrapper.
         "created_at": created.isoformat() if hasattr(created, "isoformat") else created,

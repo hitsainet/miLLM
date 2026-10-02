@@ -230,6 +230,9 @@ def armed_probe_from_row(
         windows=resolve_windows(windows, probe_scope=probe.scope),
         window_thresholds=window_thresholds_from_definition(definition),
         length_bands=length_bands_from_definition(definition),
+        # Read once here, and from then on the runtime object is the authority — a re-cut writes
+        # the row first and refreshes the registry second, so between the two the row is ahead.
+        threshold_revision=int(getattr(probe, "threshold_revision", 1) or 1),
     )
 
 
@@ -387,6 +390,12 @@ class ProbeArmingService:
             armed=True,
             paused_reason=None,
             arm_acknowledgement=acknowledgement,
+            # ⚠ WHICH BAR THE OPERATOR ARMED AGAINST. The acknowledgement records a RUNG, which
+            # is right — consent is to the evidence, and a re-cut changes neither the rung nor
+            # the evidence. But a bar can now move under an armed probe, so without this the
+            # tile cannot say "armed under revision 2; now judging at revision 4" at all, and
+            # consent given against one operating point carries silently to another.
+            armed_threshold_revision=int(getattr(probe, "threshold_revision", 1) or 1),
         )
         logger.info(
             "probe_armed id=%s name=%s layer=%s rung=%s parity_max_diff=%s",

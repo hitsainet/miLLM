@@ -663,6 +663,33 @@ class ProbeNoModelLoadedError(MiLLMError):
     status_code = 409
 
 
+class ProbeRecalibrationMismatchError(MiLLMError):
+    """The incoming cut does not describe the probe whose bar it would move.
+
+    ⚠ THE WHOLE CARVE-OUT RESTS ON THIS REFUSAL. Moving a bar in place is permitted only because
+    the detector underneath is provably unchanged, and `provenance.probe_id` plus
+    `provenance.run_id` are what prove it. A definition carrying neither cannot be verified, so it
+    refuses rather than defaulting to yes — that probe goes disarm -> delete -> import like any
+    other rebuild.
+    """
+
+    code = "PROBE_RECALIBRATION_MISMATCH"
+    status_code = 409
+
+
+class ProbeThresholdUncalibratedError(MiLLMError):
+    """A bar nobody calibrated, or one the runtime's own parser would discard.
+
+    Two cases, one refusal. A `threshold` with no `target_fpr` and no `threshold_source` is an
+    opinion wearing a measurement's clothes, and every surface downstream would present it as the
+    latter. A per-window or per-length entry the arming parsers DROP would mean a 200 that moved
+    no bar — the import-time tolerance that is correct there and inverted here.
+    """
+
+    code = "PROBE_THRESHOLD_UNCALIBRATED"
+    status_code = 409
+
+
 class ProbeHookUnsupportedError(MiLLMError):
     """The loaded runtime exposes no module tree to hook.
 

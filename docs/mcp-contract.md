@@ -1,6 +1,6 @@
 # miLLM ↔ Unified MCP Server Contract
 
-**Status:** Normative for miLLM Feature 9 (Unified MCP), Feature 15 (Circuit Edge Sensing / circuit MCP surface), Feature 19 (Concurrent Circuit Serving) and Feature 24 (Probe Monitor Runtime). **Version:** 1.6 (2026-09-27)
+**Status:** Normative for miLLM Feature 9 (Unified MCP), Feature 15 (Circuit Edge Sensing / circuit MCP surface), Feature 19 (Concurrent Circuit Serving) and Feature 24 (Probe Monitor Runtime). **Version:** 1.8 (2026-10-02)
 **Consumer:** the unified MCP server that ships in the miStudio repo
 (`backend/src/mcp_server/`), exposing `millm_runtime` / `millm_clusters` /
 `millm_sensing` / `millm_circuits` / `millm_probes` tool categories against a miLLM
@@ -12,6 +12,19 @@ This contract is **additive-only**: miLLM may add endpoints, response fields, an
 error codes; it must not rename or remove anything listed here, change field
 types, or change status-code semantics without a new contract version. The MCP
 server must tolerate unknown fields everywhere.
+
+**v1.8 (2026-10-02)** is a strict additive superset of v1.7: it adds
+`POST /api/probes/{probe_id}/recalibrate`, the `millm_recalibrate_probe` tool, the
+`PROBE_RECALIBRATION_MISMATCH` and `PROBE_THRESHOLD_UNCALIBRATED` error codes, and
+`threshold_revision` on `_probe_summary`, each armed-probe `status()` entry and every
+`probe_events` row. Nothing was renamed, removed or re-typed.
+
+⚠ **AND IT CHANGES NO EXISTING SEMANTICS, WHICH IS THE PART WORTH STATING.** `on_conflict` is
+still `rename|fail` with no `replace`; a probe's weights, layer, scope, rule and basis still
+cannot change in place under a `probe_id`. What v1.8 permits is moving the DECISION BAR, which
+each event already records for itself — see the bar-vs-detector boundary in §4d. A v1.7 client
+that ignores the new route is unaffected, and a probe nobody recalibrates stays at
+`threshold_revision` 1 forever.
 
 **v1.6 (2026-09-27)** is a strict additive superset of v1.5.1: it adds the
 `millm_probes` tool category (§4d), the `/api/probes/*` endpoints, the probe error
@@ -175,7 +188,7 @@ sub-collection of a circuit, and the flat prefix matches `/api/sensing`.
 | `millm_release_circuit_claims` | `POST /api/circuits/claims/release?circuit_id=` (**recovery** — release ONE circuit's stuck claims; scoped deliberately, there is no "release everything") | REST ✅ · MCP ✅ |
 | `millm_delete_circuit` | `DELETE /api/circuits/{id}` (deactivates first if serving) | REST ✅ · MCP ✅ |
 
-### `millm_probes` (v1.7 — Feature 24, Probe Monitor Runtime)
+### `millm_probes` (v1.8 — Feature 24, Probe Monitor Runtime; v1.8 adds `millm_recalibrate_probe`, which moves a bar in place)
 
 > **STATUS: routes served, tools registered.** Both halves shipped 2026-09-27. The
 > three-state convention this file uses elsewhere applies: *served* means a path in
@@ -194,11 +207,12 @@ sub-collection of a circuit, and the flat prefix matches `/api/sensing`.
 | `millm_import_probe` | `POST /api/probes/import?on_conflict=rename\|fail` (body = the `mistudio.probe-definition/v1` document) **or** `POST /api/probes/hub/import` (`{repo_id, filename, revision?, on_conflict?}`) |
 | `millm_list_probes` | `GET /api/probes?armed=` |
 | `millm_arm_probe` | `POST /api/probes/{probe_id}/arm` (`{acknowledge_below_rung2?: bool, reason?: str, windows?: list[str]\|null}`) |
+| `millm_recalibrate_probe` | `POST /api/probes/{probe_id}/recalibrate` (`{decision, mistudio_probe_id, mistudio_run_id?, calibration_id?, reason?}`) — moves the DECISION BAR of an already-imported, possibly armed probe. The body is `extra="forbid"` and therefore cannot carry a detector; a cut that cannot be matched to the stored `provenance.probe_id` is refused. See the bar-vs-detector boundary above |
 | `millm_disarm_probe` | `POST /api/probes/{probe_id}/disarm` |
 | `millm_probe_status` | `GET /api/probes/status` |
 | `millm_probe_events` | `GET /api/probes/events?probe_id=&request_id=&limit=` |
 
-Also served, and deliberately **not** exposed as tools in v1.6:
+Also served, and deliberately **not** exposed as tools:
 `GET /api/probes/{probe_id}` (carries the whole definition — large, and an agent that
 wants it can read the file it imported), `POST /api/probes/{probe_id}/parity` (an
 operator action whose report is already on the list row), `GET /api/probes/hub/search`
@@ -211,6 +225,36 @@ Overwriting a definition in place while its probe is armed would change the dete
 underneath a running monitor while every event before and after kept the same
 `probe_id` — the history would describe two different detectors as one. Re-importing
 a rebuilt probe is **disarm → delete → import**.
+
+> **MOVING A BAR IS NOT REPLACING A DETECTOR.**
+>
+> A probe definition carries two kinds of fact. The DETECTOR is everything that determines what
+> number the probe produces: `head.weights`, `bias`, `norm_mean`, `norm_std`, `attention_query`,
+> `read.layer`, `read.hook_point`, `scope`, `basis`, the `sae` block and its `feature_indices`,
+> `aggregation.rule` and its `params`, `model`, and the `evidence` that says what the number is
+> evidence of. The BAR is everything that determines only where that number is cut:
+> `decision.threshold`, `target_fpr`, `realised_fpr`, `threshold_source`, `calibration`,
+> `windows` and `length_bands`.
+>
+> `replace` was refused because it replaces the first kind, and the objection above stands exactly
+> as written. It turns on a specific property of `probe_events`: the row records a `score` whose
+> MEANING comes from the detector, and nothing on the row records which detector produced it.
+> Change the weights and event #1's `score = 2.9` and event #900's `score = 2.9` are measurements
+> of different quantities under one id, with nothing to tell them apart.
+>
+> A moved bar is not that, for one concrete reason: the event row ALREADY records the bar it was
+> judged against, per verdict, at judgement time — including the length-band override — and nothing
+> joins an event back to `probes.threshold`. After a re-cut, event #1 still says it was judged at
+> 2.8786 and event #900 says 2.4011; both are true and both remain comparable, because the score
+> beneath each was produced by the same weights at the same layer under the same scope with the
+> same rule. The score is the measurement; the bar is the line drawn across it.
+>
+> THE RULE: a probe's identity is everything that determines its SCORE; its bar is everything that
+> only determines the CUT. The first may never change in place under a probe id. The second may,
+> through `POST /api/probes/{probe_id}/recalibrate`, which is `extra="forbid"` and therefore
+> structurally incapable of carrying a detector, refuses any cut it cannot match to
+> `provenance.probe_id`, never stores the incoming object as the definition, and refuses a
+> threshold with no budget and no named source. `on_conflict` remains `rename|fail`.
 
 **`GET /api/probes/events` list rows carry NO context text.** `context_text` and
 `context_token_ids` are the decoded window around a firing position, i.e. the user's

@@ -84,6 +84,7 @@ function ProbeRow({
   onDelete,
   onCheckParity,
   liveWindows,
+  liveBar,
   busy,
 }: {
   probe: Probe;
@@ -93,6 +94,16 @@ function ProbeRow({
   onCheckParity: (id: string) => void;
   /** Windows this probe is LIVE on, from the registry. `undefined` when nothing reports it. */
   liveWindows?: string[] | null;
+  /**
+   * The bar actually in force and the sentence the server writes when it is not the row's.
+   *
+   * ⚠ THE ONLY PLACE A FAILED REGISTRY REFRESH BECOMES VISIBLE. A threshold can now be re-cut on
+   * an ARMED probe, and the write order is row-then-registry: if the refresh does not land, this
+   * tile's `probe.threshold` (the ROW) shows the new number while every verdict is still judged
+   * against the old one. `status()` reads the registry and reports the disagreement rather than
+   * reconciling it; this renders what it says.
+   */
+  liveBar?: { threshold: number | null; revision: number | null; disagreement: string | null };
   busy: boolean;
 }) {
   // Defaults to every window. A probe armed without a thought still gets both halves, which is
@@ -223,10 +234,15 @@ function ProbeRow({
         <RungBadge rung={probe.rung} language={probe.rung_language} />
         <ParitySummary probe={probe} />
         {/* ⚠ A null threshold is not zero. The probe ranks but does not decide. */}
-        <span className="text-xs text-slate-400 font-mono">
+        <span className="text-xs text-slate-400 font-mono" data-testid="probe-threshold">
           {probe.threshold === null
             ? 'no threshold — ranks, does not decide'
             : `threshold ${probe.threshold.toFixed(4)}`}
+          {/* The cut, shown once a bar has ever moved. Silent at revision 1, because a number
+              nobody has re-cut needs no version beside it. */}
+          {probe.threshold_revision !== undefined && probe.threshold_revision > 1 && (
+            <span className="ml-1 opacity-70">· rev {probe.threshold_revision}</span>
+          )}
         </span>
         {!probe.streamable && (
           <span className="text-xs text-slate-500" title="its rule is only defined once generation ends">
@@ -234,6 +250,19 @@ function ProbeRow({
           </span>
         )}
       </div>
+
+      {/* ⚠ THE BAR IN FORCE DISAGREES WITH THE STORED ONE. Separate from `paused_reason` on
+          purpose: this probe IS scoring, just against a previous cut, and folding the two
+          together would dilute the field whose whole job is "a probe never goes silently
+          quiet". The sentence is the server's — it names both revisions. */}
+      {liveBar?.disagreement && (
+        <p
+          data-testid="threshold-disagreement"
+          className="text-xs text-amber-300 flex items-center gap-1"
+        >
+          <AlertTriangle className="w-3 h-3 shrink-0" /> {liveBar.disagreement}
+        </p>
+      )}
 
       {/* ⚠ An armed probe that is not scoring must SAY SO. Silence reads as "nothing detected". */}
       {probe.armed && probe.paused_reason && (
@@ -379,11 +408,16 @@ function EventContext({ eventId }: { eventId: number }) {
 function EventRow({
   event,
   probeName,
+  currentRevisions,
   expanded,
   onToggle,
 }: {
   event: ProbeEvent;
   probeName: string;
+  /** probe_id -> the revision its ROW is at now. Absent for an orphaned verdict, which is why
+   *  the chip is OMITTED rather than defaulted there: a marker about a bar nobody can look up
+   *  would warn about evidence it cannot classify. */
+  currentRevisions: Record<string, number>;
   expanded: boolean;
   onToggle: (id: number) => void;
 }) {
@@ -423,6 +457,28 @@ function EventRow({
               provisional
             </span>
           )}
+          {/* ⚠ WHICH CUT OF THE BAR JUDGED THIS, shown only when it is not the one in force.
+              A threshold can now be re-cut on an armed probe, so a list can hold verdicts
+              judged under different bars — and a reader watching `provisional` disappear
+              between two rows cannot otherwise tell whether a window gained its own bar or
+              never needed one. Rendered on the same terms as `provisional`: never behind a
+              hover, with the prose in `title`. */}
+          {event.threshold_revision !== undefined &&
+            currentRevisions[event.probe_id] !== undefined &&
+            event.threshold_revision !== currentRevisions[event.probe_id] && (
+              <span
+                data-testid="event-threshold-revision"
+                title={
+                  `This verdict was judged against revision ${event.threshold_revision} of the ` +
+                  `probe's threshold. The bar has since moved to revision ` +
+                  `${currentRevisions[event.probe_id]}, so its score is not comparable to a ` +
+                  `newer verdict by the fires/silent outcome alone.`
+                }
+                className="ml-2 px-1.5 py-0.5 rounded bg-slate-800 text-slate-400 font-mono text-[10px]"
+              >
+                rev {event.threshold_revision}
+              </span>
+            )}
         </span>
         {event.scored ? (
           <span
@@ -435,6 +491,13 @@ function EventRow({
             }`}
           >
             {event.score?.toFixed(4)}
+            {/* ⚠ THE BAR IT WAS JUDGED AGAINST, BESIDE THE SCORE. Two events with the same score
+                and opposite verdicts were previously indistinguishable on this row, and the
+                number was already on the wire — a threshold that can now MOVE makes that gap
+                a lie rather than merely an omission. */}
+            {event.threshold !== null && event.threshold !== undefined
+              ? ` / ${event.threshold.toFixed(4)}`
+              : ''}
             {/* ⚠ null verdict renders as neither fired nor not-fired. */}
             {event.verdict === null ? ' (no threshold)' : event.verdict ? ' · fires' : ''}
           </span>
@@ -476,12 +539,14 @@ function RequestGroup({
   requestId,
   events,
   probeNames,
+  currentRevisions,
   expandedIds,
   onToggle,
 }: {
   requestId: string;
   events: ProbeEvent[];
   probeNames: Map<string, string>;
+  currentRevisions: Record<string, number>;
   expandedIds: ReadonlySet<number>;
   onToggle: (id: number) => void;
 }) {
@@ -504,6 +569,7 @@ function RequestGroup({
           key={event.id}
           event={event}
           probeName={probeNames.get(event.probe_id) ?? event.probe_id}
+          currentRevisions={currentRevisions}
           expanded={expandedIds.has(event.id)}
           onToggle={onToggle}
         />
@@ -560,6 +626,18 @@ export function ProbeMonitorsPage() {
   // probe that has since been deleted — an orphaned verdict is still evidence and must render.
   const probeNames = useMemo(
     () => new Map(probes.map((probe) => [probe.id, probe.name])),
+    [probes],
+  );
+  // probe_id -> the revision its row is at now, so a verdict judged against an EARLIER bar can
+  // say so. Built from the same list as `probeNames`, and deliberately a plain object so an
+  // unknown probe reads as `undefined` rather than as revision 1.
+  const currentRevisions = useMemo(
+    () =>
+      Object.fromEntries(
+        probes
+          .filter((probe) => probe.threshold_revision !== undefined)
+          .map((probe) => [probe.id, probe.threshold_revision as number]),
+      ),
     [probes],
   );
   const [showHub, setShowHub] = useState(false);
@@ -712,6 +790,16 @@ export function ProbeMonitorsPage() {
                 probe={probe}
                 onArm={(id, windows) => arm({ id, windows })}
                 liveWindows={status?.armed.find((a) => a.id === probe.id)?.windows}
+                liveBar={(() => {
+                  const entry = status?.armed.find((a) => a.id === probe.id);
+                  return entry
+                    ? {
+                        threshold: entry.threshold ?? null,
+                        revision: entry.threshold_revision ?? null,
+                        disagreement: entry.threshold_disagreement ?? null,
+                      }
+                    : undefined;
+                })()}
                 onDisarm={disarm}
                 onDelete={remove}
                 onCheckParity={checkParity}
@@ -748,6 +836,7 @@ export function ProbeMonitorsPage() {
                 requestId={requestId}
                 events={group}
                 probeNames={probeNames}
+                currentRevisions={currentRevisions}
                 expandedIds={expandedIds}
                 onToggle={toggleEvent}
               />

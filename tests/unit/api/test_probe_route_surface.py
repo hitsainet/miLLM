@@ -53,6 +53,7 @@ EXPECTED_PATHS = {
     "/api/probes/{probe_id}/arm",
     "/api/probes/{probe_id}/parity",
     "/api/probes/{probe_id}/disarm",
+    "/api/probes/{probe_id}/recalibrate",
 }
 
 
@@ -186,6 +187,10 @@ class TestTheGatesHaveACaller:
             ("check_parity", "run"),
             ("check_parity", "loaded_identity"),
             ("check_parity", "armed_probe_from_row"),
+            # ⚠ THE RECALIBRATE ROUTE MUST REACH THE SERVICE, NOT WRITE THE ROW ITSELF. A
+            # handler that called `repository.update` directly would bypass every gate and the
+            # registry refresh at once, and the path-level tests above could not tell.
+            ("recalibrate_probe", "recalibrate"),
             # The hub routes reach the hub service, not a second HTTP client.
             ("hub_search", "search"),
             ("hub_definitions", "list_definitions"),

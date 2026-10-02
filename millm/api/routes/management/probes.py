@@ -15,7 +15,7 @@ import json
 from typing import Annotated, Any, Literal, Optional
 
 from fastapi import APIRouter, Body, Path, Query
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 from millm.api.dependencies import (
     DbSession,
@@ -27,6 +27,7 @@ from millm.api.dependencies import (
     ProbeServiceDep,
 )
 from millm.api.schemas.common import ApiResponse
+from millm.api.schemas.probe import Decision
 from millm.services.probe_event_service import event_summary
 from millm.core.errors import ProbeNotFoundError
 from millm.core.probe_evidence import probe_rung_language, probe_rung_next_step
@@ -72,6 +73,37 @@ class ProbeArmRequest(BaseModel):
     windows: Optional[list[str]] = None
 
 
+class ProbeRecalibrationRequest(BaseModel):
+    """A RE-CUT BAR, AND NOTHING ELSE.
+
+    ⚠ `extra="forbid"` IS THE DOCTRINAL BOUNDARY, EXPRESSED AS A TYPE. `on_conflict=replace` is
+    refused on import because overwriting a definition in place would change the DETECTOR
+    underneath a running monitor. Moving a bar is not that — the event row already records the
+    threshold each verdict was judged against — but the distinction only holds if this route is
+    INCAPABLE of carrying a detector. A route that accepted `head`, `read`, `scope`, `basis` or
+    `aggregation` and ignored them would be one review away from honouring them.
+
+    `decision` is the contract's own `Decision` model, not a second schema: it is `extra="allow"`
+    (inherited from `_Contract`), so a newer miStudio can add `decision.*` fields and they survive
+    the round trip, while the envelope around it is closed. Additive inside the bar, closed
+    outside it.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    decision: Decision
+    #: WHICH PROBE THE PRODUCER RE-CUT, compared against `definition.provenance.probe_id`.
+    mistudio_probe_id: str = Field(min_length=1, max_length=64)
+    #: WHICH FIT. Compared when both sides carry one — the same probe id from a different fit is
+    #: a different detector.
+    mistudio_run_id: Optional[str] = Field(None, max_length=64)
+    #: The producer's identity for this cut, recorded verbatim against the revision.
+    calibration_id: Optional[str] = Field(None, max_length=64)
+    #: Why the bar moved. The operator's question on seeing a changed number is "who, and why",
+    #: and `threshold_history` is the only place that can answer.
+    reason: str = Field("", max_length=500)
+
+
 def _probe_summary(probe: Any) -> dict[str, Any]:
     return {
         "id": probe.id,
@@ -84,6 +116,12 @@ def _probe_summary(probe: Any) -> dict[str, Any]:
         "streamable": probe.streamable,
         "threshold": probe.threshold,
         "target_fpr": probe.target_fpr,
+        # ⚠ THE ROW'S REVISION, NOT THE REGISTRY'S. This is a row serialiser; consulting the
+        # live registry here would put the reconciliation in two places, and `status()` already
+        # owns that boundary and reports disagreement rather than hiding it. A reader comparing
+        # an event's revision to this one learns "the bar has since moved", which is true of the
+        # stored bar whether or not a refresh landed.
+        "threshold_revision": int(getattr(probe, "threshold_revision", 1) or 1),
         "rung": probe.rung,
         # ⚠ Rendered server-side from the shared vocabulary, never derived by a client from the
         # number. miLLM and miStudio must describe the same probe with the same words.
@@ -122,6 +160,35 @@ async def import_probe(
     `on_conflict` is `rename|fail`, matching circuits and clusters. There is deliberately no
     `replace`: overwriting a definition in place while its probe is ARMED would change the
     detector underneath a running monitor while every event kept the same `probe_id`.
+
+    MOVING A BAR IS NOT REPLACING A DETECTOR.
+    A probe definition carries two kinds of fact. The DETECTOR is everything that determines what
+    number the probe produces: `head.weights`, `bias`, `norm_mean`, `norm_std`, `attention_query`,
+    `read.layer`, `read.hook_point`, `scope`, `basis`, the `sae` block and its `feature_indices`,
+    `aggregation.rule` and its `params`, `model`, and the `evidence` that says what the number is
+    evidence of. The BAR is everything that determines only where that number is cut:
+    `decision.threshold`, `target_fpr`, `realised_fpr`, `threshold_source`, `calibration`,
+    `windows` and `length_bands`.
+
+    `replace` was refused because it replaces the first kind, and the objection above stands exactly
+    as written. It turns on a specific property of `probe_events`: the row records a `score` whose
+    MEANING comes from the detector, and nothing on the row records which detector produced it.
+    Change the weights and event #1's `score = 2.9` and event #900's `score = 2.9` are measurements
+    of different quantities under one id, with nothing to tell them apart.
+
+    A moved bar is not that, for one concrete reason: the event row ALREADY records the bar it was
+    judged against, per verdict, at judgement time — including the length-band override — and nothing
+    joins an event back to `probes.threshold`. After a re-cut, event #1 still says it was judged at
+    2.8786 and event #900 says 2.4011; both are true and both remain comparable, because the score
+    beneath each was produced by the same weights at the same layer under the same scope with the
+    same rule. The score is the measurement; the bar is the line drawn across it.
+
+    THE RULE: a probe's identity is everything that determines its SCORE; its bar is everything that
+    only determines the CUT. The first may never change in place under a probe id. The second may,
+    through `POST /api/probes/{probe_id}/recalibrate`, which is `extra="forbid"` and therefore
+    structurally incapable of carrying a detector, refuses any cut it cannot match to
+    `provenance.probe_id`, never stores the incoming object as the definition, and refuses a
+    threshold with no budget and no named source. `on_conflict` remains `rename|fail`.
     """
     raw_bytes = len(json.dumps(payload).encode("utf-8"))
     probe = await service.import_definition(
@@ -328,6 +395,78 @@ async def check_parity(
     )
     await repository.update(probe, parity=report.as_details())
     return ApiResponse.ok(report.as_details())
+
+
+@router.post("/{probe_id}/recalibrate", response_model=ApiResponse)
+async def recalibrate_probe(
+    probe_id: str,
+    request: ProbeRecalibrationRequest,
+    repository: ProbeRepo,
+) -> ApiResponse:
+    """Move this probe's decision bar in place, without touching its detector.
+
+    ⚠ **THIS IS NOT `on_conflict=replace` BY ANOTHER NAME, AND THE DIFFERENCE IS LOAD-BEARING.**
+    `replace` is refused on import because overwriting a definition in place would change the
+    detector underneath a running monitor while every event kept the same `probe_id` — the history
+    would describe two detectors as one. That objection turns on `probe_events.score` having no
+    record of which detector produced it. A bar is different: the event row ALREADY records the
+    threshold each verdict was judged against, so after a re-cut both the old and the new events
+    remain true and remain comparable, because the score beneath each came from the same weights
+    at the same layer under the same scope with the same rule.
+
+    The rule: a probe's identity is everything that determines its SCORE; its bar is everything
+    that only determines the CUT. The first may never change in place under a probe id. The second
+    may. `ProbeRecalibrationRequest` is `extra="forbid"`, so this route cannot carry the first.
+
+    Why a route rather than disarm -> delete -> import: that path assigns a new `probe_id`, renames
+    the row, leaves a monitoring gap, and **cascade-deletes every `probe_event`** — the entire
+    verdict history of the monitor, to change one number. Parity is also unaffected: it compares
+    per-token and combined scores and never reads `fires` or `threshold`, so a moved bar needs no
+    re-verification of the weights.
+
+    Refusals, each before any write: 404 unknown probe · 422 any field outside the bar
+    (`extra="forbid"`) · 409 the cut names a different probe or run, or the stored definition
+    records no provenance to compare · 409 a threshold with no budget and no source · 409 a
+    per-window or per-length entry the runtime's own parser would discard.
+
+    An ARMED probe's live runtime shape is refreshed in the same call, because a database write
+    alone would change nothing that is served — `ArmedProbe` is resolved once at arm time and held
+    in process memory. `registry_updated` says whether that happened, and `stale_armed` reports a
+    row claiming armed with no live entry rather than quietly reconciling it.
+    """
+    from millm.core.errors import (
+        ProbeRecalibrationMismatchError,
+        ProbeThresholdUncalibratedError,
+    )
+    from millm.services.probe_recalibration import (
+        ProbeRecalibrationRefused,
+        ProbeRecalibrationService,
+    )
+
+    probe = await repository.get(probe_id)
+    if probe is None:
+        raise ProbeNotFoundError(f"No probe {probe_id}")
+
+    service = ProbeRecalibrationService(repository)
+    try:
+        outcome = await service.recalibrate(
+            probe,
+            # `by_alias=True` because the contract's wire names are what a definition carries, and
+            # the stored definition must keep speaking the contract rather than python field names.
+            decision=request.decision.model_dump(by_alias=True, exclude_none=False),
+            mistudio_probe_id=request.mistudio_probe_id,
+            mistudio_run_id=request.mistudio_run_id,
+            calibration_id=request.calibration_id,
+            reason=request.reason,
+        )
+    except ProbeRecalibrationRefused as refusal:
+        # Mapped to the envelope's own error classes, so a refusal is distinguishable by CODE
+        # rather than by reading prose. Two codes, not one: "this is a different probe" and "this
+        # is not a calibrated bar" send an operator to different places.
+        if refusal.code == "probe_threshold_uncalibrated":
+            raise ProbeThresholdUncalibratedError(refusal.detail) from refusal
+        raise ProbeRecalibrationMismatchError(refusal.detail) from refusal
+    return ApiResponse.ok(outcome)
 
 
 @router.post("/{probe_id}/disarm", response_model=ApiResponse)

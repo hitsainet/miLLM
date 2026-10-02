@@ -138,6 +138,14 @@ class ArmedProbe:
     #: band. Empty when the producer did not calibrate per length, which is every document
     #: written before 2026-10-02 — the runtime then uses the single threshold, exactly as before.
     length_bands: list[dict[str, Any]] = field(default_factory=list)
+    #: WHICH CUT OF THE BAR THIS ARMED PROBE IS JUDGING AGAINST.
+    #:
+    #: ⚠ READ FROM HERE, NEVER FROM THE ROW, ON EVERY VERDICT. A bar can now be re-cut while the
+    #: probe is armed, and the write order is row-then-registry: between the two, the row says
+    #: revision N+1 while this object is still judging at N. A verdict stamped from the row would
+    #: carry the number that is WRONG in exactly the case this field exists to expose. It is also
+    #: what makes a failed registry refresh visible rather than silent.
+    threshold_revision: int = 1
 
 
 def threshold_for_length(
@@ -189,6 +197,12 @@ class Verdict:
     #: The number is still reported and still fires, by operator decision — but every surface it
     #: reaches must say so, or a reader takes an untrained window's alert for a measured one.
     provisional: bool = False
+    #: WHICH CUT OF THE BAR JUDGED THIS. Two verdicts under different bars are distinguishable by
+    #: `threshold` alone only while the two cuts land on different numbers — and a reader who sees
+    #: `provisional` vanish between two events cannot otherwise tell whether a window gained its
+    #: own bar or never needed one. The revision answers both, and it is the key into the probe's
+    #: `threshold_history`.
+    threshold_revision: int = 1
 
 
 class ProbeRequestContext:
@@ -511,6 +525,9 @@ class ProbeRequestContext:
             # Recorded per verdict rather than derived by a reader, because the reader is a
             # header, a socket payload, a DB row and a React component — four chances to forget.
             provisional=own is None and not window_is_calibrated(probe.scope, window),
+            # From the ARMED probe, for the same reason and one more: the row can be a revision
+            # ahead of this object while a re-cut is mid-flight.
+            threshold_revision=probe.threshold_revision,
         )
         if self._not_scored_reason is not None:
             return Verdict(scored=False, not_scored_reason=self._not_scored_reason, **base)
@@ -664,6 +681,43 @@ class ProbeRuntimeState:
                 model, layer, lambda hidden, _layer=layer: self._on_activations(_layer, hidden)
             )
             logger.info("probe_layer_hooked layer=%s", layer)
+
+    def get(self, probe_id: str) -> Optional[ArmedProbe]:
+        """The live runtime shape for one probe, or `None` when it is not armed in this process.
+
+        `None` is a real answer, not an error: a row can say `armed` while this registry is empty
+        because the process restarted since, which is the state `probe_event_service.status()`
+        exists to REPORT rather than reconcile.
+        """
+        return self._armed.get(probe_id)
+
+    def refresh(self, probe: ArmedProbe) -> bool:
+        """Replace an ARMED probe's runtime shape in place. Refuses to insert one that is not.
+
+        ⚠ WHY THIS IS NOT `arm()`. `arm` installs a hook when the layer is absent, and the caller
+        here — a threshold re-cut — has no model handle to install one with. On an already-armed
+        probe that branch is never taken, so `arm(rebuilt, None)` *happens* to work; a call that
+        works only because a branch is not taken is one that breaks when the branch changes.
+        `refresh` also cannot create the half-armed state `arm` would: a registry entry with no
+        hook, reporting a bar while scoring nothing, which is worse than a refusal.
+
+        ⚠ AND WHY THE CALLER MUST PASS A `dataclasses.replace` OF THE LIVE OBJECT, NOT A REBUILD
+        FROM THE ROW. `encoder` is built at arm time and `windows` come from the arm REQUEST —
+        neither is recoverable from the row, which is why `status()` reads windows out of this
+        registry. A rebuild would turn a k-sparse probe into a dense one and silently reset the
+        operator's window choice to the default.
+
+        Returns False when the probe is not armed here, so the caller can say
+        `registry_updated: false` rather than implying a live change it did not make.
+        """
+        if probe.probe_id not in self._armed:
+            return False
+        self._armed[probe.probe_id] = probe
+        logger.info(
+            "probe_runtime_refreshed probe_id=%s threshold=%s revision=%s",
+            probe.probe_id, probe.threshold, probe.threshold_revision,
+        )
+        return True
 
     def disarm(self, probe_id: str) -> bool:
         """Remove one probe, and its layer's hook if it was the last one there."""

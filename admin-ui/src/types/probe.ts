@@ -61,6 +61,14 @@ export interface Probe {
   /** ⚠ `null` means NO threshold was placed — the probe ranks but does not decide. Not zero. */
   threshold: number | null;
   target_fpr: number | null;
+  /**
+   * WHICH CUT OF THE BAR THE STORED ROW IS AT. 1 is the one the producer's training run placed.
+   *
+   * ⚠ Optional on the wire: a backend from before 2026-10-02 omits it. An event carrying a
+   * DIFFERENT revision was judged against a bar that has since moved — which is the only way a
+   * reader can tell two verdicts apart once the two cuts land on similar numbers.
+   */
+  threshold_revision?: number;
   rung: number;
   /** Server-rendered. Never derived from `rung` here. */
   rung_language: string;
@@ -113,6 +121,16 @@ export interface ProbeEvent {
   window?: string;
   /** The threshold was calibrated under the probe's own scope, and this window is not it. */
   provisional?: boolean;
+  /**
+   * WHICH CUT OF THE BAR JUDGED THIS VERDICT. 1 is the bar the producer's training run placed.
+   *
+   * ⚠ A THRESHOLD CAN NOW MOVE UNDER AN ARMED PROBE, so two events are distinguishable by
+   * `threshold` alone only while the two cuts landed on different numbers — and a reader who
+   * watches `provisional` disappear between two events cannot otherwise tell whether a window
+   * gained its own bar or never needed one. Optional on the wire, like `window`: a bundle meets
+   * an older backend during a rolling deploy.
+   */
+  threshold_revision?: number;
   created_at: string;
   /**
    * ⚠ ONLY EVER PRESENT ON THE DETAIL ROUTE. The list route and the socket omit it: it is the
@@ -131,6 +149,26 @@ export interface ProbeStatusEntry {
    * live ArmedProbe, i.e. it is scoring nothing.
    */
   windows?: string[] | null;
+  /**
+   * THE BAR ACTUALLY IN FORCE, from the LIVE registry — and the row's, beside it.
+   *
+   * ⚠ THE ONLY SURFACE THAT CAN SEE A FAILED REGISTRY REFRESH. `GET /api/probes` serialises the
+   * ROW, so if a threshold re-cut wrote the database and did not replace the in-memory
+   * `ArmedProbe`, the tile would show the new number while every verdict kept using the old
+   * one — invisible-but-visible. `threshold_disagreement` is the server's sentence for that, and
+   * it is deliberately NOT folded into `paused_reason`: a probe judging against a previous bar
+   * is still scoring, and conflating the two would dilute the field whose whole job is "a probe
+   * never goes silently quiet".
+   *
+   * `threshold` is `null` when nothing is armed here. Not scoring is not a bar of zero.
+   */
+  threshold?: number | null;
+  threshold_revision?: number | null;
+  row_threshold?: number | null;
+  row_threshold_revision?: number;
+  /** Which bar the operator armed against, so consent can be read against the bar in force. */
+  armed_threshold_revision?: number | null;
+  threshold_disagreement?: string | null;
   id: string;
   name: string;
   layer: number;

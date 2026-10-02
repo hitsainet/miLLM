@@ -78,6 +78,29 @@ class Probe(Base):
     threshold: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
     target_fpr: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
 
+    #: WHICH CUT OF THE BAR THIS IS. 1 is the one the producer's training run placed; every
+    #: recalibration increments it.
+    #:
+    #: ⚠ IT EXISTS BECAUSE A SCORE AND A BAR FAIL DIFFERENTLY. `probe_events` records the
+    #: threshold each verdict was judged against, so two verdicts under different bars are
+    #: already distinguishable BY NUMBER — until two cuts happen to land on the same number, or
+    #: a reader wants to know whether a `provisional` marker disappeared because a window got
+    #: its own bar or because it never needed one. The revision answers both, and it is the key
+    #: `threshold_history` is joined on.
+    threshold_revision: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=1, server_default="1"
+    )
+    #: The producer's identity for the calibration this bar was cut from, when it sent one.
+    #: NULL is "not stated", which is different from "never re-cut" — that is revision 1.
+    threshold_calibration_id: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
+    #: EVERY BAR THIS PROBE HAS SERVED, append-only, oldest first.
+    #:
+    #: ⚠ WITHOUT IT AN EVENT STAMPED `revision 3` IS UNANSWERABLE once the probe reaches 7: the
+    #: row carries only the current bar. Seeded at import with revision 1 from the definition's
+    #: own `decision`, so the history is complete from the first event rather than from the
+    #: first re-cut.
+    threshold_history: Mapped[Optional[list[Any]]] = mapped_column(JSONVariant, nullable=True)
+
     # --- evidence -----------------------------------------------------------------------
     rung: Mapped[int] = mapped_column(Integer, nullable=False)
     #: The acknowledgement carried IN the definition (miStudio's operator).
@@ -90,6 +113,18 @@ class Probe(Base):
     arm_acknowledgement: Mapped[Optional[dict[str, Any]]] = mapped_column(
         JSONVariant, nullable=True
     )
+    #: WHICH BAR WAS IN FORCE WHEN THIS PROBE WAS ARMED.
+    #:
+    #: ⚠ THE ACKNOWLEDGEMENT RECORDS A RUNG, NOT A BAR, AND THAT IS RIGHT — the operator consented
+    #: to monitoring with a probe whose evidence is rung N, and a re-cut changes neither the rung
+    #: nor the evidence. But a bar can now move under an armed probe, so consent given against
+    #: one operating point can silently carry to another. Annotating is the proportionate answer:
+    #: invalidating the consent would force a disarm/re-arm, which overwrites the acknowledgement
+    #: anyway and resets it to NULL above rung 1 — losing the record in order to protect it.
+    #:
+    #: NULL for a probe armed before this column existed. Defaulting it to 1 would claim a fact
+    #: nobody recorded, which is the `chat_format NOT NULL DEFAULT 'auto'` mistake.
+    armed_threshold_revision: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
 
     # --- runtime -------------------------------------------------------------------------
     #: The last parity report: max deviation, per-vector, and tokenization drift.
@@ -163,6 +198,14 @@ class ProbeEvent(Base):
     #: The threshold was calibrated under the probe's own scope. This verdict was not read under
     #: it, so the number fires against a bar that was never cut for this slice.
     provisional: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default=sa_false())
+    #: WHICH CUT OF THE BAR JUDGED THIS VERDICT. Denormalised per the module docstring, and taken
+    #: from the ARMED probe rather than the row — see `probe_runtime._verdict_for`.
+    #:
+    #: ⚠ THE DEFAULT OF 1 IS TRUE OF EVERY ROW IT LANDS ON: no probe had ever been re-cut when
+    #: this column was added, so every existing event really was judged under revision 1.
+    threshold_revision: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=1, server_default="1"
+    )
 
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()

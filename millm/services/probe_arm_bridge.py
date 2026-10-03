@@ -87,6 +87,9 @@ async def loaded_identity(session: Any) -> tuple[LoadedIdentity, Any, Any]:
         # The RESOLVED precision the loader recorded (`LoadedModel.dtype`), compared against the
         # definition's `model.load_dtype`.
         dtype=current.dtype if current.dtype in LOAD_DTYPES else None,
+        quantization=(
+            str(getattr(row.quantization, "value", row.quantization)) if row is not None else None
+        ),
     )
     logger.info(
         "probe_loaded_identity hf_id=%s d_model=%s n_layers=%s revision_source=%s",

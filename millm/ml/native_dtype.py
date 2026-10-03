@@ -120,3 +120,12 @@ def resolve_load_dtype(quantization: Any, checkpoint_dtype: Optional[str], sourc
 def resolve_for_config(quantization: Any, config: Any) -> ResolvedDtype:
     recorded, source = checkpoint_dtype_of(config)
     return resolve_load_dtype(quantization, recorded, source)
+
+
+def rule_quantization(quantization: Any, is_pre_quantized: bool) -> str:
+    """The row label the rule is applied with. A PRE-QUANTIZED checkpoint (GPTQ, AWQ, FP8...) keeps
+    its unquantized and dequantized modules at the 16-bit rule whatever the row is labelled: an
+    FP32 label on such a checkpoint would otherwise load those modules at float32 while the size
+    plan (`checkpoint_materialised_mb`) assumed 16 bits — and GPTQ/AWQ kernels at float32 are not
+    a supported combination anyway."""
+    return "FP16" if is_pre_quantized else str(getattr(quantization, "value", quantization))

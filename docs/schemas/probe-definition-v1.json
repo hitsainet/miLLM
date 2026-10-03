@@ -562,6 +562,25 @@
           ],
           "default": null,
           "title": "Load Dtype"
+        },
+        "quantization": {
+          "anyOf": [
+            {
+              "enum": [
+                "FP32",
+                "FP16",
+                "Q8",
+                "Q4",
+                "Q2"
+              ],
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Quantization"
         }
       },
       "required": [

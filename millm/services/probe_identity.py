@@ -49,6 +49,9 @@ REVISION_INCONSISTENT = "REVISION_INCONSISTENT"
 #: precision its probe was fitted at is not stated. Every miStudio probe built before then was in
 #: fact float16; parity is what decides whether it reproduces here.
 DTYPE_UNRECORDED = "DTYPE_UNRECORDED"
+#: Recorded, not refused: the definition states a precision and this server cannot say which it
+#: loaded at, so the two were not compared.
+DTYPE_UNVERIFIED = "DTYPE_UNVERIFIED"
 
 #: Files whose metadata is read to establish the commit. Two, deliberately — see `resolve_revision`.
 REVISION_WITNESS_FILES = ("config.json", "tokenizer_config.json", "model.safetensors")
@@ -67,6 +70,8 @@ class LoadedIdentity:
     supports_hooks: bool = True
     #: The precision this server loaded the model at (`ml/native_dtype.py`), or None if unknown.
     dtype: Optional[str] = None
+    #: The model row's quantization label (FP32/FP16/Q8/Q4/Q2...), or None if unknown.
+    quantization: Optional[str] = None
 
     @property
     def chat_template_sha256(self) -> Optional[str]:
@@ -193,8 +198,17 @@ def check_identity(model_block: dict[str, Any], loaded: LoadedIdentity) -> Ident
     expected_dtype = model_block.get("load_dtype")
     if expected_dtype is None:
         report.warnings.append(DTYPE_UNRECORDED)
-    elif loaded.dtype is not None and expected_dtype != loaded.dtype:
+    elif loaded.dtype is None:
+        report.warnings.append(DTYPE_UNVERIFIED)
+    elif expected_dtype != loaded.dtype:
         report.add("load_dtype", expected_dtype, loaded.dtype)
+
+    # Quantization is identity alongside precision (review round 1, MED-2): a Q4 and an FP16 load
+    # of one bfloat16 checkpoint share `load_dtype` and still read different activations.
+    expected_quant = model_block.get("quantization")
+    if expected_quant is not None and loaded.quantization is not None:
+        if str(expected_quant).upper() != str(loaded.quantization).upper():
+            report.add("quantization", expected_quant, loaded.quantization)
 
     expected_revision = (model_block.get("revision") or "").strip()
     if loaded.revision is None:

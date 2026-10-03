@@ -67,3 +67,13 @@ def test_nothing_recorded_is_none_not_a_default():
 
 def test_the_contract_enum_is_this_rules_output():
     assert set(LOAD_DTYPES) == {"float16", "bfloat16", "float32"}
+
+
+def test_a_pre_quantized_checkpoint_keeps_the_16_bit_rule_whatever_its_label():
+    """An FP32 label on a GPTQ/AWQ/FP8 checkpoint would load its unquantized modules at float32
+    while the size plan assumed 16 bits."""
+    from millm.ml.native_dtype import rule_quantization
+
+    assert rule_quantization("FP32", is_pre_quantized=True) == "FP16"
+    assert rule_quantization("FP32", is_pre_quantized=False) == "FP32"
+    assert rule_quantization("Q4", is_pre_quantized=False) == "Q4"

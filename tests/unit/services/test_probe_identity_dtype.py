@@ -14,7 +14,7 @@ import textwrap
 import pytest
 
 from millm.services import probe_arm_bridge, probe_arming
-from millm.services.probe_identity import DTYPE_UNRECORDED, check_identity
+from millm.services.probe_identity import DTYPE_UNRECORDED, DTYPE_UNVERIFIED, check_identity
 from millm.services.probe_parity import ParityReport, dtype_comparison
 from tests.unit.services.test_probe_identity import loaded, model_block
 
@@ -37,6 +37,37 @@ class TestTheIdentityCheck:
         report = check_identity(block, loaded(dtype="bfloat16"))
         assert report.ok
         assert DTYPE_UNRECORDED in report.warnings
+
+
+    def test_a_stated_precision_this_server_cannot_report_is_warned_not_passed_silently(self):
+        report = check_identity(model_block(load_dtype="bfloat16"), loaded(dtype=None))
+        assert report.ok and DTYPE_UNVERIFIED in report.warnings
+
+
+class TestQuantizationIsIdentityToo:
+    """Review round 1, MED-2: Q4 and FP16 loads of one bfloat16 checkpoint share a precision and
+    read different activations (~0.93 cosine per token)."""
+
+    def test_a_different_quantization_at_the_same_precision_is_a_mismatch(self):
+        report = check_identity(model_block(load_dtype="bfloat16", quantization="Q4"),
+                                loaded(dtype="bfloat16", quantization="FP16"))
+        assert [m["field"] for m in report.mismatches] == ["quantization"]
+
+    def test_the_same_quantization_is_clean(self):
+        report = check_identity(model_block(load_dtype="bfloat16", quantization="FP16"),
+                                loaded(dtype="bfloat16", quantization="FP16"))
+        assert report.ok
+
+    def test_matched_needs_the_quantization_to_agree(self):
+        definition = {"model": {"load_dtype": "bfloat16", "quantization": "Q4"}}
+        assert dtype_comparison(definition, "bfloat16", "FP16")["matched"] is False
+        assert dtype_comparison(definition, "bfloat16", "Q4")["matched"] is True
+        assert dtype_comparison(definition, "bfloat16", None)["matched"] is None
+
+    def test_loaded_identity_passes_the_rows_quantization(self):
+        (call,) = _calls(probe_arm_bridge.loaded_identity, "LoadedIdentity")
+        assert any(kw.arg == "quantization" and "row.quantization" in ast.unparse(kw.value)
+                   for kw in call.keywords)
 
 
 class TestTheParityFloor:
@@ -84,4 +115,4 @@ class TestTheWiring:
     def test_arming_refuses_a_precision_only_mismatch_with_its_own_error(self):
         src = inspect.getsource(probe_arming.ProbeArmingService.arm)
         assert _calls(probe_arming.ProbeArmingService.arm, "ProbeDtypeMismatchError")
-        assert '{"load_dtype"}' in src
+        assert '{"load_dtype", "quantization"}' in src

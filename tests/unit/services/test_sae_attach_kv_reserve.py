@@ -96,7 +96,7 @@ def _service(d_sae: int):
     return svc
 
 
-def _olmo_loaded():
+def _olmo_loaded(dtype: str = "bfloat16"):
     state = MagicMock()
     state.is_loaded = True
     state.loaded_model_id = 7
@@ -104,6 +104,9 @@ def _olmo_loaded():
     model.config = Olmo2Config(**OLMO2_13B)
     model.dtype = torch.bfloat16
     state.current.model = model
+    # The precision the loader RECORDED (`LoadedModel.dtype`), which the reserve and the SAE cast
+    # read — a MagicMock attribute here would silently take every fallback.
+    state.current.dtype = dtype
     return patch("millm.services.sae_service.LoadedModelState", return_value=state)
 
 
@@ -147,6 +150,16 @@ class TestAttachSet:
         assert details["available_mb"] == 1_550
         assert "KV cache" in raised.value.message
         assert svc._loader.load.call_count == 0
+
+    async def test_an_fp32_models_reserve_is_twice_a_16_bit_ones(self):
+        """⚠ An FP32 row now really loads float32, and the fit admits it with a 4-byte cache. A
+        reserve still priced at 2 bytes let an SAE take half the room the fit kept (the review
+        round 5 defect, back for FP32 only)."""
+        svc = _service(32_768)
+        with _olmo_loaded("float32"), _cards({0: 1_550, 1: 6_000}):
+            with pytest.raises(InsufficientMemoryError) as raised:
+                await svc.attach_set([("sae-l10", 10)])
+        assert raised.value.details["kv_reserve_mb"] == 2 * 1_120
 
     async def test_the_reserve_is_only_the_cache_of_that_cards_layers(self):
         """Layer 30 is on cuda:1: its 26 layers need 2,080 MiB. 844 + 2,080 = 2,924."""
@@ -257,3 +270,14 @@ class TestAttachSae:
             result = await svc.attach_sae("sae-l10", 10)
         assert result["status"] == "attached"
         assert svc._loader.load.call_count == 1
+
+    async def test_the_sae_is_cast_to_the_recorded_precision_not_model_dtype(self):
+        """⚠ `model.dtype` here says bfloat16, the loader recorded float16 (a float16 checkpoint,
+        or a bitsandbytes model whose first parameter is a module kept in another precision).
+        The SAE must follow the RECORD."""
+        svc = _service(8_192)
+        original_w_enc = svc._loader.load.return_value.W_enc  # replaced by its `.to()` result
+        with _olmo_loaded("float16"), _cards({0: 1_550, 1: 6_000}), \
+                patch("millm.db.base.async_session_factory", side_effect=RuntimeError("no db")):
+            await svc.attach_sae("sae-l10", 10)
+        original_w_enc.to.assert_called_once_with(torch.float16)

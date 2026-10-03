@@ -398,6 +398,7 @@ async def check_parity(
     report = ProbeParityEngine(build_parity_forward(model, probe.layer)).run(
         armed, probe.definition, tolerance=tolerance, tokenizer=tokenizer,
         loaded_dtype=identity.dtype,
+        loaded_quantization=identity.quantization,
     )
     await repository.update(probe, parity=report.as_details())
     return ApiResponse.ok(report.as_details())

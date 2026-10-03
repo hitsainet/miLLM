@@ -1841,7 +1841,12 @@ class SAEService:
         # load was admitted with for the model's KV cache (review round 5,
         # 2026-09-14): see _refuse_without_room.
         if self._is_gpu_device(target_device):
-            estimated_mb = (sae.file_size_bytes or 0) / (1024 * 1024) * 1.2  # 20% overhead
+            # The SAE is cast to the model's precision below; a 16-bit file attached to an FP32
+            # model doubles in memory, so size for the wider of the two (conservative for an FP32
+            # file, which is already 4 bytes an element).
+            widen = max(1.0, torch.finfo(
+                _resolve_attach_dtype("model", model_state.current.dtype)).bits / 16)
+            estimated_mb = (sae.file_size_bytes or 0) / (1024 * 1024) * 1.2 * widen  # 20% overhead
             if estimated_mb > 0:
                 self._refuse_without_room(
                     model_state.current.model,
@@ -1859,12 +1864,12 @@ class SAEService:
             device=str(target_device),
         )
 
-        # Match SAE dtype to model dtype to avoid per-forward-pass casts
+        # Match SAE dtype to the precision the model was LOADED at (`LoadedModel.dtype`, the
+        # resolver's answer). Not `model.dtype`: on a bitsandbytes model that is whichever
+        # parameter transformers checks first, which can be a module it keeps in float32.
         model = model_state.current.model
-        model_dtype = getattr(model, "dtype", None)
-        if model_dtype is None and hasattr(model, "config"):
-            model_dtype = getattr(model.config, "torch_dtype", None)
-        if model_dtype is not None and loaded_sae.W_enc.dtype != model_dtype:
+        model_dtype = _resolve_attach_dtype("model", model_state.current.dtype)
+        if loaded_sae.W_enc.dtype != model_dtype:
             logger.info(
                 "sae_dtype_cast",
                 from_dtype=str(loaded_sae.W_enc.dtype),
@@ -1975,13 +1980,17 @@ class SAEService:
         was admitted by the 20% slack instead.
         """
         from millm.core.config import settings
-        from millm.ml.model_loader import admitted_context, kv_cache_spec
+        from millm.ml.model_loader import admitted_context, kv_bytes_for, kv_cache_spec
 
         config = getattr(model, "config", None)
         spec = None
         if config is not None:
             try:
-                spec, _ = kv_cache_spec(config)
+                # At the precision the model was LOADED at: the fit admitted an FP32 model with a
+                # 4-byte cache, and a 2-byte reserve here would let an SAE take half of that room.
+                current = LoadedModelState().current
+                loaded_dtype = current.dtype if current is not None else "bfloat16"
+                spec, _ = kv_cache_spec(config, kv_bytes=kv_bytes_for(loaded_dtype))
             except Exception:  # noqa: BLE001 - an odd config: no reserve, as for the slack
                 spec = None
         if spec is None:

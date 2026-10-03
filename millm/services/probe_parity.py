@@ -275,12 +275,26 @@ class ParityReport:
         }
 
 
-def dtype_comparison(definition: dict[str, Any], loaded_dtype: Optional[str]) -> dict[str, Any]:
+def dtype_comparison(
+    definition: dict[str, Any], loaded_dtype: Optional[str], loaded_quantization: Optional[str] = None
+) -> dict[str, Any]:
     """The definition's stated precision beside this server's. `matched` is None when either side
-    is unknown — a definition from before 2026-10-03 states none, and is never assumed float16."""
-    recorded = ((definition or {}).get("model") or {}).get("load_dtype")
+    is unknown — a definition from before 2026-10-03 states none, and is never assumed float16.
+
+    ⚠ `matched` needs the QUANTIZATION to agree as well, when the definition states one (review
+    round 1, MED-2): Q4 and FP16 loads of one bfloat16 checkpoint share a precision and read
+    different activations, so the matched-precision floor must not apply across them."""
+    model = (definition or {}).get("model") or {}
+    recorded = model.get("load_dtype")
+    recorded_quant = model.get("quantization")
     matched = None if recorded is None or loaded_dtype is None else recorded == loaded_dtype
-    return {"recorded": recorded, "loaded": loaded_dtype, "matched": matched}
+    if matched and recorded_quant is not None:
+        matched = (
+            None if loaded_quantization is None
+            else str(recorded_quant).upper() == str(loaded_quantization).upper()
+        )
+    return {"recorded": recorded, "loaded": loaded_dtype, "matched": matched,
+            "recorded_quantization": recorded_quant, "loaded_quantization": loaded_quantization}
 
 
 class ProbeParityEngine:
@@ -303,10 +317,14 @@ class ProbeParityEngine:
         tolerance: float,
         tokenizer: Any = None,
         loaded_dtype: Optional[str] = None,
+        loaded_quantization: Optional[str] = None,
     ) -> ParityReport:
         spec = (definition or {}).get("test_vectors") or {}
         vectors: Sequence[dict[str, Any]] = spec.get("vectors") or []
-        report = ParityReport(tolerance=tolerance, dtype=dtype_comparison(definition, loaded_dtype))
+        report = ParityReport(
+            tolerance=tolerance,
+            dtype=dtype_comparison(definition, loaded_dtype, loaded_quantization),
+        )
 
         if not vectors:
             report.error = "the definition carries no test vectors, so parity cannot be checked"

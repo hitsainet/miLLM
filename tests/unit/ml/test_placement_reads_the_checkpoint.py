@@ -9,7 +9,7 @@ Review round 1, 2026-09-14, two defects in the decision both checks share
     a split that fits was refused — and since Phase 2 checks every quantization,
     that was a new refusal, not an old one.
   * Q2 (pre-existing): bitsandbytes has no 2-bit mode, so a Q2 checkpoint that
-    is not already quantized loads unquantized in bfloat16, while its estimate
+    is not already quantized loads unquantized at 16 bits, while its estimate
     assumed 0.25 bytes a parameter. It is now refused before anything is loaded.
 
 Cards are the node's: RTX 3080 Ti (index 0, 11 GB free), RTX 3090 (index 1,
@@ -113,7 +113,7 @@ class TestQ2:
         assert raised.value.details == {
             "quantization": "Q2",
             "estimated_memory_mb": 3_600,
-            "loads_as": "bfloat16",
+            "loads_as": "16-bit (the checkpoint's own precision)",
         }
         assert not context.__enter__.called, "nothing may be loaded for a refused quantization"
 

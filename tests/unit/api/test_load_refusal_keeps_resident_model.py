@@ -284,7 +284,7 @@ class TestQ2IsNotLoadedAsSomethingElse:
 
         assert response.status_code == 400, response.text
         assert "UNSUPPORTED_QUANTIZATION" in response.text
-        assert "bfloat16" in response.text
+        assert "unquantized at 16 bits" in response.text
         assert not svc.unload_model.called
         assert not repo.update_status.called
         assert svc._executor.calls == []

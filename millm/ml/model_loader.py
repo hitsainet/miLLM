@@ -101,7 +101,7 @@ from millm.core.errors import (
 )
 from millm.ml.gguf_catalog import quant_label_from_path
 from millm.ml.memory_utils import MEMORY_OVERHEAD_FACTOR
-from millm.ml.native_dtype import resolve_for_config
+from millm.ml.native_dtype import resolve_for_config, rule_quantization
 from millm.ml.working_memory import (
     ALLOCATOR_OVERHEAD_FRACTION,
     WorkingMemory,
@@ -774,10 +774,12 @@ def preflight_split(
         config = AutoConfig.from_pretrained(cache_path, trust_remote_code=trust_remote_code)
         # Planned at the dtype the load resolves to (`ml/native_dtype.py`): a split mapped at one
         # dtype and loaded at another is how a model spills.
-        planned_dtype = resolve_for_config(quantization, config).torch_dtype
+        pre_quantized = checkpoint_is_pre_quantized(cache_path)
+        planned_dtype = resolve_for_config(
+            rule_quantization(quantization, pre_quantized), config
+        ).torch_dtype
         quantization_config = (
-            None if checkpoint_is_pre_quantized(cache_path)
-            else _bitsandbytes_config(quantization, planned_dtype)
+            None if pre_quantized else _bitsandbytes_config(quantization, planned_dtype)
         )
         device_map = placement.transformers_device_map()
         hf_quantizer, config, device_map = get_hf_quantizer(
@@ -1175,7 +1177,8 @@ class ModelLoadContext:
         # the precision was recorded nowhere — while miStudio, which fits every probe and SAE
         # served here, cast everything to float16. A probe then failed parity here by 0.251.
         resolved_dtype = resolve_for_config(
-            quantization, config if config is not None else _read_config_json(cache_path)
+            rule_quantization(quantization, is_pre_quantized),
+            config if config is not None else _read_config_json(cache_path),
         )
         quantization_config = None
         torch_dtype = resolved_dtype.torch_dtype
@@ -2610,18 +2613,18 @@ def refuse_unsupported_quantization(
     """Refuse Q2 on a transformers checkpoint that is not already quantized.
 
     bitsandbytes has no 2-bit mode, so ModelLoadContext.load gives it no
-    quantization config and it loads in bfloat16. See decide_transformers_placement.
+    quantization config and it loads unquantized at 16 bits. See decide_transformers_placement.
     """
     if quantization.upper() == "Q2" and not is_pre_quantized:
         raise UnsupportedQuantizationError(
             "Q2 cannot be loaded as a transformers model: bitsandbytes has no 2-bit "
-            "mode, so this checkpoint would load unquantized in bfloat16, eight times "
+            "mode, so this checkpoint would load unquantized at 16 bits, eight times "
             "the memory its Q2 estimate assumes. Load it as Q4, Q8 or FP16, or serve a "
             "Q2 GGUF of the model.",
             details={
                 "quantization": quantization,
                 "estimated_memory_mb": estimated_memory_mb,
-                "loads_as": "bfloat16",
+                "loads_as": "16-bit (the checkpoint's own precision)",
             },
         )
 
@@ -3127,7 +3130,7 @@ def transformers_fit(
         stage = _STAGE_CHECKPOINT
         config = AutoConfig.from_pretrained(cache_path, trust_remote_code=trust_remote_code)
         architecture = _architecture_name(config)
-        fit_dtype = resolve_for_config(quantization, config)
+        fit_dtype = resolve_for_config(rule_quantization(quantization, is_pre_quantized), config)
         kv, reason = kv_cache_spec(config, kv_bytes=kv_bytes_for(fit_dtype.name))
         if kv is None:
             _fit_falls_back(architecture, reason)

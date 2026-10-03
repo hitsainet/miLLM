@@ -267,13 +267,17 @@ class ProbeArmingService:
 
         # ── 2. identity ─────────────────────────────────────────────────────────────
         report = check_identity(probe.definition.get("model") or {}, loaded)
-        if not report.ok and {m["field"] for m in report.mismatches} == {"load_dtype"}:
-            mismatch = report.mismatches[0]
+        if not report.ok and {m["field"] for m in report.mismatches} <= {"load_dtype", "quantization"}:
+            # Same model, different activations: a precision or quantization difference. Its own
+            # sentence, because "fitted on a different model" points at the wrong fix.
+            said = "; ".join(
+                f"{m['field']}: fitted at {m['expected']}, loaded at {m['actual']}"
+                for m in report.mismatches
+            )
             raise ProbeDtypeMismatchError(
-                f"This probe was fitted at {mismatch['expected']}, and this server loaded the "
-                f"model at {mismatch['actual']}. Both repos load a checkpoint at its own "
-                "precision, so one of them did not: rebuild the probe in miStudio, or load the "
-                "model with the quantization the probe was trained under.",
+                f"This probe reads the right model at the wrong precision ({said}). Load the model "
+                "at the quantization the probe was trained under — which gives the same precision "
+                "under the shared rule — or rebuild the probe in miStudio.",
                 details=report.as_details(),
             )
         if not report.ok:
@@ -351,6 +355,7 @@ class ProbeArmingService:
         parity = ProbeParityEngine(forward).run(
             for_parity, probe.definition, tolerance=tolerance, tokenizer=tokenizer,
             loaded_dtype=loaded.dtype,
+            loaded_quantization=loaded.quantization,
         )
         await self.repository.update(probe, parity=parity.as_details())
         if not parity.passed:

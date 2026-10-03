@@ -64,6 +64,10 @@ class ModelIdentity(_Contract):
     # the document predates the field. `probe_identity.check_identity` compares it to what this
     # server loaded; it is never read as "float16".
     load_dtype: str | None = None
+    # The producer's model-row quantization (FP32/FP16/Q8/Q4/Q2). Identity alongside the
+    # precision: Q4 and FP16 loads of one bfloat16 checkpoint share a load_dtype and read
+    # different activations. None = not recorded.
+    quantization: str | None = None
 
 
 class ReadPoint(_Contract):

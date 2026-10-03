@@ -67,14 +67,22 @@ logger = get_logger(__name__)
 
 
 
-def _target_torch_dtype() -> "torch.dtype":
-    """The precision the served model was loaded at, as a torch dtype; bfloat16 if none is loaded."""
-    from millm.ml.model_loader import LoadedModelState
-    from millm.ml.native_dtype import LOAD_DTYPES
+def _draft_torch_dtype(draft_model_id: str) -> "torch.dtype":
+    """The draft model's OWN precision, by the shared rule (`ml/native_dtype.py`) over its config.
 
-    current = LoadedModelState().current
-    name = current.dtype if current is not None and current.dtype in LOAD_DTYPES else "bfloat16"
-    return getattr(torch, name)
+    Not the target's: forcing a bfloat16-native draft to float16 because the target is float16
+    reintroduces the overflow risk the rule exists to avoid, and an FP32 target would double the
+    draft's memory with no sizing for it. The draft only proposes tokens; the target verifies them.
+    """
+    from millm.ml.native_dtype import resolve_for_config
+
+    try:
+        from transformers import AutoConfig
+
+        config = AutoConfig.from_pretrained(draft_model_id)
+    except Exception:  # noqa: BLE001 - nothing readable: the rule's default (bfloat16)
+        config = None
+    return resolve_for_config("FP16", config).torch_dtype
 
 def _return_cached_draft_memory() -> None:
     """Give a discarded draft's memory back to the card. Never raises.
@@ -2231,12 +2239,11 @@ class InferenceService:
                 # Whole, on one card. device_map="auto" spread the draft over
                 # every card, so each proposed token crossed cards before the
                 # main model could verify it.
-                # At the TARGET model's resolved precision (`ml/native_dtype.py`), so draft and
-                # target propose and verify logits computed alike. This was bfloat16 whatever the
-                # target loaded at.
+                # At the draft checkpoint's OWN precision (`ml/native_dtype.py`). This was
+                # bfloat16 whatever the checkpoint recorded.
                 draft = AutoModelForCausalLM.from_pretrained(
                     self._speculative_model_id,
-                    torch_dtype=_target_torch_dtype(),
+                    torch_dtype=_draft_torch_dtype(self._speculative_model_id),
                     device_map={"": device},
                 )
                 if getattr(self, "_model_epoch", 0) != epoch:

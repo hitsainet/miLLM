@@ -168,6 +168,7 @@ class TestEveryEnumMatchesTheContract:
             "TestVectors.authoritative_input",
             "LengthBand.threshold_source",
             "ModelIdentity.load_dtype",
+            "ModelIdentity.quantization",
         }
 
     def test_load_dtype_is_this_servers_precision_rule(self, frozen):

@@ -99,3 +99,23 @@ def test_the_planning_paths_take_the_resolved_dtype():
         calls = [n for n in ast.walk(tree) if isinstance(n, ast.Call)
                  and getattr(n.func, "id", "") == "resolve_for_config"]
         assert calls, f"{fn.__name__} never resolves the load dtype"
+        # And with the RIGHT label: the row's, through `rule_quantization` (which gives a
+        # pre-quantized checkpoint the 16-bit rule) — or the 16-bit rule itself for the sizer
+        # that only ever sees pre-quantized checkpoints. Presence alone passed for a call with
+        # the wrong argument (review round 1, LOW-3).
+        for call in calls:
+            label = ast.unparse(call.args[0])
+            assert label.startswith("rule_quantization(") or (
+                fn is model_loader.checkpoint_materialised_mb and label == "'FP16'"
+            ), f"{fn.__name__} resolves with {label}"
+
+
+def test_a_pre_quantized_checkpoint_on_an_fp32_row_loads_its_other_modules_at_16_bits():
+    """Review round 1, LOW-3: the size plan for a pre-quantized checkpoint assumes 16 bits, and
+    GPTQ/AWQ kernels at float32 are not a supported combination. An FP32 label must not apply."""
+    config = SimpleNamespace(model_type="llama", torch_dtype="bfloat16",
+                             quantization_config={"quant_method": "gptq"})
+    with fake_gpus(*NODE) as fake:
+        loaded, kwargs = _load(fake, choose_gpu(8_000), quantization="FP32", config=config)
+    assert kwargs["torch_dtype"] is torch.bfloat16
+    assert loaded.dtype == "bfloat16"

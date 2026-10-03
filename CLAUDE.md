@@ -1,6 +1,18 @@
 # Project: miLLM - Mechanistic Interpretability LLM Server
 
 ## Current Status
+- **⏳ NATIVE-DTYPE LOADING (2026-10-03), shared with miStudio.** This server loaded every non-GGUF
+  row in bfloat16 (FP32 rows too) and reported `model.dtype`; miStudio fitted every probe in float16;
+  the 0.10 parity floor was absorbing that gap. Now: `millm/ml/native_dtype.py` applies the rule in
+  `docs/schemas/native-dtype-cases.json` (byte-identical with miStudio) to the load, bnb compute, meta
+  model, split preflight, per-card fit and KV bytes; `LoadedModel.dtype` is the RESOLVED precision.
+  Probe identity compares `model.load_dtype` AND `model.quantization` → `PROBE_DTYPE_MISMATCH`
+  (warns `DTYPE_UNRECORDED` for older definitions — never assumed float16). Parity floor is keyed on a
+  match (`PROBE_PARITY_MATCHED_DTYPE_FLOOR`, provisional 0.10 until measured on retrained probes); a
+  quantization change makes parity an error, not a pass. ⚠ bfloat16 is not batch-invariant (0.177
+  batched-vs-single in miStudio's measurement) — do not expect near-exact parity. ⚠ A float16-native
+  checkpoint now loads float16 here (it was cast to bf16). Record: miStudio
+  `0xcc/reviews/native_dtype_2026-10-03.md`.
 - **Phase — ⏳ FEATURE 24 PROBE MONITOR RUNTIME: PHASES 0–10 SHIPPED AND MERGED (2026-09-27).**
   BRD-MILLM-PROBES-001, PPRD Feature 24, PR #3 squashed to `main` at `6133160`. Co-released with
   miStudio 033 phase 7 (**MCP contract v1.6**), which closed 033 at 49 of 49. miStudio trains a probe

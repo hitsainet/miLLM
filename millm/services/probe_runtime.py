@@ -71,7 +71,7 @@ import torch
 
 from millm.ml.probe_head import ProbeHead, combine
 from millm.ml.probe_hooker import ProbeHooker, is_single_row
-from millm.services.probe_scope import scored_mask, window_is_calibrated
+from millm.services.probe_scope import scored_mask, window_is_calibrated, window_weights_trained
 from millm.services.probe_scope import window as scope_window
 
 logger = logging.getLogger(__name__)
@@ -524,7 +524,12 @@ class ProbeRequestContext:
             window=window,
             # Recorded per verdict rather than derived by a reader, because the reader is a
             # header, a socket payload, a DB row and a React component — four chances to forget.
-            provisional=own is None and not window_is_calibrated(probe.scope, window),
+            # ⚠ TWO REASONS, EITHER SUFFICIENT: the bar was cut for another window, or the weights
+            # never saw the tokens this window reads. A window's own bar retires the first only.
+            provisional=(
+                (own is None and not window_is_calibrated(probe.scope, window))
+                or not window_weights_trained(probe.scope, window)
+            ),
             # From the ARMED probe, for the same reason and one more: the row can be a revision
             # ahead of this object while a re-cut is mid-flight.
             threshold_revision=probe.threshold_revision,
@@ -561,9 +566,17 @@ class ProbeRequestContext:
         # miscalibrated at every length but the one it was cut at. `n_scored_tokens` is the
         # count the producer calibrated against — the same `scored_index.numel()` recorded on
         # the verdict, not the raw sequence length.
-        threshold = threshold_for_length(
-            probe.length_bands, int(scored_index.numel()), threshold
-        )
+        #
+        # ⚠ ONLY OVER THE WINDOW THE BANDS WERE CUT FOR. miStudio cuts `length_bands` from the
+        # negatives aggregated under the probe's own scope — the same pass as the global bar — so
+        # they are quantiles of THAT window's distribution. Applied to every window they replaced
+        # each window's own bar with one cut for different tokens: on 2026-10-03 an L16 response
+        # verdict was judged at 12.35 against its own 24.20, and an L11 prompt verdict was
+        # silenced at 37.75 against its own 14.69. Every other window keeps the bar chosen above.
+        if window_is_calibrated(probe.scope, window):
+            threshold = threshold_for_length(
+                probe.length_bands, int(scored_index.numel()), threshold
+            )
 
         score_tensor = score_row.unsqueeze(0)
         mask_tensor = mask_row.unsqueeze(0)

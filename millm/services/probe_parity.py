@@ -457,7 +457,10 @@ class ProbeParityEngine:
             report.max_abs_diff,
             report.at_risk_tokens,
             report.scored_tokens,
-            tolerance,
+            # The tolerance that GATED, not the document's: under a matched precision the floor
+            # is relative to the bar, and logging the document's 0.05 beside a pass at 0.0856
+            # read as a check that had not run.
+            report.score_tolerance,
         )
         return report
 

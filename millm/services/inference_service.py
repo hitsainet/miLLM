@@ -4335,10 +4335,20 @@ class InferenceService:
                 if stopping_criteria is not None:
                     generation_kwargs["stopping_criteria"] = stopping_criteria
 
-                # Token-id capture for sensing context (Feature 11): criteria
+                # Token-id capture for event context (Feature 11): criteria
                 # run every step; storing the reference is zero-copy and
                 # survives early stops (client disconnect, stop sequence).
-                if _sensing_sae is not None and stopping_criteria is not None:
+                #
+                # ⚠ FOR PROBES AND CIRCUIT SENSING TOO, not only SAE sensing. Installed for
+                # sensing alone, a streamed request with probes armed handed the recorder the
+                # PROMPT ids, so every response-window verdict's top position fell past their end
+                # and its event stored no context — found on a real chat 2026-10-03, where the
+                # non-streamed title and tags requests had context and the person's own did not.
+                if (
+                    _sensing_sae is not None
+                    or _circuit_sensing is not None
+                    or _probe_ctx is not None
+                ) and stopping_criteria is not None:
                     _id_capture = _make_id_capture_criteria()
                     if _id_capture is not None:
                         stopping_criteria.append(_id_capture)

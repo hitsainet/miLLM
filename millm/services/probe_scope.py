@@ -90,6 +90,22 @@ def window_is_calibrated(probe_scope: str, window: str) -> bool:
     return window == probe_scope
 
 
+def window_weights_trained(probe_scope: str, window: str) -> bool:
+    """Whether this probe's WEIGHTS were fitted on the tokens this window reads.
+
+    ⚠ A SECOND QUESTION FROM `window_is_calibrated`, AND CONFLATING THEM SHIPPED A FALSE CLAIM.
+    miStudio now cuts a bar per window from that window's own negatives, which answers the
+    calibration question — and retired the `provisional` marker on the `response` window, so its
+    verdicts read as measured. But the weights behind them were fitted on plain prose sent as a
+    single user turn: they never saw a model reply. A calibrated bar over an untrained readout is
+    still a guess, and the UI's own copy says response verdicts are reported as provisional.
+
+    Conservative by construction: only a probe whose contract scope IS `response` is treated as
+    trained on replies. A future response-trained probe declares that scope; nothing infers it.
+    """
+    return window != "response" or probe_scope == "response"
+
+
 def scope_is_reproducible(scope: str) -> bool:
     """Whether a test vector under this scope can be scored exactly from its `token_ids`.
 

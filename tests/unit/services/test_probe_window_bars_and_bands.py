@@ -119,6 +119,25 @@ class TestTheResponseWindowIsProvisionalUntilItsWeightsAreTrained:
         assert window_weights_trained("all", "all") is True
         assert window_weights_trained("all", "response") is False
         assert window_weights_trained("response", "response") is True
+        # A `prompt` probe's `all` window reads the reply too (review round 1).
+        assert window_weights_trained("prompt", "all") is False
+        assert window_weights_trained("prompt", "prompt") is True
+
+
+class TestANonAllProbesBandsNeverReplaceAWindowBar:
+    """⚠ REVIEW ROUND 1. miStudio exports internal `user` as contract `prompt`, and cuts the
+    `prompt` WINDOW's bar under `input`. On such a probe the bands are `user` quantiles; letting
+    them replace the window's own `input` bar would reintroduce the defect this file pins."""
+
+    def test_the_prompt_windows_own_bar_wins(self):
+        got = verdicts(armed(scope="prompt", windows=("prompt",),
+                             window_thresholds={"prompt": 14.69}))["prompt"]
+        assert got.threshold == 14.69
+
+    def test_without_its_own_bar_the_bands_still_apply(self):
+        got = verdicts(armed(scope="prompt", windows=("prompt",), window_thresholds={}),
+                       prompt_tokens=86)["prompt"]
+        assert got.threshold == 12.35
 
 
 class TestStreamedRequestsCaptureTheGeneratedIds:
@@ -126,15 +145,22 @@ class TestStreamedRequestsCaptureTheGeneratedIds:
     the recorder was installed only when SAE sensing was active, so with probes alone the recorder
     got the PROMPT ids and every response position fell past their end."""
 
-    def test_the_capture_is_installed_when_probes_are_armed(self):
+    @staticmethod
+    def _tree():
         import ast
         import inspect
 
         from millm.services import inference_service
 
-        tree = ast.parse(inspect.getsource(inference_service))
+        return ast.parse(inspect.getsource(inference_service))
+
+    def test_the_capture_is_installed_when_probes_are_armed(self):
+        """⚠ REVIEW ROUND 1: a name anywhere in the guard is not enough — `_probe_ctx is None`
+        would pass that. Require the exact comparison, as one alternative of the guard."""
+        import ast
+
         guards = []
-        for node in ast.walk(tree):
+        for node in ast.walk(self._tree()):
             if not isinstance(node, ast.If):
                 continue
             body_calls = {
@@ -142,10 +168,49 @@ class TestStreamedRequestsCaptureTheGeneratedIds:
                 for stmt in node.body for n in ast.walk(stmt) if isinstance(n, ast.Call)
             }
             if "_make_id_capture_criteria" in body_calls:
-                guards.append({n.id for n in ast.walk(node.test) if isinstance(n, ast.Name)})
+                guards.append(node.test)
         assert guards, "the scan found no guarded id capture — it is looking at the wrong shape"
-        for names in guards:
-            assert "_probe_ctx" in names, (
-                f"the id capture is guarded by {sorted(names)} only, so a streamed request with "
-                f"probes armed records response events with no context"
+
+        def probe_alternative(test):
+            for node in ast.walk(test):
+                if (
+                    isinstance(node, ast.Compare)
+                    and isinstance(node.left, ast.Name) and node.left.id == "_probe_ctx"
+                    and len(node.ops) == 1 and isinstance(node.ops[0], ast.IsNot)
+                    and isinstance(node.comparators[0], ast.Constant)
+                    and node.comparators[0].value is None
+                ):
+                    return True
+            return False
+
+        for test in guards:
+            assert probe_alternative(test), (
+                f"the id capture is not installed on `_probe_ctx is not None`: {ast.unparse(test)}"
             )
+            assert isinstance(test, ast.BoolOp) and isinstance(test.op, ast.And), ast.unparse(test)
+            alternatives = test.values[0]
+            assert isinstance(alternatives, ast.BoolOp) and isinstance(alternatives.op, ast.Or), (
+                f"the probe check must be one OR'd alternative, not a further condition: "
+                f"{ast.unparse(test)}"
+            )
+
+    def test_the_captured_ids_reach_the_recorder(self):
+        """The capture is useless unless its ids are what `_probe_record` is given."""
+        import ast
+
+        tree = self._tree()
+        assigned = [
+            node for node in ast.walk(tree)
+            if isinstance(node, ast.Assign)
+            and any(isinstance(t, ast.Name) and t.id == "_full_ids" for t in node.targets)
+            and "_id_capture.latest_ids" in ast.unparse(node.value)
+        ]
+        assert assigned, "_full_ids is not taken from the id capture"
+        recorded = [
+            node for node in ast.walk(tree)
+            if isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Attribute) and node.func.attr == "_probe_record"
+            and any(k.arg == "full_ids" and isinstance(k.value, ast.Name)
+                    and k.value.id == "_full_ids" for k in node.keywords)
+        ]
+        assert recorded, "_probe_record is not given the captured ids on the streamed path"

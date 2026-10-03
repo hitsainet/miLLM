@@ -279,12 +279,17 @@ what it was trained on, what its threshold was cut under, and the only thing the
 can verify. A probe whose CONTRACT scope is `prompt` or `response` is still refused at arm
 time on reproducibility grounds, exactly as in v1.6.
 
-⚠ **ANY WINDOW OTHER THAN THE PROBE'S OWN SCOPE COMES BACK `provisional`.** A threshold is
-the `(1 - target_fpr)` quantile of negatives aggregated under **one** window; read over a
-different one the same number no longer names the same false-positive rate. For `response`
-it is worse than uncalibrated — miStudio's training corpus is prose wrapped as a single user
-turn, so weights fitted there have never seen a model reply. A provisional verdict still
-fires, by operator decision, and is a **ranking, not a rate**.
+⚠ **A WINDOW IS `provisional` WHEN IT HAS NO BAR OF ITS OWN, OR ITS WEIGHTS NEVER SAW ITS
+TOKENS.** A threshold is the `(1 - target_fpr)` quantile of negatives aggregated under **one**
+window; read over a different one the same number no longer names the same false-positive rate,
+so a window without its own bar (`decision.windows`) is provisional. A window WITH its own bar is
+not — except `response`, which stays provisional whatever bar it carries: miStudio's training
+corpus is prose wrapped as a single user turn, so weights fitted there have never seen a model
+reply. A provisional verdict still fires, by operator decision, and is a **ranking, not a rate**.
+
+⚠ **`decision.length_bands` APPLY ONLY TO THE PROBE'S OWN SCOPE.** They are cut in the same pass
+as the global bar. Every other window is judged against its own bar (or the global one), never a
+band — until 2026-10-03 the runtime applied them to every window.
 
 **What a probe verdict is, on the `/v1` side.** Non-streaming responses carry
 `X-miLLM-Probe-Verdicts` (RFC 8941 structured field); streaming responses carry a

@@ -217,8 +217,10 @@ def window_delta(before: dict[str, float], after: dict[str, float]) -> dict[str,
     """Which windows gained and which lost their own bar.
 
     ⚠ THIS IS WHY A RE-CUT MUST REPORT MORE THAN A NUMBER. A window that gains its own threshold
-    RETIRES its `provisional` marker from the next verdict on — correctly, because the marker's
-    claim ("judged against a bar cut for a different distribution") becomes false. But the marker
+    retires ONE of its `provisional` reasons — "judged against a bar cut for a different
+    distribution" — from the next verdict on. `response` keeps its marker regardless, because its
+    weights never saw a reply (`window_weights_trained`), so "newly calibrated" here means it has
+    a bar, not that it is measured. But the marker
     then vanishes from the event list with no visible cause, and the reverse direction is worse: a
     window reported calibrated now is not. An operator who moves a number and silently also
     changes which verdicts carry an honesty marker should learn both in the same breath.

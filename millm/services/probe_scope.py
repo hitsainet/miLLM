@@ -100,10 +100,15 @@ def window_weights_trained(probe_scope: str, window: str) -> bool:
     single user turn: they never saw a model reply. A calibrated bar over an untrained readout is
     still a guess, and the UI's own copy says response verdicts are reported as provisional.
 
-    Conservative by construction: only a probe whose contract scope IS `response` is treated as
-    trained on replies. A future response-trained probe declares that scope; nothing infers it.
+    Conservative by construction: a window is trained when it IS the probe's scope, or when the
+    probe is `all` and the window is not `response` (an `all` probe fitted on prose read as a
+    single user turn has seen prompt tokens, never a reply). A `prompt` probe's `all` window reads
+    the reply too, so it is not trained (review round 1). A future response-trained probe declares
+    `response`; nothing infers it.
     """
-    return window != "response" or probe_scope == "response"
+    if window == probe_scope:
+        return True
+    return probe_scope == "all" and window != "response"
 
 
 def scope_is_reproducible(scope: str) -> bool:

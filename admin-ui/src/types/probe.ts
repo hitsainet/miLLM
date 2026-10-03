@@ -122,7 +122,11 @@ export interface ProbeEvent {
    * this page down once this week.
    */
   window?: string;
-  /** The threshold was calibrated under the probe's own scope, and this window is not it. */
+  /**
+   * Either the window has no threshold of its own and is not the probe's scope, or the probe's
+   * weights were never fitted on what it reads (`response`, unless the probe's scope is
+   * `response`). A window's own bar retires only the first reason.
+   */
   provisional?: boolean;
   /**
    * WHICH CUT OF THE BAR JUDGED THIS VERDICT. 1 is the bar the producer's training run placed.

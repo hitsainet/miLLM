@@ -573,7 +573,13 @@ class ProbeRequestContext:
         # each window's own bar with one cut for different tokens: on 2026-10-03 an L16 response
         # verdict was judged at 12.35 against its own 24.20, and an L11 prompt verdict was
         # silenced at 37.75 against its own 14.69. Every other window keeps the bar chosen above.
-        if window_is_calibrated(probe.scope, window):
+        #
+        # ⚠ AND ONLY FOR AN `all` PROBE WHEN THE WINDOW HAS ITS OWN BAR (review round 1). miStudio
+        # exports its internal `user` scope as contract `prompt`, while the `prompt` WINDOW's bar
+        # is cut under `input`; on such a probe the bands are `user` quantiles and must not replace
+        # an `input` bar. Only under `all` is the window's own bar cut from the same pass as the
+        # bands. (Non-`all` probes are refused at arm time today; this keeps the rule true anyway.)
+        if window_is_calibrated(probe.scope, window) and (own is None or probe.scope == "all"):
             threshold = threshold_for_length(
                 probe.length_bands, int(scored_index.numel()), threshold
             )

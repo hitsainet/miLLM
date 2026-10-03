@@ -454,7 +454,7 @@ function EventRow({
           {event.provisional && (
             <span
               data-testid="event-provisional"
-              title="This window has no calibrated threshold — the score is judged against the probe's own scope's bar"
+              title="Provisional: either this window has no threshold of its own, or the probe's weights were never trained on what it reads (a model reply). A ranking, not a rate."
               className="ml-2 px-1.5 py-0.5 rounded bg-amber-900/40 text-amber-300 text-[10px]"
             >
               provisional

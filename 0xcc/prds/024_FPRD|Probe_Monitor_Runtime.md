@@ -160,7 +160,7 @@ call the dynamo reset used for SAE hook changes. (BR-002)
   prefix-rendering method miStudio uses), or `response` (decode tokens)
 
 It updates each probe's running aggregate. Streamable rules update online, and `last` is taken at the
-end. At the end of the request it computes the verdict (`score > threshold`) and the top-5 firing
+end. At the end of the request it computes the verdict (`score >= threshold` — at-or-above, matching how the producer cuts the bar; `>` until 2026-10-03) and the top-5 firing
 token positions. There is exactly one device-to-host copy per forward pass. (BR-003)
 
 **FR-24.7 Verdict delivery.** (BR-004)

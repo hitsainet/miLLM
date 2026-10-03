@@ -600,7 +600,13 @@ class ProbeRequestContext:
             # A provisional window fires on this same threshold by operator decision
             # (2026-09-30). `base` carries `provisional=True` so the alert cannot be read as a
             # calibrated one.
-            fires=None if threshold is None else value > threshold,
+            #
+            # ⚠ `>=`, NOT `>`. The producer cuts the bar AT a negative's score and counts that
+            # negative as admitted — its `realised_fpr` is computed with `>=`. With `>` this
+            # runtime admits one negative fewer than the rate the definition states, and an input
+            # landing exactly on the bar gets opposite verdicts here and in miStudio's offline
+            # score. Was `>` until 2026-10-03.
+            fires=None if threshold is None else value >= threshold,
             n_scored_tokens=int(scored_index.numel()),
             top_positions=top,
             # ⚠ OVERRIDE `base`'s THRESHOLD WITH THE ONE ACTUALLY USED. `base` was built before

@@ -154,6 +154,24 @@ class TestScoring:
         model(torch.ones(1, 3, 4))
         assert state.end_request().finish()[0].fires is False
 
+    def test_a_score_EXACTLY_on_the_threshold_fires(self):
+        """⚠ `>=`, NOT `>`, BECAUSE OF HOW THE BAR WAS CUT. miStudio's `calibrate` sets the
+        threshold to the score of the `int(target_fpr * n)`-th highest NEGATIVE and counts that
+        negative as admitted (`realised_fpr` is computed with `>=`). Judged with `>`, the bar
+        admits one negative fewer than the `realised_fpr` the definition carries, and the
+        studio's offline score and this runtime disagree on any input that lands on the bar.
+        The fixture's score is exactly representable (ones x ones over d=4 -> 4.0), so the
+        boundary is tested at the boundary rather than within rounding of it."""
+        model = TinyModel()
+        state = ProbeRuntimeState()
+        state.arm(make_probe(threshold=4.0), model)
+        state.begin_request("chatcmpl-a")
+        model(torch.ones(1, 3, 4))
+        verdict = state.end_request().finish()[0]
+        assert verdict.score == 4.0
+        assert verdict.threshold == 4.0
+        assert verdict.fires is True
+
     def test_NO_threshold_means_fires_is_None_not_False(self):
         """⚠ The probe ranks but does not decide. `False` would be a verdict it never gave."""
         model = TinyModel()

@@ -101,9 +101,15 @@ class ResolvedDtype:
         return "float32" if self.name == "float32" else "float16"
 
 
-def resolve_load_dtype(quantization: Any, checkpoint_dtype: Optional[str], source: str = "config") -> ResolvedDtype:
-    """THE rule. `quantization` is a QuantizationType or its value ("FP16", "Q4", ...)."""
+def resolve_load_dtype(
+    quantization: Any, checkpoint_dtype: Optional[str], source: str = "config",
+    pre_quantized: bool = False,
+) -> ResolvedDtype:
+    """THE rule. `quantization` is a QuantizationType or its value ("FP16", "Q4", ...).
+    A pre-quantized checkpoint keeps the 16-bit rule whatever its label (shared table v2)."""
     quant = str(getattr(quantization, "value", quantization)).upper()
+    if pre_quantized and quant == "FP32":
+        quant = "FP16"
     recorded = normalise_dtype_name(checkpoint_dtype)
     if recorded is None:
         source = "default"
@@ -117,9 +123,14 @@ def resolve_load_dtype(quantization: Any, checkpoint_dtype: Optional[str], sourc
     return ResolvedDtype(_TORCH[name], name, recorded, source, quant)
 
 
+def is_pre_quantized(config: Any) -> bool:
+    """Whether a checkpoint ships already quantized (its config carries `quantization_config`)."""
+    return config is not None and _field(config, "quantization_config") is not None
+
+
 def resolve_for_config(quantization: Any, config: Any) -> ResolvedDtype:
     recorded, source = checkpoint_dtype_of(config)
-    return resolve_load_dtype(quantization, recorded, source)
+    return resolve_load_dtype(quantization, recorded, source, pre_quantized=is_pre_quantized(config))
 
 
 def rule_quantization(quantization: Any, is_pre_quantized: bool) -> str:

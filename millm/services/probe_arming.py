@@ -274,10 +274,17 @@ class ProbeArmingService:
                 f"{m['field']}: fitted at {m['expected']}, loaded at {m['actual']}"
                 for m in report.mismatches
             )
+            fields = {m["field"] for m in report.mismatches}
+            if "quantization" in fields:
+                remedy = ("Load the model at the quantization the probe was trained under, or "
+                          "rebuild the probe in miStudio.")
+            else:
+                # Same quantization, different precision: one side did not follow the shared rule
+                # (docs/schemas/native-dtype-cases.json) — reloading cannot fix that.
+                remedy = ("The quantization matches, so one side did not load by the shared "
+                          "precision rule: rebuild the probe in miStudio.")
             raise ProbeDtypeMismatchError(
-                f"This probe reads the right model at the wrong precision ({said}). Load the model "
-                "at the quantization the probe was trained under — which gives the same precision "
-                "under the shared rule — or rebuild the probe in miStudio.",
+                f"This probe reads the right model at the wrong precision ({said}). {remedy}",
                 details=report.as_details(),
             )
         if not report.ok:

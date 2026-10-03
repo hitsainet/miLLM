@@ -1,38 +1,195 @@
 {
-  "description": "The precision rule shared by miStudio (producer) and miLLM (server). Both repos test their resolver against every case here, and the cross-repo check keeps this file byte-identical in both. FP32 rows load float32; every other row loads the checkpoint's own 16-bit dtype, falling back to bfloat16 when the checkpoint records float32 or nothing. storage_dtype is how miStudio stores captured activations (bf16 converts to float16 exactly within +-65504; out-of-range values are refused). Change the rule HERE first, then both resolvers.",
-  "version": 1,
+  "description": "The precision rule shared by miStudio (producer) and miLLM (server). Both repos test their resolver against every case here, and the cross-repo check keeps this file byte-identical in both. FP32 rows load float32; every other row loads the checkpoint's own 16-bit dtype, falling back to bfloat16 when the checkpoint records float32 or nothing. storage_dtype is how miStudio stores captured activations (bf16 converts to float16 exactly within +-65504; out-of-range values are refused). Change the rule HERE first, then both resolvers. A PRE-QUANTIZED checkpoint (its config carries quantization_config: GPTQ, AWQ, FP8...) keeps the 16-bit rule whatever its row is labelled, because its unquantized modules and the size plan are 16-bit and GPTQ/AWQ kernels at float32 are unsupported.",
+  "version": 2,
   "cases": [
     {
       "quantization": "FP32",
       "checkpoint_dtype": "bfloat16",
       "loads_at": "float32",
       "storage_dtype": "float32",
-      "source": "config"
+      "source": "config",
+      "pre_quantized": false
     },
     {
       "quantization": "FP32",
       "checkpoint_dtype": "float16",
       "loads_at": "float32",
       "storage_dtype": "float32",
-      "source": "config"
+      "source": "config",
+      "pre_quantized": false
     },
     {
       "quantization": "FP32",
       "checkpoint_dtype": "float32",
       "loads_at": "float32",
       "storage_dtype": "float32",
-      "source": "config"
+      "source": "config",
+      "pre_quantized": false
     },
     {
       "quantization": "FP32",
       "checkpoint_dtype": null,
       "loads_at": "float32",
       "storage_dtype": "float32",
+      "source": "default",
+      "pre_quantized": false
+    },
+    {
+      "quantization": "FP16",
+      "checkpoint_dtype": "bfloat16",
+      "loads_at": "bfloat16",
+      "storage_dtype": "float16",
+      "source": "config",
+      "pre_quantized": false
+    },
+    {
+      "quantization": "FP16",
+      "checkpoint_dtype": "float16",
+      "loads_at": "float16",
+      "storage_dtype": "float16",
+      "source": "config",
+      "pre_quantized": false
+    },
+    {
+      "quantization": "FP16",
+      "checkpoint_dtype": "float32",
+      "loads_at": "bfloat16",
+      "storage_dtype": "float16",
+      "source": "config",
+      "pre_quantized": false
+    },
+    {
+      "quantization": "FP16",
+      "checkpoint_dtype": null,
+      "loads_at": "bfloat16",
+      "storage_dtype": "float16",
+      "source": "default",
+      "pre_quantized": false
+    },
+    {
+      "quantization": "Q8",
+      "checkpoint_dtype": "bfloat16",
+      "loads_at": "bfloat16",
+      "storage_dtype": "float16",
+      "source": "config",
+      "pre_quantized": false
+    },
+    {
+      "quantization": "Q8",
+      "checkpoint_dtype": "float16",
+      "loads_at": "float16",
+      "storage_dtype": "float16",
+      "source": "config",
+      "pre_quantized": false
+    },
+    {
+      "quantization": "Q8",
+      "checkpoint_dtype": "float32",
+      "loads_at": "bfloat16",
+      "storage_dtype": "float16",
+      "source": "config",
+      "pre_quantized": false
+    },
+    {
+      "quantization": "Q8",
+      "checkpoint_dtype": null,
+      "loads_at": "bfloat16",
+      "storage_dtype": "float16",
+      "source": "default",
+      "pre_quantized": false
+    },
+    {
+      "quantization": "Q4",
+      "checkpoint_dtype": "bfloat16",
+      "loads_at": "bfloat16",
+      "storage_dtype": "float16",
+      "source": "config",
+      "pre_quantized": false
+    },
+    {
+      "quantization": "Q4",
+      "checkpoint_dtype": "float16",
+      "loads_at": "float16",
+      "storage_dtype": "float16",
+      "source": "config",
+      "pre_quantized": false
+    },
+    {
+      "quantization": "Q4",
+      "checkpoint_dtype": "float32",
+      "loads_at": "bfloat16",
+      "storage_dtype": "float16",
+      "source": "config",
+      "pre_quantized": false
+    },
+    {
+      "quantization": "Q4",
+      "checkpoint_dtype": null,
+      "loads_at": "bfloat16",
+      "storage_dtype": "float16",
+      "source": "default",
+      "pre_quantized": false
+    },
+    {
+      "quantization": "Q2",
+      "checkpoint_dtype": "bfloat16",
+      "loads_at": "bfloat16",
+      "storage_dtype": "float16",
+      "source": "config",
+      "pre_quantized": false
+    },
+    {
+      "quantization": "Q2",
+      "checkpoint_dtype": "float16",
+      "loads_at": "float16",
+      "storage_dtype": "float16",
+      "source": "config",
+      "pre_quantized": false
+    },
+    {
+      "quantization": "Q2",
+      "checkpoint_dtype": "float32",
+      "loads_at": "bfloat16",
+      "storage_dtype": "float16",
+      "source": "config",
+      "pre_quantized": false
+    },
+    {
+      "quantization": "Q2",
+      "checkpoint_dtype": null,
+      "loads_at": "bfloat16",
+      "storage_dtype": "float16",
+      "source": "default",
+      "pre_quantized": false
+    },
+    {
+      "quantization": "FP32",
+      "checkpoint_dtype": "bfloat16",
+      "pre_quantized": true,
+      "loads_at": "bfloat16",
+      "storage_dtype": "float16",
+      "source": "config"
+    },
+    {
+      "quantization": "FP32",
+      "checkpoint_dtype": "float16",
+      "pre_quantized": true,
+      "loads_at": "float16",
+      "storage_dtype": "float16",
+      "source": "config"
+    },
+    {
+      "quantization": "FP32",
+      "checkpoint_dtype": null,
+      "pre_quantized": true,
+      "loads_at": "bfloat16",
+      "storage_dtype": "float16",
       "source": "default"
     },
     {
       "quantization": "FP16",
       "checkpoint_dtype": "bfloat16",
+      "pre_quantized": true,
       "loads_at": "bfloat16",
       "storage_dtype": "float16",
       "source": "config"
@@ -40,104 +197,15 @@
     {
       "quantization": "FP16",
       "checkpoint_dtype": "float16",
+      "pre_quantized": true,
       "loads_at": "float16",
       "storage_dtype": "float16",
       "source": "config"
     },
     {
       "quantization": "FP16",
-      "checkpoint_dtype": "float32",
-      "loads_at": "bfloat16",
-      "storage_dtype": "float16",
-      "source": "config"
-    },
-    {
-      "quantization": "FP16",
       "checkpoint_dtype": null,
-      "loads_at": "bfloat16",
-      "storage_dtype": "float16",
-      "source": "default"
-    },
-    {
-      "quantization": "Q8",
-      "checkpoint_dtype": "bfloat16",
-      "loads_at": "bfloat16",
-      "storage_dtype": "float16",
-      "source": "config"
-    },
-    {
-      "quantization": "Q8",
-      "checkpoint_dtype": "float16",
-      "loads_at": "float16",
-      "storage_dtype": "float16",
-      "source": "config"
-    },
-    {
-      "quantization": "Q8",
-      "checkpoint_dtype": "float32",
-      "loads_at": "bfloat16",
-      "storage_dtype": "float16",
-      "source": "config"
-    },
-    {
-      "quantization": "Q8",
-      "checkpoint_dtype": null,
-      "loads_at": "bfloat16",
-      "storage_dtype": "float16",
-      "source": "default"
-    },
-    {
-      "quantization": "Q4",
-      "checkpoint_dtype": "bfloat16",
-      "loads_at": "bfloat16",
-      "storage_dtype": "float16",
-      "source": "config"
-    },
-    {
-      "quantization": "Q4",
-      "checkpoint_dtype": "float16",
-      "loads_at": "float16",
-      "storage_dtype": "float16",
-      "source": "config"
-    },
-    {
-      "quantization": "Q4",
-      "checkpoint_dtype": "float32",
-      "loads_at": "bfloat16",
-      "storage_dtype": "float16",
-      "source": "config"
-    },
-    {
-      "quantization": "Q4",
-      "checkpoint_dtype": null,
-      "loads_at": "bfloat16",
-      "storage_dtype": "float16",
-      "source": "default"
-    },
-    {
-      "quantization": "Q2",
-      "checkpoint_dtype": "bfloat16",
-      "loads_at": "bfloat16",
-      "storage_dtype": "float16",
-      "source": "config"
-    },
-    {
-      "quantization": "Q2",
-      "checkpoint_dtype": "float16",
-      "loads_at": "float16",
-      "storage_dtype": "float16",
-      "source": "config"
-    },
-    {
-      "quantization": "Q2",
-      "checkpoint_dtype": "float32",
-      "loads_at": "bfloat16",
-      "storage_dtype": "float16",
-      "source": "config"
-    },
-    {
-      "quantization": "Q2",
-      "checkpoint_dtype": null,
+      "pre_quantized": true,
       "loads_at": "bfloat16",
       "storage_dtype": "float16",
       "source": "default"

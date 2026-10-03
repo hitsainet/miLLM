@@ -125,7 +125,23 @@ def _working_reserve_mb(model: Any, device: Any) -> int:
     return int(by_device.get(label, 0))
 
 
-def _resolve_attach_dtype(name: str, model_dtype: Optional[str] = None) -> "torch.dtype":
+
+def _file_element_bytes(sae: Any) -> float:
+    """Bytes per element of an SAE FILE, from its size and shape (W_enc + W_dec = 2·d_in·d_sae):
+    4 for a float32 file, 2 for a 16-bit one. 4 when the shape or size is unknown — the widen
+    factor is then 1, which is the old sizing."""
+    try:
+        elements = 2 * int(sae.d_in) * int(sae.d_sae)
+        size = int(sae.file_size_bytes or 0)
+    except (TypeError, ValueError):
+        return 4.0
+    if elements <= 0 or size <= 0:
+        return 4.0
+    return 4.0 if size / elements > 3.0 else 2.0
+
+def _resolve_attach_dtype(
+    name: str, model_dtype: Optional[str] = None, fallback: Optional["torch.dtype"] = None
+) -> "torch.dtype":
     """Resolve a configured attach-dtype name to a torch dtype.
 
     "model" (the default) is the precision the model was loaded at — `LoadedModel.dtype`, the
@@ -138,8 +154,12 @@ def _resolve_attach_dtype(name: str, model_dtype: Optional[str] = None) -> "torc
     if key == "model":
         if loaded is not None:
             return loaded
-        logger.warning("attach_dtype_model_unknown_falling_back_fp16", model_dtype=model_dtype)
-        return torch.float16
+        # No recorded precision (a LoadedModel built outside the loader): the caller's fallback —
+        # the model's own parameter dtype on the single-SAE path — before a fixed float16, which
+        # would cast an SAE away from a bfloat16 model.
+        logger.warning("attach_dtype_model_unknown", model_dtype=model_dtype,
+                       fallback=str(fallback) if fallback is not None else "float16")
+        return fallback if fallback is not None else torch.float16
     dtype = _ATTACH_DTYPES.get(key)
     if dtype is None:
         logger.warning("unknown_attach_dtype_falling_back", requested=name, model_dtype=model_dtype)
@@ -1844,8 +1864,9 @@ class SAEService:
             # The SAE is cast to the model's precision below; a 16-bit file attached to an FP32
             # model doubles in memory, so size for the wider of the two (conservative for an FP32
             # file, which is already 4 bytes an element).
-            widen = max(1.0, torch.finfo(
-                _resolve_attach_dtype("model", model_state.current.dtype)).bits / 16)
+            target_bytes = torch.finfo(
+                _resolve_attach_dtype("model", model_state.current.dtype)).bits / 8
+            widen = max(1.0, target_bytes / _file_element_bytes(sae))
             estimated_mb = (sae.file_size_bytes or 0) / (1024 * 1024) * 1.2 * widen  # 20% overhead
             if estimated_mb > 0:
                 self._refuse_without_room(
@@ -1868,7 +1889,9 @@ class SAEService:
         # resolver's answer). Not `model.dtype`: on a bitsandbytes model that is whichever
         # parameter transformers checks first, which can be a module it keeps in float32.
         model = model_state.current.model
-        model_dtype = _resolve_attach_dtype("model", model_state.current.dtype)
+        model_dtype = _resolve_attach_dtype(
+            "model", model_state.current.dtype, fallback=getattr(model, "dtype", None)
+        )
         if loaded_sae.W_enc.dtype != model_dtype:
             logger.info(
                 "sae_dtype_cast",
@@ -1988,8 +2011,14 @@ class SAEService:
             try:
                 # At the precision the model was LOADED at: the fit admitted an FP32 model with a
                 # 4-byte cache, and a 2-byte reserve here would let an SAE take half of that room.
+                # Only the RECORD of this same model: the reserve belongs to the model it was
+                # planned for (as `_working_reserve_mb` already guards).
                 current = LoadedModelState().current
-                loaded_dtype = current.dtype if current is not None else "bfloat16"
+                loaded_dtype = (
+                    current.dtype
+                    if current is not None and getattr(current, "model", None) is model
+                    else "bfloat16"
+                )
                 spec, _ = kv_cache_spec(config, kv_bytes=kv_bytes_for(loaded_dtype))
             except Exception:  # noqa: BLE001 - an odd config: no reserve, as for the slack
                 spec = None

@@ -27,9 +27,11 @@ MISTUDIO = Path(os.environ.get("MISTUDIO_REPO", "/home/x-sean/app/miStudio"))
 CASES = json.loads(CASES_PATH.read_text())["cases"]
 
 
-@pytest.mark.parametrize("case", CASES, ids=lambda c: f"{c['quantization']}-{c['checkpoint_dtype']}")
+@pytest.mark.parametrize("case", CASES, ids=lambda c: f"{c['quantization']}-{c['checkpoint_dtype']}-pq{c['pre_quantized']}")
 def test_every_case_in_the_shared_table(case):
-    resolved = resolve_load_dtype(case["quantization"], case["checkpoint_dtype"])
+    resolved = resolve_load_dtype(
+        case["quantization"], case["checkpoint_dtype"], pre_quantized=case["pre_quantized"]
+    )
     assert resolved.name == case["loads_at"]
     assert resolved.torch_dtype is getattr(torch, case["loads_at"])
     assert resolved.storage_name == case["storage_dtype"]

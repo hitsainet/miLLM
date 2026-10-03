@@ -80,7 +80,10 @@ def _draft_torch_dtype(draft_model_id: str) -> "torch.dtype":
         from transformers import AutoConfig
 
         config = AutoConfig.from_pretrained(draft_model_id)
-    except Exception:  # noqa: BLE001 - nothing readable: the rule's default (bfloat16)
+    except Exception as exc:  # noqa: BLE001 - nothing readable: the rule's default (bfloat16)
+        # SAID, not silent: a custom-architecture or uncached draft then loads at bfloat16 even
+        # if its checkpoint is float16.
+        logger.warning("draft_dtype_config_unreadable", draft_model_id=draft_model_id, error=str(exc))
         config = None
     return resolve_for_config("FP16", config).torch_dtype
 

@@ -247,6 +247,31 @@ class TestTheRequestsWorkingMemoryIsKeptFreeToo:
             assert _working_reserve_mb(state.current.model, torch.device("cuda", 0)) == 400
             assert _working_reserve_mb(state.current.model, 0) == 400
 
+    async def test_the_kv_reserve_reads_only_the_precision_recorded_for_this_model(self):
+        """Round 3, LOW-4: the FP32 record of the loaded model must not price another model's
+        cache at 4 bytes (the property `_working_reserve_mb` already guards)."""
+        svc = _service(16_384)
+        patcher = _olmo_loaded("float32")
+        state = patcher.kwargs["return_value"]
+        other = MagicMock()
+        other.config = state.current.model.config
+        with patcher, _cards({0: 1_550, 1: 6_000}):
+            own, _ = svc._kv_reserve_mb(state.current.model, torch.device("cuda", 0))
+            foreign, _ = svc._kv_reserve_mb(other, torch.device("cuda", 0))
+        assert own == 2 * foreign
+
+
+class TestTheFileWidth:
+    def test_a_float32_file_is_four_bytes_and_a_16_bit_one_two(self):
+        """Round 3, LOW-3: the attach sized every file as if 16-bit, so a float32 SAE on an FP32
+        model was projected at twice its real size."""
+        from millm.services.sae_service import _file_element_bytes
+
+        assert _file_element_bytes(_row("a", 1024)) == 4.0
+        sixteen = _row("b", 1024)
+        sixteen.file_size_bytes = 2 * 5_120 * 1024 * 2
+        assert _file_element_bytes(sixteen) == 2.0
+
 
 class TestAttachSae:
     async def test_an_sae_without_room_is_refused_not_warned_about(self):

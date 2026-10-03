@@ -66,8 +66,22 @@ class TestQuantizationIsIdentityToo:
 
     def test_loaded_identity_passes_the_rows_quantization(self):
         (call,) = _calls(probe_arm_bridge.loaded_identity, "LoadedIdentity")
-        assert any(kw.arg == "quantization" and "row.quantization" in ast.unparse(kw.value)
-                   for kw in call.keywords)
+        (kw,) = [k for k in call.keywords if k.arg == "quantization"]
+        assert ast.unparse(kw.value) == (
+            "str(getattr(row.quantization, 'value', row.quantization)) if row is not None else None"
+        )
+
+    def test_parity_across_a_quantization_change_is_an_error_not_a_pass(self):
+        """Round 3, MED-A: the diagnostic route judged a Q4 probe on an FP16 load under the LOOSER
+        floor. Re-scoring across quantizations is not a check of the probe."""
+        from millm.services.probe_parity import ProbeParityEngine
+
+        report = ProbeParityEngine(forward=lambda *a: None).run(
+            probe=None, definition={"model": {"load_dtype": "bfloat16", "quantization": "Q4"},
+                                    "test_vectors": {"vectors": [{"token_ids": [1]}]}},
+            tolerance=0.05, loaded_dtype="bfloat16", loaded_quantization="FP16")
+        assert report.error and "quantization change" in report.error
+        assert report.passed is False
 
 
 class TestTheParityFloor:
@@ -105,14 +119,15 @@ class TestTheWiring:
         dtype = [kw for kw in call.keywords if kw.arg == "dtype"]
         assert dtype and "current.dtype" in ast.unparse(dtype[0].value)
 
-    def test_both_parity_entry_points_pass_the_loaded_precision(self):
+    @pytest.mark.parametrize("fn_name,who", [("arm", "loaded"), ("check_parity", "identity")])
+    def test_both_parity_entry_points_pass_the_loaded_precision_and_quantization(self, fn_name, who):
+        """The PAYLOAD, exactly — a keyword present with the wrong expression would pass a
+        presence check (round 3, MED-B)."""
         from millm.api.routes.management import probes
 
-        for fn in (probe_arming.ProbeArmingService.arm, probes.check_parity):
-            runs = [c for c in _calls(fn, "run") if any(k.arg == "loaded_dtype" for k in c.keywords)]
-            assert runs, f"{fn.__qualname__} runs parity without the loaded precision"
+        fn = probe_arming.ProbeArmingService.arm if fn_name == "arm" else probes.check_parity
+        (call,) = [c for c in _calls(fn, "run") if any(k.arg == "loaded_dtype" for k in c.keywords)]
+        got = {k.arg: ast.unparse(k.value) for k in call.keywords}
+        assert got["loaded_dtype"] == f"{who}.dtype"
+        assert got["loaded_quantization"] == f"{who}.quantization"
 
-    def test_arming_refuses_a_precision_only_mismatch_with_its_own_error(self):
-        src = inspect.getsource(probe_arming.ProbeArmingService.arm)
-        assert _calls(probe_arming.ProbeArmingService.arm, "ProbeDtypeMismatchError")
-        assert '{"load_dtype", "quantization"}' in src

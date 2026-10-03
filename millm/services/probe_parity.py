@@ -325,6 +325,18 @@ class ProbeParityEngine:
             tolerance=tolerance,
             dtype=dtype_comparison(definition, loaded_dtype, loaded_quantization),
         )
+        recorded_quant = report.dtype.get("recorded_quantization")
+        if (recorded_quant is not None and loaded_quantization is not None
+                and str(recorded_quant).upper() != str(loaded_quantization).upper()):
+            # ⚠ NOT "unmatched precision" with the looser floor (review round 3, MED-A): a Q4
+            # probe re-scored on an FP16 load reads different activations (~0.93 cosine per
+            # token). A comparison across quantizations is not a check of THIS probe, so it is
+            # reported as such rather than allowed to pass under a floor sized for fp16/bf16 noise.
+            report.error = (
+                f"the probe was fitted at {recorded_quant} and this model is loaded at "
+                f"{loaded_quantization}; parity across a quantization change does not test the probe"
+            )
+            return report
 
         if not vectors:
             report.error = "the definition carries no test vectors, so parity cannot be checked"

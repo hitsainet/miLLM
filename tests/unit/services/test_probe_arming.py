@@ -19,6 +19,7 @@ from torch import nn
 
 from millm.core.errors import (
     ProbeLimitError,
+    ProbeDtypeMismatchError,
     ProbeModelMismatchError,
     ProbeParityFailedError,
     UnvalidatedProbeError,
@@ -149,6 +150,33 @@ class TestGateOrder:
                 loaded=loaded(hf_id="Qwen/Qwen2.5-7B-Instruct"),
                 forward=forward_at(0.5),
             )
+
+    async def test_a_quantization_only_mismatch_gets_its_own_refusal(self, ctx):
+        """Round 3, MED-B: behaviour, not a scrape. Q4 fitted, FP16 loaded, same precision —
+        PROBE_DTYPE_MISMATCH with the quantization remedy, not "fitted on a different model"."""
+        _repo, service, arming = ctx
+        doc = definition()
+        doc["model"]["load_dtype"] = "bfloat16"
+        doc["model"]["quantization"] = "Q4"
+        probe = await service.import_definition(doc)
+        with pytest.raises(ProbeDtypeMismatchError) as caught:
+            await arming.arm(probe, model=TinyModel(),
+                             loaded=loaded(dtype="bfloat16", quantization="FP16"),
+                             forward=forward_at(0.5))
+        assert "quantization the probe was trained under" in caught.value.message
+
+    async def test_a_precision_only_mismatch_says_the_rule_was_broken(self, ctx):
+        """Round 3, LOW-2: same quantization, different precision — reloading cannot fix it."""
+        _repo, service, arming = ctx
+        doc = definition()
+        doc["model"]["load_dtype"] = "float16"
+        doc["model"]["quantization"] = "FP16"
+        probe = await service.import_definition(doc)
+        with pytest.raises(ProbeDtypeMismatchError) as caught:
+            await arming.arm(probe, model=TinyModel(),
+                             loaded=loaded(dtype="bfloat16", quantization="FP16"),
+                             forward=forward_at(0.5))
+        assert "did not load by the shared precision rule" in caught.value.message
 
     async def test_parity_is_not_run_when_an_earlier_gate_fails(self, ctx):
         """Parity is the only gate that costs a forward pass."""

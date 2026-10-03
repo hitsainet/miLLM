@@ -584,6 +584,22 @@ class ProbeModelMismatchError(MiLLMError):
     status_code = 409
 
 
+class ProbeDtypeMismatchError(ProbeModelMismatchError):
+    """The probe was fitted at a different PRECISION than this server loaded the model at.
+
+    Same model, same layer, same weights — and still a different distribution: the residual
+    stream a probe reads depends on the precision the model ran at. Re-scoring a float16-fitted
+    probe at bfloat16 moved its combined scores by up to 0.25 (2026-10-03), more than parity's
+    whole tolerance. Split out from `ProbeModelMismatchError` because "fitted on a different model"
+    is the wrong sentence for it and points an operator at the wrong fix.
+
+    A subclass, so every handler of a model mismatch still catches it.
+    """
+
+    code = "PROBE_DTYPE_MISMATCH"
+    status_code = 409
+
+
 class ProbeScopeUnverifiableError(MiLLMError):
     """The probe's scope cannot be checked against its recorded scores at all.
 

@@ -26,6 +26,7 @@ import torch
 
 from millm.core.config import settings
 from millm.core.errors import (
+    ProbeDtypeMismatchError,
     ProbeLimitError,
     ProbeModelMismatchError,
     ProbeParityFailedError,
@@ -266,6 +267,15 @@ class ProbeArmingService:
 
         # ── 2. identity ─────────────────────────────────────────────────────────────
         report = check_identity(probe.definition.get("model") or {}, loaded)
+        if not report.ok and {m["field"] for m in report.mismatches} == {"load_dtype"}:
+            mismatch = report.mismatches[0]
+            raise ProbeDtypeMismatchError(
+                f"This probe was fitted at {mismatch['expected']}, and this server loaded the "
+                f"model at {mismatch['actual']}. Both repos load a checkpoint at its own "
+                "precision, so one of them did not: rebuild the probe in miStudio, or load the "
+                "model with the quantization the probe was trained under.",
+                details=report.as_details(),
+            )
         if not report.ok:
             raise ProbeModelMismatchError(
                 "This probe was fitted on a different model than the one loaded",
@@ -339,7 +349,8 @@ class ProbeArmingService:
             settings.PROBE_PARITY_TOLERANCE,
         )
         parity = ProbeParityEngine(forward).run(
-            for_parity, probe.definition, tolerance=tolerance, tokenizer=tokenizer
+            for_parity, probe.definition, tolerance=tolerance, tokenizer=tokenizer,
+            loaded_dtype=loaded.dtype,
         )
         await self.repository.update(probe, parity=parity.as_details())
         if not parity.passed:

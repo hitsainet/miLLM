@@ -156,6 +156,10 @@ class ParityReport:
     vectors: list[VectorResult] = field(default_factory=list)
     tokenization_drift: dict[str, Any] = field(default_factory=dict)
     error: Optional[str] = None
+    #: `{"recorded", "loaded", "matched"}` — the definition's `model.load_dtype` against the
+    #: precision this server loaded at (`dtype_comparison`). Reported on every report, so a failed
+    #: parity shows its likely cause; and it chooses the floor (`score_tolerance`).
+    dtype: dict[str, Any] = field(default_factory=dict)
 
     @property
     def max_abs_diff(self) -> Optional[float]:
@@ -180,7 +184,16 @@ class ParityReport:
         """
         from millm.core.config import settings
 
-        return max(self.tolerance, settings.PROBE_PARITY_SCORE_TOLERANCE)
+        # ⚠ THE FLOOR IS KEYED ON WHY IT EXISTS. `PROBE_PARITY_SCORE_TOLERANCE` (0.10) was set to
+        # absorb a CROSS-PRECISION gap — miStudio float16, this server bfloat16. When the
+        # definition states the same precision this server loaded at, that gap is gone and what
+        # remains is two implementations' bfloat16 noise, which has its own measured floor.
+        floor = (
+            settings.PROBE_PARITY_MATCHED_DTYPE_FLOOR
+            if self.dtype.get("matched") is True
+            else settings.PROBE_PARITY_SCORE_TOLERANCE
+        )
+        return max(self.tolerance, floor)
 
     @property
     def max_combined_diff(self) -> Optional[float]:
@@ -257,8 +270,17 @@ class ParityReport:
                 for v in self.vectors
             ],
             "tokenization_drift": self.tokenization_drift,
+            "dtype": self.dtype,
             "error": self.error,
         }
+
+
+def dtype_comparison(definition: dict[str, Any], loaded_dtype: Optional[str]) -> dict[str, Any]:
+    """The definition's stated precision beside this server's. `matched` is None when either side
+    is unknown — a definition from before 2026-10-03 states none, and is never assumed float16."""
+    recorded = ((definition or {}).get("model") or {}).get("load_dtype")
+    matched = None if recorded is None or loaded_dtype is None else recorded == loaded_dtype
+    return {"recorded": recorded, "loaded": loaded_dtype, "matched": matched}
 
 
 class ProbeParityEngine:
@@ -280,10 +302,11 @@ class ProbeParityEngine:
         *,
         tolerance: float,
         tokenizer: Any = None,
+        loaded_dtype: Optional[str] = None,
     ) -> ParityReport:
         spec = (definition or {}).get("test_vectors") or {}
         vectors: Sequence[dict[str, Any]] = spec.get("vectors") or []
-        report = ParityReport(tolerance=tolerance)
+        report = ParityReport(tolerance=tolerance, dtype=dtype_comparison(definition, loaded_dtype))
 
         if not vectors:
             report.error = "the definition carries no test vectors, so parity cannot be checked"

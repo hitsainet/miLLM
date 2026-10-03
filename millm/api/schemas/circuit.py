@@ -140,6 +140,8 @@ class CircuitDiscoveryProvenance(BaseModel):
     granularity: str | None = None   # feature | cluster
     corpus_ref: str | None = None
     thresholds: dict[str, Any] | None = None
+    # The precision the discovery capture ran at (miStudio 2026-10-03); None = not recorded.
+    model_dtype: str | None = None
 
 
 class CalibrationProbe(BaseModel):

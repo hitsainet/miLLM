@@ -125,16 +125,25 @@ def _working_reserve_mb(model: Any, device: Any) -> int:
     return int(by_device.get(label, 0))
 
 
-def _resolve_attach_dtype(name: str) -> "torch.dtype":
+def _resolve_attach_dtype(name: str, model_dtype: Optional[str] = None) -> "torch.dtype":
     """Resolve a configured attach-dtype name to a torch dtype.
 
-    Defaults to fp16 (the measured ~64 MB/SAE footprint) for an unknown name
-    rather than raising — a bad config value must not block attachment.
+    "model" (the default) is the precision the model was loaded at — `LoadedModel.dtype`, the
+    resolver's answer, NOT a parameter's dtype, which on a bitsandbytes model is int8. An unknown
+    name, or "model" with no loaded precision, falls back to the model's precision when known and
+    float16 otherwise, rather than raising: a bad config value must not block attachment.
     """
-    dtype = _ATTACH_DTYPES.get(str(name).strip().lower())
-    if dtype is None:
-        logger.warning("unknown_attach_dtype_falling_back_fp16", requested=name)
+    key = str(name).strip().lower()
+    loaded = _ATTACH_DTYPES.get(str(model_dtype or "").strip().lower())
+    if key == "model":
+        if loaded is not None:
+            return loaded
+        logger.warning("attach_dtype_model_unknown_falling_back_fp16", model_dtype=model_dtype)
         return torch.float16
+    dtype = _ATTACH_DTYPES.get(key)
+    if dtype is None:
+        logger.warning("unknown_attach_dtype_falling_back", requested=name, model_dtype=model_dtype)
+        return loaded if loaded is not None else torch.float16
     return dtype
 
 
@@ -2093,7 +2102,9 @@ class SAEService:
         requested: list[tuple[str, int]] = list(
             dict.fromkeys((sid, int(layer)) for sid, layer in sae_layers)
         )
-        attach_dtype = _resolve_attach_dtype(settings.MULTISAE_ATTACH_DTYPE)
+        attach_dtype = _resolve_attach_dtype(
+            settings.MULTISAE_ATTACH_DTYPE, model_state.current.dtype
+        )
         model = model_state.current.model
 
         # Split into to-attach (new keys) and already-attached (idempotent skip).

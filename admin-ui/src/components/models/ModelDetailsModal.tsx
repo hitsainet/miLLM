@@ -65,7 +65,8 @@ export interface ModelDetailsModalProps {
 
 const QUANTIZATION_OPTIONS = [
   { format: 'FP32', label: 'FP32 (Full Precision)' },
-  { format: 'FP16', label: 'FP16 (Half Precision)' },
+  // 16 bits at the checkpoint's OWN format — bfloat16 or float16 — not a cast to float16.
+  { format: 'FP16', label: '16-bit (checkpoint native)' },
   { format: 'Q8', label: 'Q8 (8-bit)' },
   { format: 'Q4', label: 'Q4 (4-bit)', recommended: true },
   { format: 'Q2', label: 'Q2 (2-bit)' },

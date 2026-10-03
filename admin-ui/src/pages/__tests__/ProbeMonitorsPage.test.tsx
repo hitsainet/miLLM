@@ -924,6 +924,20 @@ describe('a bar that can move, and verdicts judged under different ones', () => 
     expect(screen.getByTestId('probe-threshold')).not.toHaveTextContent('rev');
   });
 
+  it('shows the precision the probe was fitted at', () => {
+    state.probes = [probe({ load_dtype: 'bfloat16' })];
+    renderPage();
+    expect(screen.getByTestId('probe-load-dtype')).toHaveTextContent('fitted at bfloat16');
+  });
+
+  it('says a precision was not recorded rather than supplying one', () => {
+    // A definition from before 2026-10-03 states no precision. It WAS float16, but the tile must
+    // not supply a fact the document did not record.
+    state.probes = [probe({ load_dtype: null })];
+    renderPage();
+    expect(screen.getByTestId('probe-load-dtype')).toHaveTextContent('unrecorded precision');
+  });
+
   it('shows the cut on the tile once a bar HAS moved', () => {
     state.probes = [probe({ threshold_revision: 4 })];
     renderPage();

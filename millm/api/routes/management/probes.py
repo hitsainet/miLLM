@@ -134,6 +134,9 @@ def _probe_summary(probe: Any) -> dict[str, Any]:
         # corpus. `concept` is miStudio's own sentence, carried through rather than recomposed.
         "concept": concept_of(probe.definition),
         "label_mapping": label_mapping_of(probe.definition),
+        # The precision the probe was fitted at, as the definition STATES it; None = the
+        # definition predates the field (it was float16, but the document does not say so).
+        "load_dtype": ((probe.definition or {}).get("model") or {}).get("load_dtype"),
         "armed": probe.armed,
         "paused_reason": probe.paused_reason,
         "parity": probe.parity,
@@ -382,7 +385,9 @@ async def check_parity(
     if probe is None:
         raise ProbeNotFoundError(f"No probe {probe_id}")
 
-    _identity, model, tokenizer = await loaded_identity(session)
+    # The identity is not CHECKED here (that is arming's gate), but its precision is reported
+    # with the result, so a failed parity names its likely cause.
+    identity, model, tokenizer = await loaded_identity(session)
     # `windows=[]` — the probe's own scope alone. Parity compares against miStudio's recorded
     # scores, which were computed under that scope; other windows would be work with no reader.
     armed = armed_probe_from_row(probe, encoder=await build_probe_encoder(probe), windows=[])
@@ -391,7 +396,8 @@ async def check_parity(
         settings.PROBE_PARITY_TOLERANCE,
     )
     report = ProbeParityEngine(build_parity_forward(model, probe.layer)).run(
-        armed, probe.definition, tolerance=tolerance, tokenizer=tokenizer
+        armed, probe.definition, tolerance=tolerance, tokenizer=tokenizer,
+        loaded_dtype=identity.dtype,
     )
     await repository.update(probe, parity=report.as_details())
     return ApiResponse.ok(report.as_details())

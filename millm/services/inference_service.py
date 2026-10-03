@@ -66,6 +66,16 @@ from millm.services.reasoning_split import (
 logger = get_logger(__name__)
 
 
+
+def _target_torch_dtype() -> "torch.dtype":
+    """The precision the served model was loaded at, as a torch dtype; bfloat16 if none is loaded."""
+    from millm.ml.model_loader import LoadedModelState
+    from millm.ml.native_dtype import LOAD_DTYPES
+
+    current = LoadedModelState().current
+    name = current.dtype if current is not None and current.dtype in LOAD_DTYPES else "bfloat16"
+    return getattr(torch, name)
+
 def _return_cached_draft_memory() -> None:
     """Give a discarded draft's memory back to the card. Never raises.
 
@@ -2221,9 +2231,12 @@ class InferenceService:
                 # Whole, on one card. device_map="auto" spread the draft over
                 # every card, so each proposed token crossed cards before the
                 # main model could verify it.
+                # At the TARGET model's resolved precision (`ml/native_dtype.py`), so draft and
+                # target propose and verify logits computed alike. This was bfloat16 whatever the
+                # target loaded at.
                 draft = AutoModelForCausalLM.from_pretrained(
                     self._speculative_model_id,
-                    torch_dtype=torch.bfloat16,
+                    torch_dtype=_target_torch_dtype(),
                     device_map={"": device},
                 )
                 if getattr(self, "_model_epoch", 0) != epoch:

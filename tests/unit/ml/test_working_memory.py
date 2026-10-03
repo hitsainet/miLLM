@@ -108,7 +108,7 @@ def _meta(name: str, quantization: str = "FP16"):
     config_class, fields = CONFIGS[name]
     config = config_class(**fields)
     quantizer = None
-    bnb = _bitsandbytes_config(quantization)
+    bnb = _bitsandbytes_config(quantization, torch.bfloat16)
     if bnb is not None:
         quantizer, config, device_map = get_hf_quantizer(config, bnb, "sequential", True, {})
     model = _meta_model(config, False)

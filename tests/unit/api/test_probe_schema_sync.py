@@ -143,10 +143,17 @@ class TestEveryEnumMatchesTheContract:
         found: dict[str, list] = {}
         for defname, spec in frozen["$defs"].items():
             for fieldname, field in (spec.get("properties") or {}).items():
-                if "enum" in field:
-                    found[f"{defname}.{fieldname}"] = sorted(field["enum"])
-                elif "const" in field:
-                    found[f"{defname}.{fieldname}"] = [field["const"]]
+                # ⚠ AN OPTIONAL ENUM IS WRAPPED IN `anyOf` ([{enum}, {type: null}]). Reading only
+                # the top level missed two: `LengthBand.threshold_source` from the day it shipped,
+                # and `ModelIdentity.load_dtype` on 2026-10-03 — so "this test must learn about
+                # it rather than pass" was untrue of every optional enum in the contract.
+                for alt in [field, *field.get("anyOf", [])]:
+                    if "enum" in alt:
+                        found[f"{defname}.{fieldname}"] = sorted(alt["enum"])
+                        break
+                    if "const" in alt:
+                        found[f"{defname}.{fieldname}"] = [alt["const"]]
+                        break
         return found
 
     def test_the_frozen_schema_still_has_the_enums_this_pins(self, frozen):
@@ -159,7 +166,20 @@ class TestEveryEnumMatchesTheContract:
             "Aggregation.rule",
             "EvaluationEntry.distribution",
             "TestVectors.authoritative_input",
+            "LengthBand.threshold_source",
+            "ModelIdentity.load_dtype",
         }
+
+    def test_load_dtype_is_this_servers_precision_rule(self, frozen):
+        """The precisions a definition may declare are exactly the ones this server's resolver
+        produces — so a definition can never name a precision miLLM has no way to load at."""
+        from millm.ml.native_dtype import LOAD_DTYPES
+
+        assert sorted(LOAD_DTYPES) == self._enums(frozen)["ModelIdentity.load_dtype"]
+
+    def test_threshold_source(self, frozen):
+        """`length_bands_from_definition` distinguishes a cut band from an inherited one by these."""
+        assert self._enums(frozen)["LengthBand.threshold_source"] == ["band", "global"]
 
     def test_scope(self, frozen):
         assert sorted(SCOPES) == self._enums(frozen)["ProbeDefinitionV1.scope"]

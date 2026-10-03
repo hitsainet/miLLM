@@ -83,6 +83,9 @@ export interface Probe {
    * Sent RAW so the client names both sides; the server does not format it.
    */
   label_mapping?: Record<string, string> | null;
+  /** The precision the probe was fitted at, as its definition STATES it. Absent/null = the
+   *  definition predates the field (miStudio 2026-10-03) — not assumed to be float16. */
+  load_dtype?: string | null;
   armed: boolean;
   /** Why an armed probe is not scoring. Displayed whenever present. */
   paused_reason: string | null;

@@ -45,6 +45,10 @@ SHA_RE = re.compile(r"^[0-9a-f]{40}$")
 REVISION_UNVERIFIED = "REVISION_UNVERIFIED"
 #: Recorded, not refused: the files on disk came from more than one commit.
 REVISION_INCONSISTENT = "REVISION_INCONSISTENT"
+#: Recorded, not refused: the definition predates `model.load_dtype` (miStudio, 2026-10-03), so the
+#: precision its probe was fitted at is not stated. Every miStudio probe built before then was in
+#: fact float16; parity is what decides whether it reproduces here.
+DTYPE_UNRECORDED = "DTYPE_UNRECORDED"
 
 #: Files whose metadata is read to establish the commit. Two, deliberately — see `resolve_revision`.
 REVISION_WITNESS_FILES = ("config.json", "tokenizer_config.json", "model.safetensors")
@@ -61,6 +65,8 @@ class LoadedIdentity:
     revision: Optional[str] = None
     revision_source: str = REVISION_UNVERIFIED
     supports_hooks: bool = True
+    #: The precision this server loaded the model at (`ml/native_dtype.py`), or None if unknown.
+    dtype: Optional[str] = None
 
     @property
     def chat_template_sha256(self) -> Optional[str]:
@@ -143,7 +149,13 @@ def resolve_revision(
 def check_identity(model_block: dict[str, Any], loaded: LoadedIdentity) -> IdentityReport:
     """Compare a definition's `model` block against the loaded model.
 
-    Four fields refuse on mismatch: `hf_id`, `d_model`, `n_layers`, `chat_template_sha256`.
+    Five fields refuse on mismatch: `hf_id`, `d_model`, `n_layers`, `chat_template_sha256`, and
+    `load_dtype` — the precision the probe was fitted at. That last is a refusal, not a warning,
+    because both repos load by one shared rule (`docs/schemas/native-dtype-cases.json`): a
+    disagreement means one side broke it, and a probe read at another precision is reading
+    another distribution (re-scoring at bfloat16 instead of float16 moved combined scores by up
+    to 0.25 — more than parity's whole tolerance). A definition that does not STATE a precision
+    is warned about (`DTYPE_UNRECORDED`), never assumed to be float16.
     The revision **warns** rather than refuses when it cannot be established (locked decision 10) —
     but it REFUSES when both sides are known and disagree, which is a different situation entirely
     from not knowing.
@@ -177,6 +189,12 @@ def check_identity(model_block: dict[str, Any], loaded: LoadedIdentity) -> Ident
             report.add("chat_template_sha256", expected_template, None)
         elif expected_template != actual_template:
             report.add("chat_template_sha256", expected_template, actual_template)
+
+    expected_dtype = model_block.get("load_dtype")
+    if expected_dtype is None:
+        report.warnings.append(DTYPE_UNRECORDED)
+    elif loaded.dtype is not None and expected_dtype != loaded.dtype:
+        report.add("load_dtype", expected_dtype, loaded.dtype)
 
     expected_revision = (model_block.get("revision") or "").strip()
     if loaded.revision is None:

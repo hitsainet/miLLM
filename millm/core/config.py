@@ -127,8 +127,12 @@ class Settings(BaseSettings):
     # 4096 MB ≈ 32 SAEs at the measured 128 MB fp16 each, comfortably past the
     # 16-layer contract maximum while still flagging a genuine runaway.
     MULTISAE_VRAM_ENVELOPE_MB: int = 4096
-    # Dtype for the attached steering-weight set (fp16 ≈ 64 MB/SAE measured).
-    MULTISAE_ATTACH_DTYPE: str = "float16"
+    # Dtype for the attached steering-weight set. "model" = the precision the model was LOADED at
+    # (`ml/native_dtype.py`), as the single-SAE path already does. This was "float16", so circuits
+    # and clusters steered with float16 weights added to a bfloat16 residual stream. Bytes per SAE
+    # are unchanged at 16 bits (~64 MB measured); an FP32 model doubles them, and the envelope
+    # sizes from the element width. An explicit dtype name still overrides.
+    MULTISAE_ATTACH_DTYPE: str = "model"
     # Global circuit intensity (λ) bounds — shared with the Feature 14 dial.
     CIRCUIT_INTENSITY_MIN: float = 0.0
     CIRCUIT_INTENSITY_MAX: float = 2.0
@@ -188,6 +192,15 @@ class Settings(BaseSettings):
     #: that costs a worst-case 0.098 on the score against a threshold of 2.879 — 3.4%. Set from
     #: measurement on 2026-09-27, not chosen. See `ParityReport`.
     PROBE_PARITY_SCORE_TOLERANCE: float = 0.10
+    #: The gate's floor when the definition's `model.load_dtype` EQUALS the precision this server
+    #: loaded at, so no cross-precision gap remains — only two implementations' bfloat16 noise.
+    #:
+    #: ⚠ PROVISIONAL, equal to the legacy floor, until it is MEASURED (native-dtype plan, Phase 7):
+    #: worst combined Δ over a retrained probe's vectors between miStudio (one input at a time,
+    #: bfloat16) and this server. Phase 0 already showed that noise is not small: bfloat16 moved
+    #: combined scores up to 0.177 between batched and single scoring in ONE codebase, and two
+    #: codebases differed by at least 0.087 on one vector. Expect this to rise, not fall.
+    PROBE_PARITY_MATCHED_DTYPE_FLOOR: float = 0.10
     #: How much of a vector must be reproducible for its comparison to count.
     #:
     #: ⚠ A k-sparse JumpReLU probe has positions whose gate NO independent implementation can

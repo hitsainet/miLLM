@@ -240,6 +240,9 @@ function ProbeRow({
             : `threshold ${probe.threshold.toFixed(4)}`}
           {/* The cut, shown once a bar has ever moved. Silent at revision 1, because a number
               nobody has re-cut needs no version beside it. */}
+          <span className="ml-1 opacity-70" data-testid="probe-load-dtype">
+            · fitted at {probe.load_dtype ?? 'unrecorded precision'}
+          </span>
           {probe.threshold_revision !== undefined && probe.threshold_revision > 1 && (
             <span className="ml-1 opacity-70">· rev {probe.threshold_revision}</span>
           )}

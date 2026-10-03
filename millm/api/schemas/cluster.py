@@ -96,6 +96,9 @@ class ProfileBudget(BaseModel):
 class DefinitionModelRef(BaseModel):
     hf_id: str | None = None
     mistudio_model_id: str | None = None
+    # The precision the members' activations were measured at (miStudio 2026-10-03). Declared so
+    # a re-export keeps it — an undeclared field is dropped by this mirror on the round trip.
+    load_dtype: Literal["float16", "bfloat16", "float32"] | None = None
 
 
 class DefinitionSAERef(BaseModel):

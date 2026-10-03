@@ -323,6 +323,23 @@
           "default": null,
           "title": "Mode"
         },
+        "model_dtype": {
+          "anyOf": [
+            {
+              "enum": [
+                "float16",
+                "bfloat16",
+                "float32"
+              ],
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Model Dtype"
+        },
         "split": {
           "anyOf": [
             {
@@ -677,6 +694,23 @@
           ],
           "default": null,
           "title": "Hf Id"
+        },
+        "load_dtype": {
+          "anyOf": [
+            {
+              "enum": [
+                "float16",
+                "bfloat16",
+                "float32"
+              ],
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Load Dtype"
         },
         "mistudio_model_id": {
           "anyOf": [

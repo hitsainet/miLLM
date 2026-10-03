@@ -59,7 +59,8 @@ function looksLikeRepoId(value: string): boolean {
 const quantizationOptions = [
   { value: 'Q4', label: 'Q4 - 4-bit (Recommended)' },
   { value: 'Q8', label: 'Q8 - 8-bit' },
-  { value: 'FP16', label: 'FP16 - Half Precision' },
+  // 16 bits at the checkpoint's OWN format (bfloat16 or float16); the loaded model shows which.
+  { value: 'FP16', label: '16-bit - checkpoint native' },
   { value: 'FP32', label: 'FP32 - Full Precision' },
   { value: 'Q2', label: 'Q2 - 2-bit' },
 ];

@@ -101,6 +101,7 @@ from millm.core.errors import (
 )
 from millm.ml.gguf_catalog import quant_label_from_path
 from millm.ml.memory_utils import MEMORY_OVERHEAD_FACTOR
+from millm.ml.native_dtype import resolve_for_config
 from millm.ml.working_memory import (
     ALLOCATOR_OVERHEAD_FRACTION,
     WorkingMemory,
@@ -584,12 +585,13 @@ def checkpoint_materialised_mb(cache_path: Optional[str], trust_remote_code: boo
         hf_quantizer, config, device_map = get_hf_quantizer(config, None, "sequential", True, {})
         if hf_quantizer is None:
             return 0
-        model = _meta_model(config, trust_remote_code)
+        materialised_dtype = resolve_for_config("FP16", config).torch_dtype
+        model = _meta_model(config, trust_remote_code, materialised_dtype)
         # Config, class and quantizer all built: from here a failure is transformers'.
         stage = _STAGE_ENGINE
         hf_quantizer.preprocess_model(
             model=model,
-            dtype=torch.bfloat16,
+            dtype=materialised_dtype,
             device_map=device_map,
             checkpoint_files=None,
             use_kernels=False,
@@ -645,7 +647,22 @@ def transformers_estimate_mb(
     return int(weights_mb * MEMORY_OVERHEAD_FACTOR)
 
 
-def _bitsandbytes_config(quantization: str) -> Any:
+
+def _read_config_json(cache_path: Optional[str]) -> Optional[dict]:
+    """The snapshot's config.json as a dict, or None — the dtype source when AutoConfig failed."""
+    import json as _json
+    import os
+
+    if not cache_path:
+        return None
+    try:
+        with open(os.path.join(cache_path, "config.json")) as handle:
+            loaded = _json.load(handle)
+    except (OSError, ValueError):
+        return None
+    return loaded if isinstance(loaded, dict) else None
+
+def _bitsandbytes_config(quantization: str, compute_dtype: Optional[torch.dtype] = None) -> Any:
     """The BitsAndBytesConfig miLLM loads a Q4 or Q8 checkpoint with; None otherwise.
 
     ONE definition for the load and the split preflight, which must compute the
@@ -659,9 +676,14 @@ def _bitsandbytes_config(quantization: str) -> Any:
     while nothing needed it.
     """
     if quantization == "Q4":
+        # ⚠ THE ROW'S RESOLVED DTYPE (`ml/native_dtype.py`), never a default. This hardcoded
+        # bfloat16, which is right for a bfloat16 checkpoint and casts a float16 one away from
+        # itself; the compute dtype must equal the load dtype, and only the resolver knows it.
+        if not isinstance(compute_dtype, torch.dtype):
+            raise ValueError("Q4 needs the row's resolved load dtype as its compute dtype")
         return BitsAndBytesConfig(
             load_in_4bit=True,
-            bnb_4bit_compute_dtype=torch.bfloat16,
+            bnb_4bit_compute_dtype=compute_dtype,
             bnb_4bit_use_double_quant=True,
             bnb_4bit_quant_type="nf4",
         )
@@ -670,7 +692,7 @@ def _bitsandbytes_config(quantization: str) -> Any:
     return None
 
 
-def _meta_model(config: Any, trust_remote_code: bool) -> Any:
+def _meta_model(config: Any, trust_remote_code: bool, dtype: Optional[torch.dtype] = None) -> Any:
     """The skeleton the load would build, on the meta device: no weights, no GPU.
 
     The same class choice as ModelLoadContext.load: the class the config names,
@@ -690,8 +712,10 @@ def _meta_model(config: Any, trust_remote_code: bool) -> Any:
     for model_class in candidates:
         try:
             with torch.device("meta"):
+                # The dtype the LOAD will use (`ml/native_dtype.py`), so the plan sizes what loads.
                 return model_class.from_config(
-                    config, dtype=torch.bfloat16, trust_remote_code=trust_remote_code
+                    config, dtype=dtype if dtype is not None else resolve_for_config("FP16", config).torch_dtype,
+                    trust_remote_code=trust_remote_code,
                 )
         except Exception as e:  # noqa: BLE001
             last_error = e
@@ -748,20 +772,24 @@ def preflight_split(
 
         stage = _STAGE_CHECKPOINT
         config = AutoConfig.from_pretrained(cache_path, trust_remote_code=trust_remote_code)
+        # Planned at the dtype the load resolves to (`ml/native_dtype.py`): a split mapped at one
+        # dtype and loaded at another is how a model spills.
+        planned_dtype = resolve_for_config(quantization, config).torch_dtype
         quantization_config = (
-            None if checkpoint_is_pre_quantized(cache_path) else _bitsandbytes_config(quantization)
+            None if checkpoint_is_pre_quantized(cache_path)
+            else _bitsandbytes_config(quantization, planned_dtype)
         )
         device_map = placement.transformers_device_map()
         hf_quantizer, config, device_map = get_hf_quantizer(
             config, quantization_config, device_map, True, {}
         )
-        model = _meta_model(config, trust_remote_code)
+        model = _meta_model(config, trust_remote_code, planned_dtype)
         # Config, class and quantizer all built: from here a failure is transformers'.
         stage = _STAGE_ENGINE
         if hf_quantizer is not None:
             hf_quantizer.preprocess_model(
                 model=model,
-                dtype=torch.bfloat16,
+                dtype=planned_dtype,
                 device_map=device_map,
                 checkpoint_files=None,
                 use_kernels=False,
@@ -1138,12 +1166,19 @@ class ModelLoadContext:
                     pass
             logger.warning("config_load_for_quant_detection_failed", error=str(e))
 
-        # Configure quantization
-        # Use bfloat16 instead of float16: same memory (2 bytes/param) but much larger
-        # numeric range (max ~3.4e38 vs ~65504). Many modern models (Gemma 3, Llama 3, etc.)
-        # are trained in bfloat16 and produce NaN/Inf logits when loaded in float16.
+        # THE CHECKPOINT'S OWN PRECISION (`ml/native_dtype.py`, the rule miStudio shares).
+        #
+        # This was `torch.bfloat16` for every row — FP16- and FP32-labelled alike — on the
+        # reasoning that bfloat16 checkpoints overflow float16. That reasoning stands for a
+        # bfloat16 checkpoint, which the rule still loads at bfloat16. What it got wrong: a
+        # checkpoint PUBLISHED in float16 was cast to bfloat16, an FP32 row was not float32, and
+        # the precision was recorded nowhere — while miStudio, which fits every probe and SAE
+        # served here, cast everything to float16. A probe then failed parity here by 0.251.
+        resolved_dtype = resolve_for_config(
+            quantization, config if config is not None else _read_config_json(cache_path)
+        )
         quantization_config = None
-        torch_dtype = torch.bfloat16
+        torch_dtype = resolved_dtype.torch_dtype
 
         if is_pre_quantized:
             # Model is already quantized (GPTQ/AWQ) — skip bitsandbytes
@@ -1151,7 +1186,7 @@ class ModelLoadContext:
         else:
             # Shared with preflight_split, which must compute the device map
             # with the quantizer this load uses.
-            quantization_config = _bitsandbytes_config(quantization)
+            quantization_config = _bitsandbytes_config(quantization, torch_dtype)
             if quantization_config is not None:
                 quant_method = "bitsandbytes"
 
@@ -1422,15 +1457,11 @@ class ModelLoadContext:
 
         device_str = ", ".join(device_labels) if device_labels else "unknown"
 
-        # Get dtype info
-        dtype_str = "unknown"
-        try:
-            if hasattr(self.model, "dtype"):
-                dtype_str = str(self.model.dtype).replace("torch.", "")
-            elif hasattr(self.model, "config") and hasattr(self.model.config, "torch_dtype"):
-                dtype_str = str(self.model.config.torch_dtype).replace("torch.", "")
-        except Exception:
-            pass
+        # THE RESOLVED DTYPE, not `model.dtype`. On a bitsandbytes model `model.dtype` reports
+        # whichever parameter transformers checks first — not the precision the activations
+        # flow in — and this string is what the admin UI shows and what probe identity compares
+        # against a definition's `model.load_dtype`.
+        dtype_str = resolved_dtype.name
 
         # Apply torch.compile for faster decoding.
         # bitsandbytes quantization is incompatible with torch.compile (CUDA kernel
@@ -2530,12 +2561,16 @@ def load_gguf_model(
 # Per-card fit of a transformers load (Decision 7, 2026-09-14)
 # =============================================================================
 
-#: The KV cache of a transformers load holds bfloat16 tensors, 2 bytes an element.
-#: ModelLoadContext.load loads every model with torch_dtype=torch.bfloat16
-#: (bitsandbytes computes in it too), and nothing on the transformers path
-#: quantizes the cache: KV_CACHE_MODE is "dynamic" or "static", and
-#: GGUF_KV_CACHE_TYPE (q8_0) applies to llama.cpp alone.
+#: The KV cache of a transformers load holds tensors at the model's load dtype: 2 bytes an element
+#: for a 16-bit load (bfloat16 or float16), 4 for an FP32 row, which now really loads float32
+#: (`ml/native_dtype.py`). Nothing on the transformers path quantizes the cache: KV_CACHE_MODE is
+#: "dynamic" or "static", and GGUF_KV_CACHE_TYPE (q8_0) applies to llama.cpp alone.
 TRANSFORMERS_KV_BYTES = 2
+
+
+def kv_bytes_for(load_dtype: str) -> int:
+    """Bytes per KV element at a load dtype: 4 for float32, else 2."""
+    return 4 if load_dtype == "float32" else 2
 
 #: Layer types as transformers' DynamicCache reads them (transformers 5.15.1,
 #: cache_utils.get_layer_types_and_kwargs and DYNAMIC_LAYER_TYPE_MAPPING), with
@@ -2655,7 +2690,7 @@ def _layer_config(text: Any, index: int) -> Any:
     return text.per_layer_config[index]
 
 
-def kv_cache_spec(config: Any) -> tuple[Optional[KvCacheSpec], str]:
+def kv_cache_spec(config: Any, kv_bytes: int = TRANSFORMERS_KV_BYTES) -> tuple[Optional[KvCacheSpec], str]:
     """The KV cache a model's config says transformers allocates; (None, why) when unsure.
 
     Mirrors DynamicCache: `layer_types` when the config has it, else every layer
@@ -2727,7 +2762,7 @@ def kv_cache_spec(config: Any) -> tuple[Optional[KvCacheSpec], str]:
             if not _positive_int(window):
                 return None, f"layer {index} is a {layer_type!r} layer with no {window_field}"
             cap = int(window)
-        bytes_per_token.append(2 * int(kv_heads) * int(head_dim) * TRANSFORMERS_KV_BYTES)
+        bytes_per_token.append(2 * int(kv_heads) * int(head_dim) * kv_bytes)
         token_cap.append(cap)
     max_context = getattr(text, "max_position_embeddings", None)
     return KvCacheSpec(
@@ -3092,24 +3127,27 @@ def transformers_fit(
         stage = _STAGE_CHECKPOINT
         config = AutoConfig.from_pretrained(cache_path, trust_remote_code=trust_remote_code)
         architecture = _architecture_name(config)
-        kv, reason = kv_cache_spec(config)
+        fit_dtype = resolve_for_config(quantization, config)
+        kv, reason = kv_cache_spec(config, kv_bytes=kv_bytes_for(fit_dtype.name))
         if kv is None:
             _fit_falls_back(architecture, reason)
             return None
-        quantization_config = None if is_pre_quantized else _bitsandbytes_config(quantization)
+        quantization_config = (
+            None if is_pre_quantized else _bitsandbytes_config(quantization, fit_dtype.torch_dtype)
+        )
         hf_quantizer, config, device_map = get_hf_quantizer(
             config, quantization_config, "sequential", True, {}
         )
         if is_pre_quantized and hf_quantizer is None:
             _fit_falls_back(architecture, "its quantization method has no transformers quantizer")
             return None
-        model = _meta_model(config, trust_remote_code)
+        model = _meta_model(config, trust_remote_code, fit_dtype.torch_dtype)
         # Config, class and quantizer all built: from here a failure is transformers'.
         stage = _STAGE_ENGINE
         if hf_quantizer is not None:
             hf_quantizer.preprocess_model(
                 model=model,
-                dtype=torch.bfloat16,
+                dtype=fit_dtype.torch_dtype,
                 device_map=device_map,
                 checkpoint_files=None,
                 use_kernels=False,

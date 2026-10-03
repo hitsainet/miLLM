@@ -60,6 +60,10 @@ class ModelIdentity(_Contract):
     architecture: str
     chat_template_sha256: str | None = None
     mistudio_model_id: str | None = None
+    # The precision the producer's model ran at (miStudio 2026-10-03). None = NOT RECORDED —
+    # the document predates the field. `probe_identity.check_identity` compares it to what this
+    # server loaded; it is never read as "float16".
+    load_dtype: str | None = None
 
 
 class ReadPoint(_Contract):

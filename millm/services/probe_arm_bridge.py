@@ -20,6 +20,7 @@ from typing import Any, Optional
 import torch
 from sqlalchemy import select
 
+from millm.ml.native_dtype import LOAD_DTYPES
 from millm.core.errors import (
     ProbeHookUnsupportedError,
     ProbeNoModelLoadedError,
@@ -83,6 +84,9 @@ async def loaded_identity(session: Any) -> tuple[LoadedIdentity, Any, Any]:
         revision=revision,
         revision_source=revision_source,
         supports_hooks=True,
+        # The RESOLVED precision the loader recorded (`LoadedModel.dtype`), compared against the
+        # definition's `model.load_dtype`.
+        dtype=current.dtype if current.dtype in LOAD_DTYPES else None,
     )
     logger.info(
         "probe_loaded_identity hf_id=%s d_model=%s n_layers=%s revision_source=%s",

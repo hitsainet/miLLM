@@ -52,7 +52,7 @@ function ParitySummary({ probe }: { probe: Probe }) {
   // is labelled as what it is.
   const decided =
     max_gated_diff != null && score_tolerance != null
-      ? `${max_gated_diff.toFixed(3)} / ${score_tolerance}`
+      ? `${max_gated_diff.toFixed(3)} / ${score_tolerance.toFixed(3)}`
       : null;
   return (
     <span

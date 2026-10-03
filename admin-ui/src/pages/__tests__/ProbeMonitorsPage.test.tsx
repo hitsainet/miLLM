@@ -690,7 +690,16 @@ describe('the parity badge shows the numbers that DECIDED the verdict', () => {
   it('shows the gated difference against the tolerance that gated it', () => {
     state.probes = [probe({ parity } as never)];
     renderPage();
-    expect(screen.getByTestId('parity')).toHaveTextContent('0.079 / 0.1');
+    expect(screen.getByTestId('parity')).toHaveTextContent('0.079 / 0.100');
+  });
+
+  it('rounds a relative tolerance instead of printing float noise', () => {
+    // The matched floor is 0.6% of the bar: 0.006 x 46.78 is 0.28068 in floating point.
+    state.probes = [probe({ parity: { ...parity, score_tolerance: 0.006 * 46.78 } } as never)];
+    renderPage();
+    const text = screen.getByTestId('parity').textContent ?? '';
+    expect(text).toContain('0.079 / 0.281');
+    expect(text).not.toMatch(/0\.2806\d{5,}/);
   });
 
   it('⚠ never pairs the per-token maximum with a tolerance', () => {
@@ -716,7 +725,7 @@ describe('the parity badge shows the numbers that DECIDED the verdict', () => {
     renderPage();
     const text = screen.getByTestId('parity').textContent ?? '';
     expect(text).toContain('FAILED');
-    expect(text).toContain('0.400 / 0.1');
+    expect(text).toContain('0.400 / 0.100');
   });
 
   it('omits the pair entirely when the backend does not send it', () => {

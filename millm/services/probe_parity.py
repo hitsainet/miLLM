@@ -160,6 +160,9 @@ class ParityReport:
     #: precision this server loaded at (`dtype_comparison`). Reported on every report, so a failed
     #: parity shows its likely cause; and it chooses the floor (`score_tolerance`).
     dtype: dict[str, Any] = field(default_factory=dict)
+    #: The probe's own bar (`decision.threshold`), which scales the matched floor. None for a probe
+    #: that places no bar, whose matched floor is the absolute minimum.
+    threshold: Optional[float] = None
 
     @property
     def max_abs_diff(self) -> Optional[float]:
@@ -188,11 +191,16 @@ class ParityReport:
         # absorb a CROSS-PRECISION gap — miStudio float16, this server bfloat16. When the
         # definition states the same precision this server loaded at, that gap is gone and what
         # remains is two implementations' bfloat16 noise, which has its own measured floor.
-        floor = (
-            settings.PROBE_PARITY_MATCHED_DTYPE_FLOOR
-            if self.dtype.get("matched") is True
-            else settings.PROBE_PARITY_SCORE_TOLERANCE
-        )
+        if self.dtype.get("matched") is True:
+            # Measured two-implementation bfloat16 noise, which scales with the probe's own score
+            # range — see PROBE_PARITY_MATCHED_RELATIVE_FLOOR for the numbers.
+            relative = (
+                settings.PROBE_PARITY_MATCHED_RELATIVE_FLOOR * abs(float(self.threshold))
+                if self.threshold is not None else 0.0
+            )
+            floor = max(settings.PROBE_PARITY_MATCHED_DTYPE_FLOOR, relative)
+        else:
+            floor = settings.PROBE_PARITY_SCORE_TOLERANCE
         return max(self.tolerance, floor)
 
     @property
@@ -321,9 +329,11 @@ class ProbeParityEngine:
     ) -> ParityReport:
         spec = (definition or {}).get("test_vectors") or {}
         vectors: Sequence[dict[str, Any]] = spec.get("vectors") or []
+        threshold = ((definition or {}).get("decision") or {}).get("threshold")
         report = ParityReport(
             tolerance=tolerance,
             dtype=dtype_comparison(definition, loaded_dtype, loaded_quantization),
+            threshold=float(threshold) if isinstance(threshold, (int, float)) and not isinstance(threshold, bool) else None,
         )
         recorded_quant = report.dtype.get("recorded_quantization")
         if (recorded_quant is not None and loaded_quantization is not None

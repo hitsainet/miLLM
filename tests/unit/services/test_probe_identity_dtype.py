@@ -101,6 +101,44 @@ class TestTheParityFloor:
         report = ParityReport(tolerance=0.05, dtype={"matched": matched})
         assert report.score_tolerance == expected
 
+    @pytest.mark.parametrize("threshold,expected", [
+        (46.78, 0.006 * 46.78),   # L21 rolling w=32: the relative part governs
+        (25.29, 0.006 * 25.29),   # L11 rolling w=64
+        (17.24, 0.006 * 17.24),   # L16 mean: 0.1034, just over the minimum
+        (10.0, 0.10),             # a small bar: the absolute minimum governs
+        (-30.0, 0.18),            # a negative bar: its magnitude
+        (None, 0.10),             # no bar: the absolute minimum
+    ])
+    def test_the_matched_floor_is_relative_to_the_probes_bar(self, monkeypatch, threshold, expected):
+        """Measured 2026-10-03: two codebases' bf16 noise was 0.16-0.27% of the bar."""
+        from millm.core.config import settings
+
+        monkeypatch.setattr(settings, "PROBE_PARITY_MATCHED_DTYPE_FLOOR", 0.10)
+        monkeypatch.setattr(settings, "PROBE_PARITY_MATCHED_RELATIVE_FLOOR", 0.006)
+        report = ParityReport(tolerance=0.05, dtype={"matched": True}, threshold=threshold)
+        assert report.score_tolerance == pytest.approx(expected)
+
+    def test_an_unmatched_probe_never_gets_the_relative_floor(self, monkeypatch):
+        from millm.core.config import settings
+
+        monkeypatch.setattr(settings, "PROBE_PARITY_SCORE_TOLERANCE", 0.10)
+        report = ParityReport(tolerance=0.05, dtype={"matched": False}, threshold=46.78)
+        assert report.score_tolerance == 0.10
+
+    def test_the_engine_reads_the_bar_from_the_definition(self):
+        from millm.services.probe_parity import ProbeParityEngine
+
+        report = ProbeParityEngine(forward=lambda *a: None).run(
+            probe=None, definition={"model": {}, "decision": {"threshold": 46.78}, "test_vectors": {"vectors": []}},
+            tolerance=0.05)
+        assert report.threshold == 46.78
+
+    def test_the_shipped_settings(self):
+        from millm.core.config import Settings
+
+        assert Settings.model_fields["PROBE_PARITY_MATCHED_DTYPE_FLOOR"].default == 0.10
+        assert Settings.model_fields["PROBE_PARITY_MATCHED_RELATIVE_FLOOR"].default == 0.006
+
     def test_the_report_carries_the_comparison(self):
         details = ParityReport(tolerance=0.05, dtype={"recorded": "float16", "loaded": "bfloat16",
                                                       "matched": False}).as_details()

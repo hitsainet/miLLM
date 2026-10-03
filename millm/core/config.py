@@ -195,12 +195,19 @@ class Settings(BaseSettings):
     #: The gate's floor when the definition's `model.load_dtype` EQUALS the precision this server
     #: loaded at, so no cross-precision gap remains — only two implementations' bfloat16 noise.
     #:
-    #: ⚠ PROVISIONAL, equal to the legacy floor, until it is MEASURED (native-dtype plan, Phase 7):
-    #: worst combined Δ over a retrained probe's vectors between miStudio (one input at a time,
-    #: bfloat16) and this server. Phase 0 already showed that noise is not small: bfloat16 moved
-    #: combined scores up to 0.177 between batched and single scoring in ONE codebase, and two
-    #: codebases differed by at least 0.087 on one vector. Expect this to rise, not fall.
+    #: The ABSOLUTE minimum of the matched floor; the probe-relative part is below.
     PROBE_PARITY_MATCHED_DTYPE_FLOOR: float = 0.10
+    #: The matched floor's RELATIVE part, as a fraction of the probe's own bar: the floor is
+    #: max(PROBE_PARITY_MATCHED_DTYPE_FLOOR, this x |decision.threshold|).
+    #:
+    #: MEASURED 2026-10-03 on three retrained bfloat16 probes (48 vectors), miStudio scoring one
+    #: input at a time vs this server: worst combined Δ 0.0679 (L11 rolling w=64, bar 25.29),
+    #: 0.0278 (L16 mean, bar 17.24), 0.0856 (L21 rolling w=32, bar 46.78) — 0.16-0.27% of the bar,
+    #: and 15 of 48 vectors reproduced EXACTLY. Relative because the rules score on different
+    #: scales and the noise tracks the bar more tightly (1.7x spread) than it tracks an absolute
+    #: number (3.1x). 0.6% gives 2.2-3.6x headroom on all three; a wrong detector misses by whole
+    #: units. Chosen by the operator over keeping 0.10, which left the L21 probe 14% headroom.
+    PROBE_PARITY_MATCHED_RELATIVE_FLOOR: float = 0.006
     #: How much of a vector must be reproducible for its comparison to count.
     #:
     #: ⚠ A k-sparse JumpReLU probe has positions whose gate NO independent implementation can

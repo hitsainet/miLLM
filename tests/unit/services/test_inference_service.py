@@ -790,36 +790,43 @@ class TestCreateEmbeddings:
         """
         from contextlib import contextmanager
 
-        entered = {"count": 0, "active_during_forward": False}
-        mock_sae = MagicMock()
+        # ⚠ TWO ATTACHED SAEs, as a multi-layer circuit attaches (2026-10-04). Suppression used to
+        # reach only the FIRST, so a circuit's other layers still steered embeddings; a one-SAE
+        # fixture agreed with that defect by construction.
+        entered = {"layer_a": 0, "layer_b": 0}
+        active = set()
 
-        @contextmanager
-        def fake_suppressed():
-            entered["count"] += 1
-            entered["active_during_forward"] = True
-            try:
-                yield
-            finally:
-                entered["active_during_forward"] = False
+        def sae(name):
+            mock = MagicMock()
 
-        mock_sae.suppressed = fake_suppressed
+            @contextmanager
+            def fake_suppressed():
+                entered[name] += 1
+                active.add(name)
+                try:
+                    yield
+                finally:
+                    active.discard(name)
 
-        # Record whether suppression was active at the moment of the forward pass.
+            mock.suppressed = fake_suppressed
+            return SimpleNamespace(sae=mock)
+
         forward_state = {}
 
         def record_forward(*args, **kwargs):
-            forward_state["suppressed"] = entered["active_during_forward"]
+            forward_state["suppressed"] = set(active)
             out = MagicMock()
             out.hidden_states = [torch.randn(1, 5, 64)]
             return out
 
         mock_model_for_embeddings.side_effect = record_forward
 
-        with patch.object(service, "_get_attached_sae", return_value=mock_sae):
+        with patch("millm.services.sae_service.AttachedSAEState.entries",
+                   return_value=[sae("layer_a"), sae("layer_b")]):
             await service.create_embeddings(embedding_request)
 
-        assert entered["count"] == 1
-        assert forward_state.get("suppressed") is True
+        assert entered == {"layer_a": 1, "layer_b": 1}
+        assert forward_state.get("suppressed") == {"layer_a", "layer_b"}
 
     @pytest.mark.asyncio
     async def test_base64_encoding_format(

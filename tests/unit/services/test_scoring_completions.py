@@ -277,3 +277,127 @@ class TestTheHttpRouteCarriesItEndToEnd:
             "model": "tiny", "prompt": PROMPT, "max_tokens": 1, "allowed_token_ids": [999]})
         assert response.status_code == 400, response.text
         assert "INVALID_SCORING_REQUEST" in response.text or "vocabulary" in response.text
+
+
+class _Spy(torch.nn.Module):
+    """Wraps the real model: records each forward's kwargs, optionally fails or corrupts it."""
+
+    def __init__(self, inner, *, fail=None, nan=False, on_forward=None):
+        super().__init__()
+        self.inner, self.fail, self.nan, self.on_forward, self.calls = inner, fail, nan, on_forward, []
+        self.config = inner.config
+
+    def forward(self, **kwargs):
+        self.calls.append(kwargs)
+        if self.on_forward is not None:
+            self.on_forward()
+        if self.fail is not None:
+            raise self.fail
+        out = self.inner(**kwargs)
+        if self.nan:
+            out.logits[..., 5] = float("nan")
+        return out
+
+    def get_input_embeddings(self):
+        return self.inner.get_input_embeddings()
+
+
+class TestReviewRoundOne:
+    async def test_only_the_last_positions_logits_are_computed(self, model):
+        """H1: a plain forward builds logits for every position (~2 GB at 4k tokens, 248k vocab)."""
+        spy = _Spy(model)
+        response = await _service(spy, _tokenizer(bos=False)).create_text_completion(_request())
+        assert response.choices[0].logprobs is not None
+        assert len(spy.calls) == 1 and spy.calls[0]["logits_to_keep"] == 1
+
+    async def test_out_of_memory_is_the_typed_refusal(self, model):
+        from millm.core.errors import GenerationOutOfMemoryError
+
+        spy = _Spy(model, fail=torch.cuda.OutOfMemoryError("CUDA out of memory. GPU 0 has a total"))
+        with pytest.raises(GenerationOutOfMemoryError):
+            await _service(spy, _tokenizer(bos=False)).create_text_completion(_request())
+
+    async def test_non_finite_logits_are_refused_not_serialised(self, model):
+        from millm.core.errors import ScoringNumericalError
+
+        spy = _Spy(model, nan=True)
+        with pytest.raises(ScoringNumericalError):
+            await _service(spy, _tokenizer(bos=False)).create_text_completion(_request())
+
+    async def test_every_attached_sae_is_suppressed_during_the_pass(self, model):
+        """M1: a judge's verdict must not be steered. Two SAEs, as a circuit attaches."""
+        from contextlib import contextmanager
+        from types import SimpleNamespace
+        from unittest.mock import MagicMock
+
+        active, seen = set(), []
+
+        def entry(name):
+            sae = MagicMock()
+
+            @contextmanager
+            def suppressed():
+                active.add(name)
+                try:
+                    yield
+                finally:
+                    active.discard(name)
+
+            sae.suppressed = suppressed
+            return SimpleNamespace(sae=sae)
+
+        spy = _Spy(model, on_forward=lambda: seen.append(set(active)))
+        with patch("millm.services.sae_service.AttachedSAEState.entries",
+                   return_value=[entry("a"), entry("b")]):
+            await _service(spy, _tokenizer(bos=False)).create_text_completion(_request())
+        assert seen == [{"a", "b"}]
+        assert active == set(), "suppression outlived the pass"
+
+    async def test_no_monitor_is_ever_begun(self, model):
+        """Probes, sensing and circuit sensing record a request only once it is begun."""
+        svc = _service(model, _tokenizer(bos=False))
+
+        def refuse(*a, **k):
+            raise AssertionError("a monitor was begun for a scoring request")
+
+        svc._probe_begin = svc._sensing_begin = svc._circuit_sensing_begin = refuse
+        assert (await svc.create_text_completion(_request())).choices[0].logprobs is not None
+
+    async def test_an_empty_prompt_is_a_400(self, model):
+        with pytest.raises(InvalidScoringRequestError, match="tokenises to nothing"):
+            await _service(model, _tokenizer(bos=False)).create_text_completion(_request(prompt=""))
+
+    def test_an_empty_prompt_list_is_refused(self):
+        with pytest.raises(ValidationError, match="at least one prompt"):
+            _request(prompt=[])
+
+    async def test_allowed_ids_without_logprobs_return_no_logprobs_object(self, model):
+        """vLLM returns `logprobs: null` when only the token was constrained."""
+        response = await _service(model, _tokenizer(bos=False)).create_text_completion(
+            _request(logprobs=None))
+        choice = response.choices[0]
+        assert choice.logprobs is None and choice.text in {"w3", "w7"}
+
+    def test_a_gguf_model_is_refused_before_it_is_loaded(self, model):
+        """M2: loading would evict the resident model and its SAEs to reach the same 400."""
+        from unittest.mock import AsyncMock, MagicMock
+
+        from fastapi.testclient import TestClient
+
+        from millm.api.dependencies import get_inference_service, get_model_service
+        from millm.main import create_app
+
+        row = MagicMock()
+        row.id, row.name, row.architecture, row.gguf_files = 2, "q-gguf", "text-generation", ["m.gguf"]
+        svc = MagicMock()
+        svc.find_model_by_name = AsyncMock(return_value=row)
+        svc.load_model_and_wait = AsyncMock()
+        inference = MagicMock()
+        inference.get_loaded_model_info = lambda: None
+        app = create_app()
+        app.dependency_overrides[get_model_service] = lambda: svc
+        app.dependency_overrides[get_inference_service] = lambda: inference
+        response = TestClient(app).post("/v1/completions", json={
+            "model": "q-gguf", "prompt": "x", "max_tokens": 1, "logprobs": 2})
+        assert response.status_code == 400 and "GGUF" in response.text
+        svc.load_model_and_wait.assert_not_called()

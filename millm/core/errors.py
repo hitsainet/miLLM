@@ -64,6 +64,14 @@ class InvalidScoringRequestError(MiLLMError):
     status_code = 400
 
 
+class ScoringNumericalError(MiLLMError):
+    """The model produced NaN or infinite logits, so no probability can be reported. A fault of the
+    model or its weights, not of the request — and reported, never serialised as `NaN`."""
+
+    code = "NON_FINITE_LOGITS"
+    status_code = 500
+
+
 class ContextLengthExceededError(MiLLMError):
     """The request does not fit in the model's context window.
 

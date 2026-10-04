@@ -266,6 +266,8 @@ class TextCompletionRequest(BaseModel):
                 raise ValueError("logprobs and allowed_token_ids require n=1")
             if self.allowed_token_ids is not None and any(i < 0 for i in self.allowed_token_ids):
                 raise ValueError("allowed_token_ids must be non-negative token ids")
+            if isinstance(self.prompt, list) and not self.prompt:
+                raise ValueError("scoring mode needs at least one prompt")
         return self
 
     def wants_scores(self) -> bool:

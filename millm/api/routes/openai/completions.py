@@ -83,6 +83,16 @@ async def create_completion(
             param="stream",
         )
 
+    # Scoring mode needs a per-token distribution, which the llama.cpp engine does not expose here.
+    # Decided by the request and the row, so refused BEFORE the auto-load below would evict the
+    # resident model and its SAEs to reach the same 400 (review round 1, M2).
+    if request.wants_scores() and getattr(model, "gguf_files", None):
+        return validation_error(
+            "Scoring mode (logprobs / allowed_token_ids) needs the transformers engine; "
+            f"'{request.model}' is a GGUF model served by llama.cpp.",
+            param="logprobs",
+        )
+
     # Load the requested model on demand.
     #
     # An OpenAI client — Open WebUI included — selects a model by naming it in

@@ -12,6 +12,7 @@ Implementation notes:
 """
 
 import asyncio
+import contextlib
 import contextvars
 import gc
 import math
@@ -20,7 +21,7 @@ import uuid
 from contextlib import asynccontextmanager
 from datetime import datetime
 from threading import Event, Thread
-from typing import TYPE_CHECKING, Any, AsyncGenerator, AsyncIterator, Optional
+from typing import TYPE_CHECKING, Any, AsyncGenerator, AsyncIterator, Iterator, Optional
 
 import torch
 
@@ -45,6 +46,7 @@ from millm.core.errors import (
     ContextLengthExceededError,
     EngineUnsupportedError,
     InvalidScoringRequestError,
+    ScoringNumericalError,
     GenerationOutOfMemoryError,
     MiLLMError,
     ModelBusyError,
@@ -1150,6 +1152,29 @@ class InferenceService:
             return AttachedSAEState().attached_sae
         except Exception:
             return None
+
+    @contextlib.contextmanager
+    def _unsteered(self) -> Iterator[None]:
+        """Every attached SAE inert for the duration: no steering applied, no monitoring captured.
+
+        ⚠ EVERY ENTRY, NOT THE FIRST. Embeddings used `_get_attached_sae().suppressed()`, which is the
+        FIRST attached SAE only, while a multi-layer circuit attaches one per layer — so "embeddings
+        are never steered" was false whenever a circuit was serving (found 2026-10-04 reviewing the
+        scoring path, which needs the same guarantee). The flag each SAE carries is shared, so a pass
+        run under this while continuous batching generates concurrently would leave that generation
+        unsteered for the window; CBM is off by default and everything else is serialised by
+        `_admit`.
+        """
+        try:
+            from millm.services.sae_service import AttachedSAEState
+
+            entries = AttachedSAEState().entries()
+        except Exception:  # noqa: BLE001 - no SAE service means nothing to suppress
+            entries = []
+        with contextlib.ExitStack() as stack:
+            for entry in entries:
+                stack.enter_context(entry.sae.suppressed())
+            yield
 
     @staticmethod
     def _intensity_range_of(profile: Any) -> Optional[tuple[float, float]]:
@@ -4888,7 +4913,11 @@ class InferenceService:
 
         What a typed-decision judge reads its answer from (see `next_token_scores`). Probe and
         sensing hooks see no open request here, so they record nothing — a judge's prompt is not
-        user traffic. An attached SAE still steers the pass, exactly as it steers generation.
+        user traffic.
+
+        ⚠ UNSTEERED, like embeddings (review round 1, M1). A judge's whole output is a probability;
+        a steering profile left on the model would bias every verdict and nothing in the response
+        would say so. Scoring runs with every attached SAE suppressed.
         """
         from millm.services.next_token_scores import next_token_scores
 
@@ -4904,12 +4933,6 @@ class InferenceService:
         prompt_total = 0
 
         async with self._admit():
-            vocab = int(self._model.get_output_embeddings().weight.shape[0])
-            if request.allowed_token_ids and max(request.allowed_token_ids) >= vocab:
-                raise InvalidScoringRequestError(
-                    f"allowed_token_ids contains {max(request.allowed_token_ids)}, outside the loaded "
-                    f"model's vocabulary of {vocab}"
-                )
 
             def key(token_id: int) -> str:
                 if request.return_tokens_as_token_ids:
@@ -4921,8 +4944,26 @@ class InferenceService:
                     prompt_text, return_tensors="pt", add_special_tokens=request.add_special_tokens
                 ).to(self._get_input_device())
                 prompt_tokens = int(inputs.input_ids.shape[1])
+                if prompt_tokens == 0:
+                    raise InvalidScoringRequestError(
+                        f"prompt {index} tokenises to nothing, so there is no position to score"
+                    )
                 self._check_context_length(prompt_tokens, 1)
-                logits = await asyncio.to_thread(self._next_token_logits, inputs)
+                with self._unsteered():
+                    logits = await asyncio.to_thread(self._next_token_logits, inputs)
+                # The vocabulary is what the model actually scores — its logits — not a config
+                # field or an embedding matrix some wrappers do not expose (review round 1).
+                vocab = int(logits.shape[-1])
+                if request.allowed_token_ids and max(request.allowed_token_ids) >= vocab:
+                    raise InvalidScoringRequestError(
+                        f"allowed_token_ids contains {max(request.allowed_token_ids)}, outside the "
+                        f"loaded model's vocabulary of {vocab}"
+                    )
+                if not bool(torch.isfinite(logits).all()):
+                    raise ScoringNumericalError(
+                        "The model produced non-finite logits for this prompt, so no probability can "
+                        "be reported for it."
+                    )
                 scores = next_token_scores(
                     logits,
                     allowed=request.allowed_token_ids,
@@ -4934,7 +4975,9 @@ class InferenceService:
                         index=index,
                         text=self._tokenizer.decode([scores.chosen_id]),
                         finish_reason="length",
-                        logprobs=CompletionLogprobs(
+                        # `allowed_token_ids` alone constrains the token without asking for
+                        # scores; vLLM then returns `logprobs: null`, and so does this.
+                        logprobs=None if request.logprobs is None else CompletionLogprobs(
                             tokens=[key(scores.chosen_id)],
                             token_logprobs=[scores.chosen_logprob],
                             top_logprobs=[{key(t): lp for t, lp in scores.top}],
@@ -4958,10 +5001,28 @@ class InferenceService:
         )
 
     def _next_token_logits(self, inputs: Any) -> torch.Tensor:
-        """The last position's logits as float32 on the CPU, from one forward pass."""
-        with torch.no_grad():
-            outputs = self._model(**inputs, use_cache=False)
-        return outputs.logits[0, -1].float().cpu()
+        """The last position's logits as float32 on the CPU, from one forward pass.
+
+        ⚠ ONLY THE LAST POSITION (review round 1, H1). A plain forward computes logits for every
+        prompt position — ~2 GB at 4k tokens with a 248k vocabulary, ~16 GB at 32k — which
+        `generate()` avoids by asking for one. A CUDA out-of-memory error is the same typed,
+        memory-releasing refusal generation gives, not a bare 500.
+        """
+        failure: Optional[GenerationOutOfMemoryError] = None
+        try:
+            with torch.no_grad():
+                try:
+                    outputs = self._model(**inputs, use_cache=False, logits_to_keep=1)
+                except TypeError as exc:
+                    if "logits_to_keep" not in str(exc):
+                        raise
+                    outputs = self._model(**inputs, use_cache=False)
+            return outputs.logits[0, -1].float().cpu()
+        except torch.cuda.OutOfMemoryError as exc:
+            failure = _generation_oom_error(exc, {**dict(inputs), "max_new_tokens": 1})
+        _release_generation_memory()
+        logger.error("scoring_out_of_memory", **failure.details)
+        raise failure
 
     # =========================================================================
     # Embeddings
@@ -5001,10 +5062,6 @@ class InferenceService:
         # from, and the pass would clobber the last-captured monitoring
         # activations.  Suppress the hook for the duration of the embedding
         # forward passes.
-        import contextlib
-
-        attached_sae = self._get_attached_sae()
-
         async with self._admit():
             for i, text in enumerate(inputs):
                 # Tokenize
@@ -5017,12 +5074,7 @@ class InferenceService:
                 total_tokens += encoded.input_ids.shape[1]
 
                 # Get embeddings from last hidden layer
-                suppress_ctx = (
-                    attached_sae.suppressed()
-                    if attached_sae is not None
-                    else contextlib.nullcontext()
-                )
-                with torch.no_grad(), suppress_ctx:
+                with torch.no_grad(), self._unsteered():
                     outputs = self._model(
                         **encoded, output_hidden_states=True
                     )

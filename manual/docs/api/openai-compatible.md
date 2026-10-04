@@ -163,7 +163,22 @@ Classification models in the Jev style (for example `autotrust/JEV-9B`) don't ge
 | `add_special_tokens` | bool | `true` | Set `false` when the prompt must be tokenised exactly as written (no BOS) |
 | `return_tokens_as_token_ids` | bool | `false` | Key `top_logprobs` by `"token_id:<id>"` instead of the decoded token text, which can be ambiguous |
 
-Scoring mode needs `max_tokens: 1` and `n: 1`; any other value is refused with a 422. One forward pass runs per prompt and nothing is generated. The returned `text` is the most probable allowed token, and `temperature` divides the logits before normalising (`0` means no scaling). Each choice carries an OpenAI-shaped `logprobs` object: `tokens`, `token_logprobs`, `top_logprobs` and `text_offset`. A token id outside the loaded model's vocabulary is a 400. Scoring needs the transformers engine; a llama.cpp (GGUF) model refuses it with a 400 rather than returning text without probabilities.
+Scoring mode needs `max_tokens: 1` and `n: 1`; any other value is refused with a 422. One forward pass runs per prompt and nothing is generated.
+- The returned `text` is the most probable allowed token.
+- `temperature` divides the logits before normalising; `0` means no scaling. `top_p`, `stop` and the penalties don't apply in scoring mode.
+- Each choice carries an OpenAI-shaped `logprobs` object: `tokens`, `token_logprobs`, `top_logprobs`, and `text_offset` (the character offset of the token within prompt plus completion, which is OpenAI's convention). With `allowed_token_ids` but no `logprobs`, the token is constrained and `logprobs` is `null`, as in vLLM.
+- When tokens are keyed by text, two ids that decode to the same text share one entry. Use `return_tokens_as_token_ids` when that matters.
+
+These requests are refused instead:
+- A token id outside the loaded model's vocabulary: 400.
+- A prompt that tokenises to nothing: 400.
+- A GGUF (llama.cpp) model: 400, before the model is loaded, because llama.cpp exposes no per-token distribution here.
+- A model that produces non-finite logits: 500 `NON_FINITE_LOGITS`.
+- Running out of GPU memory: the same typed error as generation.
+
+:::caution Behaviour change
+Before scoring mode existed, `logprobs` was silently ignored, so `logprobs: 5, max_tokens: 100` returned 100 tokens of text with no probabilities. That request is now refused with a 422 rather than answered without what it asked for.
+:::
 
 ```bash
 curl http://localhost:8000/v1/completions -H 'content-type: application/json' -d '{
@@ -172,14 +187,14 @@ curl http://localhost:8000/v1/completions -H 'content-type: application/json' -d
   "add_special_tokens": false, "return_tokens_as_token_ids": true}'
 ```
 
-Scoring requests are not monitored: probes and sensing record nothing for them, because a judge's prompt isn't user traffic. An attached SAE still steers the forward pass, exactly as it steers generation.
+Scoring requests are **never steered and never monitored**. Every attached SAE is suppressed for the forward pass, as for embeddings, because a judge's output is a probability that a steering profile left on the model would silently bias. Probes and sensing record nothing, because a judge's prompt isn't user traffic. Suppression is a shared switch on each SAE, so with continuous batching enabled (`ENABLE_CONTINUOUS_BATCHING`, off by default) a generation running at the same moment is unsteered for that pass.
 
 ## Embeddings
 
 `POST /v1/embeddings` with `input` (string or list) returns mean-pooled last-hidden-layer embeddings. `encoding_format` may be `"float"` (default) or `"base64"`.
 
 :::info Embeddings are never steered
-The steering hook is suppressed during embedding computation, so embeddings always reflect the unmodified model — making them a neutral measuring stick for comparing steered vs. unsteered generations.
+The steering hook of **every** attached SAE is suppressed during embedding computation (each layer of a circuit, not just the first — fixed 2026-10-04), so embeddings always reflect the unmodified model — making them a neutral measuring stick for comparing steered vs. unsteered generations.
 :::
 
 ## Models

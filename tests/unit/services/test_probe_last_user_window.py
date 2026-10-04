@@ -20,7 +20,7 @@ from transformers import PreTrainedTokenizerFast
 
 from millm.ml.probe_head import ProbeHead
 from millm.services.probe_arming import (
-    DEFAULT_WINDOWS,
+    BASE_DEFAULT_WINDOWS,
     resolve_windows,
     window_length_bands_from_definition,
 )
@@ -157,7 +157,7 @@ class TestTheWindowAtServeTime:
     def test_it_is_a_known_window_on_by_default_only_with_its_own_bar(self):
         """Review round 1 (M4): an older probe has no `last_user` bar, so defaulting the window on
         would fire provisionally against the global bar on traffic that was quiet before."""
-        assert "last_user" in WINDOWS and "last_user" in DEFAULT_WINDOWS
+        assert "last_user" in WINDOWS and "last_user" not in BASE_DEFAULT_WINDOWS
         assert "last_user" not in resolve_windows(None, probe_scope="all")
         assert "last_user" in resolve_windows(None, probe_scope="all", calibrated={"last_user": 2.0})
         assert resolve_windows(["last_user"], probe_scope="all") == ("last_user",)
@@ -307,11 +307,19 @@ _STUDIO_CASES = _Path(_os.environ.get("MISTUDIO_REPO", "/home/x-sean/app/miStudi
 _CASES = _json.loads(_CASES_PATH.read_text())
 
 
-def _case_tokenizer(prepend_bos: bool, template: str | None = None):
+def _case_tokenizer(prepend_bos: bool, template: str | None = None, case: dict | None = None):
     from tokenizers import processors
 
-    tok = Tokenizer(models.WordLevel({w: i for i, w in enumerate(_CASES["vocab"])}, unk_token="[UNK]"))
+    vocab = (case or {}).get("vocab") or _CASES["vocab"]
+    tok = Tokenizer(models.WordLevel({w: i for i, w in enumerate(vocab)}, unk_token="[UNK]"))
     tok.pre_tokenizer = pre_tokenizers.WhitespaceSplit()
+    if (case or {}).get("pretokenizer") == "metaspace_first":
+        from tokenizers import Regex
+
+        tok.pre_tokenizer = pre_tokenizers.Sequence([
+            pre_tokenizers.Metaspace(replacement="\u2581", prepend_scheme="first", split=True),
+            pre_tokenizers.Split(Regex("\u2581?<\\|[a-z]+\\|>"), behavior="isolated"),
+        ])
     if prepend_bos:
         tok.post_processor = processors.TemplateProcessing(single="<s> $A", special_tokens=[("<s>", 0)])
     fast = PreTrainedTokenizerFast(tokenizer_object=tok, bos_token="<s>", unk_token="[UNK]")
@@ -322,7 +330,7 @@ def _case_tokenizer(prepend_bos: bool, template: str | None = None):
 @pytest.mark.parametrize("case", _CASES["cases"], ids=lambda c: c["name"])
 def test_the_served_span_matches_the_shared_cases(case):
     """What this server scores — tokenized as `InferenceService` does, specials ON."""
-    tok = _case_tokenizer(case["prepend_bos"], case.get("template"))
+    tok = _case_tokenizer(case["prepend_bos"], case.get("template"), case)
     prompt = tok.apply_chat_template(case["messages"], tokenize=False, add_generation_prompt=True)
     served = tok(prompt)["input_ids"]
     span, _reason = last_user_token_span(tok, case["messages"], served)

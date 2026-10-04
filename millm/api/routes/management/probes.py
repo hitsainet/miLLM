@@ -61,7 +61,8 @@ class ProbeArmRequest(BaseModel):
     acknowledge_below_rung2: bool = False
     reason: str = Field("", max_length=500)
     #: WHICH WINDOWS THIS PROBE REPORTS — `all`, `prompt`, `response`, `last_user`. `None` means
-    #: the default (all four); an explicit `[]` means the probe's own scope alone, which is what it
+    #: `all`, `prompt` and `response`, plus `last_user` only when the definition carries a bar for
+    #: it (`probe_arming.resolve_windows`); an explicit `[]` means the probe's own scope alone, which is what it
     #: did before windows existed. `last_user` (2026-10-04) is the newest user message alone.
     #:
     #: ⚠ THIS IS NOT THE PROBE'S SCOPE AND DOES NOT CHANGE IT. `scope` is identity: what the

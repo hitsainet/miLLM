@@ -294,10 +294,14 @@ rendering the conversation's prefixes, which requires that rendering `messages[:
 rendering `messages[:i]`. A template that renders an earlier turn differently once a later one
 exists — one that strips reasoning from previous assistant turns, as some reasoning-model templates
 do — fails that check on a multi-turn request and reports `last_user_span_unresolved`. Single-turn
-requests are unaffected.
+requests are unaffected. A template that is not prefix-stable even for one message (measured:
+Phi-4-mini-instruct) yields no `last_user` window at all, in either repo.
 
 ⚠ **A WINDOW'S OWN `length_bands` (`decision.windows[w].length_bands`) REFINE ITS OWN BAR**, cut
 from that window's negatives and token counts, and take precedence over `decision.length_bands`.
+A recalibrate push refreshes the bars of the windows a probe is ARMED with; a window it was not
+armed with (a `last_user` bar pushed to a probe armed before it had one) is read only after a
+re-arm.
 
 ⚠ **`windows` IS NOT `scope`, AND DOES NOT CHANGE IT.** `scope` is the probe's identity:
 what it was trained on, what its threshold was cut under, and the only thing the parity gate

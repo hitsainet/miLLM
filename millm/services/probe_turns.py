@@ -14,6 +14,8 @@ calibrated one would be a rate of one distribution applied to another.
 
 from __future__ import annotations
 
+import json
+import weakref
 from typing import Any, Optional, Sequence
 
 #: The reasons a request has no resolvable `last_user` span. Stated on the verdict.
@@ -32,9 +34,82 @@ _HEADER_PROBES = (
 )
 
 
+#: Single-message renders whose contents differ in one character: their common prefix is the
+#: template's preamble plus the first user header and holds NO content (review round 2, H-A).
+_FIRST_PROBES = ([{"role": "user", "content": "x"}], [{"role": "user", "content": "y"}])
+#: Weakly keyed by tokenizer, then by template and kwargs, so the four extra renders are paid once
+#: per tokenizer rather than per request (review round 2, L-B).
+_cache: "weakref.WeakKeyDictionary[Any, dict]" = weakref.WeakKeyDictionary()
+
+
+def _cached(tokenizer: Any, name: str, kwargs: dict, compute: Any) -> Any:
+    try:
+        key = f"{name}:{getattr(tokenizer, 'chat_template', None)!r}:{json.dumps(kwargs, sort_keys=True, default=str)}"
+        per_tokenizer = _cache.setdefault(tokenizer, {})
+    except TypeError:  # not weakly referenceable: computed every time, never wrongly shared
+        return compute()
+    if key not in per_tokenizer:
+        per_tokenizer[key] = compute()
+    return per_tokenizer[key]
+
+
+def _encode_render(tokenizer: Any, conversation: list, kwargs: dict, generation_prompt: bool = False) -> list[int]:
+    text = tokenizer.apply_chat_template(
+        conversation, tokenize=False, add_generation_prompt=generation_prompt, **kwargs
+    )
+    return list(tokenizer(text, add_special_tokens=False)["input_ids"])
+
+
+def _normalised_text(tokenizer: Any, ids: Sequence[int]) -> str:
+    return tokenizer.decode(list(ids), skip_special_tokens=False).replace("\u2581", " ").strip()
+
+
+def first_user_header(
+    tokenizer: Any, template_kwargs: Optional[dict] = None
+) -> Optional[tuple[list[int], int]]:
+    """`(prefix, start)` for a conversation whose message 0 is a user turn, or `None`.
+
+    `prefix` is what every such render begins with (preamble and header, never content) and
+    `start` is where the header begins inside it. ⚠ NEVER LOCATED IN THE CONTENT: searching
+    message 0 for the header let a user who typed a role header into a single-turn message move
+    the window past everything before it (review round 2, H-A). The header is matched by its TEXT
+    at its own position, because a SentencePiece tokenizer encodes a header at the start of a
+    string with a leading `▁` that the same header after a turn lacks (M-A). Identical to
+    miStudio's `probe_monitor_render.first_user_header`.
+    """
+    kwargs = dict(template_kwargs or {})
+    return _cached(tokenizer, "first", kwargs, lambda: _first_user_header(tokenizer, kwargs))
+
+
+def _first_user_header(tokenizer: Any, kwargs: dict) -> Optional[tuple[list[int], int]]:
+    header = user_header_ids(tokenizer, kwargs)
+    if not header:
+        return None
+    try:
+        a, b = (_encode_render(tokenizer, c, kwargs) for c in _FIRST_PROBES)
+    except Exception:  # a template that refuses a lone user turn has no answer here
+        return None
+    prefix: list[int] = []
+    for x, y in zip(a, b):
+        if x != y:
+            break
+        prefix.append(x)
+    shared = 0
+    while shared < min(len(header), len(prefix)) and prefix[-1 - shared] == header[-1 - shared]:
+        shared += 1
+    start = len(prefix) - shared - (0 if shared == len(header) else 1)
+    if start < 0 or _normalised_text(tokenizer, prefix[start:]) != _normalised_text(tokenizer, header):
+        return None
+    return prefix, start
+
+
 def user_header_ids(tokenizer: Any, template_kwargs: Optional[dict] = None) -> Optional[list[int]]:
     """The token ids of a user turn's role header, or `None` when they cannot be isolated."""
     kwargs = dict(template_kwargs or {})
+    return _cached(tokenizer, "header", kwargs, lambda: _user_header_ids(tokenizer, kwargs))
+
+
+def _user_header_ids(tokenizer: Any, kwargs: dict) -> Optional[list[int]]:
     spans: list[list[int]] = []
     try:
         for conversation in _HEADER_PROBES:
@@ -99,19 +174,15 @@ def last_user_token_span(
     if last == 0:
         # ⚠ MESSAGE 0 ALSO HOLDS THE BOS AND ANY PREAMBLE THE TEMPLATE INJECTS — on Llama-3.1 a
         # ~25-token system block even when no system message was sent (review round 1, H1). The
-        # window starts at the message's own role header, its LAST occurrence in that span, as
-        # miStudio's calibration does.
-        header = user_header_ids(tokenizer, kwargs)
-        if not header:
-            return None, NO_USER_HEADER
-        found = None
-        for candidate in range(end - len(header), start - 1, -1):
-            if served[candidate: candidate + len(header)] == header:
-                found = candidate
-                break
+        # header start comes from content-free renders, never from the content (round 2, H-A),
+        # and the served ids must begin with exactly that prefix.
+        found = first_user_header(tokenizer, kwargs)
         if found is None:
             return None, NO_USER_HEADER
-        start = found
+        prefix, header_start = found
+        if served[offset: offset + len(prefix)] != prefix or offset + len(prefix) > end:
+            return None, NO_USER_HEADER
+        start = offset + header_start
     if end <= start:
         return None, SPAN_UNRESOLVED
     return (start, end), None

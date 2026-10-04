@@ -80,7 +80,6 @@ def head_from_definition(
 #: bar — it answers "is THIS message high-stakes?" on a client that resends the conversation. An
 #: older probe has no such bar, so the window would fire provisionally against the global one:
 #: new alerts on traffic that was quiet yesterday (review round 1, M4).
-DEFAULT_WINDOWS: tuple[str, ...] = ("all", "prompt", "response", "last_user")
 BASE_DEFAULT_WINDOWS: tuple[str, ...] = ("all", "prompt", "response")
 
 

@@ -139,6 +139,10 @@ class ArmedProbe:
     #: band. Empty when the producer did not calibrate per length, which is every document
     #: written before 2026-10-02 — the runtime then uses the single threshold, exactly as before.
     length_bands: list[dict[str, Any]] = field(default_factory=list)
+    #: `{window: bands}` — a window's OWN length bands (`decision.windows[w].length_bands`,
+    #: 2026-10-04), cut from that window's negatives. They refine that window's own bar and take
+    #: precedence over `length_bands`, which describe the probe's own scope.
+    window_length_bands: dict[str, list[dict[str, Any]]] = field(default_factory=dict)
     #: WHICH CUT OF THE BAR THIS ARMED PROBE IS JUDGING AGAINST.
     #:
     #: ⚠ READ FROM HERE, NEVER FROM THE ROW, ON EVERY VERDICT. A bar can now be re-cut while the
@@ -263,6 +267,22 @@ class ProbeRequestContext:
         #: mask exists to prevent. `None` means nobody said, and a non-`all` probe then reports
         #: `prompt_boundary_unknown` rather than guessing.
         self._n_prompt_tokens: Optional[int] = None
+        #: Where the newest user message sits, `(start, end)` in served positions, and why not
+        #: when it cannot be resolved (`probe_turns.last_user_token_span`). `None` with no reason
+        #: means nobody said — the `last_user` window then reports that rather than guessing.
+        self._last_user_span: Optional[tuple[int, int]] = None
+        self._last_user_reason: Optional[str] = None
+
+    def set_last_user_span(
+        self, span: Optional[tuple[int, int]], reason: Optional[str] = None
+    ) -> None:
+        """Record the `last_user` window's span, or why there is none."""
+        self._last_user_span = (int(span[0]), int(span[1])) if span else None
+        self._last_user_reason = None if span else (reason or "last_user_span_unknown")
+
+    @property
+    def last_user_span(self) -> Optional[tuple[int, int]]:
+        return self._last_user_span
 
     @property
     def prompt_length(self) -> Optional[int]:
@@ -552,6 +572,12 @@ class ProbeRequestContext:
         # One `cat` and one host crossing per probe per request, over one tensor per pass.
         score_row = _row(score_parts)
         mask_row = self._mask_for_window(probe, window, mask_parts, int(score_row.numel()))
+        if mask_row is None and window == "last_user":
+            return Verdict(
+                scored=False,
+                not_scored_reason=self._last_user_reason or "last_user_span_unknown",
+                **base,
+            )
         if mask_row is None:
             # ⚠ THIS WINDOW ONLY. The boundary-unknown path used to abort the WHOLE request via
             # `mark_not_scored`, so one probe's unresolvable window silenced every other probe's
@@ -585,7 +611,12 @@ class ProbeRequestContext:
         # is cut under `input`; on such a probe the bands are `user` quantiles and must not replace
         # an `input` bar. Only under `all` is the window's own bar cut from the same pass as the
         # bands. (Non-`all` probes are refused at arm time today; this keeps the rule true anyway.)
-        if window_is_calibrated(probe.scope, window) and (own is None or probe.scope == "all"):
+        own_bands = probe.window_length_bands.get(window) if own is not None else None
+        if own_bands:
+            # ⚠ A WINDOW'S OWN BANDS FIRST (2026-10-04): cut from this window's negatives and
+            # lengths, they are the only bands that describe what this window reads.
+            threshold = threshold_for_length(own_bands, int(scored_index.numel()), threshold)
+        elif window_is_calibrated(probe.scope, window) and (own is None or probe.scope == "all"):
             threshold = threshold_for_length(
                 probe.length_bands, int(scored_index.numel()), threshold
             )
@@ -656,6 +687,15 @@ class ProbeRequestContext:
             return _row(mask_parts)
         if window == "all":
             return torch.ones(n_total, dtype=torch.bool)
+        if window == "last_user":
+            # The newest user message's span, as miStudio calibrated it. Never derived from the
+            # prompt boundary: the prompt is every turn, which is what this window exists to avoid.
+            if self._last_user_span is None:
+                return None
+            start, end = self._last_user_span
+            mask = torch.zeros(n_total, dtype=torch.bool)
+            mask[max(0, start): min(end, n_total)] = True
+            return mask
         if self._n_prompt_tokens is None:
             return None
         n_prompt = min(self._n_prompt_tokens, n_total)

@@ -202,7 +202,8 @@
                 "enum": [
                   "all",
                   "prompt",
-                  "response"
+                  "response",
+                  "last_user"
                 ]
               },
               "type": "object"
@@ -1044,6 +1045,21 @@
           ],
           "default": null,
           "title": "Scope"
+        },
+        "length_bands": {
+          "anyOf": [
+            {
+              "items": {
+                "$ref": "#/$defs/LengthBand"
+              },
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Length Bands"
         }
       },
       "title": "WindowDecision",

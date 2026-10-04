@@ -69,12 +69,13 @@ function ParitySummary({ probe }: { probe: Probe }) {
 }
 
 /** The windows a probe can be asked to report, in the order they read. */
-const WINDOWS = ['all', 'prompt', 'response'] as const;
+const WINDOWS = ['last_user', 'prompt', 'response', 'all'] as const;
 
 /** Why each window is worth having, said once, where the operator chooses. */
 const WINDOW_HELP: Record<string, string> = {
   all: "the whole request — what this did before windows existed. A long reply drags the mean down, so the same conversation scores differently depending on how much the model said.",
-  prompt: "the person's words only. Independent of how much the model then said, and closest to what these weights were trained on.",
+  last_user: "the newest user message only — its header, text and end-of-turn. Earlier turns, a system prompt and retrieved documents are excluded, so a high-stakes message earlier in a chat does not keep firing on every later one. The question \"is THIS message high-stakes?\".",
+  prompt: "everything before the model's reply — system text, every earlier turn and the newest message. Independent of how much the model then said, but a high-stakes earlier turn keeps firing on every later one.",
   response: "the model's own output. ⚠ UNTRAINED — miStudio's training corpus is prose wrapped as a single user turn, so these weights never saw a model reply. Its threshold may be cut from reply negatives, but the readout itself is unvalidated, so it is always reported as provisional.",
 };
 
@@ -85,7 +86,10 @@ const SCOPE_WORDS: Record<string, string> = {
   response: "the model's reply",
 };
 
-const WINDOW_ORDER = ['prompt', 'response', 'all'] as const;
+const WINDOW_ORDER = ['last_user', 'prompt', 'response', 'all'] as const;
+
+/** How a window is named where a person reads it; `last_user` is an identifier, not a label. */
+const WINDOW_LABELS: Record<string, string> = { last_user: 'last user turn' };
 
 /**
  * WHICH TOKENS: what the probe was fitted on, and its own bar over each window.
@@ -128,7 +132,7 @@ export function ProbeWindowBars({ probe }: { probe: Probe }) {
                     : `This window's own bar, cut from calibration negatives read over the ${window} window.`
                 }
               >
-                {window} ≥ {bars[window].toFixed(2)}
+                {WINDOW_LABELS[window] ?? window} ≥ {bars[window].toFixed(2)}
                 {untrained ? ' · provisional' : ''}
               </span>
             );
@@ -270,7 +274,7 @@ function ProbeRow({
                         : 'border-slate-700 text-slate-500'
                     }`}
                   >
-                    {name}
+                    {WINDOW_LABELS[name] ?? name}
                   </button>
                 );
               })}

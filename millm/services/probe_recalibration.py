@@ -158,6 +158,31 @@ def every_submitted_bar_survives_parsing(decision: dict[str, Any]) -> None:
             "tile every length contiguously from 0 with an open-ended final band, and a torn "
             "table is refused rather than half-applied",
         )
+    # ⚠ A WINDOW NO ARMED PROBE CAN REPORT, OR A WINDOW'S OWN BANDS THE PARSER WOULD DROP
+    # (2026-10-04) — both would be stored, reported as moved, and never applied.
+    from millm.services.probe_arming import window_length_bands_from_definition
+    from millm.services.probe_scope import WINDOWS
+
+    unknown = sorted(w for w in submitted_windows if w not in WINDOWS)
+    if unknown:
+        raise ProbeRecalibrationRefused(
+            "probe_threshold_uncalibrated",
+            f"window(s) {', '.join(unknown)} are not windows this server can report "
+            f"({', '.join(WINDOWS)}), so their bars would be stored and never applied",
+        )
+    with_bands = sorted(
+        w for w, entry in (decision.get("windows") or {}).items()
+        if isinstance(entry, dict) and entry.get("length_bands")
+    )
+    parsed_bands = window_length_bands_from_definition(wrapped)
+    torn = [w for w in with_bands if w not in parsed_bands]
+    if torn:
+        raise ProbeRecalibrationRefused(
+            "probe_threshold_uncalibrated",
+            f"the per-length tables for window(s) {', '.join(torn)} would be discarded by the "
+            f"runtime's own parser — each must tile every length from 0 with an open-ended final "
+            f"band",
+        )
 
 
 def history_entry(probe: Any, decision: dict[str, Any], *, revision: int,
@@ -253,6 +278,7 @@ class ProbeRecalibrationService:
         """Move this probe's bar. Every gate runs before any write."""
         from millm.services.probe_arming import (
             length_bands_from_definition,
+            window_length_bands_from_definition,
             window_thresholds_from_definition,
         )
 
@@ -314,6 +340,8 @@ class ProbeRecalibrationService:
                     threshold=decision.get("threshold"),
                     window_thresholds=after_windows,
                     length_bands=length_bands_from_definition(new_definition),
+                    # A window's own bands move with its bar, or the live verdicts keep the old ones.
+                    window_length_bands=window_length_bands_from_definition(new_definition),
                     threshold_revision=revision,
                 )
             )

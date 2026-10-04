@@ -32,6 +32,11 @@ from __future__ import annotations
 from typing import Optional
 
 SCOPES = ("all", "prompt", "response")
+#: The windows a probe may report. Wider than `SCOPES`, which is a probe's IDENTITY (what it was
+#: trained on): a window is a reading of the same weights. `last_user` (2026-10-04) is the newest
+#: user message alone — `prompt` is every turn before the reply, so on a client that resends the
+#: conversation a high-stakes earlier turn kept firing on every later one.
+WINDOWS = ("all", "prompt", "response", "last_user")
 
 
 def scored_mask(
@@ -120,8 +125,10 @@ def window_weights_trained(probe_scope: str, window: str) -> bool:
     if window == probe_scope:
         return True
     # Spelled exactly as the docstring states it, so a window name added later is untrained until
-    # someone decides otherwise, rather than trained by omission (review round 3).
-    return probe_scope == "all" and window == "prompt"
+    # someone decides otherwise, rather than trained by omission (review round 3). `last_user`
+    # was decided on 2026-10-04: the newest user message is a person's words, the kind of text an
+    # `all` probe was fitted on.
+    return probe_scope == "all" and window in ("prompt", "last_user")
 
 
 def scope_is_reproducible(scope: str) -> bool:

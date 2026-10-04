@@ -270,9 +270,22 @@ Measured 2026-09-30: one sentence scored **+9.86 (fires)** against an 8-token re
 **−0.32 (silent)** against a full one.
 
 `windows` selects which slices the same weights are read over — any of `all`, `prompt`,
-`response`. `null` (or an absent key) means all three; an explicit `[]` means the probe's
-own scope alone, which is what it did before v1.7. Each window yields **its own verdict and
-its own event**, so one request can produce three.
+`response`, `last_user`. `null` (or an absent key) means all four; an explicit `[]` means the
+probe's own scope alone, which is what it did before v1.7. Each window yields **its own verdict
+and its own event**, so one request can produce four.
+
+⚠ **`prompt` IS EVERY TURN BEFORE THE REPLY; `last_user` IS THE NEWEST USER MESSAGE ALONE
+(2026-10-04).** A client that resends the conversation (Open WebUI, LibreChat, most agent
+frameworks) puts every earlier turn, the system prompt and any retrieved documents into `prompt`,
+so a high-stakes earlier turn keeps firing on every later one. `last_user` reads only the newest
+user message — its header, content and end-of-turn, the span miStudio calibrated it on, found by
+rendering the conversation's prefixes with the same chat template. A request with no user turn, a
+raw-text completion, or a template that rewrites earlier turns reports that window not scored, with
+the reason (`no_user_turn`, `text_completion_has_no_user_turn`, `last_user_span_unresolved`,
+`no_chat_template`), never a guessed span.
+
+⚠ **A WINDOW'S OWN `length_bands` (`decision.windows[w].length_bands`) REFINE ITS OWN BAR**, cut
+from that window's negatives and token counts, and take precedence over `decision.length_bands`.
 
 ⚠ **`windows` IS NOT `scope`, AND DOES NOT CHANGE IT.** `scope` is the probe's identity:
 what it was trained on, what its threshold was cut under, and the only thing the parity gate
@@ -300,7 +313,7 @@ final chunk with `choices: []` and a `millm_probe_verdicts` extension before
 `[DONE]`. Both are additive: a v1.5 client ignores the header and skips the
 empty-choices chunk, which is what the OpenAI SDK and Open WebUI both already do.
 
-Since v1.7 each header member carries `window=<all|prompt|response>`, and
+Since v1.7 each header member carries `window=<all|prompt|response|last_user>`, and
 `provisional=?1` where it applies — both as **parameters**, so a v1.6 consumer reading the
 name and the score is unaffected. The parameters cannot be omitted: one probe now emits
 several members and they would otherwise share an identical name token. The streaming

@@ -92,12 +92,19 @@ def context_window(
         return None, None
 
 
-def window_span(window: str, prompt_length: Optional[int]) -> tuple[int, Optional[int]]:
+def window_span(
+    window: str,
+    prompt_length: Optional[int],
+    last_user_span: Optional[tuple[int, int]] = None,
+) -> tuple[int, Optional[int]]:
     """The token span a contract window reads: prompt `[0, n_prompt)`, response `[n_prompt, end)`.
 
     Unknown prompt length leaves the span unbounded rather than guessing a boundary — the same
     position the runtime takes, which then marks such a window `prompt_boundary_unknown`.
     """
+    if window == "last_user":
+        # The newest user message's own span; without one there is nothing honest to show.
+        return last_user_span if last_user_span else (0, 0)
     if prompt_length is None or window == "all":
         return (0, None)
     if window == "prompt":
@@ -113,6 +120,7 @@ def contexts_for(
     k: int,
     tokenizer: Any,
     prompt_length: Optional[int] = None,
+    last_user_span: Optional[tuple[int, int]] = None,
 ) -> dict[tuple[str, str], dict[str, Any]]:
     """`{(probe_id, window): {context_text, context_token_ids}}` for verdicts with a top position.
 
@@ -134,7 +142,7 @@ def contexts_for(
             continue
         text, window = context_window(
             full_ids, int(positions[0]), k, tokenizer,
-            span=window_span(getattr(verdict, "window", "all"), prompt_length),
+            span=window_span(getattr(verdict, "window", "all"), prompt_length, last_user_span),
         )
         if text is None and window is None:
             continue

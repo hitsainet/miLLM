@@ -264,9 +264,11 @@ describe('ProbeMonitorsPage', () => {
     // ⚠ The PAYLOAD, still exact. `windows` joined it on 2026-09-30 and defaults to all three —
     // the capability is useless if it only works for someone who remembers it exists. Asserting
     // the default explicitly is what would catch it silently becoming one window, or none.
+    // 2026-10-04: `last_user` joined the default, first — it is the window that reads the
+    // newest message alone on a client that resends the conversation.
     expect(calls.arm).toHaveBeenCalledWith({
       id: 'pr_1',
-      windows: ['all', 'prompt', 'response'],
+      windows: ['last_user', 'prompt', 'response', 'all'],
     });
   });
 
@@ -275,7 +277,7 @@ describe('ProbeMonitorsPage', () => {
     renderPage();
     await userEvent.click(screen.getByRole('button', { name: 'response' }));
     await userEvent.click(screen.getByRole('button', { name: 'Arm' }));
-    expect(calls.arm).toHaveBeenCalledWith({ id: 'pr_1', windows: ['all', 'prompt'] });
+    expect(calls.arm).toHaveBeenCalledWith({ id: 'pr_1', windows: ['last_user', 'prompt', 'all'] });
   });
 
   it('Arm is refused when every window is deselected', async () => {
@@ -283,7 +285,7 @@ describe('ProbeMonitorsPage', () => {
     // scope alone"), so a UI that sent one would arm a probe the operator did not ask for.
     state.probes = [probe()];
     renderPage();
-    for (const name of ['all', 'prompt', 'response']) {
+    for (const name of ['last user turn', 'all', 'prompt', 'response']) {
       await userEvent.click(screen.getByRole('button', { name }));
     }
     expect(screen.getByRole('button', { name: 'Arm' })).toBeDisabled();
@@ -1085,5 +1087,23 @@ describe('the tile says which tokens a probe reads and names its rolling window 
     state.probes = [probe({ window_thresholds: {} })];
     renderPage();
     expect(screen.getByTestId('window-single-bar')).toBeInTheDocument();
+  });
+});
+
+describe('the last user turn window (2026-10-04)', () => {
+  it('is offered first in the window picker, labelled for a person', () => {
+    state.probes = [probe({ armed: false })];
+    renderPage();
+    const labels = screen.getAllByRole('button', { pressed: undefined })
+      .map((b) => b.textContent)
+      .filter((t) => ['last user turn', 'prompt', 'response', 'all'].includes(t ?? ''));
+    expect(labels[0]).toBe('last user turn');
+  });
+
+  it('shows its own bar on the tile, not provisional', () => {
+    state.probes = [probe({ window_thresholds: { last_user: 19.5, prompt: 28.8, response: 46.57, all: 46.78 } })];
+    renderPage();
+    expect(screen.getByTestId('window-last_user')).toHaveTextContent('last user turn ≥ 19.50');
+    expect(screen.getByTestId('window-last_user')).not.toHaveTextContent('provisional');
   });
 });

@@ -2477,6 +2477,31 @@ class InferenceService:
         except Exception as exc:  # a probe must never break generation
             logger.warning("probe_prompt_length_failed", error=str(exc))
 
+    def _probe_note_last_user_span(self, context, messages, served_ids, template_kwargs) -> None:
+        """Tell the open probe context where the newest user message sits (`last_user`).
+
+        Computed by rendering the same prefixes miStudio calibrated the window over
+        (`probe_turns.last_user_token_span`); every failure is a stated reason on that window's
+        verdict, never a guessed span. Safe when nothing is armed.
+        """
+        if context is None:
+            return
+        try:
+            from millm.services.probe_turns import last_user_token_span
+
+            ids = served_ids[0] if hasattr(served_ids, "dim") and served_ids.dim() == 2 else served_ids
+            ids = ids.tolist() if hasattr(ids, "tolist") else list(ids)
+            span, reason = last_user_token_span(
+                self._tokenizer,
+                [{"role": m.role, "content": m.content} for m in messages],
+                ids,
+                template_kwargs,
+            )
+            context.set_last_user_span(span, reason)
+        except Exception as exc:  # a probe must never break generation
+            logger.warning("probe_last_user_span_failed", error=str(exc))
+            context.set_last_user_span(None, "last_user_span_unresolved")
+
     def _probe_mark_not_scored(self, reason: str) -> None:
         """Record why the request in flight cannot be scored. Safe when nothing is armed."""
         try:
@@ -2596,6 +2621,7 @@ class InferenceService:
                 self._tokenizer if self.is_model_loaded() else None,
                 # The window boundary, so each context shows only the tokens its window read.
                 prompt_length=getattr(context, "prompt_length", None),
+                last_user_span=getattr(context, "last_user_span", None),
             )
             async with async_session_factory() as session:
                 service = getattr(deps, "_probe_event_service", None)
@@ -3584,6 +3610,9 @@ class InferenceService:
                 inputs = self._tokenizer(prompt, return_tensors="pt").to(self._get_input_device())
                 prompt_tokens = inputs.input_ids.shape[1]
                 self._probe_note_prompt_length(_probe_ctx, prompt_tokens)
+                self._probe_note_last_user_span(
+                    _probe_ctx, request.messages, inputs.input_ids, request.chat_template_kwargs
+                )
                 _sensing_full_ids = inputs.input_ids  # prefill-only fallback
                 self._sensing_mark_history(_sensing_sae, inputs.input_ids)
 
@@ -4314,6 +4343,9 @@ class InferenceService:
                 inputs = self._tokenizer(prompt, return_tensors="pt").to(self._get_input_device())
                 prompt_tokens = inputs["input_ids"].shape[1]
                 self._probe_note_prompt_length(_probe_ctx, prompt_tokens)
+                self._probe_note_last_user_span(
+                    _probe_ctx, request.messages, inputs["input_ids"], request.chat_template_kwargs
+                )
                 self._sensing_mark_history(_sensing_sae, inputs["input_ids"])
 
                 # Set up streamer
@@ -4753,6 +4785,9 @@ class InferenceService:
                     )
                     prompt_tokens = inputs.input_ids.shape[1]
                     self._probe_note_prompt_length(_probe_ctx, prompt_tokens)
+                    if _probe_ctx is not None:
+                        # A raw-text completion has no roles, so no user turn to read.
+                        _probe_ctx.set_last_user_span(None, "text_completion_has_no_user_turn")
                     self._sensing_mark_history(_sensing_ctx, inputs.input_ids)
                     self._check_context_length(prompt_tokens, gen_config.max_new_tokens)
 

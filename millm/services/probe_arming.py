@@ -44,6 +44,7 @@ from millm.services.probe_parity import NOT_COMPARABLE_SCOPE, ProbeParityEngine
 from millm.services.probe_scope import (
     RUNTIME_SCORABLE_SCOPES,
     SCOPES,
+    WINDOWS,
     scope_is_runtime_scorable,
 )
 from millm.services.probe_runtime import ArmedProbe, ProbeRuntimeState
@@ -75,7 +76,9 @@ def head_from_definition(
 #: What a probe reports when the operator names no windows. All three by decision (2026-09-30):
 #: `all` keeps continuity with every event recorded before this existed, and having it beside the
 #: other two makes the dilution the feature exists to fix directly visible.
-DEFAULT_WINDOWS: tuple[str, ...] = ("all", "prompt", "response")
+#: `last_user` joined the default on 2026-10-04: it is the window that answers "is THIS message
+#: high-stakes?" on a client that resends the conversation, which is every chat client here.
+DEFAULT_WINDOWS: tuple[str, ...] = ("all", "prompt", "response", "last_user")
 
 
 def resolve_windows(requested: Any, *, probe_scope: str) -> tuple[str, ...]:
@@ -93,8 +96,8 @@ def resolve_windows(requested: Any, *, probe_scope: str) -> tuple[str, ...]:
         return DEFAULT_WINDOWS
     seen: list[str] = []
     for name in requested:
-        if name not in SCOPES:
-            raise ValueError(f"unknown window {name!r}; known: {', '.join(SCOPES)}")
+        if name not in WINDOWS:
+            raise ValueError(f"unknown window {name!r}; known: {', '.join(WINDOWS)}")
         if name not in seen:
             seen.append(name)
     if not seen:
@@ -159,7 +162,15 @@ def length_bands_from_definition(definition: Any) -> list[dict[str, Any]]:
     caller gets `[]` rather than a table with a hole in it.
     """
     decision = (definition or {}).get("decision") or {}
-    bands = decision.get("length_bands")
+    return bands_from_block(decision.get("length_bands"))
+
+
+def bands_from_block(bands: Any) -> list[dict[str, Any]]:
+    """A band table from another repository's document, or `[]` — whole or not at all.
+
+    Shared by the global table and every window's own (2026-10-04), so the two cannot disagree
+    about what a usable table is.
+    """
     if not isinstance(bands, list) or not bands:
         return []
     out: list[dict[str, Any]] = []
@@ -208,6 +219,25 @@ def window_thresholds_from_definition(definition: Any) -> dict[str, float]:
     return out
 
 
+def window_length_bands_from_definition(definition: Any) -> dict[str, list[dict[str, Any]]]:
+    """`{window: bands}` from `decision.windows[w].length_bands`, for windows that carry a usable
+    table AND a bar of their own — bands refine a window's own bar, so without one they apply to
+    nothing (2026-10-04)."""
+    decision = (definition or {}).get("decision") or {}
+    windows = decision.get("windows")
+    if not isinstance(windows, dict):
+        return {}
+    bars = window_thresholds_from_definition(definition)
+    out: dict[str, list[dict[str, Any]]] = {}
+    for name, entry in windows.items():
+        if not isinstance(entry, dict) or str(name) not in bars:
+            continue
+        bands = bands_from_block(entry.get("length_bands"))
+        if bands:
+            out[str(name)] = bands
+    return out
+
+
 def armed_probe_from_row(
     probe: Any,
     *,
@@ -231,6 +261,7 @@ def armed_probe_from_row(
         windows=resolve_windows(windows, probe_scope=probe.scope),
         window_thresholds=window_thresholds_from_definition(definition),
         length_bands=length_bands_from_definition(definition),
+        window_length_bands=window_length_bands_from_definition(definition),
         # Read once here, and from then on the runtime object is the authority — a re-cut writes
         # the row first and refreshes the registry second, so between the two the row is ahead.
         threshold_revision=int(getattr(probe, "threshold_revision", 1) or 1),

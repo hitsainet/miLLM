@@ -2486,6 +2486,10 @@ class InferenceService:
         """
         if context is None:
             return
+        # Only when an armed probe reads it: three template renders and tokenizations per request
+        # are not free on a long conversation (review round 1, M3).
+        if not any("last_user" in (p.windows or ()) for p in getattr(context, "probes", ())):
+            return
         try:
             from millm.services.probe_turns import last_user_token_span
 

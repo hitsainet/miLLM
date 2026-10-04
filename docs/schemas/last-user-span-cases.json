@@ -1,0 +1,134 @@
+{
+  "version": 1,
+  "about": "The last_user window's span, pinned for BOTH repos. miStudio's renderer (probe_monitor_render) calibrates over it and miLLM's probe_turns serves it; each repo builds these tokenizers and must return exactly expected_span. The span starts at the newest user message's OWN role header: a template preamble (BOS, injected system block) is never part of it. Byte-identical in miStudio and miLLM. A case may carry its own template; otherwise the top-level one applies.",
+  "template": "<s> {% if messages[0]['role'] != 'system' %}<|system|> cutting knowledge date <|end|> {% endif %}{% for m in messages %}<|{{ m['role'] }}|> {{ m['content'] }} <|end|> {% endfor %}{% if add_generation_prompt %}<|assistant|> {% endif %}",
+  "vocab": [
+    "<s>",
+    "<|user|>",
+    "<|assistant|>",
+    "<|system|>",
+    "<|end|>",
+    "cutting",
+    "knowledge",
+    "date",
+    "be",
+    "brief",
+    "a",
+    "b",
+    "x",
+    "y",
+    "first",
+    "question",
+    "an",
+    "answer",
+    "virus",
+    "spreads",
+    "fast",
+    "[UNK]"
+  ],
+  "cases": [
+    {
+      "name": "single user turn behind an injected preamble",
+      "prepend_bos": false,
+      "messages": [
+        {
+          "role": "user",
+          "content": "virus spreads fast"
+        }
+      ],
+      "expected_span": [
+        "<|user|>",
+        "virus",
+        "spreads",
+        "fast",
+        "<|end|>"
+      ]
+    },
+    {
+      "name": "multi-turn: only the newest user turn",
+      "prepend_bos": false,
+      "messages": [
+        {
+          "role": "user",
+          "content": "first question"
+        },
+        {
+          "role": "assistant",
+          "content": "an answer"
+        },
+        {
+          "role": "user",
+          "content": "virus spreads fast"
+        }
+      ],
+      "expected_span": [
+        "<|user|>",
+        "virus",
+        "spreads",
+        "fast",
+        "<|end|>"
+      ]
+    },
+    {
+      "name": "system prompt then user",
+      "prepend_bos": false,
+      "messages": [
+        {
+          "role": "system",
+          "content": "be brief"
+        },
+        {
+          "role": "user",
+          "content": "virus spreads fast"
+        }
+      ],
+      "expected_span": [
+        "<|user|>",
+        "virus",
+        "spreads",
+        "fast",
+        "<|end|>"
+      ]
+    },
+    {
+      "name": "the serving tokenizer prepends a BOS of its own",
+      "prepend_bos": true,
+      "messages": [
+        {
+          "role": "user",
+          "content": "virus spreads fast"
+        }
+      ],
+      "expected_span": [
+        "<|user|>",
+        "virus",
+        "spreads",
+        "fast",
+        "<|end|>"
+      ]
+    },
+    {
+      "name": "no user turn",
+      "prepend_bos": false,
+      "messages": [
+        {
+          "role": "system",
+          "content": "be brief"
+        }
+      ],
+      "expected_span": null
+    },
+    {
+      "name": "a template whose user header cannot be isolated: message 0 is refused, not read with its preamble",
+      "template": "<s> {% if messages[0]['role'] != 'system' %}<|system|> cutting knowledge date <|end|> {% endif %}{% for m in messages %}{% if m['role'] == 'assistant' %}{{ raise_exception('this template serves single prompts only') }}{% endif %}<|{{ m['role'] }}|> {{ m['content'] }} <|end|> {% endfor %}{% if add_generation_prompt %}<|assistant|> {% endif %}",
+      "prepend_bos": false,
+      "messages": [
+        {
+          "role": "user",
+          "content": "virus spreads fast"
+        }
+      ],
+      "expected_span": null
+    }
+  ]
+}

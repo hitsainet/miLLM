@@ -183,7 +183,11 @@ function ProbeRow({
 }) {
   // Defaults to every window. A probe armed without a thought still gets both halves, which is
   // the point — the capability is useless if it only works for someone who remembers it exists.
-  const [windows, setWindows] = useState<string[]>([...WINDOWS]);
+  // `last_user` starts selected only when this probe carries its own bar for it; an older probe
+  // would otherwise fire provisionally against the global bar on traffic that was quiet before.
+  const [windows, setWindows] = useState<string[]>(
+    WINDOWS.filter((w) => w !== 'last_user' || 'last_user' in (probe.window_thresholds ?? {}))
+  );
   const separation = labelSeparation(probe.label_mapping);
   // The full mapping in the tooltip, so the caption's formatting hides nothing — including an
   // `excluded` label, which is on neither side of the boundary but is still an operator decision.

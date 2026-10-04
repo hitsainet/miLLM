@@ -270,9 +270,11 @@ Measured 2026-09-30: one sentence scored **+9.86 (fires)** against an 8-token re
 **−0.32 (silent)** against a full one.
 
 `windows` selects which slices the same weights are read over — any of `all`, `prompt`,
-`response`, `last_user`. `null` (or an absent key) means all four; an explicit `[]` means the
-probe's own scope alone, which is what it did before v1.7. Each window yields **its own verdict
-and its own event**, so one request can produce four.
+`response`, `last_user`. `null` (or an absent key) means `all`, `prompt` and `response`, plus
+`last_user` **only when the definition carries a bar for it** (`decision.windows.last_user`) — a
+probe exported before that window existed would otherwise report it against a global bar cut over
+a different span. An explicit `[]` means the probe's own scope alone, which is what it did before
+v1.7. Each window yields **its own verdict and its own event**, so one request can produce four.
 
 ⚠ **`prompt` IS EVERY TURN BEFORE THE REPLY; `last_user` IS THE NEWEST USER MESSAGE ALONE
 (2026-10-04).** A client that resends the conversation (Open WebUI, LibreChat, most agent
@@ -282,7 +284,17 @@ user message — its header, content and end-of-turn, the span miStudio calibrat
 rendering the conversation's prefixes with the same chat template. A request with no user turn, a
 raw-text completion, or a template that rewrites earlier turns reports that window not scored, with
 the reason (`no_user_turn`, `text_completion_has_no_user_turn`, `last_user_span_unresolved`,
-`no_chat_template`), never a guessed span.
+`no_chat_template`, `no_user_header`), never a guessed span. The span starts at the newest user
+message's OWN role header: a BOS or a system block the template injects in front of a first message
+(Llama-3.1 adds ~25 tokens even when no system message was sent) is not part of it. Both repos are
+held to `docs/schemas/last-user-span-cases.json`, byte-identical in each.
+
+⚠ **SOME TEMPLATES CANNOT YIELD THIS WINDOW, AND SAY SO RATHER THAN GUESS.** The span is found by
+rendering the conversation's prefixes, which requires that rendering `messages[:i+1]` extends
+rendering `messages[:i]`. A template that renders an earlier turn differently once a later one
+exists — one that strips reasoning from previous assistant turns, as some reasoning-model templates
+do — fails that check on a multi-turn request and reports `last_user_span_unresolved`. Single-turn
+requests are unaffected.
 
 ⚠ **A WINDOW'S OWN `length_bands` (`decision.windows[w].length_bands`) REFINE ITS OWN BAR**, cut
 from that window's negatives and token counts, and take precedence over `decision.length_bands`.

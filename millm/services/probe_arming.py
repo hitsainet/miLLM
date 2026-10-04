@@ -76,12 +76,17 @@ def head_from_definition(
 #: What a probe reports when the operator names no windows. All three by decision (2026-09-30):
 #: `all` keeps continuity with every event recorded before this existed, and having it beside the
 #: other two makes the dilution the feature exists to fix directly visible.
-#: `last_user` joined the default on 2026-10-04: it is the window that answers "is THIS message
-#: high-stakes?" on a client that resends the conversation, which is every chat client here.
+#: `last_user` joins the default (2026-10-04) ONLY for a probe that carries its own `last_user`
+#: bar — it answers "is THIS message high-stakes?" on a client that resends the conversation. An
+#: older probe has no such bar, so the window would fire provisionally against the global one:
+#: new alerts on traffic that was quiet yesterday (review round 1, M4).
 DEFAULT_WINDOWS: tuple[str, ...] = ("all", "prompt", "response", "last_user")
+BASE_DEFAULT_WINDOWS: tuple[str, ...] = ("all", "prompt", "response")
 
 
-def resolve_windows(requested: Any, *, probe_scope: str) -> tuple[str, ...]:
+def resolve_windows(
+    requested: Any, *, probe_scope: str, calibrated: Any = ()
+) -> tuple[str, ...]:
     """The windows a probe will report, validated.
 
     ⚠ THIS IS A REPORTING CHOICE, NOT THE PROBE'S SCOPE. `scope` is identity — what the probe was
@@ -93,7 +98,7 @@ def resolve_windows(requested: Any, *, probe_scope: str) -> tuple[str, ...]:
     one verdict rather than two identical rows.
     """
     if requested is None:
-        return DEFAULT_WINDOWS
+        return BASE_DEFAULT_WINDOWS + (("last_user",) if "last_user" in set(calibrated) else ())
     seen: list[str] = []
     for name in requested:
         if name not in WINDOWS:
@@ -258,7 +263,10 @@ def armed_probe_from_row(
         rung_language=probe_rung_language(probe.rung),
         threshold=probe.threshold,
         encoder=encoder,
-        windows=resolve_windows(windows, probe_scope=probe.scope),
+        windows=resolve_windows(
+            windows, probe_scope=probe.scope,
+            calibrated=window_thresholds_from_definition(definition).keys(),
+        ),
         window_thresholds=window_thresholds_from_definition(definition),
         length_bands=length_bands_from_definition(definition),
         window_length_bands=window_length_bands_from_definition(definition),

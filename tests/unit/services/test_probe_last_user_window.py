@@ -35,7 +35,7 @@ from millm.services.probe_turns import (
 )
 
 WORDS = ["<s>", "<|user|>", "<|assistant|>", "<|system|>", "<|end|>", "be", "brief", "first",
-         "question", "an", "answer", "second", "virus", "spreads", "fast", "[UNK]"]
+         "question", "an", "answer", "second", "virus", "spreads", "fast", "a", "b", "x", "y", "[UNK]"]
 
 
 @pytest.fixture(scope="module")
@@ -81,13 +81,15 @@ class TestTheSpan:
         shifted, _ = last_user_token_span(tokenizer, CHAT, _served(tokenizer, CHAT, extra_bos=True))
         assert shifted == (plain[0] + 1, plain[1] + 1)
 
-    def test_a_first_and_only_user_turn_includes_the_template_preamble(self, tokenizer):
-        """miStudio gives message 0 everything its prefix render adds, BOS included."""
+    def test_a_first_and_only_user_turn_starts_at_its_own_header(self, tokenizer):
+        """Review round 1 (H1): message 0 also holds the BOS and any template preamble; the window
+        starts at the message's own role header, as miStudio calibrates it."""
         messages = [{"role": "user", "content": "virus spreads fast"}]
         served = _served(tokenizer, messages)
         span, _ = last_user_token_span(tokenizer, messages, served)
-        assert span[0] == 0
-        assert tokenizer.convert_ids_to_tokens(served[span[0]: span[1]])[-1] == "<|end|>"
+        assert tokenizer.convert_ids_to_tokens(served[span[0]: span[1]]) == [
+            "<|user|>", "virus", "spreads", "fast", "<|end|>",
+        ]
 
     def test_no_user_turn_is_a_reason(self, tokenizer):
         messages = [{"role": "system", "content": "be brief"}]
@@ -152,8 +154,12 @@ class TestTheWindowAtServeTime:
             "a 4-token turn must be judged against this window's own short band"
         )
 
-    def test_it_is_a_known_window_and_on_by_default(self):
+    def test_it_is_a_known_window_on_by_default_only_with_its_own_bar(self):
+        """Review round 1 (M4): an older probe has no `last_user` bar, so defaulting the window on
+        would fire provisionally against the global bar on traffic that was quiet before."""
         assert "last_user" in WINDOWS and "last_user" in DEFAULT_WINDOWS
+        assert "last_user" not in resolve_windows(None, probe_scope="all")
+        assert "last_user" in resolve_windows(None, probe_scope="all", calibrated={"last_user": 2.0})
         assert resolve_windows(["last_user"], probe_scope="all") == ("last_user",)
 
 
@@ -288,3 +294,83 @@ class TestTheWindowBandsAreWiredEndToEnd:
         text = fast.apply_chat_template(CHAT, tokenize=False, add_generation_prompt=True)
         served = fast(text, add_special_tokens=False)["input_ids"]
         assert last_user_token_span(fast, CHAT, served) == (None, SPAN_UNRESOLVED)
+
+
+# ── Review round 1, H1/H2: the span is pinned by a case file BOTH repos test ──
+
+import json as _json
+import os as _os
+from pathlib import Path as _Path
+
+_CASES_PATH = _Path(__file__).resolve().parents[3] / "docs" / "schemas" / "last-user-span-cases.json"
+_STUDIO_CASES = _Path(_os.environ.get("MISTUDIO_REPO", "/home/x-sean/app/miStudio")) / "docs" / "schemas" / "last-user-span-cases.json"
+_CASES = _json.loads(_CASES_PATH.read_text())
+
+
+def _case_tokenizer(prepend_bos: bool, template: str | None = None):
+    from tokenizers import processors
+
+    tok = Tokenizer(models.WordLevel({w: i for i, w in enumerate(_CASES["vocab"])}, unk_token="[UNK]"))
+    tok.pre_tokenizer = pre_tokenizers.WhitespaceSplit()
+    if prepend_bos:
+        tok.post_processor = processors.TemplateProcessing(single="<s> $A", special_tokens=[("<s>", 0)])
+    fast = PreTrainedTokenizerFast(tokenizer_object=tok, bos_token="<s>", unk_token="[UNK]")
+    fast.chat_template = template or _CASES["template"]
+    return fast
+
+
+@pytest.mark.parametrize("case", _CASES["cases"], ids=lambda c: c["name"])
+def test_the_served_span_matches_the_shared_cases(case):
+    """What this server scores — tokenized as `InferenceService` does, specials ON."""
+    tok = _case_tokenizer(case["prepend_bos"], case.get("template"))
+    prompt = tok.apply_chat_template(case["messages"], tokenize=False, add_generation_prompt=True)
+    served = tok(prompt)["input_ids"]
+    span, _reason = last_user_token_span(tok, case["messages"], served)
+    got = tok.convert_ids_to_tokens(served[span[0]: span[1]]) if span else None
+    assert got == case["expected_span"]
+
+
+def test_the_case_file_is_identical_in_mistudio():
+    if not _STUDIO_CASES.exists():
+        if _os.environ.get("MILLM_REQUIRE_CROSS_REPO_CHECKS") == "1":
+            pytest.fail(f"miStudio's copy of the span cases is missing at {_STUDIO_CASES}")
+        pytest.skip("miStudio checkout not present")
+    assert _STUDIO_CASES.read_bytes() == _CASES_PATH.read_bytes()
+
+
+class TestTheSpanIsOnlyComputedWhenSomethingReadsIt:
+    """Review round 1 (M3): three renders and tokenizations per request are not free."""
+
+    def _service(self, monkeypatch, calls):
+        from millm.services import inference_service, probe_turns
+
+        monkeypatch.setattr(probe_turns, "last_user_token_span", lambda *a, **k: calls.append(1) or ((1, 2), None))
+        from types import SimpleNamespace
+
+        svc = inference_service.InferenceService.__new__(inference_service.InferenceService)
+        # `_tokenizer` is a property over the loaded model state; stand that up, not the property.
+        svc._model_state = SimpleNamespace(
+            is_loaded=True, current=SimpleNamespace(tokenizer=object())
+        )
+        return svc
+
+    def test_not_computed_without_a_last_user_window(self, monkeypatch):
+        from types import SimpleNamespace
+        from unittest.mock import MagicMock
+
+        calls = []
+        ctx = MagicMock()
+        ctx.probes = [SimpleNamespace(windows=("prompt", "response"))]
+        self._service(monkeypatch, calls)._probe_note_last_user_span(ctx, [], [1, 2, 3], None)
+        assert calls == [] and not ctx.set_last_user_span.called
+
+    def test_computed_and_recorded_when_a_probe_reads_it(self, monkeypatch):
+        from types import SimpleNamespace
+        from unittest.mock import MagicMock
+
+        calls = []
+        ctx = MagicMock()
+        ctx.probes = [SimpleNamespace(windows=("last_user",))]
+        self._service(monkeypatch, calls)._probe_note_last_user_span(ctx, [], [1, 2, 3], None)
+        assert calls == [1]
+        ctx.set_last_user_span.assert_called_once_with((1, 2), None)

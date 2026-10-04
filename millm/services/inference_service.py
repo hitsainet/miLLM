@@ -35,6 +35,7 @@ from millm.api.schemas.openai import (
     EmbeddingData,
     EmbeddingRequest,
     EmbeddingResponse,
+    CompletionLogprobs,
     TextCompletionChoice,
     TextCompletionRequest,
     TextCompletionResponse,
@@ -43,6 +44,7 @@ from millm.api.schemas.openai import (
 from millm.core.errors import (
     ContextLengthExceededError,
     EngineUnsupportedError,
+    InvalidScoringRequestError,
     GenerationOutOfMemoryError,
     MiLLMError,
     ModelBusyError,
@@ -4741,6 +4743,12 @@ class InferenceService:
         Returns:
             TextCompletionResponse with generated text
         """
+        # SCORING MODE FIRST: neither llama.cpp nor the continuous-batching manager below can
+        # return a per-token distribution, and routing a scoring request to either would generate
+        # text with no logprobs — the request's whole point silently dropped.
+        if request.wants_scores():
+            return await self._score_text_completion(request)
+
         # llama.cpp first, for the same reason as the chat path: everything
         # below reaches through `self._tokenizer`, which is None on this engine.
         # Unguarded, the first line of the loop is
@@ -4872,6 +4880,88 @@ class InferenceService:
                 total_tokens=total_prompt_tokens + total_completion_tokens,
             ),
         )
+
+    async def _score_text_completion(
+        self, request: TextCompletionRequest
+    ) -> TextCompletionResponse:
+        """One forward pass per prompt; the next token's log-probabilities in OpenAI's shape.
+
+        What a typed-decision judge reads its answer from (see `next_token_scores`). Probe and
+        sensing hooks see no open request here, so they record nothing — a judge's prompt is not
+        user traffic. An attached SAE still steers the pass, exactly as it steers generation.
+        """
+        from millm.services.next_token_scores import next_token_scores
+
+        if self._engine_is_llamacpp():
+            raise EngineUnsupportedError(
+                "Scoring mode (logprobs / allowed_token_ids) needs the transformers engine; the "
+                "loaded model runs on llama.cpp, which exposes no per-token distribution here."
+            )
+        completion_id = f"cmpl-{uuid.uuid4().hex[:24]}"
+        created = int(datetime.now().timestamp())
+        prompts = request.prompt if isinstance(request.prompt, list) else [request.prompt]
+        choices: list[TextCompletionChoice] = []
+        prompt_total = 0
+
+        async with self._admit():
+            vocab = int(self._model.get_output_embeddings().weight.shape[0])
+            if request.allowed_token_ids and max(request.allowed_token_ids) >= vocab:
+                raise InvalidScoringRequestError(
+                    f"allowed_token_ids contains {max(request.allowed_token_ids)}, outside the loaded "
+                    f"model's vocabulary of {vocab}"
+                )
+
+            def key(token_id: int) -> str:
+                if request.return_tokens_as_token_ids:
+                    return f"token_id:{token_id}"
+                return self._tokenizer.decode([token_id])
+
+            for index, prompt_text in enumerate(prompts):
+                inputs = self._tokenizer(
+                    prompt_text, return_tensors="pt", add_special_tokens=request.add_special_tokens
+                ).to(self._get_input_device())
+                prompt_tokens = int(inputs.input_ids.shape[1])
+                self._check_context_length(prompt_tokens, 1)
+                logits = await asyncio.to_thread(self._next_token_logits, inputs)
+                scores = next_token_scores(
+                    logits,
+                    allowed=request.allowed_token_ids,
+                    temperature=request.temperature,
+                    top_k=request.logprobs or 0,
+                )
+                choices.append(
+                    TextCompletionChoice(
+                        index=index,
+                        text=self._tokenizer.decode([scores.chosen_id]),
+                        finish_reason="length",
+                        logprobs=CompletionLogprobs(
+                            tokens=[key(scores.chosen_id)],
+                            token_logprobs=[scores.chosen_logprob],
+                            top_logprobs=[{key(t): lp for t, lp in scores.top}],
+                            text_offset=[len(prompt_text)],
+                        ),
+                    )
+                )
+                prompt_total += prompt_tokens
+
+        model_info = self.get_loaded_model_info()
+        return TextCompletionResponse(
+            id=completion_id,
+            created=created,
+            model=model_info.name if model_info else "unknown",
+            choices=choices,
+            usage=Usage(
+                prompt_tokens=prompt_total,
+                completion_tokens=len(choices),
+                total_tokens=prompt_total + len(choices),
+            ),
+        )
+
+    def _next_token_logits(self, inputs: Any) -> torch.Tensor:
+        """The last position's logits as float32 on the CPU, from one forward pass."""
+        with torch.no_grad():
+            outputs = self._model(**inputs, use_cache=False)
+        return outputs.logits[0, -1].float().cpu()
 
     # =========================================================================
     # Embeddings

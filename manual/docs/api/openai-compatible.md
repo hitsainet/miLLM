@@ -152,6 +152,28 @@ The named profile's steering replaces the global configuration for this one requ
 
 `POST /v1/completions` accepts `prompt` (string or list of strings; each list entry produces a choice) plus the same sampling parameters as chat. No chat template is applied — the prompt goes to the model verbatim, which is often preferable for base-model steering experiments.
 
+### Scoring mode: next-token log-probabilities
+
+Classification models in the Jev style (for example `autotrust/JEV-9B`) don't generate an answer: you read the probability of a few answer tokens at the next position. Add these fields to a `/v1/completions` request to get those probabilities back. The names match OpenAI's legacy completions and vLLM, so their clients work unchanged.
+
+| Parameter | Type | Default | Notes |
+|-----------|------|---------|-------|
+| `logprobs` | int | — | Alternatives to return for the next token, 0–20 |
+| `allowed_token_ids` | int[] | — | Restrict the next token to these ids. Log-probabilities are normalised over this set only, so every listed token is always returned. |
+| `add_special_tokens` | bool | `true` | Set `false` when the prompt must be tokenised exactly as written (no BOS) |
+| `return_tokens_as_token_ids` | bool | `false` | Key `top_logprobs` by `"token_id:<id>"` instead of the decoded token text, which can be ambiguous |
+
+Scoring mode needs `max_tokens: 1` and `n: 1`; any other value is refused with a 422. One forward pass runs per prompt and nothing is generated. The returned `text` is the most probable allowed token, and `temperature` divides the logits before normalising (`0` means no scaling). Each choice carries an OpenAI-shaped `logprobs` object: `tokens`, `token_logprobs`, `top_logprobs` and `text_offset`. A token id outside the loaded model's vocabulary is a 400. Scoring needs the transformers engine; a llama.cpp (GGUF) model refuses it with a 400 rather than returning text without probabilities.
+
+```bash
+curl http://localhost:8000/v1/completions -H 'content-type: application/json' -d '{
+  "model": "JEV-9B-decision", "prompt": "[kind] noul\n[state] ...\n[question] ...\n[options]\nfalse\ntrue\n[decision]:",
+  "max_tokens": 1, "temperature": 1.0, "logprobs": 2, "allowed_token_ids": [3721, 1802],
+  "add_special_tokens": false, "return_tokens_as_token_ids": true}'
+```
+
+Scoring requests are not monitored: probes and sensing record nothing for them, because a judge's prompt isn't user traffic. An attached SAE still steers the forward pass, exactly as it steers generation.
+
 ## Embeddings
 
 `POST /v1/embeddings` with `input` (string or list) returns mean-pooled last-hidden-layer embeddings. `encoding_format` may be `"float"` (default) or `"base64"`.

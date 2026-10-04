@@ -56,6 +56,14 @@ class EngineUnsupportedError(MiLLMError):
     status_code = 400
 
 
+class InvalidScoringRequestError(MiLLMError):
+    """A scoring-mode request (`logprobs` / `allowed_token_ids`) the loaded model cannot answer —
+    e.g. a token id outside its vocabulary. A fault of the request, so 400, never a 500."""
+
+    code = "INVALID_SCORING_REQUEST"
+    status_code = 400
+
+
 class ContextLengthExceededError(MiLLMError):
     """The request does not fit in the model's context window.
 

@@ -226,6 +226,21 @@ class TextCompletionRequest(BaseModel):
     frequency_penalty: float = Field(default=0.0, ge=-2.0, le=2.0)
     presence_penalty: float = Field(default=0.0, ge=-2.0, le=2.0)
     user: Optional[str] = None
+    #: SCORING MODE (2026-10-04). Return the log-probabilities of the next token instead of only
+    #: generating text — what a typed-decision judge (Jev-style classifiers, jevify) reads its answer
+    #: from. Named as OpenAI's legacy completions and vLLM name them, so their clients work unchanged.
+    #: `logprobs` is how many alternatives to return per position (0–20, OpenAI's limit).
+    logprobs: Optional[int] = Field(default=None, ge=0, le=20)
+    #: Restrict the next token to these ids. The returned log-probabilities are then normalised over
+    #: this set only (vLLM's `processed_logprobs` semantics), so a judge's answer tokens are always
+    #: present even when the model would not rank them in its unrestricted top 20.
+    allowed_token_ids: Optional[list[int]] = Field(default=None, min_length=1, max_length=1024)
+    #: Whether the tokenizer adds its special tokens (a BOS) to the prompt. A template-exact judge
+    #: prompt needs False. Defaults to the tokenizer's behaviour, as before.
+    add_special_tokens: bool = True
+    #: Key `top_logprobs` by "token_id:<id>" instead of the decoded token, which is ambiguous
+    #: (vLLM's name for the same switch).
+    return_tokens_as_token_ids: bool = False
 
     model_config = {"extra": "ignore"}
 
@@ -235,6 +250,26 @@ class TextCompletionRequest(BaseModel):
         if isinstance(self.stop, list) and len(self.stop) > 4:
             raise ValueError("Maximum 4 stop sequences allowed")
         return self
+
+    @model_validator(mode="after")
+    def validate_scoring_mode(self) -> "TextCompletionRequest":
+        """Scoring mode scores ONE next token. Refused, not approximated, outside that.
+
+        Returning log-probabilities for a multi-token generation needs every step's distribution;
+        silently scoring only the first token while generating more would hand a client numbers
+        that describe a different output than the text it received.
+        """
+        if self.wants_scores():
+            if self.max_tokens != 1:
+                raise ValueError("logprobs and allowed_token_ids require max_tokens=1")
+            if self.n != 1:
+                raise ValueError("logprobs and allowed_token_ids require n=1")
+            if self.allowed_token_ids is not None and any(i < 0 for i in self.allowed_token_ids):
+                raise ValueError("allowed_token_ids must be non-negative token ids")
+        return self
+
+    def wants_scores(self) -> bool:
+        return self.logprobs is not None or self.allowed_token_ids is not None
 
 
 class EmbeddingRequest(BaseModel):
@@ -352,12 +387,23 @@ class ChatCompletionChunk(BaseModel):
 # =============================================================================
 
 
+class CompletionLogprobs(BaseModel):
+    """OpenAI legacy-completions `logprobs` object, one entry per generated token."""
+
+    tokens: list[str]
+    token_logprobs: list[float]
+    top_logprobs: list[dict[str, float]]
+    text_offset: list[int]
+
+
 class TextCompletionChoice(BaseModel):
     """Single completion choice in text completion response."""
 
     index: int
     text: str
     finish_reason: Literal["stop", "length", "timeout"]
+    #: Present only in scoring mode (`logprobs` / `allowed_token_ids` on the request).
+    logprobs: Optional[CompletionLogprobs] = None
 
 
 class TextCompletionResponse(BaseModel):

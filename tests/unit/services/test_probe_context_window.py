@@ -302,3 +302,56 @@ class TestEveryCallSitePassesTheIds:
             f"_probe_record called without full_ids at line(s) {missing} — that path records "
             f"events with no prompt window, and nothing else will report it"
         )
+
+
+class TestTheContextStaysInsideItsWindow:
+    """⚠ FOUND ON A REAL CHAT, 2026-10-04: a prompt verdict peaking near the end of the prompt
+    displayed the start of the model's REPLY, and a response verdict the end of the prompt. The
+    context is evidence for one window's verdict, so it shows only that window's tokens."""
+
+    IDS = list(range(100, 120))  # 20 tokens: prompt is the first 12, the reply the last 8
+    N_PROMPT = 12
+
+    def test_a_prompt_peak_at_the_end_of_the_prompt_shows_no_reply(self):
+        out = contexts_for(
+            [_verdict(top=[11], window="prompt")], self.IDS, 5, FakeTokenizer(), prompt_length=self.N_PROMPT,
+        )
+        ids = out[("pr_1", "prompt")]["context_token_ids"]
+        assert ids == list(range(106, 112)), "the context ran past the prompt into the reply"
+
+    def test_a_response_peak_at_the_start_of_the_reply_shows_no_prompt(self):
+        out = contexts_for(
+            [_verdict(top=[12], window="response")], self.IDS, 5, FakeTokenizer(), prompt_length=self.N_PROMPT,
+        )
+        ids = out[("pr_1", "response")]["context_token_ids"]
+        assert ids == list(range(112, 118)), "the context reached back into the prompt"
+
+    def test_the_all_window_is_unclipped(self):
+        out = contexts_for(
+            [_verdict(top=[11], window="all")], self.IDS, 5, FakeTokenizer(), prompt_length=self.N_PROMPT,
+        )
+        assert out[("pr_1", "all")]["context_token_ids"] == list(range(106, 117))
+
+    def test_an_unknown_boundary_is_not_guessed(self):
+        out = contexts_for([_verdict(top=[11], window="prompt")], self.IDS, 5, FakeTokenizer())
+        assert out[("pr_1", "prompt")]["context_token_ids"] == list(range(106, 117))
+
+    def test_the_recorder_passes_the_boundary(self):
+        """Wiring: the clip is inert unless the recorder hands over the prompt length."""
+        from millm.services import inference_service
+
+        import textwrap
+
+        tree = ast.parse(textwrap.dedent(inspect.getsource(inference_service.InferenceService._probe_record)))
+        calls = [n for n in ast.walk(tree) if isinstance(n, ast.Call) and getattr(n.func, "id", None) == "contexts_for"]
+        assert len(calls) == 1
+        passed = {k.arg: ast.unparse(k.value) for k in calls[0].keywords}
+        assert passed.get("prompt_length") == "getattr(context, 'prompt_length', None)"
+
+    def test_the_request_context_exposes_its_prompt_length(self):
+        from millm.services.probe_runtime import ProbeRequestContext
+
+        ctx = ProbeRequestContext("r", [])
+        assert ctx.prompt_length is None
+        ctx.set_prompt_length(12)
+        assert ctx.prompt_length == 12

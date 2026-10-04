@@ -264,6 +264,11 @@ class ProbeRequestContext:
         #: `prompt_boundary_unknown` rather than guessing.
         self._n_prompt_tokens: Optional[int] = None
 
+    @property
+    def prompt_length(self) -> Optional[int]:
+        """The request's prompt length once known, else None — the window boundary."""
+        return self._n_prompt_tokens
+
     def set_prompt_length(self, n_prompt_tokens: int) -> None:
         """Record where the prompt ends. Idempotent; a conflicting second call is refused.
 

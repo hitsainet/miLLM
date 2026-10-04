@@ -31,6 +31,7 @@ def context_window(
     position: int,
     k: int,
     tokenizer: Any,
+    span: tuple[int, Optional[int]] = (0, None),
 ) -> tuple[Optional[str], Optional[list[int]]]:
     """The ±`k` token window around `position`, decoded.
 
@@ -65,8 +66,17 @@ def context_window(
             # attribute the verdict to text it never scored.
             return None, None
 
-        lo = max(0, position - k)
-        hi = min(total, position + 1 + k)
+        # ⚠ CLIPPED TO THE SPAN THE VERDICT'S WINDOW READ (2026-10-04). A ±k window cut from the
+        # whole sequence let a prompt verdict whose peak sat near the end of the prompt display
+        # the start of the model's REPLY — text that window never scored — and a response verdict
+        # display the end of the prompt. The context is evidence for one window's verdict, so it
+        # shows that window's tokens only.
+        span_lo = max(0, int(span[0] or 0))
+        span_hi = total if span[1] is None else min(total, int(span[1]))
+        if not (span_lo <= position < span_hi):
+            return None, None
+        lo = max(span_lo, position - k)
+        hi = min(span_hi, position + 1 + k)
         window = take(lo, hi)
         if not window:
             return None, None
@@ -82,11 +92,27 @@ def context_window(
         return None, None
 
 
+def window_span(window: str, prompt_length: Optional[int]) -> tuple[int, Optional[int]]:
+    """The token span a contract window reads: prompt `[0, n_prompt)`, response `[n_prompt, end)`.
+
+    Unknown prompt length leaves the span unbounded rather than guessing a boundary — the same
+    position the runtime takes, which then marks such a window `prompt_boundary_unknown`.
+    """
+    if prompt_length is None or window == "all":
+        return (0, None)
+    if window == "prompt":
+        return (0, int(prompt_length))
+    if window == "response":
+        return (int(prompt_length), None)
+    return (0, None)
+
+
 def contexts_for(
     verdicts: Any,
     full_ids: Any,
     k: int,
     tokenizer: Any,
+    prompt_length: Optional[int] = None,
 ) -> dict[tuple[str, str], dict[str, Any]]:
     """`{(probe_id, window): {context_text, context_token_ids}}` for verdicts with a top position.
 
@@ -106,7 +132,10 @@ def contexts_for(
         positions = getattr(verdict, "top_positions", None) or []
         if not positions:
             continue
-        text, window = context_window(full_ids, int(positions[0]), k, tokenizer)
+        text, window = context_window(
+            full_ids, int(positions[0]), k, tokenizer,
+            span=window_span(getattr(verdict, "window", "all"), prompt_length),
+        )
         if text is None and window is None:
             continue
         out[(verdict.probe_id, verdict.window)] = {

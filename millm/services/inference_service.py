@@ -2594,6 +2594,8 @@ class InferenceService:
                 full_ids,
                 _settings.PROBE_EVENT_CONTEXT_TOKENS,
                 self._tokenizer if self.is_model_loaded() else None,
+                # The window boundary, so each context shows only the tokens its window read.
+                prompt_length=getattr(context, "prompt_length", None),
             )
             async with async_session_factory() as session:
                 service = getattr(deps, "_probe_event_service", None)

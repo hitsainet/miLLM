@@ -164,8 +164,15 @@ class TestTheHungThreadGuard:
         assert 'disarm_all("generation_thread_hung")' in code
 
     def test_the_reason_is_recorded_not_just_the_flag(self):
+        """⚠ THIS TEST PINNED A DEFECT UNTIL 2026-10-04. It asserted the source CONTAINED
+        `mark_all_disarmed("generation_thread_hung")`, reached through
+        `dependencies._probe_arming_service` — a global that never existed, so the call never ran
+        and the rows were never marked. Text presence is not a call. The write now goes through
+        `mark_armed_rows_disarmed`, run for real in `test_unload_clears_probe_hooks.py`."""
         code = source_of("stream_chat_completion")
-        assert 'mark_all_disarmed("generation_thread_hung")' in code
+        assert "mark_armed_rows_disarmed(" in code
+        assert '"disarmed because a generation thread hung"' in code
+        assert '"_probe_arming_service"' not in code
 
 
 class TestTheVerdictContextVar:

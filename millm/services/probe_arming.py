@@ -492,3 +492,41 @@ class ProbeArmingService:
         """
         self.state.disarm_all(reason)
         return await self.repository.disarm_all(reason)
+
+
+async def mark_armed_rows_disarmed(session_factory: Any, paused_reason: str, *, event: str) -> list[str]:
+    """Clear every `armed` probe row with `paused_reason`; return the ids. Never raises.
+
+    ⚠ ONE WRITE FOR EVERY MOMENT THE HOOKS GO AWAY. `probes.armed` is a database column and the
+    hook it describes lives in `ProbeRuntimeState`; anything that empties the second must clear
+    the first, or status reports a monitor that is not monitoring. The same write
+    `main.disarm_probes_on_startup` makes after a restart, for the two moments inside a running
+    process: a model unload (`ModelService.unload_model`) and a hung generation thread. The
+    hang guard read a `dependencies._probe_arming_service` global that was never defined, so its
+    database half never ran (found 2026-10-04 with the unload defect).
+    """
+    from sqlalchemy import select, update as sa_update
+
+    from millm.db.models.probe import Probe
+
+    try:
+        async with session_factory() as session:
+            armed = (
+                await session.execute(select(Probe.id).where(Probe.armed.is_(True)))
+            ).scalars().all()
+            if not armed:
+                return []
+            await session.execute(
+                sa_update(Probe).where(Probe.armed.is_(True)).values(
+                    armed=False, paused_reason=paused_reason
+                )
+            )
+            await session.commit()
+            logger.info("%s count=%s probes=%s", event, len(armed), sorted(armed))
+            return sorted(armed)
+    except Exception as e:  # noqa: BLE001 - bookkeeping must not break the caller
+        logger.error(
+            "%s_failed error=%s — armed rows may outlive their hooks; status cross-checks the "
+            "live registry and reports them stale", event, e, exc_info=True,
+        )
+        return []

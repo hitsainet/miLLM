@@ -1294,6 +1294,17 @@ class ModelService:
                 self.loader.cancel_unload()
             raise
 
+        # The loader cleared the probe hooks with the model; the rows must say so, or status
+        # reports probes armed that nothing will ever score again.
+        from millm.db.base import async_session_factory
+        from millm.services.probe_arming import mark_armed_rows_disarmed
+
+        await mark_armed_rows_disarmed(
+            async_session_factory,
+            "disarmed because the model was unloaded — re-arm after loading it again",
+            event="probes_disarmed_by_unload",
+        )
+
         # Auto-unlock on unload
         model = await self.repository.update(
             model_id,

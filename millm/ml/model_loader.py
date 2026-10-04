@@ -3865,6 +3865,19 @@ class ModelLoader:
         model_id = self.state.loaded_model_id
         logger.info("unloading_model", model_id=model_id)
 
+        # ⚠ THE PROBE HOOKS GO WITH THE MODEL, OR NO PROBE SCORES AGAIN (2026-10-04). They are
+        # forward hooks on THIS model's decoder layers, and `ProbeRuntimeState` keys its handles by
+        # layer number alone. Left in place, a reload kept the stale handles, so arming any probe on
+        # the same layer of the NEW model installed nothing — while status reported the hook
+        # installed and every request recorded `no_scored_tokens`, silently. Every unload path ends
+        # here (explicit, forced after a timeout, replaced by another load, shutdown), so this is
+        # the one place it cannot be bypassed. `ModelService.unload_model` records the rows.
+        from millm.services.probe_runtime import ProbeRuntimeState
+
+        disarmed = ProbeRuntimeState().disarm_all("model_unloaded")
+        if disarmed:
+            logger.info("probes_disarmed_by_unload", model_id=model_id, probes=disarmed)
+
         self.state.clear()
 
         logger.info("model_unloaded", model_id=model_id)

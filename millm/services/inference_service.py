@@ -4695,11 +4695,16 @@ class InferenceService:
                         _pstate = ProbeRuntimeState()
                         if _pstate.has_armed():
                             _pstate.disarm_all("generation_thread_hung")
-                            import millm.api.dependencies as _deps
+                            # ⚠ This read a `dependencies._probe_arming_service` global that was
+                            # never defined, so the rows were never marked (found 2026-10-04).
+                            from millm.db.base import async_session_factory
+                            from millm.services.probe_arming import mark_armed_rows_disarmed
 
-                            _psvc = getattr(_deps, "_probe_arming_service", None)
-                            if _psvc is not None:
-                                await _psvc.mark_all_disarmed("generation_thread_hung")
+                            await mark_armed_rows_disarmed(
+                                async_session_factory,
+                                "disarmed because a generation thread hung",
+                                event="probes_disarmed_by_hang",
+                            )
                         _pstate.end_request()
                     except Exception:
                         logger.warning("probe_disarm_after_hang_failed")

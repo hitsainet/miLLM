@@ -401,3 +401,149 @@ class TestReviewRoundOne:
             "model": "q-gguf", "prompt": "x", "max_tokens": 1, "logprobs": 2})
         assert response.status_code == 400 and "GGUF" in response.text
         svc.load_model_and_wait.assert_not_called()
+
+
+class TestReviewRoundTwo:
+    def test_suppression_reaches_only_the_thread_that_asked(self):
+        """M-A: a scoring pass in a worker thread must not unsteer a generation in another thread.
+        A REAL LoadedSAE with steering on: suppressed in thread A, still steering in thread B."""
+        import threading
+
+        from millm.ml.sae_config import SAEConfig
+        from millm.ml.sae_wrapper import LoadedSAE
+
+        torch.manual_seed(1)
+        sae = LoadedSAE(W_enc=torch.randn(8, 16), b_enc=torch.zeros(16), W_dec=torch.randn(16, 8),
+                        b_dec=torch.zeros(8), config=SAEConfig(d_in=8, d_sae=16, model_name="t",
+                                                               hook_name="t", hook_layer=0),
+                        device="cpu")
+        sae.set_steering(3, 5.0)
+        sae.enable_steering(True)
+        hidden = torch.zeros(1, 2, 8)
+        steered = sae.apply_steering(hidden.clone())
+        assert not torch.equal(steered, hidden), "precondition: steering changes the hidden states"
+
+        inside, release, seen = threading.Event(), threading.Event(), {}
+
+        def scoring_thread():
+            with sae.suppressed():
+                seen["a"] = sae.apply_steering(hidden.clone())
+                inside.set()
+                release.wait(5)
+
+        worker = threading.Thread(target=scoring_thread)
+        worker.start()
+        assert inside.wait(5)
+        seen["b"] = sae.apply_steering(hidden.clone())   # this thread, while A is suppressed
+        release.set()
+        worker.join(5)
+        assert torch.equal(seen["a"], hidden), "the suppressed thread was steered"
+        assert torch.equal(seen["b"], steered), "another thread's generation was unsteered"
+        assert torch.equal(sae.apply_steering(hidden.clone()), steered)
+
+    async def test_suppression_is_entered_in_the_worker_thread(self, model):
+        """The context must wrap the forward IN the thread that runs it, or per-thread suppression
+        suppresses nothing."""
+        import threading
+        from contextlib import contextmanager
+        from types import SimpleNamespace
+        from unittest.mock import MagicMock
+
+        entered_in, forward_in = [], []
+        sae = MagicMock()
+
+        @contextmanager
+        def suppressed():
+            entered_in.append(threading.get_ident())
+            yield
+
+        sae.suppressed = suppressed
+        spy = _Spy(model, on_forward=lambda: forward_in.append(threading.get_ident()))
+        with patch("millm.services.sae_service.AttachedSAEState.entries",
+                   return_value=[SimpleNamespace(sae=sae)]):
+            await _service(spy, _tokenizer(bos=False)).create_text_completion(_request())
+        assert entered_in == forward_in and len(forward_in) == 1
+
+    async def test_a_model_without_logits_to_keep_falls_back(self, model):
+        class Strict(torch.nn.Module):
+            def __init__(self, inner):
+                super().__init__()
+                self.inner, self.config, self.calls = inner, inner.config, 0
+
+            def forward(self, input_ids=None, attention_mask=None, use_cache=None):
+                self.calls += 1
+                return self.inner(input_ids=input_ids, attention_mask=attention_mask, use_cache=use_cache)
+
+            def get_input_embeddings(self):
+                return self.inner.get_input_embeddings()
+
+        tok = _tokenizer(bos=False)
+        strict = Strict(model)
+        response = await _service(strict, tok).create_text_completion(_request())
+        expected = torch.log_softmax(_logits(model, tok, PROMPT, False)[[5, 9]], 0)
+        assert response.choices[0].logprobs.top_logprobs[0]["token_id:5"] == pytest.approx(
+            float(expected[0]), abs=1e-5)
+        # The first attempt fails at the call boundary (unexpected keyword), before forward's body
+        # runs, so exactly one call reached the model: the retry without logits_to_keep.
+        assert strict.calls == 1
+
+    async def test_an_unrelated_type_error_is_not_swallowed(self, model):
+        spy = _Spy(model, fail=TypeError("bad thing"))
+        with pytest.raises(TypeError, match="bad thing"):
+            await _service(spy, _tokenizer(bos=False)).create_text_completion(_request())
+        assert len(spy.calls) == 1
+
+    async def test_out_of_memory_releases_memory_and_says_scoring(self, model):
+        from contextlib import contextmanager
+        from types import SimpleNamespace
+        from unittest.mock import MagicMock
+
+        from millm.core.errors import GenerationOutOfMemoryError
+
+        state = {"active": False}
+        sae = MagicMock()
+
+        @contextmanager
+        def suppressed():
+            state["active"] = True
+            try:
+                yield
+            finally:
+                state["active"] = False
+
+        sae.suppressed = suppressed
+        released = []
+        spy = _Spy(model, fail=torch.cuda.OutOfMemoryError("CUDA out of memory. GPU 0 has a total"))
+        with patch("millm.services.sae_service.AttachedSAEState.entries",
+                   return_value=[SimpleNamespace(sae=sae)]), \
+             patch("millm.services.inference_service._release_generation_memory",
+                   lambda: released.append(True)):
+            with pytest.raises(GenerationOutOfMemoryError) as exc:
+                await _service(spy, _tokenizer(bos=False)).create_text_completion(_request())
+        assert released == [True]
+        assert "Scoring ran out of memory" in str(exc.value) and "max_tokens" not in str(exc.value)
+        assert exc.value.details["prompt_tokens"] == 5
+        assert state["active"] is False, "suppression outlived the failed pass"
+
+    async def test_minus_inf_outside_the_allowed_set_is_fine(self, model):
+        """L2: a head that masks padded vocabulary with -inf must not refuse a valid answer."""
+        class MaskPadding(_Spy):
+            def forward(self, **kwargs):
+                out = self.inner(**kwargs)
+                out.logits[..., 20] = float("-inf")
+                return out
+
+        response = await _service(MaskPadding(model), _tokenizer(bos=False)).create_text_completion(_request())
+        assert response.choices[0].logprobs is not None
+
+    async def test_minus_inf_on_a_requested_token_is_refused(self, model):
+        from millm.core.errors import ScoringNumericalError
+
+        class MaskAnswer(_Spy):
+            def forward(self, **kwargs):
+                out = self.inner(**kwargs)
+                out.logits[..., 9] = float("-inf")
+                return out
+
+        with pytest.raises(ScoringNumericalError):
+            await _service(MaskAnswer(model), _tokenizer(bos=False)).create_text_completion(_request())

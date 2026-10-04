@@ -151,6 +151,24 @@ def _generation_oom_error(exc: BaseException, generation_kwargs: dict) -> Genera
     )
 
 
+def _scoring_oom_error(exc: BaseException, inputs: Any) -> GenerationOutOfMemoryError:
+    """The out-of-memory refusal for a scoring pass, worded for scoring (review round 2, L1).
+
+    Generation's message blames the KV cache and suggests fewer max_tokens; a scoring pass has no
+    cache (`use_cache=False`) and must send max_tokens=1, so that advice would be wrong.
+    """
+    base = _generation_oom_error(exc, {**dict(inputs), "max_new_tokens": 1})
+    tokens = base.details.get("prompt_tokens")
+    size = f"{tokens} prompt tokens" if tokens is not None else "its prompt"
+    where = base.details.get("device") or "a GPU"
+    return GenerationOutOfMemoryError(
+        f"Scoring ran out of memory on {where}: one forward pass over {size} needed more room than "
+        "the card had left beside the model. Its memory has been released and the server keeps "
+        "serving. Send a shorter prompt.",
+        details={**base.details, "max_new_tokens": None, "scoring": True},
+    )
+
+
 def _release_generation_memory() -> None:
     """Give a failed generation's memory back: collect what its frames held, then empty torch's cache. Never raises.
 
@@ -1155,15 +1173,17 @@ class InferenceService:
 
     @contextlib.contextmanager
     def _unsteered(self) -> Iterator[None]:
-        """Every attached SAE inert for the duration: no steering applied, no monitoring captured.
+        """Every attached SAE inert for forward passes run IN THIS THREAD while the context is open.
 
         ⚠ EVERY ENTRY, NOT THE FIRST. Embeddings used `_get_attached_sae().suppressed()`, which is the
         FIRST attached SAE only, while a multi-layer circuit attaches one per layer — so "embeddings
         are never steered" was false whenever a circuit was serving (found 2026-10-04 reviewing the
-        scoring path, which needs the same guarantee). The flag each SAE carries is shared, so a pass
-        run under this while continuous batching generates concurrently would leave that generation
-        unsteered for the window; CBM is off by default and everything else is serialised by
-        `_admit`.
+        scoring path, which needs the same guarantee).
+
+        ⚠ ENTER IT IN THE THREAD THAT RUNS THE FORWARD. Suppression is per-thread
+        (`LoadedSAE._suppressed`), so it reaches exactly the pass it wraps and never a concurrent
+        generation in another thread — entered around an `await asyncio.to_thread(...)` it would
+        suppress nothing in the worker.
         """
         try:
             from millm.services.sae_service import AttachedSAEState
@@ -4949,8 +4969,7 @@ class InferenceService:
                         f"prompt {index} tokenises to nothing, so there is no position to score"
                     )
                 self._check_context_length(prompt_tokens, 1)
-                with self._unsteered():
-                    logits = await asyncio.to_thread(self._next_token_logits, inputs)
+                logits = await asyncio.to_thread(self._unsteered_next_token_logits, inputs)
                 # The vocabulary is what the model actually scores — its logits — not a config
                 # field or an embedding matrix some wrappers do not expose (review round 1).
                 vocab = int(logits.shape[-1])
@@ -4959,10 +4978,12 @@ class InferenceService:
                         f"allowed_token_ids contains {max(request.allowed_token_ids)}, outside the "
                         f"loaded model's vocabulary of {vocab}"
                     )
-                if not bool(torch.isfinite(logits).all()):
+                # NaN or +inf anywhere poisons the normaliser. A -inf is how some heads mask padded
+                # vocabulary, so it is refused only where it would be REPORTED (review round 2, L2).
+                if bool(torch.isnan(logits).any()) or bool(torch.isposinf(logits).any()):
                     raise ScoringNumericalError(
-                        "The model produced non-finite logits for this prompt, so no probability can "
-                        "be reported for it."
+                        "The model produced NaN or infinite logits for this prompt, so no probability "
+                        "can be reported for it."
                     )
                 scores = next_token_scores(
                     logits,
@@ -4970,6 +4991,11 @@ class InferenceService:
                     temperature=request.temperature,
                     top_k=request.logprobs or 0,
                 )
+                if not all(math.isfinite(lp) for _, lp in scores.top):
+                    raise ScoringNumericalError(
+                        "A requested token has no probability under this model (its logit is -inf), "
+                        "so its log-probability cannot be reported."
+                    )
                 choices.append(
                     TextCompletionChoice(
                         index=index,
@@ -5000,6 +5026,12 @@ class InferenceService:
             ),
         )
 
+    def _unsteered_next_token_logits(self, inputs: Any) -> torch.Tensor:
+        """`_next_token_logits` with every attached SAE suppressed — in the worker thread itself,
+        where the forward hooks run (review round 2, M-A)."""
+        with self._unsteered():
+            return self._next_token_logits(inputs)
+
     def _next_token_logits(self, inputs: Any) -> torch.Tensor:
         """The last position's logits as float32 on the CPU, from one forward pass.
 
@@ -5019,7 +5051,7 @@ class InferenceService:
                     outputs = self._model(**inputs, use_cache=False)
             return outputs.logits[0, -1].float().cpu()
         except torch.cuda.OutOfMemoryError as exc:
-            failure = _generation_oom_error(exc, {**dict(inputs), "max_new_tokens": 1})
+            failure = _scoring_oom_error(exc, inputs)
         _release_generation_memory()
         logger.error("scoring_out_of_memory", **failure.details)
         raise failure

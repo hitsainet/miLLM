@@ -11,6 +11,7 @@ This applies steering directly to the residual stream, uniformly to all token po
 """
 
 import logging
+import threading
 from contextlib import contextmanager
 from dataclasses import dataclass
 from typing import Iterator, Optional
@@ -176,11 +177,18 @@ class LoadedSAE:
             f"d_sae mismatch: weights have {self.d_sae}, config has {config.d_sae}"
         )
 
-        # When True, the forward hook applies neither steering nor monitoring
-        # capture.  Used to run "plain" forward passes (e.g. /v1/embeddings)
-        # through the same hooked model without perturbing their hidden states
-        # or clobbering the last-captured activations.  See suppressed().
-        self._suppressed: bool = False
+        # When set, the forward hook applies neither steering nor monitoring
+        # capture.  Used to run "plain" forward passes (e.g. /v1/embeddings,
+        # scoring-mode completions) through the same hooked model without
+        # perturbing their hidden states or clobbering the last-captured
+        # activations.  See suppressed().
+        #
+        # ⚠ PER THREAD (2026-10-04). A forward hook runs in the thread running
+        # the forward pass, so a thread-local flag suppresses exactly the pass
+        # that asked for it. A plain attribute was process-wide: a scoring pass
+        # in a worker thread switched steering, monitoring and sensing off for a
+        # continuous-batching generation running at the same moment, silently.
+        self._suppression = threading.local()
 
         # Steering state (direct residual stream steering)
         self._steering_values: dict[int, float] = {}
@@ -1278,6 +1286,11 @@ class LoadedSAE:
         self._edge_done = True
         self._note_circuit_truncation()
 
+    @property
+    def _suppressed(self) -> bool:
+        """Whether the CURRENT thread's forward passes run unsteered and unmonitored."""
+        return getattr(self._suppression, "active", False)
+
     @contextmanager
     def suppressed(self) -> Iterator[None]:
         """Temporarily disable steering application and monitoring capture.
@@ -1289,11 +1302,11 @@ class LoadedSAE:
         their output or overwriting the last-captured activations.
         """
         previous = self._suppressed
-        self._suppressed = True
+        self._suppression.active = True
         try:
             yield
         finally:
-            self._suppressed = previous
+            self._suppression.active = previous
 
     def _capture_activations(self, feature_acts: Tensor) -> None:
         """

@@ -5,7 +5,7 @@ title: OpenAI-Compatible API
 
 # OpenAI-Compatible API
 
-miLLM exposes an OpenAI-compatible API at `/v1`, making it a drop-in replacement backend for the OpenAI SDK, Open WebUI, LangChain, LlamaIndex, and anything else that speaks the OpenAI protocol. When steering is active on the server, it applies transparently to every completion (never to embeddings).
+miLLM exposes an OpenAI-compatible API at `/v1`, making it a drop-in replacement backend for the OpenAI SDK, Open WebUI, LangChain, LlamaIndex, and anything else that speaks the OpenAI protocol. When steering is active on the server, it applies transparently to every completion. It never applies to embeddings or to [scoring-mode](#scoring-mode-next-token-log-probabilities) completions.
 
 ## Endpoints
 
@@ -173,7 +173,7 @@ These requests are refused instead:
 - A token id outside the loaded model's vocabulary: 400.
 - A prompt that tokenises to nothing: 400.
 - A GGUF (llama.cpp) model: 400, before the model is loaded, because llama.cpp exposes no per-token distribution here.
-- A model that produces non-finite logits: 500 `NON_FINITE_LOGITS`.
+- A model that produces NaN or +inf logits, or a requested token whose logit is −inf: 500 `non_finite_logits`.
 - Running out of GPU memory: the same typed error as generation.
 
 :::caution Behaviour change
@@ -187,7 +187,7 @@ curl http://localhost:8000/v1/completions -H 'content-type: application/json' -d
   "add_special_tokens": false, "return_tokens_as_token_ids": true}'
 ```
 
-Scoring requests are **never steered and never monitored**. Every attached SAE is suppressed for the forward pass, as for embeddings, because a judge's output is a probability that a steering profile left on the model would silently bias. Probes and sensing record nothing, because a judge's prompt isn't user traffic. Suppression is a shared switch on each SAE, so with continuous batching enabled (`ENABLE_CONTINUOUS_BATCHING`, off by default) a generation running at the same moment is unsteered for that pass.
+Scoring requests are **never steered and never monitored**. Every attached SAE is suppressed for the forward pass, as for embeddings, because a judge's output is a probability that a steering profile left on the model would silently bias. Probes and sensing record nothing, because a judge's prompt isn't user traffic. Suppression applies only to the scoring pass's own forward computation, so a generation running at the same moment (with continuous batching enabled) is still steered.
 
 ## Embeddings
 

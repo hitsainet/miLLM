@@ -205,6 +205,10 @@ class ChatCompletionRequest(BaseModel):
         return self
 
 
+#: Below this, dividing the logits by the temperature can overflow them; 0 means "no scaling".
+MIN_SCORING_TEMPERATURE = 1e-3
+
+
 class TextCompletionRequest(BaseModel):
     """Text completion request - OpenAI format (legacy completions endpoint).
 
@@ -268,6 +272,12 @@ class TextCompletionRequest(BaseModel):
                 raise ValueError("allowed_token_ids must be non-negative token ids")
             if isinstance(self.prompt, list) and not self.prompt:
                 raise ValueError("scoring mode needs at least one prompt")
+            if 0.0 < self.temperature < MIN_SCORING_TEMPERATURE:
+                # Dividing by a vanishing temperature overflows finite logits to +inf, and the
+                # result would be refused as a model fault it is not (review round 3).
+                raise ValueError(
+                    f"scoring mode needs temperature 0 or at least {MIN_SCORING_TEMPERATURE}"
+                )
         return self
 
     def wants_scores(self) -> bool:

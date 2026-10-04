@@ -512,8 +512,9 @@ class TestReviewRoundTwo:
                 state["active"] = False
 
         sae.suppressed = suppressed
-        released = []
-        spy = _Spy(model, fail=torch.cuda.OutOfMemoryError("CUDA out of memory. GPU 0 has a total"))
+        released, during = [], []
+        spy = _Spy(model, fail=torch.cuda.OutOfMemoryError("CUDA out of memory. GPU 0 has a total"),
+                   on_forward=lambda: during.append(state["active"]))
         with patch("millm.services.sae_service.AttachedSAEState.entries",
                    return_value=[SimpleNamespace(sae=sae)]), \
              patch("millm.services.inference_service._release_generation_memory",
@@ -523,6 +524,7 @@ class TestReviewRoundTwo:
         assert released == [True]
         assert "Scoring ran out of memory" in str(exc.value) and "max_tokens" not in str(exc.value)
         assert exc.value.details["prompt_tokens"] == 5
+        assert during == [True], "the failing pass was not suppressed"
         assert state["active"] is False, "suppression outlived the failed pass"
 
     async def test_minus_inf_outside_the_allowed_set_is_fine(self, model):
@@ -547,3 +549,41 @@ class TestReviewRoundTwo:
 
         with pytest.raises(ScoringNumericalError):
             await _service(MaskAnswer(model), _tokenizer(bos=False)).create_text_completion(_request())
+
+
+class TestReviewRoundThree:
+    @staticmethod
+    def _poison(model, index, value):
+        class Poison(_Spy):
+            def forward(self, **kwargs):
+                out = self.inner(**kwargs)
+                out.logits[..., index] = value
+                return out
+        return Poison(model)
+
+    @pytest.mark.parametrize("value", [float("nan"), float("inf")])
+    async def test_poison_outside_the_allowed_set_does_not_refuse_a_restricted_answer(self, model, value):
+        response = await _service(self._poison(model, 20, value), _tokenizer(bos=False)).create_text_completion(
+            _request())
+        assert response.choices[0].logprobs is not None
+
+    @pytest.mark.parametrize("value", [float("nan"), float("inf")])
+    async def test_poison_anywhere_refuses_an_unrestricted_answer(self, model, value):
+        from millm.core.errors import ScoringNumericalError
+
+        with pytest.raises(ScoringNumericalError, match="NaN or infinite"):
+            await _service(self._poison(model, 20, value), _tokenizer(bos=False)).create_text_completion(
+                _request(allowed_token_ids=None, logprobs=3))
+
+    @pytest.mark.parametrize("value", [float("nan"), float("inf")])
+    async def test_poison_on_an_allowed_token_is_refused_up_front(self, model, value):
+        from millm.core.errors import ScoringNumericalError
+
+        with pytest.raises(ScoringNumericalError, match="NaN or infinite"):
+            await _service(self._poison(model, 9, value), _tokenizer(bos=False)).create_text_completion(
+                _request())
+
+    def test_a_vanishing_temperature_is_refused(self):
+        with pytest.raises(ValidationError, match="temperature 0 or at least"):
+            _request(temperature=1e-38)
+        assert _request(temperature=0.0).temperature == 0.0

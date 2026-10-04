@@ -173,7 +173,8 @@ These requests are refused instead:
 - A token id outside the loaded model's vocabulary: 400.
 - A prompt that tokenises to nothing: 400.
 - A GGUF (llama.cpp) model: 400, before the model is loaded, because llama.cpp exposes no per-token distribution here.
-- A model that produces NaN or +inf logits, or a requested token whose logit is −inf: 500 `non_finite_logits`.
+- NaN or +inf logits where they reach the answer (on an allowed token, or anywhere when the vocabulary is unrestricted), or a reported token whose logit is −inf: 500 `non_finite_logits`. A −inf on a token outside the allowed set is fine; some heads mask padded vocabulary that way.
+- A temperature between 0 and 0.001, which would overflow the logits: 422.
 - Running out of GPU memory: the same typed error as generation.
 
 :::caution Behaviour change

@@ -160,7 +160,8 @@ def _scoring_oom_error(exc: BaseException, inputs: Any) -> GenerationOutOfMemory
     base = _generation_oom_error(exc, {**dict(inputs), "max_new_tokens": 1})
     tokens = base.details.get("prompt_tokens")
     size = f"{tokens} prompt tokens" if tokens is not None else "its prompt"
-    where = base.details.get("device") or "a GPU"
+    device, name = base.details.get("device"), base.details.get("device_name")
+    where = f"{device} ({name})" if device and name else (device or "a GPU")
     return GenerationOutOfMemoryError(
         f"Scoring ran out of memory on {where}: one forward pass over {size} needed more room than "
         "the card had left beside the model. Its memory has been released and the server keeps "
@@ -4978,9 +4979,16 @@ class InferenceService:
                         f"allowed_token_ids contains {max(request.allowed_token_ids)}, outside the "
                         f"loaded model's vocabulary of {vocab}"
                     )
-                # NaN or +inf anywhere poisons the normaliser. A -inf is how some heads mask padded
-                # vocabulary, so it is refused only where it would be REPORTED (review round 2, L2).
-                if bool(torch.isnan(logits).any()) or bool(torch.isposinf(logits).any()):
+                # NaN or +inf poisons the normaliser — over the whole vocabulary when unrestricted,
+                # over the allowed ids only when restricted (log-softmax runs over that set alone,
+                # so a NaN elsewhere cannot touch the answer; review round 3). A -inf is how some
+                # heads mask padded vocabulary, so it is refused only where it would be REPORTED.
+                checked = (
+                    logits
+                    if request.allowed_token_ids is None
+                    else logits[torch.tensor(request.allowed_token_ids, dtype=torch.long)]
+                )
+                if bool(torch.isnan(checked).any()) or bool(torch.isposinf(checked).any()):
                     raise ScoringNumericalError(
                         "The model produced NaN or infinite logits for this prompt, so no probability "
                         "can be reported for it."
@@ -4993,8 +5001,8 @@ class InferenceService:
                 )
                 if not all(math.isfinite(lp) for _, lp in scores.top):
                     raise ScoringNumericalError(
-                        "A requested token has no probability under this model (its logit is -inf), "
-                        "so its log-probability cannot be reported."
+                        "A reported log-probability is not finite: a requested token's logit is -inf "
+                        "under this model, so it has no probability to report."
                     )
                 choices.append(
                     TextCompletionChoice(

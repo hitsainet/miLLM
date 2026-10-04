@@ -19,6 +19,7 @@ import type { ProbeAckDetails } from '@/hooks/useProbes';
 import { ProbeHubBrowser } from '@/components/probes/ProbeHubBrowser';
 import { useProbeEventDetail, useProbes } from '@/hooks/useProbes';
 import type { Probe, ProbeEvent } from '@/types/probe';
+import { groupByRequest } from '@/utils/probeEvents';
 import { ARM_WITHOUT_ACK_MIN_RUNG } from '@/types/probe';
 import { labelSeparation } from '@/utils/probeLabels';
 
@@ -77,6 +78,76 @@ const WINDOW_HELP: Record<string, string> = {
   response: "the model's own output. ⚠ UNTRAINED — miStudio's training corpus is prose wrapped as a single user turn, so these weights never saw a model reply. Its threshold may be cut from reply negatives, but the readout itself is unvalidated, so it is always reported as provisional.",
 };
 
+/** What a probe's contract scope covers, in words — the same sentence miStudio's tile uses. */
+const SCOPE_WORDS: Record<string, string> = {
+  all: 'every token (prompt and reply)',
+  prompt: "the person's side of the request",
+  response: "the model's reply",
+};
+
+const WINDOW_ORDER = ['prompt', 'response', 'all'] as const;
+
+/**
+ * WHICH TOKENS: what the probe was fitted on, and its own bar over each window.
+ *
+ * ⚠ A miStudio run's probes are layers x rules, each fitted on one scope with a bar per window.
+ * Without this a list of them read as "one per window", and the bar each window is judged against
+ * was invisible. `response` is marked provisional unless the probe was fitted on replies — the
+ * same rule the runtime applies (`window_weights_trained`).
+ */
+export function ProbeWindowBars({ probe }: { probe: Probe }) {
+  const bars = probe.window_thresholds ?? {};
+  const windows = WINDOW_ORDER.filter((w) => w in bars);
+  return (
+    <div className="text-xs text-slate-400 mt-0.5" data-testid="probe-windows">
+      <span data-testid="probe-scope">
+        fitted on <span className="text-slate-300">{SCOPE_WORDS[probe.scope] ?? probe.scope}</span>
+      </span>
+      <div className="flex flex-wrap items-center gap-1.5 mt-1">
+        {windows.length === 0 ? (
+          <span
+            className="px-1.5 py-0.5 rounded bg-slate-700/60 text-slate-300 text-[10px]"
+            data-testid="window-single-bar"
+            title="No per-window bar was placed, so every window is judged against the single threshold."
+          >
+            one bar for every window
+          </span>
+        ) : (
+          windows.map((window) => {
+            const untrained = window === 'response' && probe.scope !== 'response';
+            return (
+              <span
+                key={window}
+                data-testid={`window-${window}`}
+                className={`px-1.5 py-0.5 rounded text-[10px] ${
+                  untrained ? 'bg-amber-900/40 text-amber-200' : 'bg-slate-700/60 text-slate-200'
+                }`}
+                title={
+                  untrained
+                    ? "This bar was cut from reply negatives, but the probe's weights never saw a model reply — verdicts here are provisional: a ranking, not a measured rate."
+                    : `This window's own bar, cut from calibration negatives read over the ${window} window.`
+                }
+              >
+                {window} ≥ {bars[window].toFixed(2)}
+                {untrained ? ' · provisional' : ''}
+              </span>
+            );
+          })
+        )}
+        {probe.length_band_count ? (
+          <span
+            className="text-[10px] text-slate-500"
+            data-testid="window-length-bands"
+            title="The bar over the probe's own scope also varies with how many tokens were scored. Only that window uses the bands."
+          >
+            + {probe.length_band_count} length bands on {probe.scope}
+          </span>
+        ) : null}
+      </div>
+    </div>
+  );
+}
+
 function ProbeRow({
   probe,
   onArm,
@@ -128,11 +199,14 @@ function ProbeRow({
       <div className="flex items-start justify-between gap-3">
         <div className="min-w-0">
           <p className="text-slate-100 font-medium truncate">{probe.name}</p>
-          <p className="font-mono text-xs text-slate-400">
-            {probe.hf_id} · L{probe.layer} · {probe.rule} ·{' '}
-            {probe.basis === 'sae_features' ? 'SAE basis' : 'dense residual'} · scope{' '}
-            {probe.scope}
+          <p className="font-mono text-xs text-slate-400" data-testid="probe-readout">
+            {probe.hf_id} · L{probe.layer} · {probe.rule}
+            {/* The rolling window is part of the rule: two `rolling_mean_max` probes at one layer
+                differ ONLY here, and without it their tiles read identically (2026-10-04). */}
+            {typeof probe.rule_params?.window === 'number' ? ` w=${probe.rule_params.window}` : ''} ·{' '}
+            {probe.basis === 'sae_features' ? 'SAE basis' : 'dense residual'}
           </p>
+          <ProbeWindowBars probe={probe} />
           {/* ⚠ WHAT IT WAS FITTED ON. The line above is the READ POINT; it says nothing about
               the concept, and two probes here differed only in their run. A probe is a boundary
               between two sets of labelled rows, so both sides are named — the same positive
@@ -581,19 +655,6 @@ function RequestGroup({
   );
 }
 
-
-/** Group in arrival order, preserving it. A Map keeps insertion order, so the newest request
- *  stays first without sorting by a timestamp the socket payload once did not carry. */
-export function groupByRequest(events: ProbeEvent[]): [string, ProbeEvent[]][] {
-  const groups = new Map<string, ProbeEvent[]>();
-  for (const event of events) {
-    const key = event.request_id ?? '—';
-    const existing = groups.get(key);
-    if (existing) existing.push(event);
-    else groups.set(key, [event]);
-  }
-  return [...groups.entries()];
-}
 
 export function ProbeMonitorsPage() {
   const {

@@ -55,6 +55,15 @@ export interface Probe {
   hf_id: string;
   layer: number;
   rule: ProbeRule;
+  /**
+   * The rule's parameters, e.g. `{ window: 32 }`. Two `rolling_mean_max` probes at one layer
+   * differ ONLY here. Optional on the wire: a backend before 2026-10-04 omits it.
+   */
+  rule_params?: Record<string, unknown>;
+  /** Each window's OWN bar (`decision.windows`). `{}` = one bar for every window. */
+  window_thresholds?: Record<string, number>;
+  /** Length bands refining the bar over the probe's own scope; 0 = none. */
+  length_band_count?: number;
   scope: ProbeScope;
   basis: ProbeBasis;
   streamable: boolean;

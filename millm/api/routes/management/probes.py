@@ -105,12 +105,25 @@ class ProbeRecalibrationRequest(BaseModel):
 
 
 def _probe_summary(probe: Any) -> dict[str, Any]:
+    from millm.services.probe_arming import (
+        length_bands_from_definition,
+        window_thresholds_from_definition,
+    )
+
     return {
         "id": probe.id,
         "name": probe.name,
         "hf_id": probe.hf_id,
         "layer": probe.layer,
         "rule": probe.rule,
+        # ⚠ THE RULE'S PARAMETERS, e.g. `{"window": 32}`. Two `rolling_mean_max` probes at one
+        # layer differ ONLY here, and without it their tiles read identically (operator,
+        # 2026-10-04). Read from the same field arming reads (`aggregation.params`).
+        "rule_params": ((probe.definition or {}).get("aggregation") or {}).get("params") or {},
+        # Each window's OWN bar (`decision.windows`), and how many length bands refine the bar
+        # over the probe's own scope — the tile states which tokens a probe reads and at what bar.
+        "window_thresholds": window_thresholds_from_definition(probe.definition),
+        "length_band_count": len(length_bands_from_definition(probe.definition)),
         "scope": probe.scope,
         "basis": probe.basis,
         "streamable": probe.streamable,

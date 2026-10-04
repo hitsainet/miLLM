@@ -65,7 +65,8 @@ vi.mock('@/hooks/useProbes', () => ({
 }));
 
 // Imported after the mock so the page picks it up.
-const { ProbeMonitorsPage, groupByRequest } = await import('../ProbeMonitorsPage');
+const { ProbeMonitorsPage } = await import('../ProbeMonitorsPage');
+import { groupByRequest } from '@/utils/probeEvents';
 import { labelSeparation, trainingLabels } from '@/utils/probeLabels';
 
 function probe(over: Partial<Probe> = {}): Probe {
@@ -1046,5 +1047,43 @@ describe('the bar in force, when it is not the one stored', () => {
     renderPage();
     expect(screen.getByTestId('probe-threshold')).toBeInTheDocument();
     expect(screen.queryByTestId('threshold-disagreement')).not.toBeInTheDocument();
+  });
+});
+
+describe('the tile says which tokens a probe reads and names its rolling window (2026-10-04)', () => {
+  const bars = { all: 46.78, prompt: 28.8, response: 46.57 };
+
+  it('names the rolling window, the only thing telling w=32 from w=64 apart', () => {
+    state.probes = [
+      probe({ id: 'pr_32', rule: 'rolling_mean_max', rule_params: { window: 32 } }),
+      probe({ id: 'pr_64', rule: 'rolling_mean_max', rule_params: { window: 64 } }),
+    ];
+    renderPage();
+    const readouts = screen.getAllByTestId('probe-readout').map((el) => el.textContent);
+    expect(readouts[0]).toContain('rolling_mean_max w=32');
+    expect(readouts[1]).toContain('rolling_mean_max w=64');
+  });
+
+  it('adds nothing for a rule with no window', () => {
+    state.probes = [probe({ rule: 'mean', rule_params: {} })];
+    renderPage();
+    expect(screen.getByTestId('probe-readout').textContent).not.toContain('w=');
+  });
+
+  it("shows what it was fitted on and each window's own bar, response provisional", () => {
+    state.probes = [probe({ window_thresholds: bars, length_band_count: 4 })];
+    renderPage();
+    expect(screen.getByTestId('probe-scope')).toHaveTextContent('fitted on every token (prompt and reply)');
+    expect(screen.getByTestId('window-prompt')).toHaveTextContent('prompt ≥ 28.80');
+    expect(screen.getByTestId('window-response')).toHaveTextContent('response ≥ 46.57 · provisional');
+    expect(screen.getByTestId('window-all')).toHaveTextContent('all ≥ 46.78');
+    expect(screen.getByTestId('window-prompt')).not.toHaveTextContent('provisional');
+    expect(screen.getByTestId('window-length-bands')).toHaveTextContent('+ 4 length bands on all');
+  });
+
+  it('says so when one bar serves every window', () => {
+    state.probes = [probe({ window_thresholds: {} })];
+    renderPage();
+    expect(screen.getByTestId('window-single-bar')).toBeInTheDocument();
   });
 });

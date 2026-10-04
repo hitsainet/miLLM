@@ -171,7 +171,7 @@ class TestTheHungThreadGuard:
         `mark_armed_rows_disarmed`, run for real in `test_unload_clears_probe_hooks.py`."""
         code = source_of("stream_chat_completion")
         assert "mark_armed_rows_disarmed(" in code
-        assert '"disarmed because a generation thread hung"' in code
+        assert "HANG_REASON" in code
         assert '"_probe_arming_service"' not in code
 
 

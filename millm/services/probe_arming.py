@@ -494,6 +494,21 @@ class ProbeArmingService:
         return await self.repository.disarm_all(reason)
 
 
+#: Why a probe stopped scoring, as recorded on its row. ⚠ `probes.paused_reason` is VARCHAR(64), and
+#: the first unload reason was 70 characters: Postgres refused the write, the helper logged it, and
+#: every row went on claiming to be armed. SQLite — the unit-test database — does not enforce the
+#: length, so the suite was green. The helper now refuses an over-long reason before any write.
+UNLOAD_REASON = "disarmed: the model was unloaded — re-arm after loading"
+HANG_REASON = "disarmed: a generation thread hung"
+
+
+def paused_reason_limit() -> int:
+    """The column's declared length, read from the model rather than restated here."""
+    from millm.db.models.probe import Probe
+
+    return int(Probe.__table__.c.paused_reason.type.length)
+
+
 async def mark_armed_rows_disarmed(session_factory: Any, paused_reason: str, *, event: str) -> list[str]:
     """Clear every `armed` probe row with `paused_reason`; return the ids. Never raises.
 
@@ -509,6 +524,12 @@ async def mark_armed_rows_disarmed(session_factory: Any, paused_reason: str, *, 
 
     from millm.db.models.probe import Probe
 
+    if len(paused_reason) > paused_reason_limit():
+        # A programming error, not a runtime condition: raised so a test sees it, never swallowed.
+        raise ValueError(
+            f"paused_reason is {len(paused_reason)} characters; the column holds "
+            f"{paused_reason_limit()}: {paused_reason!r}"
+        )
     try:
         async with session_factory() as session:
             armed = (

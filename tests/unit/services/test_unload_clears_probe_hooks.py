@@ -186,3 +186,47 @@ class TestTheHangGuardWritesTheRowsNow:
         assert "mark_armed_rows_disarmed" in names
         source = inspect.getsource(InferenceService.stream_chat_completion)
         assert '"_probe_arming_service"' not in source
+
+
+class TestEveryReasonFitsTheColumn:
+    """⚠ `probes.paused_reason` is VARCHAR(64). The first unload reason was 70 characters: Postgres
+    refused the write on hardware, the rows stayed `armed`, and this suite was green because its
+    database is SQLite, which does not enforce VARCHAR lengths. So the length is checked against
+    the column's DECLARED length, not against whatever the test database accepts."""
+
+    def test_the_reasons_fit(self):
+        from millm.services.probe_arming import HANG_REASON, UNLOAD_REASON, paused_reason_limit
+
+        assert paused_reason_limit() == 64
+        for reason in (UNLOAD_REASON, HANG_REASON):
+            assert len(reason) <= paused_reason_limit(), reason
+
+    def test_the_startup_reason_fits_too(self):
+        import millm.main as main
+
+        source = inspect.getsource(main.disarm_probes_on_startup)
+        tree = ast.parse(textwrap.dedent(source))
+        reasons = [
+            kw.value for node in ast.walk(tree) if isinstance(node, ast.Call)
+            for kw in node.keywords if kw.arg == "paused_reason"
+        ]
+        assert reasons, "the startup write's reason was not found"
+        from millm.services.probe_arming import paused_reason_limit
+
+        for value in reasons:
+            text = ast.literal_eval(value)
+            assert len(text) <= paused_reason_limit(), text
+
+    async def test_an_over_long_reason_is_refused_before_any_write(self):
+        from millm.services.probe_arming import mark_armed_rows_disarmed
+
+        touched = []
+
+        @asynccontextmanager
+        async def factory():
+            touched.append(True)
+            yield None
+
+        with pytest.raises(ValueError, match="column holds 64"):
+            await mark_armed_rows_disarmed(factory, "x" * 65, event="t")
+        assert touched == [], "a session was opened for a write the column would refuse"

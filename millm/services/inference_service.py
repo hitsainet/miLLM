@@ -4698,12 +4698,13 @@ class InferenceService:
                             # ⚠ This read a `dependencies._probe_arming_service` global that was
                             # never defined, so the rows were never marked (found 2026-10-04).
                             from millm.db.base import async_session_factory
-                            from millm.services.probe_arming import mark_armed_rows_disarmed
+                            from millm.services.probe_arming import (
+                                HANG_REASON,
+                                mark_armed_rows_disarmed,
+                            )
 
                             await mark_armed_rows_disarmed(
-                                async_session_factory,
-                                "disarmed because a generation thread hung",
-                                event="probes_disarmed_by_hang",
+                                async_session_factory, HANG_REASON, event="probes_disarmed_by_hang"
                             )
                         _pstate.end_request()
                     except Exception:

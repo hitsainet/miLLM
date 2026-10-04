@@ -131,8 +131,9 @@ class ArmedProbe:
     #: every position's score UNMASKED, and the window is applied in `combine`.
     windows: tuple[str, ...] = ()
     #: `{window: threshold}` where the producer calibrated that window's own negatives. A window
-    #: present here is NOT provisional: its bar was cut from the distribution it is judged
-    #: against, which is the whole difference between a rate and a ranking.
+    #: present here has a bar cut from the distribution it is judged against — the difference
+    #: between a rate and a ranking. That retires ONE reason to be provisional; `response` stays
+    #: provisional anyway, because its weights never saw a reply (`window_weights_trained`).
     window_thresholds: dict[str, float] = field(default_factory=dict)
     #: A threshold per ABSOLUTE token-length band, contiguous from 0 with an open-ended last
     #: band. Empty when the producer did not calibrate per length, which is every document
@@ -193,9 +194,10 @@ class Verdict:
     #: probe's name; not `contexts_for`, which keyed by `probe_id` alone and would have given both
     #: verdicts the same context text.
     window: str = "all"
-    #: The threshold was calibrated under `probe.scope`, and this verdict was not read under it.
-    #: The number is still reported and still fires, by operator decision — but every surface it
-    #: reaches must say so, or a reader takes an untrained window's alert for a measured one.
+    #: Either the bar was cut for another window (this one has none of its own), or the weights
+    #: were never fitted on the tokens this window reads (`window_weights_trained`). The number is
+    #: still reported and still fires, by operator decision — but every surface it reaches must
+    #: say so, or a reader takes an untrained window's alert for a measured one.
     provisional: bool = False
     #: WHICH CUT OF THE BAR JUDGED THIS. Two verdicts under different bars are distinguishable by
     #: `threshold` alone only while the two cuts land on different numbers — and a reader who sees
@@ -509,10 +511,9 @@ class ProbeRequestContext:
 
     def _verdict_for(self, probe: ArmedProbe, window: str) -> Verdict:
         """One probe's verdict over one window."""
-        # ⚠ A WINDOW'S OWN THRESHOLD RETIRES ITS PROVISIONAL FLAG, and nothing else does. The
-        # flag means "judged against a bar cut for a different distribution"; once miStudio has
-        # cut a bar from THIS window's negatives that is no longer true, and continuing to mark
-        # it would train the operator to ignore the marker that still matters elsewhere.
+        # ⚠ A WINDOW'S OWN THRESHOLD RETIRES ONE OF ITS TWO PROVISIONAL REASONS. "Judged against a
+        # bar cut for a different distribution" stops being true once miStudio has cut a bar from
+        # THIS window's negatives. "The weights never saw these tokens" does not — see below.
         own = probe.window_thresholds.get(window)
         threshold = own if own is not None else probe.threshold
         base = dict(

@@ -83,9 +83,11 @@ def window_is_calibrated(probe_scope: str, window: str) -> bool:
     there is nothing to train on"*. Weights fitted on user statements are being pointed at model
     output.
 
-    A window this returns `False` for still produces a verdict and still fires — the operator
-    chose alerts now over silence on 2026-09-30 — but it is marked `provisional` everywhere it
-    surfaces, which is the condition that choice was made under.
+    A window this returns `False` for, with no bar of its own, still produces a verdict and still
+    fires — the operator chose alerts now over silence on 2026-09-30 — but it is marked
+    `provisional` everywhere it surfaces, which is the condition that choice was made under. A
+    window with its own bar (`decision.windows`) is not marked for THIS reason; it can still be
+    marked by `window_weights_trained`.
     """
     return window == probe_scope
 
@@ -100,11 +102,20 @@ def window_weights_trained(probe_scope: str, window: str) -> bool:
     single user turn: they never saw a model reply. A calibrated bar over an untrained readout is
     still a guess, and the UI's own copy says response verdicts are reported as provisional.
 
-    Conservative by construction: a window is trained when it IS the probe's scope, or when the
-    probe is `all` and the window is not `response` (an `all` probe fitted on prose read as a
-    single user turn has seen prompt tokens, never a reply). A `prompt` probe's `all` window reads
-    the reply too, so it is not trained (review round 1). A future response-trained probe declares
-    `response`; nothing infers it.
+    THE CRITERION, stated rather than argued (review round 2, M4):
+
+    * The probe's OWN scope is trained by definition. It is what the probe was fitted on, what
+      its metrics and evidence rung describe, and the only window parity verifies. If an `all`
+      probe fitted on prose then reads chat replies in its `all` window, that is a property of
+      the PROBE, stated by its evidence, not a per-window caveat.
+    * Another window counts as trained only when the probe is `all` and the window is `prompt`:
+      the person's words are the kind of text an `all` probe was fitted on. The contract's
+      `prompt` also holds the system preamble and earlier assistant turns, so on a multi-turn
+      chat this is an approximation, accepted and named here.
+    * `response` is untrained unless the probe's scope IS `response`. So is any other window of a
+      non-`all` probe — a `prompt` probe's `all` window reads the reply too.
+
+    A future response-trained probe declares `response`; nothing infers it.
     """
     if window == probe_scope:
         return True

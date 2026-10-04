@@ -171,28 +171,29 @@ class TestStreamedRequestsCaptureTheGeneratedIds:
                 guards.append(node.test)
         assert guards, "the scan found no guarded id capture — it is looking at the wrong shape"
 
-        def probe_alternative(test):
-            for node in ast.walk(test):
-                if (
-                    isinstance(node, ast.Compare)
-                    and isinstance(node.left, ast.Name) and node.left.id == "_probe_ctx"
-                    and len(node.ops) == 1 and isinstance(node.ops[0], ast.IsNot)
-                    and isinstance(node.comparators[0], ast.Constant)
-                    and node.comparators[0].value is None
-                ):
-                    return True
-            return False
+        def is_probe_check(node):
+            return (
+                isinstance(node, ast.Compare)
+                and isinstance(node.left, ast.Name) and node.left.id == "_probe_ctx"
+                and len(node.ops) == 1 and isinstance(node.ops[0], ast.IsNot)
+                and isinstance(node.comparators[0], ast.Constant)
+                and node.comparators[0].value is None
+            )
 
         for test in guards:
-            assert probe_alternative(test), (
+            # ⚠ REVIEW ROUND 2: anywhere in the test was still too loose — `not (...)` or an extra
+            # AND conjunct passed. The shape is fixed: `(<OR of alternatives>) and <criteria>`,
+            # with the probe check a DIRECT member of the OR.
+            assert isinstance(test, ast.BoolOp) and isinstance(test.op, ast.And), ast.unparse(test)
+            assert len(test.values) == 2, ast.unparse(test)
+            alternatives, criteria = test.values
+            assert isinstance(alternatives, ast.BoolOp) and isinstance(alternatives.op, ast.Or), (
+                ast.unparse(test)
+            )
+            assert any(is_probe_check(v) for v in alternatives.values), (
                 f"the id capture is not installed on `_probe_ctx is not None`: {ast.unparse(test)}"
             )
-            assert isinstance(test, ast.BoolOp) and isinstance(test.op, ast.And), ast.unparse(test)
-            alternatives = test.values[0]
-            assert isinstance(alternatives, ast.BoolOp) and isinstance(alternatives.op, ast.Or), (
-                f"the probe check must be one OR'd alternative, not a further condition: "
-                f"{ast.unparse(test)}"
-            )
+            assert ast.unparse(criteria) == "stopping_criteria is not None", ast.unparse(test)
 
     def test_the_captured_ids_reach_the_recorder(self):
         """The capture is useless unless its ids are what `_probe_record` is given."""
@@ -203,7 +204,8 @@ class TestStreamedRequestsCaptureTheGeneratedIds:
             node for node in ast.walk(tree)
             if isinstance(node, ast.Assign)
             and any(isinstance(t, ast.Name) and t.id == "_full_ids" for t in node.targets)
-            and "_id_capture.latest_ids" in ast.unparse(node.value)
+            and isinstance(node.value, ast.IfExp)
+            and ast.unparse(node.value.body) == "_id_capture.latest_ids"
         ]
         assert assigned, "_full_ids is not taken from the id capture"
         recorded = [

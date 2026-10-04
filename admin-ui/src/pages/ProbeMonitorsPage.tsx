@@ -74,7 +74,7 @@ const WINDOWS = ['all', 'prompt', 'response'] as const;
 const WINDOW_HELP: Record<string, string> = {
   all: "the whole request — what this did before windows existed. A long reply drags the mean down, so the same conversation scores differently depending on how much the model said.",
   prompt: "the person's words only. Independent of how much the model then said, and closest to what these weights were trained on.",
-  response: "the model's own output. ⚠ UNCALIBRATED AND UNTRAINED — miStudio's training corpus is prose wrapped as a single user turn, so these weights never saw a model reply. Reported as provisional.",
+  response: "the model's own output. ⚠ UNTRAINED — miStudio's training corpus is prose wrapped as a single user turn, so these weights never saw a model reply. Its threshold may be cut from reply negatives, but the readout itself is unvalidated, so it is always reported as provisional.",
 };
 
 function ProbeRow({

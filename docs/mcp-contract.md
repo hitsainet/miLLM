@@ -287,9 +287,12 @@ not — except `response`, which stays provisional whatever bar it carries: miSt
 corpus is prose wrapped as a single user turn, so weights fitted there have never seen a model
 reply. A provisional verdict still fires, by operator decision, and is a **ranking, not a rate**.
 
-⚠ **`decision.length_bands` APPLY ONLY TO THE PROBE'S OWN SCOPE.** They are cut in the same pass
-as the global bar. Every other window is judged against its own bar (or the global one), never a
-band — until 2026-10-03 the runtime applied them to every window.
+⚠ **`decision.length_bands` APPLY ONLY TO THE PROBE'S OWN SCOPE, AND THERE ONLY WHERE THEY WERE
+CUT FROM THE SAME PASS AS THAT WINDOW'S BAR.** They are cut with the global bar. Every other window
+is judged against its own bar (or the global one), never a band. On a non-`all` probe the own
+window's bar (`decision.windows`, cut under miStudio's `input`) and the bands (cut under `user`)
+come from different passes, so a window with its own bar is judged against that bar and the bands
+apply only when it has none. Until 2026-10-03 the runtime applied the bands to every window.
 
 **What a probe verdict is, on the `/v1` side.** Non-streaming responses carry
 `X-miLLM-Probe-Verdicts` (RFC 8941 structured field); streaming responses carry a

@@ -122,6 +122,8 @@ class TestTheResponseWindowIsProvisionalUntilItsWeightsAreTrained:
         # A `prompt` probe's `all` window reads the reply too (review round 1).
         assert window_weights_trained("prompt", "all") is False
         assert window_weights_trained("prompt", "prompt") is True
+        # An unknown window is untrained until someone decides otherwise.
+        assert window_weights_trained("all", "some_new_window") is False
 
 
 class TestANonAllProbesBandsNeverReplaceAWindowBar:

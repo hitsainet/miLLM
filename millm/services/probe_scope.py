@@ -119,7 +119,9 @@ def window_weights_trained(probe_scope: str, window: str) -> bool:
     """
     if window == probe_scope:
         return True
-    return probe_scope == "all" and window != "response"
+    # Spelled exactly as the docstring states it, so a window name added later is untrained until
+    # someone decides otherwise, rather than trained by omission (review round 3).
+    return probe_scope == "all" and window == "prompt"
 
 
 def scope_is_reproducible(scope: str) -> bool:

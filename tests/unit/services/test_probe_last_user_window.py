@@ -382,3 +382,33 @@ class TestTheSpanIsOnlyComputedWhenSomethingReadsIt:
         self._service(monkeypatch, calls)._probe_note_last_user_span(ctx, [], [1, 2, 3], None)
         assert calls == [1]
         ctx.set_last_user_span.assert_called_once_with((1, 2), None)
+
+
+class TestTheCachedPreambleCannotGoStale:
+    """Review round 3 (M1): templates that call `strftime_now` stamp today's date into the
+    preamble, so a prefix cached before midnight matched no request after it and every
+    single-turn `last_user` verdict went dark until a restart."""
+
+    def test_a_stale_cached_prefix_is_recomputed_not_refused(self):
+        from millm.services import probe_turns
+
+        tok = _case_tokenizer(False)
+        messages = [{"role": "user", "content": "virus spreads fast"}]
+        served = tok(tok.apply_chat_template(messages, tokenize=False, add_generation_prompt=True))["input_ids"]
+        good, _ = last_user_token_span(tok, messages, served)
+        prefix, start = probe_turns.first_user_header(tok)
+        stale = list(prefix)
+        stale[1] = tok.convert_tokens_to_ids("brief")
+        [key] = [k for k in probe_turns._cache[tok] if k.startswith("first:")]
+        probe_turns._cache[tok][key] = (stale, start)
+        span, reason = last_user_token_span(tok, messages, served)
+        assert (span, reason) == (good, None)
+        assert probe_turns.first_user_header(tok) == (prefix, start)
+
+    def test_the_cache_is_bounded_against_client_kwargs(self):
+        from millm.services import probe_turns
+
+        tok = _case_tokenizer(False)
+        for i in range(probe_turns._MAX_ENTRIES * 2):
+            probe_turns.user_header_ids(tok, {"client_value": i})
+        assert len(probe_turns._cache[tok]) <= probe_turns._MAX_ENTRIES

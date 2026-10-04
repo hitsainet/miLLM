@@ -14,6 +14,7 @@ calibrated one would be a rate of one distribution applied to another.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import weakref
 from typing import Any, Optional, Sequence
@@ -42,13 +43,24 @@ _FIRST_PROBES = ([{"role": "user", "content": "x"}], [{"role": "user", "content"
 _cache: "weakref.WeakKeyDictionary[Any, dict]" = weakref.WeakKeyDictionary()
 
 
-def _cached(tokenizer: Any, name: str, kwargs: dict, compute: Any) -> Any:
+#: Bound on entries per tokenizer: the key holds client-supplied `chat_template_kwargs`, so
+#: distinct values must not grow it without limit (review round 3, L2).
+_MAX_ENTRIES = 64
+
+
+def _cached(tokenizer: Any, name: str, kwargs: dict, compute: Any, *, refresh: bool = False) -> Any:
     try:
-        key = f"{name}:{getattr(tokenizer, 'chat_template', None)!r}:{json.dumps(kwargs, sort_keys=True, default=str)}"
+        template = str(getattr(tokenizer, "chat_template", None))
+        key = (
+            f"{name}:{hashlib.sha256(template.encode()).hexdigest()}:"
+            f"{json.dumps(kwargs, sort_keys=True, default=str)}"
+        )
         per_tokenizer = _cache.setdefault(tokenizer, {})
     except TypeError:  # not weakly referenceable: computed every time, never wrongly shared
         return compute()
-    if key not in per_tokenizer:
+    if refresh or key not in per_tokenizer:
+        if key not in per_tokenizer and len(per_tokenizer) >= _MAX_ENTRIES:
+            per_tokenizer.pop(next(iter(per_tokenizer)), None)
         per_tokenizer[key] = compute()
     return per_tokenizer[key]
 
@@ -65,7 +77,7 @@ def _normalised_text(tokenizer: Any, ids: Sequence[int]) -> str:
 
 
 def first_user_header(
-    tokenizer: Any, template_kwargs: Optional[dict] = None
+    tokenizer: Any, template_kwargs: Optional[dict] = None, *, refresh: bool = False
 ) -> Optional[tuple[list[int], int]]:
     """`(prefix, start)` for a conversation whose message 0 is a user turn, or `None`.
 
@@ -76,9 +88,15 @@ def first_user_header(
     at its own position, because a SentencePiece tokenizer encodes a header at the start of a
     string with a leading `▁` that the same header after a turn lacks (M-A). Identical to
     miStudio's `probe_monitor_render.first_user_header`.
+
+    ⚠ THE PREFIX HOLDS THE PREAMBLE, AND A PREAMBLE CAN CHANGE WITH THE CLOCK (review round 3,
+    M1): templates that call `strftime_now` stamp today's date into it, so a prefix cached before
+    midnight matches no request after it. Callers pass `refresh=True` once on a mismatch.
     """
     kwargs = dict(template_kwargs or {})
-    return _cached(tokenizer, "first", kwargs, lambda: _first_user_header(tokenizer, kwargs))
+    return _cached(
+        tokenizer, "first", kwargs, lambda: _first_user_header(tokenizer, kwargs), refresh=refresh
+    )
 
 
 def _first_user_header(tokenizer: Any, kwargs: dict) -> Optional[tuple[list[int], int]]:
@@ -176,13 +194,18 @@ def last_user_token_span(
         # ~25-token system block even when no system message was sent (review round 1, H1). The
         # header start comes from content-free renders, never from the content (round 2, H-A),
         # and the served ids must begin with exactly that prefix.
+        def matches(found: Optional[tuple[list[int], int]]) -> bool:
+            return found is not None and served[offset: offset + len(found[0])] == found[0] and (
+                offset + len(found[0]) <= end
+            )
+
         found = first_user_header(tokenizer, kwargs)
-        if found is None:
-            return None, NO_USER_HEADER
-        prefix, header_start = found
-        if served[offset: offset + len(prefix)] != prefix or offset + len(prefix) > end:
-            return None, NO_USER_HEADER
-        start = offset + header_start
+        if not matches(found):
+            # Recompute once before refusing: the cached preamble may be stale (a date).
+            found = first_user_header(tokenizer, kwargs, refresh=True)
+            if not matches(found):
+                return None, NO_USER_HEADER
+        start = offset + found[1]
     if end <= start:
         return None, SPAN_UNRESOLVED
     return (start, end), None

@@ -260,12 +260,17 @@ def _release_cuda_memory(gpu_indices: list[int]) -> None:
         free_after, _ = torch.cuda.mem_get_info(index)
         used_before = (total - free_before) / (1024 * 1024)
         used_after = (total - free_after) / (1024 * 1024)
+        # Allocated vs reserved is what tells a live reference (allocated stays high) from memory
+        # the allocator could not hand back (reserved stays high). This line once reported
+        # "freed 10 MB" for a 17 GB model and could not say which.
         logger.info(
             "gpu_memory_cleanup",
             device=f"cuda:{index}",
             used_before_mb=int(used_before),
             used_after_mb=int(used_after),
             freed_mb=int(used_before - used_after),
+            torch_allocated_mb=int(torch.cuda.memory_allocated(index) / (1024 * 1024)),
+            torch_reserved_mb=int(torch.cuda.memory_reserved(index) / (1024 * 1024)),
         )
 
 

@@ -14,3 +14,20 @@ ArgoCD Image Updater (see k8s/argocd/millm-app.yaml).
 #: server. `test_one_version_everywhere.py` now fails if they drift again.
 __version__ = "0.5.0"
 __author__ = "miLLM Team"
+
+
+# ⚠ EXPANDABLE SEGMENTS, OR AN UNLOAD RETURNS NOTHING (2026-10-05). Set here, in the package's first
+# lines, because the allocator reads it once, before torch makes its first CUDA allocation — a
+# setting applied later is ignored. Measured on JEV-9B (Qwen3.5, 17 GB bf16): after one request,
+# unload left 8 MiB ALLOCATED and 17,080 MiB RESERVED, so the card stayed full with no model
+# loaded. The 8 MiB is no Python tensor (cuBLAS's workspace is the size and lifetime that fits);
+# it sits inside the one block the weights were carved from, and `empty_cache` can only return a
+# block that is entirely free. With expandable segments the same unload ends at 20 MiB reserved.
+# An operator's own setting wins; only a value that does not mention the option is extended.
+import os as _os
+
+from millm.core.cuda_allocator import allocator_env as _allocator_env
+
+_name, _value = _allocator_env(_os.environ)
+_os.environ[_name] = _value
+del _os, _allocator_env, _name, _value

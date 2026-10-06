@@ -210,7 +210,7 @@ refactor(services): extract HuggingFace logic
 
 ### Project Level Documents
 - ⏳ 0xcc/prds/BRD-04-miLLM-Dataworks-Support.md (miLLM additions for miDataworks: chat scoring, structured output, seed, batch API, per-request SAE activations, stateless probe scoring, inline steering, embedding options, model lease, backpressure, GPU visibility, probe-path fixes; 47 requirements R-04.1–47; needed by miDataworks BRD-03 and miStudio BRD-MIS-DATAWORKS-001; 2026-10-06)
-- ⏳ PPRD v1.5 (Features 25–30, FR-25.x–FR-30.x, BRD-04 coverage 47/47) · PADR v1.5 (§1 "(v1.5)" rows, §10 Dataworks Support trade-offs) — feature files 025–030 pending the checkpoint
+- ⏳ PPRD v1.5 (Features 25–30, FR-25.x–FR-30.x, BRD-04 coverage 47/47) · PADR v1.5 (§1 "(v1.5)" rows, §10 Dataworks Support trade-offs) — ✅ feature PRDs 025–030 written 2026-10-06 (FR-25…FR-30 refined into testable items; BRD-04 coverage 47/47); FTDD/FTID/FTASKS after the operator's open-question batch
 - ⏳ 0xcc/prds/BRD-MILLM-PROBES-001.md (Probe Monitor Runtime; consumes miStudio's `mistudio.probe-definition/v1`; sibling BRD-MIS-PROBES-001; handed off 2026-09-25)
 - ⏳ PPRD v1.4 (Feature 24, FR-24.1–24.15) · PADR v1.4 (§1 probe rows, §10 Probe Monitor Runtime trade-offs)
 

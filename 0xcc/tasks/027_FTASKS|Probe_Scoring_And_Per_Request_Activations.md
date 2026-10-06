@@ -212,13 +212,13 @@
   - [x] 6.9 The response `note` states the read point is not a counterfactual (FR-27.2e, T-77). Test the
         text is present.
 
-- [ ] 7.0 Configuration, contracts and documentation (covers FR-27.4g, FR-27.10e)
-  - [ ] 7.1 Config block and `.env.example` lines (FTID §9). Test defaults load.
-  - [ ] 7.2 `docs/mcp-contract.md`: next additive minor version; `POST /api/probes/score` in the
+- [x] 7.0 Configuration, contracts and documentation (covers FR-27.4g, FR-27.10e)
+  - [x] 7.1 Config block and `.env.example` lines (FTID §9). Test defaults load.
+  - [x] 7.2 `docs/mcp-contract.md`: next additive minor version; `POST /api/probes/score` in the
         `millm_probes` inventory; §4d states `score >= threshold`. Contract consistency tests green.
-  - [ ] 7.3 Tell Feature 26's chain: `/api/probes/score` batch rows call the service with one input,
+  - [x] 7.3 Tell Feature 26's chain: `/api/probes/score` batch rows call the service with one input,
         never packed (FR-27.6b). Note in this file's follow-ups; do not edit 026's files.
-  - [ ] 7.4 Manual: "Scoring stored text" section, the boundary rule, the new not-scored reasons, and
+  - [x] 7.4 Manual: "Scoring stored text" section, the boundary rule, the new not-scored reasons, and
         `return_sae_activations` in the OpenAI API page with the read-point note.
 
 - [ ] 8.0 Feature Acceptance
@@ -262,3 +262,14 @@
 - **Open questions:** none open in the FPRD (all seven decided by T-72 – T-77 and T-49). The one
   verification T-49 requires is task 0.x.
 - **The final parent task is Feature Acceptance.** ✔
+
+## Follow-ups (recorded during implementation, 2026-10-06)
+- **For Feature 26's chain (task 7.3, FR-27.6b):** a batch row targeting `/api/probes/score` must
+  call `ProbeScoringService.score` with ONE input per row and never pack rows, whatever the batch's
+  `pack` setting — bfloat16 is not batch-invariant and each input takes its own admission slot.
+  The one wire mapping to reuse for batch output lines is `probe_scoring.verdict_payload`. 026's
+  files were not edited.
+- **Out of scope, still open (BRD-04 §7):** per-row probe scoring inside batched chat — batched
+  chat records `batched_request` until it exists.
+- `probe_arming.scope_refusal` cannot fire today (`RUNTIME_SCORABLE_SCOPES` admits every scope);
+  the arming docstring describing an `all`-only runtime is stale.

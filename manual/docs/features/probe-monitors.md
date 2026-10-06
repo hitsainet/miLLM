@@ -193,8 +193,15 @@ surface has no outlet hook — so a verdict reaches a human through this page, n
 - **`verdict` absent** means no threshold was placed. The probe ranks without deciding; it is not a
   "no".
 - **`scored: false`** means the request was not scored, and always carries a reason
-  (`batched_request`, `speculative_decoding`, `continuous_batching`, `role_mask_unreliable`). It is
-  not a "no" either.
+  (`batched_request`, `speculative_decoding`, `continuous_batching`, `engine_unsupported`,
+  `role_mask_unreliable`). It is not a "no" either.
+
+### Where the bar is
+
+A verdict fires when **`score >= threshold`** — a score exactly on the bar fires. miStudio cuts the
+bar at a negative's score and counts that negative as admitted, so this is the rule that makes the
+definition's stated false-positive rate true here. It is the same everywhere a verdict is reported:
+the header, the streaming chunk, the event, and stateless scoring below.
 - **A high score is not a cause.** A probe detects; it does not explain.
 
 ## When a probe is not scoring
@@ -202,8 +209,55 @@ surface has no outlet hook — so a verdict reaches a human through this page, n
 An armed probe that is quiet always says why, on the page and in `GET /api/probes/status`. Silence
 would read as "nothing detected", which is a claim it never made.
 
-Requests are not scored when they are batched (`n > 1` or `extra_messages`), under speculative
-decoding, or served by continuous batching.
+Requests are not scored when they are batched (`n > 1` or `extra_messages`, reason
+`batched_request`), under speculative decoding, served by continuous batching (chat, streaming chat
+and text completions all record `continuous_batching`), or served by llama.cpp
+(`engine_unsupported`). Every one of these still writes an event and still sends the header — on
+`/v1/completions` too, which never sent `X-miLLM-Probe-Verdicts` before Feature 27.
+
+## Scoring stored text
+
+`POST /api/probes/score` asks imported probes about inputs you already have — rows in a dataset, a
+transcript, a definition's test vectors — **without arming anything and without recording
+anything**:
+
+```json
+{"probe_ids": ["prb_…"],
+ "inputs": [{"token_ids": [1, 2, 3], "prompt_tokens": 2},
+            {"messages": [{"role": "user", "content": "…"}, {"role": "assistant", "content": "…"}]}],
+ "windows": ["all", "prompt"]}
+```
+
+- **Nothing is persisted.** No event, no change to what is armed, no change to a stored parity
+  report. An armed probe on the same layer sees nothing either.
+- **Offline equals live.** The probe is built, run and decided by the same code live serving uses,
+  on the same layer hook, unsteered (every attached SAE is suppressed for the scoring forward).
+- **One input at a time.** Each input takes its own place in the request queue, so a chat request
+  waits at most one input's forward behind a scoring batch. Inputs are never packed together:
+  bfloat16 results change with batch shape.
+- **Window boundaries are never guessed.** `token_ids` may carry `prompt_tokens`; a `messages` input
+  ending in an assistant turn derives it; a `messages` input ending in a user turn is all prompt.
+  Otherwise a `prompt` or `response` window says `prompt_boundary_unknown`, and `last_user` on bare
+  `token_ids` says `token_ids_have_no_turns`.
+- **`verdict` is three-valued**, `rung_language` is verbatim, and `provisional` is carried as
+  recorded — a provisional verdict is a ranking, not a rate.
+- **Parity is reported, not required.** Each probe says whether its stored parity passed, failed or
+  never ran, and which model load it was checked against (`"unknown"` for older reports).
+- **Wrong model:** with `probe_ids` given, the request is refused naming every mismatched field, as
+  arming refuses. With `probe_ids` omitted, every matching probe is scored and the others are listed
+  under `skipped` with their reason.
+- **If the model changes mid-request**, the remaining inputs fail with `MODEL_CHANGED`; earlier
+  results are kept. No input is scored on a different model from the first.
+
+:::warning `text` inputs are not enabled yet
+`text` is meant to be scored as one user turn, the way miStudio built its training corpus. Until
+that render has reproduced a miStudio-reported AUROC on the probe's model (a check on the GPU node),
+`text` inputs are refused with `INVALID_PROBE_SCORE_REQUEST`. Send `messages` with one user turn, or
+the recorded `token_ids`.
+:::
+
+Limits: `PROBE_SCORE_MAX_INPUTS` (64) inputs and `PROBE_SCORE_MAX_PROBES` (8) probes per request;
+token ids must lie inside the model's vocabulary; each input must fit the context window.
 
 :::warning Arming costs throughput
 While any probe is armed, continuous batching is disabled and requests run serially

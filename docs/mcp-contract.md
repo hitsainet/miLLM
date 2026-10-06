@@ -1,6 +1,6 @@
 # miLLM ↔ Unified MCP Server Contract
 
-**Status:** Normative for miLLM Feature 9 (Unified MCP), Feature 15 (Circuit Edge Sensing / circuit MCP surface), Feature 19 (Concurrent Circuit Serving) and Feature 24 (Probe Monitor Runtime), and the model-lease / backpressure surface of Feature 29. **Version:** 1.9 (2026-10-06)
+**Status:** Normative for miLLM Feature 9 (Unified MCP), Feature 15 (Circuit Edge Sensing / circuit MCP surface), Feature 19 (Concurrent Circuit Serving) and Feature 24 (Probe Monitor Runtime), the model-lease / backpressure surface of Feature 29, and the stateless probe scoring and per-request activations of Feature 27. **Version:** 1.10 (2026-10-06)
 **Consumer:** the unified MCP server that ships in the miStudio repo
 (`backend/src/mcp_server/`), exposing `millm_runtime` / `millm_clusters` /
 `millm_sensing` / `millm_circuits` / `millm_probes` tool categories against a miLLM
@@ -12,6 +12,18 @@ This contract is **additive-only**: miLLM may add endpoints, response fields, an
 error codes; it must not rename or remove anything listed here, change field
 types, or change status-code semantics without a new contract version. The MCP
 server must tolerate unknown fields everywhere.
+
+**v1.10 (2026-10-06)** is a strict additive superset of v1.9: it adds `POST /api/probes/score`
+(stateless probe scoring, §4 `millm_probes`), the `INVALID_PROBE_SCORE_REQUEST` and
+`SAE_ACTIVATIONS_REFUSED` codes, the `return_sae_activations` request field and the optional
+`millm` response object on `/v1/chat/completions` and `/v1/completions`, `X-miLLM-Probe-Verdicts`
+on `/v1/completions` (FR-24.7 promised it on both routes; only chat sent it), two optional keys
+(`model`, `checked_at`) in a stored parity report, and the not-scored reasons `batched_request`
+(batched chat), `continuous_batching` (now on CBM chat and text, not only CBM streaming) and
+`engine_unsupported` (llama.cpp). It also STATES the verdict boundary in §4d — `score >= threshold`
+— which the runtime has applied since 2026-10-03. **No tool is added here**: the scoring tool is
+miStudio's (034 `millm_score_probes`) to build against this section. Nothing was renamed, removed
+or re-typed; a response that did not ask for activations carries no `millm` key.
 
 **v1.9 (2026-10-06)** is a strict additive superset of v1.8: it adds the model-lease routes
 (§4e), the `X-miLLM-Lease` and `X-miLLM-Load-Policy` request headers, the `MODEL_LEASED`,
@@ -222,6 +234,24 @@ sub-collection of a circuit, and the flat prefix matches `/api/sensing`.
 | `millm_probe_status` | `GET /api/probes/status` |
 | `millm_probe_events` | `GET /api/probes/events?probe_id=&request_id=&limit=` |
 
+**Stateless scoring (v1.10 — Feature 27).** `POST /api/probes/score`
+(`{probe_ids?, inputs: [{token_ids, prompt_tokens?} | {messages} | {text}], windows?,
+return_token_ids?}`, at most `PROBE_SCORE_MAX_INPUTS` (64) inputs and `PROBE_SCORE_MAX_PROBES` (8)
+probes) asks imported probes — armed or not — about stored inputs and **persists nothing**: no
+`probe_events` row, no runtime request context, no change to the armed set or a stored parity
+report. Each input runs in its own admission slot with every SAE suppressed, one input per forward,
+never packed. The result per input, probe and window carries `score`, `threshold`, `verdict`
+(`true`/`false`/`null` — `null` means the probe said nothing and is never `false`), `rung`,
+`rung_language` (verbatim), `provisional`, `threshold_revision`, `n_scored_tokens` and
+`not_scored_reason`; each probe carries its stored parity status (`passed`/`failed`/`never_run`,
+and `checked_against` — `"unknown"` for a report written before v1.10). With `probe_ids` given, any
+mismatch refuses the request with arming's own error; omitted, mismatched probes are listed in
+`skipped` with their code. A model change mid-request fails the remaining inputs with
+`MODEL_CHANGED` and keeps the earlier results. ⚠ `text` inputs are refused with
+`INVALID_PROBE_SCORE_REQUEST` until the one-user-turn render has reproduced a miStudio AUROC on
+hardware (T-49). Consumed by miStudio's 034 scoring tool; no tool is registered in this contract
+version. It is not a generation endpoint and carries no `X-miLLM-Steering` header.
+
 Also served, and deliberately **not** exposed as tools:
 `GET /api/probes/{probe_id}` (carries the whole definition — large, and an agent that
 wants it can read the file it imported), `POST /api/probes/{probe_id}/parity` (an
@@ -345,6 +375,13 @@ name and the score is unaffected. The parameters cannot be omitted: one probe no
 several members and they would otherwise share an identical name token. The streaming
 payload gained `probe_id`, `window` and `provisional` for the same reason; it carried no
 probe id at all before.
+
+**The verdict boundary (v1.10 states it; the runtime has applied it since 2026-10-03).** A verdict
+fires when `score >= threshold` — a score exactly on the bar FIRES, on every miLLM surface: the
+live header, the streaming chunk, the event row and `POST /api/probes/score`. The producer cuts
+the bar at a negative's score and counts that negative as admitted, so `>` would admit one negative
+fewer than the definition's `realised_fpr`. The comparison lives in one function
+(`ProbeRequestContext._verdict_for`), and a guard keeps it the only one.
 
 ### 4d-bis. Probe evidence-rung rule (v1.6 — Feature 24)
 
@@ -721,6 +758,14 @@ on a model that is not resident; on `/v1` `model_not_resident` answers the refus
 `LEASE_EXPIRED` (409 — `details.end_reason`), `INVALID_LEASE_REQUEST` (400 — `details.param`
 names the field and limit). `MODEL_LOADING` (503, `/v1`) now has a producer: the refuse-load
 policy for a model being loaded. Every `503` carries `Retry-After`.
+
+**v1.10 codes (Feature 27):** `INVALID_PROBE_SCORE_REQUEST` (400 — a scoring request refused as a
+whole before any forward: no or too many inputs, too many probes, two input kinds in one input,
+`prompt_tokens` past the input, a token id outside the vocabulary, every probe skipped, or `text`
+before its render is verified; `details.param` names the field) and `SAE_ACTIVATIONS_REFUSED` (400,
+`/v1` `sae_activations_refused` — `n > 1`, `extra_messages`, several prompts, an ambiguous SAE, a
+feature index past the SAE's width, `top_k` or the worst-case entry count over its cap). Per-input
+`MODEL_CHANGED` and `TOKENIZATION_FAILED` are data inside a 200, never a status.
 
 ⚠ **`UNVALIDATED_PROBE` and `PROBE_MODEL_MISMATCH` must not be collapsed into one
 "arming failed".** They call for opposite actions — the first is resolved by asserting

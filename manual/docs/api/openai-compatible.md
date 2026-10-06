@@ -195,6 +195,46 @@ curl http://localhost:8000/v1/completions -H 'content-type: application/json' -d
 
 Scoring requests are **never steered and never monitored**. Every attached SAE is suppressed for the forward pass, as for embeddings, because a judge's output is a probability that a steering profile left on the model would silently bias. Probes and sensing record nothing, because a judge's prompt isn't user traffic. Suppression applies only to the scoring pass's own forward computation, so a generation running at the same moment (with continuous batching enabled) is still steered.
 
+## Per-request SAE activations
+
+Add `return_sae_activations` to a chat or text completion to receive **this request's** activations
+of an attached SAE, under a `millm` object in the response:
+
+```json
+"return_sae_activations": {"sae_id": "sae_…", "features": [12, 99], "top_k": 8,
+                           "positions": "completion", "read_point": "post_steering"}
+```
+
+- `positions`: `last`, `prompt`, `completion`, `all`, or `{"start": int, "end": int}` (half-open),
+  absolute over prompt-then-generated tokens. The final sampled token is never fed back to the
+  model, so it has no activation; the response lists the positions actually read.
+- `features` restricts the candidates; `top_k` returns the largest among them per position.
+- `read_point`: `post_steering` (default — after this layer's steering delta, what the model
+  computed) or `pre_steering` (before it, where monitoring reads). In scoring mode the read point is
+  reported as `unsteered`, and the response carries `X-miLLM-Steering: none`.
+
+```json
+"millm": {"sae_activations": {"sae_id": "sae_…", "layer": 11, "read_point": "post_steering",
+  "positions": [{"position": 17, "token_id": 345, "features": [{"index": 12, "value": 3.1}]}],
+  "note": "post_steering is what the model computed at this layer for this request; it is not an unsteered counterfactual …"}}
+```
+
+:::warning Neither read point is a counterfactual
+Steering at earlier layers, and tokens generated under steering, still shape the residual at this
+layer. `pre_steering` removes only this layer's own delta.
+:::
+
+When streaming, the activations arrive in one final chunk with `choices: []` and the `millm` object,
+after any probe-verdict chunk and before `[DONE]`. A response that did not ask carries no `millm`
+key at all.
+
+Refused with `400` before anything is generated: `n > 1`, `extra_messages`, several prompts (there
+is no single position axis); no matching SAE attached; `sae_id` omitted while several SAEs are
+attached (the error names the candidates); a feature index past the SAE's width; `top_k` over
+`SAE_ACTIVATIONS_MAX_TOP_K` (64); and a worst case — positions × `top_k`, counting `max_tokens` in
+full for `completion` and `all` — over `SAE_ACTIVATIONS_MAX_ENTRIES` (65,536). A GGUF model is
+refused before any load. These requests are served on the serial path, never continuous batching.
+
 ## Embeddings
 
 `POST /v1/embeddings` with `input` (string or list) returns mean-pooled last-hidden-layer embeddings. `encoding_format` may be `"float"` (default) or `"base64"`.

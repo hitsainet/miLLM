@@ -64,25 +64,25 @@
         pending verification (FTID §9); test that refusal; remove the gate in the same commit that
         records 0.2's pass.
 
-- [ ] 1.0 The discovery-based probe-path guard, written first (covers FR-27.9)
-  - [ ] 1.1 `tests/unit/services/test_probe_paths_discovered.py`: AST discovery of generation sites in
+- [x] 1.0 The discovery-based probe-path guard, written first (covers FR-27.9)
+  - [x] 1.1 `tests/unit/services/test_probe_paths_discovered.py`: AST discovery of generation sites in
         `InferenceService` from the primitive sets in FTID §8, counting calls **and** callables passed
         as arguments, walking nested closures (`inference_service.py:4246`).
-  - [ ] 1.2 Entry-point discovery over the `self.<method>` call graph; assert the set is non-empty and
+  - [x] 1.2 Entry-point discovery over the `self.<method>` call graph; assert the set is non-empty and
         contains `create_chat_completion`, `stream_chat_completion`, `create_text_completion`, so a
         broken parser cannot pass by finding nothing.
-  - [ ] 1.3 Event-log harness: lock-guarded log; spies on `_probe_begin` and `_probe_begin_detached`;
+  - [x] 1.3 Event-log harness: lock-guarded log; spies on `_probe_begin` and `_probe_begin_detached`;
         wrappers on every discovered site; fake primitives. Scenario table keyed by site, with
         `assert set(table) == discovered_sites`.
-  - [ ] 1.4 Per-scenario assertions (FTDD §10.1 step 4): site entered; every `gen` preceded by a
+  - [x] 1.4 Per-scenario assertions (FTDD §10.1 step 4): site entered; every `gen` preceded by a
         `begin`; exactly one `record` with a verdict or `not_scored_reason` (payload asserted);
         `current_request() is None` afterwards.
-  - [ ] 1.5 Exemptions dict (scoring mode, embeddings) with reasons, and a test that no exempt method is
+  - [x] 1.5 Exemptions dict (scoring mode, embeddings) with reasons, and a test that no exempt method is
         a generation site.
-  - [ ] 1.6 Run on today's code and **record the expected red**: batched chat, `_cbm_chat_completion`,
+  - [x] 1.6 Run on today's code and **record the expected red**: batched chat, `_cbm_chat_completion`,
         `_cbm_text_completion` and the three llama.cpp paths fail. A guard that is green before the
         fix is not guarding the fix.
-  - [ ] 1.7 Rework `tests/unit/services/test_probe_wiring.py:49-53`: parametrise
+  - [x] 1.7 Rework `tests/unit/services/test_probe_wiring.py:49-53`: parametrise
         `TestEveryServingPathIsWired` over the discovered entry points; delete the literal list.
 
 - [ ] 2.0 Probe-path fixes (covers FR-27.8a–h)

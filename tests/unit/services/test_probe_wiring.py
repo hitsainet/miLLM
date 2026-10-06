@@ -27,6 +27,7 @@ from millm.services.inference_service import (
     set_probe_verdicts,
 )
 from millm.services.probe_runtime import Verdict
+from tests.unit.services.test_probe_paths_discovered import discover_entry_points
 
 
 def source_of(name: str) -> str:
@@ -45,13 +46,15 @@ def verdict(**over) -> Verdict:
 
 class TestEveryServingPathIsWired:
     """Each path must begin, finish and record. A path that begins and never finishes produces
-    a context that is never closed, and the NEXT request's `begin_request` raises."""
+    a context that is never closed, and the NEXT request's `begin_request` raises.
 
-    @pytest.mark.parametrize(
-        "method",
-        ["create_chat_completion", "stream_chat_completion", "create_text_completion",
-         "_cbm_stream_chat_completion"],
-    )
+    ⚠ A SECONDARY CHECK, NOT THE GUARD (FR-27.9d). This was a literal list of four methods and
+    missed batched chat and both continuous-batching non-streaming paths. It now parametrises over
+    the entry points `test_probe_paths_discovered` derives from the class itself, and the guard
+    proper — which drives every discovered generation site with a probe armed — lives there.
+    """
+
+    @pytest.mark.parametrize("method", sorted(discover_entry_points()))
     def test_it_begins_finishes_and_records(self, method):
         code = source_of(method)
         assert "_probe_begin(" in code, f"{method} never opens a probe context"

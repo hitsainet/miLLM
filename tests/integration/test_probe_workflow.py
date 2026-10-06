@@ -43,6 +43,12 @@ SAE = FIXTURES / "lfm2_probe_definition_sae.json"
 RUNG0 = FIXTURES / "lfm2_probe_definition_rung0.json"
 
 
+
+async def run_inline(fn):
+    """The arm executor in tests: `InferenceService.run_model_work` without a model or a slot.
+    `executor` is a REQUIRED keyword of `ProbeArmingService.arm` (Feature 27, FR-27.6f)."""
+    return fn()
+
 def load(path: Path) -> dict:
     return json.loads(path.read_text())
 
@@ -312,7 +318,7 @@ class TestTheArmingGatesOnRealDocuments:
         service = ProbeArmingService(_repo())
         armed = await service.arm(
             row,
-            model=tiny_llama,
+            executor=run_inline, model=tiny_llama,
             loaded=_identity(row.definition),
             forward=_forward_from(tiny_llama),
         )
@@ -326,7 +332,7 @@ class TestTheArmingGatesOnRealDocuments:
         with pytest.raises(UnvalidatedProbeError) as exc:
             await service.arm(
                 _row(definition),
-                model=tiny_llama,
+                executor=run_inline, model=tiny_llama,
                 loaded=_identity(definition),
                 forward=_forward_from(tiny_llama),
             )
@@ -347,7 +353,7 @@ class TestTheArmingGatesOnRealDocuments:
         _rescore_vectors_for(row, tiny_llama)
         await ProbeArmingService(repo).arm(
             row,
-            model=tiny_llama,
+            executor=run_inline, model=tiny_llama,
             loaded=_identity(row.definition),
             forward=_forward_from(tiny_llama),
             acknowledge_below_rung2=True,
@@ -373,7 +379,7 @@ class TestTheArmingGatesOnRealDocuments:
         _rescore_vectors_for(row, tiny_llama)
         await ProbeArmingService(repo).arm(
             row,
-            model=tiny_llama,
+            executor=run_inline, model=tiny_llama,
             loaded=_identity(row.definition),
             forward=_forward_from(tiny_llama),
         )
@@ -408,7 +414,7 @@ class TestTheArmingGatesOnRealDocuments:
         with pytest.raises(ProbeModelMismatchError) as exc:
             await ProbeArmingService(_repo()).arm(
                 _row(definition),
-                model=tiny_llama,
+                executor=run_inline, model=tiny_llama,
                 loaded=_identity(definition, **{field: wrong}),
                 forward=_forward_from(tiny_llama),
             )
@@ -431,7 +437,7 @@ class TestTheArmingGatesOnRealDocuments:
         with pytest.raises(ProbeLimitError):
             await ProbeArmingService(_repo(count_armed=settings.PROBE_MAX_ARMED)).arm(
                 _row(load(DENSE)),
-                model=tiny_llama,
+                executor=run_inline, model=tiny_llama,
                 loaded=_identity(load(DENSE)),
                 forward=exploding_forward,
             )
@@ -458,7 +464,7 @@ class TestTheArmingGatesOnRealDocuments:
         with pytest.raises(ProbeParityFailedError) as exc:
             await ProbeArmingService(repo).arm(
                 row,
-                model=tiny_llama,
+                executor=run_inline, model=tiny_llama,
                 loaded=_identity(row.definition),
                 forward=_forward_from(tiny_llama),
             )
@@ -487,7 +493,10 @@ class TestScoringARequest:
         # accumulator rather than pretending the shapes agree.
         row = _row_at_model_width(definition, tiny_llama)
 
-        armed = armed_probe_from_row(row)
+        # `windows=[]` — the probe's own scope alone. Since the windows feature (2026-09-30) the
+        # default reports three windows, and this test predated it: it asserted ONE verdict and
+        # had been failing on `main` (found running the integration tier for Feature 27).
+        armed = armed_probe_from_row(row, windows=[])
         context = ProbeRequestContext("req_1", [armed])
         forward = _forward_from(tiny_llama)
         forward(torch.tensor([[1, 2, 3, 4, 5]], dtype=torch.long), context)

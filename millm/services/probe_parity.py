@@ -163,6 +163,13 @@ class ParityReport:
     #: The probe's own bar (`decision.threshold`), which scales the matched floor. None for a probe
     #: that places no bar, whose matched floor is the absolute minimum.
     threshold: Optional[float] = None
+    #: WHAT this report was checked against — `{hf_id, revision, dtype, quantization}` of the model
+    #: loaded when it ran — and WHEN (Feature 27, T-74). Stateless scoring reports each probe's
+    #: stored parity status, and "passed" means nothing without "against which load": a report from
+    #: before a reload describes a different model. Additive keys; reports written before this
+    #: feature have neither, and readers treat both as optional (`checked_against: "unknown"`).
+    model: Optional[dict[str, Any]] = None
+    checked_at: Optional[str] = None
 
     @property
     def max_abs_diff(self) -> Optional[float]:
@@ -280,7 +287,20 @@ class ParityReport:
             "tokenization_drift": self.tokenization_drift,
             "dtype": self.dtype,
             "error": self.error,
+            "model": self.model,
+            "checked_at": self.checked_at,
         }
+
+
+def model_summary(identity: Any) -> dict[str, Any]:
+    """`{hf_id, revision, dtype, quantization}` of a `LoadedIdentity`, for a parity report and for
+    stateless scoring's `model` block. One function so the two cannot describe a load differently."""
+    return {
+        "hf_id": getattr(identity, "hf_id", None),
+        "revision": getattr(identity, "revision", None),
+        "dtype": getattr(identity, "dtype", None),
+        "quantization": getattr(identity, "quantization", None),
+    }
 
 
 def dtype_comparison(
@@ -326,7 +346,10 @@ class ProbeParityEngine:
         tokenizer: Any = None,
         loaded_dtype: Optional[str] = None,
         loaded_quantization: Optional[str] = None,
+        model: Optional[dict[str, Any]] = None,
     ) -> ParityReport:
+        from datetime import datetime, timezone
+
         spec = (definition or {}).get("test_vectors") or {}
         vectors: Sequence[dict[str, Any]] = spec.get("vectors") or []
         threshold = ((definition or {}).get("decision") or {}).get("threshold")
@@ -334,6 +357,8 @@ class ProbeParityEngine:
             tolerance=tolerance,
             dtype=dtype_comparison(definition, loaded_dtype, loaded_quantization),
             threshold=float(threshold) if isinstance(threshold, (int, float)) and not isinstance(threshold, bool) else None,
+            model=dict(model) if model is not None else None,
+            checked_at=datetime.now(timezone.utc).isoformat(),
         )
         recorded_quant = report.dtype.get("recorded_quantization")
         if (recorded_quant is not None and loaded_quantization is not None

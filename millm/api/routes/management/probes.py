@@ -19,6 +19,7 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from millm.api.dependencies import (
     DbSession,
+    InferenceServiceDep,
     ProbeArmingDep,
     ProbeEventRepo,
     ProbeEventServiceDep,
@@ -346,6 +347,7 @@ async def arm_probe(
     session: DbSession,
     repository: ProbeRepo,
     arming: ProbeArmingDep,
+    inference: InferenceServiceDep,
 ) -> ApiResponse:
     """Run the four gates and arm the probe if they all pass.
 
@@ -366,6 +368,8 @@ async def arm_probe(
         model=model,
         loaded=identity,
         forward=build_parity_forward(model, probe.layer),
+        # The parity forward runs inside one admission slot, unsteered (FR-27.6f-g, T-73).
+        executor=inference.run_model_work,
         tokenizer=tokenizer,
         acknowledge_below_rung2=request.acknowledge_below_rung2,
         reason=request.reason,
@@ -387,6 +391,7 @@ async def check_parity(
     probe_id: str,
     session: DbSession,
     repository: ProbeRepo,
+    inference: InferenceServiceDep,
 ) -> ApiResponse:
     """Re-run parity without arming, and store the report.
 
@@ -409,11 +414,19 @@ async def check_parity(
         float((probe.definition.get("test_vectors") or {}).get("tolerance", 0.0) or 0.0),
         settings.PROBE_PARITY_TOLERANCE,
     )
-    report = ProbeParityEngine(build_parity_forward(model, probe.layer)).run(
+    from millm.services.probe_parity import model_summary
+
+    forward = build_parity_forward(model, probe.layer)
+    # ⚠ INSIDE ONE ADMISSION SLOT, UNSTEERED (FR-27.6e, T-73). This ran the engine directly: no
+    # slot, so a parity forward could run beside a generation on the same model, and no
+    # suppression, so a profile steering an earlier layer moved the residual being compared
+    # against miStudio's recorded scores.
+    report = await inference.run_model_work(lambda: ProbeParityEngine(forward).run(
         armed, probe.definition, tolerance=tolerance, tokenizer=tokenizer,
         loaded_dtype=identity.dtype,
         loaded_quantization=identity.quantization,
-    )
+        model=model_summary(identity),
+    ))
     await repository.update(probe, parity=report.as_details())
     return ApiResponse.ok(report.as_details())
 

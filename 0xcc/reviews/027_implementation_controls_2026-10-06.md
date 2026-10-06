@@ -59,3 +59,26 @@ Pre-mutation sha of `inference_service.py`: `eccfa5820b1d…`; every restore mat
 - 2.9: the Probe Monitors page renders `not_scored_reason` verbatim (`ProbeMonitorsPage.tsx:591`),
   so no code change; an `it.each` over the three new reasons pins it.
 
+## Task 3 — admission and suppression for model work (M15–M17, L6–L8)
+
+| # | Mutation | Tests | Result | Restore |
+|---|---|---|---|---|
+| M15 | `run_model_work`: `async with self._admit():` → `if True:` | `test_run_model_work.py` | RED | sha ✔ grep ✔ |
+| M16 | arm route: delete `executor=inference.run_model_work` | same | RED (payload test) | ✔ ✔ |
+| M17 | `run_model_work`: enter `_unsteered()` around the await, run `fn` bare in the worker | same | RED (`test_suppression_is_entered_IN_THE_WORKER_THREAD`) | ✔ ✔ |
+| L6 | parity route: `inference.run_model_work(…)` → `asyncio.to_thread(…)` | same | RED (call count) | ✔ ✔ |
+| L7 | `ProbeArmingService.arm`: `await executor(…)` → `asyncio.to_thread(…)` | same + `test_probe_arming.py` | RED | ✔ ✔ |
+| L8 | `ParityReport.as_details`: `"model": None` | same | RED | ✔ ✔ |
+
+**6 controls, 0 survived first time.** (Runner note: the first M16 attempt aborted before writing —
+the scope helper only knew class methods; route handlers are module-level. Fixed the helper,
+confirmed the tree untouched, re-ran. Not a survivor.)
+
+**3.5 measured:** on the tiny real Llama with a LoadedSAE steering layer 0 (feature 2 at 40.0), a
+layer-1 probe's per-token scores moved by up to **282.32** on the pre-fix path (direct forward, no
+seam); through `run_model_work` they equal the unsteered scores exactly.
+
+**Pre-existing defect fixed:** `tests/integration/test_probe_workflow.py::test_an_armed_probe_scores_a_forward_pass`
+failed on `main` (asserted one verdict; the windows feature made it three). Now arms with
+`windows=[]`. The integration tier is not in `tests/unit`, which is why it went unnoticed.
+

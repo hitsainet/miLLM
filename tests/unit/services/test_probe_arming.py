@@ -37,6 +37,12 @@ TEMPLATE = "{{ messages }}"
 TEMPLATE_SHA = hashlib.sha256(TEMPLATE.encode()).hexdigest()
 
 
+
+async def run_inline(fn):
+    """The arm executor in tests: `InferenceService.run_model_work` without a model or a slot.
+    `executor` is a REQUIRED keyword of `ProbeArmingService.arm` (Feature 27, FR-27.6f)."""
+    return fn()
+
 class TinyLayer(nn.Module):
     def forward(self, x):
         return (x, None)
@@ -113,7 +119,7 @@ class TestHappyPath:
         repo, service, arming = ctx
         probe = await service.import_definition(definition())
         armed = await arming.arm(
-            probe, model=TinyModel(), loaded=loaded(), forward=forward_at(0.5)
+            probe, executor=run_inline, model=TinyModel(), loaded=loaded(), forward=forward_at(0.5)
         )
         assert armed.probe_id == probe.id
         assert (await repo.get(probe.id)).armed is True
@@ -122,7 +128,7 @@ class TestHappyPath:
     async def test_the_parity_report_is_stored_even_on_success(self, ctx):
         repo, service, arming = ctx
         probe = await service.import_definition(definition())
-        await arming.arm(probe, model=TinyModel(), loaded=loaded(), forward=forward_at(0.5))
+        await arming.arm(probe, executor=run_inline, model=TinyModel(), loaded=loaded(), forward=forward_at(0.5))
         stored = (await repo.get(probe.id)).parity
         assert stored["passed"] is True
         assert stored["max_abs_diff"] == pytest.approx(0.0)
@@ -130,7 +136,7 @@ class TestHappyPath:
     async def test_a_rung_two_probe_needs_no_acknowledgement(self, ctx):
         _repo, service, arming = ctx
         probe = await service.import_definition(definition())
-        await arming.arm(probe, model=TinyModel(), loaded=loaded(), forward=forward_at(0.5))
+        await arming.arm(probe, executor=run_inline, model=TinyModel(), loaded=loaded(), forward=forward_at(0.5))
         assert probe.arm_acknowledgement is None
 
 
@@ -146,7 +152,7 @@ class TestGateOrder:
         with pytest.raises(ProbeModelMismatchError):
             await arming.arm(
                 probe,
-                model=TinyModel(),
+                executor=run_inline, model=TinyModel(),
                 loaded=loaded(hf_id="Qwen/Qwen2.5-7B-Instruct"),
                 forward=forward_at(0.5),
             )
@@ -160,7 +166,7 @@ class TestGateOrder:
         doc["model"]["quantization"] = "Q4"
         probe = await service.import_definition(doc)
         with pytest.raises(ProbeDtypeMismatchError) as caught:
-            await arming.arm(probe, model=TinyModel(),
+            await arming.arm(probe, executor=run_inline, model=TinyModel(),
                              loaded=loaded(dtype="bfloat16", quantization="FP16"),
                              forward=forward_at(0.5))
         assert "quantization the probe was trained under" in caught.value.message
@@ -173,7 +179,7 @@ class TestGateOrder:
         doc["model"]["quantization"] = "FP16"
         probe = await service.import_definition(doc)
         with pytest.raises(ProbeDtypeMismatchError) as caught:
-            await arming.arm(probe, model=TinyModel(),
+            await arming.arm(probe, executor=run_inline, model=TinyModel(),
                              loaded=loaded(dtype="bfloat16", quantization="FP16"),
                              forward=forward_at(0.5))
         assert "did not load by the shared precision rule" in caught.value.message
@@ -190,7 +196,7 @@ class TestGateOrder:
 
         with pytest.raises(ProbeModelMismatchError):
             await arming.arm(
-                probe, model=TinyModel(), loaded=loaded(d_model=4096), forward=counting_forward
+                probe, executor=run_inline, model=TinyModel(), loaded=loaded(d_model=4096), forward=counting_forward
             )
         assert calls == [], "the model was run for a probe that had already failed a free gate"
 
@@ -203,7 +209,7 @@ class TestTheRungGate:
                            "acknowledgement": acknowledged(), "evaluations": []}
         probe = await service.import_definition(doc)
         with pytest.raises(UnvalidatedProbeError) as exc:
-            await arming.arm(probe, model=TinyModel(), loaded=loaded(), forward=forward_at(0.5))
+            await arming.arm(probe, executor=run_inline, model=TinyModel(), loaded=loaded(), forward=forward_at(0.5))
         assert exc.value.details["rung"] == 1
         assert exc.value.details["next_step"]
 
@@ -221,7 +227,7 @@ class TestTheRungGate:
         probe = await service.import_definition(doc)
         await arming.arm(
             probe,
-            model=TinyModel(),
+            executor=run_inline, model=TinyModel(),
             loaded=loaded(),
             forward=forward_at(0.5),
             acknowledge_below_rung2=True,
@@ -241,7 +247,7 @@ class TestParityGate:
         probe = await service.import_definition(definition())
         with pytest.raises(ProbeParityFailedError) as exc:
             # 0.9 * 8 = 7.2 per token, against a recorded 4.0
-            await arming.arm(probe, model=TinyModel(), loaded=loaded(), forward=forward_at(0.9))
+            await arming.arm(probe, executor=run_inline, model=TinyModel(), loaded=loaded(), forward=forward_at(0.9))
         assert exc.value.details["max_abs_diff"] == pytest.approx(3.2)
         assert exc.value.details["vector_index"] == 0
 
@@ -251,7 +257,7 @@ class TestParityGate:
         repo, service, arming = ctx
         probe = await service.import_definition(definition())
         with pytest.raises(ProbeParityFailedError):
-            await arming.arm(probe, model=TinyModel(), loaded=loaded(), forward=forward_at(0.9))
+            await arming.arm(probe, executor=run_inline, model=TinyModel(), loaded=loaded(), forward=forward_at(0.9))
         assert (await repo.get(probe.id)).armed is False
         assert ProbeRuntimeState().has_armed() is False
 
@@ -261,7 +267,7 @@ class TestParityGate:
         repo, service, arming = ctx
         probe = await service.import_definition(definition())
         with pytest.raises(ProbeParityFailedError):
-            await arming.arm(probe, model=TinyModel(), loaded=loaded(), forward=forward_at(0.9))
+            await arming.arm(probe, executor=run_inline, model=TinyModel(), loaded=loaded(), forward=forward_at(0.9))
         assert (await repo.get(probe.id)).parity["passed"] is False
 
 
@@ -275,9 +281,9 @@ class TestTheLimit:
             await service.import_definition(definition(name=f"p{i}")) for i in range(3)
         ]
         for probe in probes[:2]:
-            await arming.arm(probe, model=TinyModel(), loaded=loaded(), forward=forward_at(0.5))
+            await arming.arm(probe, executor=run_inline, model=TinyModel(), loaded=loaded(), forward=forward_at(0.5))
         with pytest.raises(ProbeLimitError) as exc:
-            await arming.arm(probes[2], model=TinyModel(), loaded=loaded(), forward=forward_at(0.5))
+            await arming.arm(probes[2], executor=run_inline, model=TinyModel(), loaded=loaded(), forward=forward_at(0.5))
         assert exc.value.details["max_armed"] == 2
 
 
@@ -285,7 +291,7 @@ class TestDisarm:
     async def test_disarm_clears_both_the_runtime_and_the_row(self, ctx):
         repo, service, arming = ctx
         probe = await service.import_definition(definition())
-        await arming.arm(probe, model=TinyModel(), loaded=loaded(), forward=forward_at(0.5))
+        await arming.arm(probe, executor=run_inline, model=TinyModel(), loaded=loaded(), forward=forward_at(0.5))
         await arming.disarm(probe, reason="operator")
         assert (await repo.get(probe.id)).armed is False
         assert ProbeRuntimeState().has_armed() is False
@@ -296,7 +302,7 @@ class TestDisarm:
         repo, service, arming = ctx
         for i in range(2):
             probe = await service.import_definition(definition(name=f"p{i}"))
-            await arming.arm(probe, model=TinyModel(), loaded=loaded(), forward=forward_at(0.5))
+            await arming.arm(probe, executor=run_inline, model=TinyModel(), loaded=loaded(), forward=forward_at(0.5))
         assert await arming.disarm_all("model_changed") == 2
         assert ProbeRuntimeState().has_armed() is False
         assert await repo.count_armed() == 0
@@ -392,7 +398,7 @@ class TestAnUnverifiableScopeSaysSo:
         with pytest.raises(ProbeScopeUnverifiableError) as exc:
             await ProbeArmingService(repo).arm(
                 self._probe(scope),
-                model=MagicMock(),
+                executor=run_inline, model=MagicMock(),
                 loaded=identity,
                 forward=lambda *a, **k: None,
             )
@@ -415,7 +421,7 @@ class TestAnUnverifiableScopeSaysSo:
         with pytest.raises(ProbeScopeUnverifiableError) as exc:
             await ProbeArmingService(repo).arm(
                 self._probe("prompt"),
-                model=MagicMock(),
+                executor=run_inline, model=MagicMock(),
                 loaded=LoadedIdentity(
                     hf_id="LiquidAI/LFM2.5-1.2B-Instruct", d_model=8, n_layers=16
                 ),
@@ -464,7 +470,7 @@ class TestAnUnverifiableScopeSaysSo:
         with pytest.raises(ProbeParityFailedError):
             await ProbeArmingService(repo).arm(
                 self._probe("all"),          # reproducible scope, wrong numbers
-                model=MagicMock(),
+                executor=run_inline, model=MagicMock(),
                 loaded=LoadedIdentity(
                     hf_id="LiquidAI/LFM2.5-1.2B-Instruct", d_model=8, n_layers=16
                 ),

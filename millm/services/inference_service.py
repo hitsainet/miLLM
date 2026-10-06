@@ -22,7 +22,16 @@ import uuid
 from contextlib import asynccontextmanager
 from datetime import datetime
 from threading import Event, Thread
-from typing import TYPE_CHECKING, Any, AsyncGenerator, AsyncIterator, Iterator, Optional
+from typing import (
+    TYPE_CHECKING,
+    Any,
+    AsyncGenerator,
+    AsyncIterator,
+    Callable,
+    Iterator,
+    Optional,
+    TypeVar,
+)
 
 import torch
 
@@ -84,6 +93,9 @@ from millm.services.reasoning_split import (
 
 
 logger = get_logger(__name__)
+
+#: The result type of `InferenceService.run_model_work`'s callable.
+_T = TypeVar("_T")
 
 
 
@@ -804,6 +816,29 @@ class InferenceService:
         if raise_refusal:
             raise refusal
         yield refusal
+
+    async def run_model_work(self, fn: Callable[[], _T]) -> _T:
+        """Model work that is not generation, inside ONE admission slot, with every SAE suppressed.
+
+        THE seam for probe scoring, probe parity and the parity forward at arm time (FR-27.6,
+        T-73). Before Feature 27 neither the parity route nor the arm route took a slot at all, so
+        a parity forward ran concurrently with a generation on the same model; and neither
+        suppressed steering, so a profile steering an EARLIER layer moved the residual parity
+        compared against miStudio's recorded scores.
+
+        ⚠ The slot is taken through `_admit()` — the only way work takes one
+        (`test_every_request_queue_slot_is_taken_through_admission`) — so a model being unloaded
+        refuses before `fn` runs. Suppression is entered in `_unsteered_call`, INSIDE the worker
+        thread, because it is per-thread: entered around the `await` it would suppress nothing in
+        the thread that runs the forward.
+        """
+        async with self._admit():
+            return await asyncio.to_thread(self._unsteered_call, fn)
+
+    def _unsteered_call(self, fn: Callable[[], _T]) -> _T:
+        """Run `fn` with every attached SAE suppressed — in THIS thread, the worker's."""
+        with self._unsteered():
+            return fn()
 
     def _schedule_idle_cache_release(self) -> None:
         """Once the queue has stayed idle for TRANSFORMERS_IDLE_CACHE_RELEASE_S, give the model's cards torch's unused cache back.

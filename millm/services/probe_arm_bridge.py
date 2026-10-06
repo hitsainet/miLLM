@@ -122,20 +122,41 @@ def build_parity_forward(model: Any, layer: int) -> Any:
     ⚠ **A TEMPORARY hook, installed and removed per call.** Parity runs BEFORE the probe is armed,
     so `ProbeRuntimeState` has installed nothing yet; and it must stay uninstalled if a gate
     refuses, or a refused probe would leave a hook on the model with nothing tracking it.
+
+    Delegates to `build_probe_forward` with one layer, so parity and stateless scoring run the
+    SAME forward (FR-27.5e) — a second copy is how offline and live scores drift apart.
+    """
+    return build_probe_forward(model, [layer])
+
+
+def build_probe_forward(model: Any, layers: Any) -> Any:
+    """`forward(input_ids, context)` — one pass with a temporary read hook on each of `layers`.
+
+    The parity forward generalised to several layers, so stateless scoring runs ONE forward per
+    input for every requested probe whatever layer each reads (FR-27.6c). One `ProbeHooker` hook
+    per DISTINCT layer, each feeding `context.observe(layer, hidden)`; every handle is removed in
+    `finally`, so a failed pass leaves nothing installed.
+
+    Runs whatever thread calls it; the caller owns the admission slot and the suppression
+    (`InferenceService.run_model_work`).
     """
     hooker = ProbeHooker()
+    distinct = sorted({int(layer) for layer in layers})
 
     def forward(input_ids: torch.Tensor, context: Any) -> None:
         device = next(model.parameters()).device
         ids = input_ids.to(device)
-        handle = hooker.install(
-            model, layer, lambda hidden, _layer=layer: context.observe(_layer, hidden)
-        )
+        handles = []
         try:
+            for layer in distinct:
+                handles.append(hooker.install(
+                    model, layer, lambda hidden, _layer=layer: context.observe(_layer, hidden)
+                ))
             with torch.inference_mode():
                 model(input_ids=ids, use_cache=False)
         finally:
-            hooker.remove(handle)
+            for handle in handles:
+                hooker.remove(handle)
 
     return forward
 

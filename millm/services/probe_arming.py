@@ -20,7 +20,7 @@ from __future__ import annotations
 
 import logging
 from datetime import datetime, timezone
-from typing import Any, Callable, Optional
+from typing import Any, Awaitable, Callable, Optional
 
 import torch
 
@@ -40,7 +40,7 @@ from millm.core.probe_evidence import (
 )
 from millm.ml.probe_head import ProbeHead
 from millm.services.probe_identity import LoadedIdentity, check_identity
-from millm.services.probe_parity import NOT_COMPARABLE_SCOPE, ProbeParityEngine
+from millm.services.probe_parity import NOT_COMPARABLE_SCOPE, ProbeParityEngine, model_summary
 from millm.services.probe_scope import (
     RUNTIME_SCORABLE_SCOPES,
     SCOPES,
@@ -289,6 +289,7 @@ class ProbeArmingService:
         model: Any,
         loaded: LoadedIdentity,
         forward: Callable[[torch.Tensor, Any], None],
+        executor: Callable[[Callable[[], Any]], Awaitable[Any]],
         tokenizer: Any = None,
         acknowledge_below_rung2: bool = False,
         reason: str = "",
@@ -397,11 +398,17 @@ class ProbeArmingService:
             float((probe.definition.get("test_vectors") or {}).get("tolerance", 0.0) or 0.0),
             settings.PROBE_PARITY_TOLERANCE,
         )
-        parity = ProbeParityEngine(forward).run(
+        # ⚠ THROUGH THE EXECUTOR, which the route sets to `InferenceService.run_model_work`: one
+        # admission slot, every SAE suppressed in the thread that runs the forward (FR-27.6f-g,
+        # T-73). Called directly, this forward ran beside a generation on the same model and read
+        # a residual an earlier layer's steering had moved. REQUIRED, with no default, because a
+        # default that skips the slot is the defect being fixed.
+        parity = await executor(lambda: ProbeParityEngine(forward).run(
             for_parity, probe.definition, tolerance=tolerance, tokenizer=tokenizer,
             loaded_dtype=loaded.dtype,
             loaded_quantization=loaded.quantization,
-        )
+            model=model_summary(loaded),
+        ))
         await self.repository.update(probe, parity=parity.as_details())
         if not parity.passed:
             details = parity.as_details()

@@ -117,23 +117,23 @@
         stream, batched, CBM chat, CBM text, three llama.cpp — each must turn the guard red. **M11:** add
         a method calling `self._generate_sync` with no scenario → red. Record all eleven.
 
-- [ ] 3.0 Admission and suppression for model work (covers FR-27.6e–g, FR-27.7, FR-27.5a1)
-  - [ ] 3.1 `InferenceService.run_model_work(fn)` and `_unsteered_call` (FTID §3). Tests: one `_admit`
+- [x] 3.0 Admission and suppression for model work (covers FR-27.6e–g, FR-27.7, FR-27.5a1)
+  - [x] 3.1 `InferenceService.run_model_work(fn)` and `_unsteered_call` (FTID §3). Tests: one `_admit`
         entry per call; `_unsteered` entered **in the worker thread** (a fake SAE counting
         `suppressed()` per thread); an unloading model refuses before `fn` runs.
         `test_every_request_queue_slot_is_taken_through_admission` stays green.
-  - [ ] 3.2 `build_probe_forward(model, layers)`; `build_parity_forward` delegates. Existing parity
+  - [x] 3.2 `build_probe_forward(model, layers)`; `build_parity_forward` delegates. Existing parity
         tests unchanged and green.
-  - [ ] 3.3 Parity route (`probes.py:385-418`) runs the engine through `run_model_work`. Arm route
+  - [x] 3.3 Parity route (`probes.py:385-418`) runs the engine through `run_model_work`. Arm route
         (`probes.py:340-383`) passes `executor=inference.run_model_work`; `ProbeArmingService.arm`
         takes `executor` as a required keyword and awaits it at `probe_arming.py:400`. Tests: payload
         (the executor is the service's `run_model_work`) and call count (once per arm, once per parity).
         Update `test_probe_arming.py` callers with an inline executor.
-  - [ ] 3.4 `ParityReport.as_details()` adds `model` and `checked_at` (`probe_parity.py:246`); readers
+  - [x] 3.4 `ParityReport.as_details()` adds `model` and `checked_at` (`probe_parity.py:246`); readers
         treat both as optional. Test old reports without the keys still read.
-  - [ ] 3.5 Test the steering fix itself: with a steering profile active on an **earlier** layer,
+  - [x] 3.5 Test the steering fix itself: with a steering profile active on an **earlier** layer,
         parity scores equal the unsteered scores (they did not before; record the pre-fix difference).
-  - [ ] 3.6 Controls: **M15** (drop `_admit` from `run_model_work`), **M16** (drop `executor=` from the
+  - [x] 3.6 Controls: **M15** (drop `_admit` from `run_model_work`), **M16** (drop `executor=` from the
         arm route), **M17** (enter `_unsteered` outside the worker) — each red. Record.
 
 - [ ] 4.0 Stateless probe scoring (covers FR-27.4, FR-27.5, FR-27.6a–d, FR-27.7)

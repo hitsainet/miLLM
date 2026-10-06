@@ -247,7 +247,7 @@ whole request, as today (`inference_service.py:5105`, `:5194`). The cap bounds h
   the measurement is recorded.
 - **Not changed:** the transformers forward runs on the event-loop thread inside `_admit()`
   (`inference_service.py:5117-5120`). Recorded debt; moving it to a worker thread must move
-  `_unsteered()` with it, because suppression is per thread (`:1184-1187`).
+  `_unsteered()` with it, because suppression is per thread (`:1184-1187`). **Confirmed by the operator 2026-10-06 (S3-11).**
 
 ## 10. Testing Strategy
 

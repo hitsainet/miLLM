@@ -62,12 +62,12 @@ miStudio 034 to send `X-miLLM-Strict: true` safely.
 
 ## Tasks
 
-- [ ] 0.0 Spikes and measurements that gate later work (covers FR-25.10.8, FR-25.14.3; FTDD §12)
+- [x] 0.0 Spikes and measurements that gate later work (covers FR-25.10.8, FR-25.14.3; FTDD §12)
   - [x] 0.1 **gemma-4 tokenizer spike** (before 7.x ships): on the node, build
         `xgr.TokenizerInfo.from_huggingface` from the served gemma-4 tokenizer and compile the FTDD
         §3.1 test schema; require the target string accepted. Record compile time and mask timing.
         If it fails, add a refusal row for that model family and record why. *needs hardware — operator session.*
-  - [?] 0.2 **xgrammar on the node's CUDA stack:** in the deployed image, run one constrained
+  - [x] 0.2 **xgrammar on the node's CUDA stack:** in the deployed image, run one constrained
         `generate()` on LFM2.5-1.2B on the 3090 (the triton bitmask kernel path). A failure blocks
         7.x. *needs hardware — operator session.*
   - [x] 0.3 **T-61 llama.cpp seed measurement** (before 6.6): forward `seed` to llama.cpp on the
@@ -263,26 +263,26 @@ miStudio 034 to send `X-miLLM-Strict: true` safely.
         `X-miLLM-Constrained`, `X-miLLM-Seed`), the outcome table, the JSON Schema subset, seed
         scopes, chat logprobs shape, `system_fingerprint` format.
 
-- [ ] 9.0 Feature Acceptance
+- [x] 9.0 Feature Acceptance
   - [x] 9.1 Verify each FPRD success criterion SC-1…SC-8 and each user story US-1…US-7 against its
         test; tick or file the gap.
   - [x] 9.2 Run every FTID §8.3 mutation control (M1–M16): back up, mutate one line, confirm it
         landed, run, require red, restore, confirm `git diff` clean. Record results in
         `0xcc/reviews/review_feature025_<date>.md`. Any survivor gets a regression test and is
         re-run as a negative control (SC-8).
-  - [?] 9.3 **Hardware — BRD-04 acceptance 3 (chat scoring parity):** JEV-9B-decision, bfloat16, on
+  - [x] 9.3 **Hardware — BRD-04 acceptance 3 (chat scoring parity):** JEV-9B-decision, bfloat16, on
         the 3090: 200 prompts, chat scoring of `messages` vs completion scoring of the same rendered
         prompt — identical token ids, every logprob within 1e-5 absolute. *needs hardware — operator session.*
-  - [?] 9.4 **Hardware — BRD-04 acceptance 4:** with a profile active, chat scoring equals scoring
+  - [x] 9.4 **Hardware — BRD-04 acceptance 4:** with a profile active, chat scoring equals scoring
         with no SAE attached. *needs hardware — operator session.*
-  - [?] 9.5 **Hardware — BRD-04 acceptance 5:** 100 `json_schema` requests on transformers all parse
+  - [x] 9.5 **Hardware — BRD-04 acceptance 5:** 100 `json_schema` requests on transformers all parse
         and validate; record the GPU per-token constraint cost against unconstrained; the same request
         on a GGUF model returns `400` with no model load (verify by the resident model's `loaded_at`
         unchanged). *needs hardware — operator session.*
-  - [?] 9.6 **Hardware — BRD-04 acceptance 6:** the same sampled request with `seed: 7` twice on the
+  - [x] 9.6 **Hardware — BRD-04 acceptance 6:** the same sampled request with `seed: 7` twice on the
         serial path gives byte-identical text and echoes the seed; include a run with the speculative
         draft configured if the node has one. *needs hardware — operator session.*
-  - [?] 9.7 **BRD-04 acceptance 1 and 2** over HTTP against the deployed pod: `foo: 1` reported;
+  - [x] 9.7 **BRD-04 acceptance 1 and 2** over HTTP against the deployed pod: `foo: 1` reported;
         strict refuses; every refused list field returns `400` with and without strict; `n: 2` on
         completions returns `400`. *needs hardware — operator session.*
   - [x] 9.8 Full suite: `pytest tests/unit` green; `ruff`, `mypy millm/` clean; the existing
@@ -314,3 +314,19 @@ miStudio 034 to send `X-miLLM-Strict: true` safely.
 - **Open questions:** none open in the FPRD (all resolved, T-55–T-62). Outstanding **measurements**
   are tasks: T-61 → 0.3; gemma-4 tokenizer → 0.1; CUDA kernel → 0.2; GPU per-token cost → 9.5.
 - **The final parent task is Feature Acceptance.** ✔
+
+
+## Hardware acceptance — 2026-10-06 (operator session, RTX 3090, image `hitsai/millm-backend@sha256:5fece646…`, commit `ba22e61`)
+
+| Item | Result |
+|---|---|
+| 0.1 gemma-4 tokenizer (`google/gemma-4-12b-it`) | PASS — vocab 262,144; schema compiles in 0.62 s; mask median 0.0013 ms, max 0.060 ms |
+| 0.2 xgrammar on the node's CUDA stack | PASS — constrained generation on LFM2.5-1.2B-Instruct (see 9.5) |
+| 0.3 T-61 llama.cpp seed | PASS — LFM2.5-1.2B-Instruct Q4_K_M, temperature 1.0: seed 7 identical within one instance and across a fresh instance; seed 8 differs. 6.6 flipped to honoured (`ba22e61`) |
+| 9.3 chat scoring parity | PASS — JEV-9B-decision, 200 prompts, `allowed_token_ids` = the decision verbalizer (24 ids), top 5: 0 token mismatches, worst abs logprob diff **0.0**, prompt-token counts equal |
+| 9.4 unsteered | PASS — Qwen2.5-7B-Instruct, 50 prompts: no SAE vs layer-25 SAE attached with steering {100: +80, 500: −60} enabled → worst diff **0.0**; `steering_apply_count` unchanged (29 → 29) across the scoring; control: greedy generation does change with steering on |
+| 9.5 structured output | PASS — 100/100 parse and validate at `max_tokens` 256 (one hit `length` at the script's default cap; not a constraint failure); 137.4 vs 144.4 tok/s (~5% cost); GGUF `LFM2.5-1.2B-Instruct-GGUF:Q4_K_M` → 400 `response_format`, resident `loaded_at` unchanged |
+| 9.6 seed | PASS — LFM2.5-1.2B-Instruct: seed 7 twice byte-identical, seed 8 differs, `X-miLLM-Seed: 7;scope="request"`, fingerprint `millm:LFM2.5-1.2B-Instruct@0f604ada…:bfloat16/FP16:transformers`. No speculative draft configured on the node |
+| 9.7 acceptance 1 & 2 over HTTP | PASS — `foo: 1` → 200 with `X-miLLM-Ignored-Fields: "foo"`; strict → 400; 15 refused (endpoint, field) pairs × strict on/off = 30 requests, all 400 |
+
+**Observation (not a 025 defect, filed for follow-up):** enabling steering through `/api/saes/steering/enable` left the model row `locked = true`; disabling steering and detaching the SAE did not clear it, so the next request naming another model was refused `model_locked` until `POST /api/models/{id}/unlock`.

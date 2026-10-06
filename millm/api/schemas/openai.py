@@ -48,6 +48,9 @@ class ChatMessage(BaseModel):
 # Request Schemas
 # =============================================================================
 
+#: Below this, dividing the logits by the temperature can overflow them; 0 means "no scaling".
+MIN_SCORING_TEMPERATURE = 1e-3
+
 # `user` is deliberately NOT declared on any request (T-57, FR-25.3.3b): nothing in millm reads
 # it, so it lands in `model_extra` and is reported as unused — and refused under X-miLLM-Strict.
 
@@ -151,6 +154,18 @@ class ChatCompletionRequest(BaseModel):
     # template which RAISES on these kwargs fails loudly instead of silently
     # falling back to a generic format with the request ignored.
     chat_template_kwargs: Optional[dict[str, Any]] = None
+
+    # SCORING MODE on chat (Feature 25, FR-25.5). OpenAI's chat names and shapes: `logprobs` is a
+    # BOOLEAN here (it is a count on legacy completions) and `top_logprobs` the number of
+    # alternatives. Scoring is on when `logprobs` is true or `allowed_token_ids` is sent; the
+    # chat template is rendered and the SAME scorer /v1/completions uses is called, so chat and
+    # completion scores of one rendered prompt agree by construction.
+    logprobs: Optional[bool] = None
+    top_logprobs: Optional[int] = Field(default=None, ge=0, le=20)
+    #: As on completions: restrict the next token to these ids, renormalised over the set.
+    allowed_token_ids: Optional[list[int]] = Field(default=None, min_length=1, max_length=1024)
+    #: Key tokens as "token_id:<id>" (vLLM's switch). `bytes` stays the decoded text's UTF-8.
+    return_tokens_as_token_ids: bool = False
 
     # miLLM extension - steering profile override
     profile: Optional[str] = None
@@ -262,9 +277,36 @@ class ChatCompletionRequest(BaseModel):
             raise ValueError("Maximum 4 stop sequences allowed")
         return self
 
+    @field_validator("top_logprobs")
+    @classmethod
+    def _top_logprobs_needs_logprobs(cls, v, info):
+        # OpenAI's rule (FR-25.5.3): alternatives are only returned when logprobs is true.
+        # `logprobs` is declared before `top_logprobs`, so it is already in info.data.
+        if v is not None and info.data.get("logprobs") is not True:
+            raise ValueError("top_logprobs requires logprobs: true")
+        return v
 
-#: Below this, dividing the logits by the temperature can overflow them; 0 means "no scaling".
-MIN_SCORING_TEMPERATURE = 1e-3
+    @model_validator(mode="after")
+    def validate_scoring_mode(self) -> "ChatCompletionRequest":
+        """Chat scoring carries completion scoring's limits, plus no streaming (FR-25.6.1)."""
+        if self.wants_scores():
+            if self.max_tokens != 1:
+                raise ValueError("logprobs and allowed_token_ids require max_tokens=1")
+            if self.n != 1:
+                raise ValueError("logprobs and allowed_token_ids require n=1")
+            if self.stream:
+                raise ValueError("logprobs and allowed_token_ids require stream=false")
+            if self.allowed_token_ids is not None and any(i < 0 for i in self.allowed_token_ids):
+                raise ValueError("allowed_token_ids must be non-negative token ids")
+            if 0.0 < self.temperature < MIN_SCORING_TEMPERATURE:
+                raise ValueError(
+                    f"scoring mode needs temperature 0 or at least {MIN_SCORING_TEMPERATURE}"
+                )
+        return self
+
+    def wants_scores(self) -> bool:
+        """Scoring mode (FR-25.5.2): `logprobs: false` alone is ordinary generation."""
+        return self.logprobs is True or self.allowed_token_ids is not None
 
 
 class TextCompletionRequest(BaseModel):
@@ -399,12 +441,34 @@ class Usage(BaseModel):
 # =============================================================================
 
 
+class ChatLogprobAlternative(BaseModel):
+    """One entry of `top_logprobs` in OpenAI's chat logprobs shape."""
+
+    token: str
+    logprob: float
+    #: UTF-8 of the DECODED token text, always — `return_tokens_as_token_ids` changes `token` only.
+    bytes: list[int]
+
+
+class ChatLogprobToken(ChatLogprobAlternative):
+    """The scored next token (FR-25.8): `content` holds exactly one of these."""
+
+    top_logprobs: list[ChatLogprobAlternative]
+
+
+class ChatLogprobs(BaseModel):
+    content: list[ChatLogprobToken]
+
+
 class ChatCompletionChoice(BaseModel):
     """Single completion choice in non-streaming response."""
 
     index: int
     message: ChatMessage
     finish_reason: Literal["stop", "length", "timeout"]
+    #: Present only for chat scoring with `logprobs: true` (FR-25.8). Omitted otherwise, so a
+    #: client that sends no new field receives the body it received before Feature 25.
+    logprobs: Optional[ChatLogprobs] = Field(default=None, exclude_if=lambda v: v is None)
 
 
 class ChatCompletionResponse(BaseModel):

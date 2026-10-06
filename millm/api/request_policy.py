@@ -138,16 +138,16 @@ _SCORING_UNSTEERED = "scoring is always unsteered (X-09), so a steering field ca
 #: THE output-changing list (FR-25.3.3). Field -> (endpoint, engine) -> outcome.
 OUTPUT_CHANGING: dict[str, dict[tuple[Endpoint, Engine], Outcome]] = {
     "logprobs": _cells(
-        _PENDING, _NO_DISTRIBUTION, HONOURED, _NO_DISTRIBUTION, _EMB_NO_TOKENS, _EMB_NO_TOKENS,
+        HONOURED, _NO_DISTRIBUTION, HONOURED, _NO_DISTRIBUTION, _EMB_NO_TOKENS, _EMB_NO_TOKENS,
     ),
     "top_logprobs": _cells(
-        _PENDING, _NO_DISTRIBUTION,
+        HONOURED, _NO_DISTRIBUTION,
         refused("/v1/completions takes the number of alternatives in `logprobs`"),
         refused("/v1/completions takes the number of alternatives in `logprobs`"),
         _EMB_NO_TOKENS, _EMB_NO_TOKENS,
     ),
     "allowed_token_ids": _cells(
-        _PENDING, _NO_DISTRIBUTION, HONOURED, _NO_DISTRIBUTION, _EMB_NO_TOKENS, _EMB_NO_TOKENS,
+        HONOURED, _NO_DISTRIBUTION, HONOURED, _NO_DISTRIBUTION, _EMB_NO_TOKENS, _EMB_NO_TOKENS,
     ),
     "response_format": _cells(
         _PENDING,

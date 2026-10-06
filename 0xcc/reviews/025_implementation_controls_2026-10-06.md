@@ -19,6 +19,7 @@ is re-run as a negative control (rows suffixed `-rerun`).
 | After 3.0 (errors) | 3624 passed / 3 skipped / 0 failed |
 | After 2.0 (request policy) | 3872 passed / 3 skipped / 0 failed |
 | After 4.0 (small refusals) | 3898 passed / 3 skipped / 0 failed |
+| After 5.0 (chat scoring) | 3932 passed / 3 skipped / 0 failed |
 
 ## Discrepancies between the documents and the code (the code won)
 
@@ -66,6 +67,10 @@ is re-run as a negative control (rows suffixed `-rerun`).
   code). The CBM is off in Kubernetes.
 - **`n` on `/v1/completions` and a streamed `n`/`extra_messages`** — the FPRD's own FR-25.3.5 and
   FR-25.4.1 latent defects — refused at the schema and (streaming) in the service.
+- **`logprobs: null` on every chat choice avoided.** Adding `ChatCompletionChoice.logprobs` would
+  have serialised `"logprobs": null` into every generation response; it is declared with
+  `exclude_if=None` (pydantic 2.12) so a client sending no new field gets the body it got before
+  (FPRD §8). Pinned by `test_a_generation_response_carries_no_logprobs_key`.
 
 ## Mutation controls
 
@@ -97,4 +102,16 @@ is re-run as a negative control (rows suffixed `-rerun`).
 | 24 | CBM-penalty | `millm/services/inference_service.py` | CBM gate: penalties no longer route serial | yes | 1 failed, 19 passed in 6.85s | **red** | ok |
 | 25 | S-user-removed | `millm/api/schemas/openai.py` | `user` re-declared on the chat schema (so it would no longer be reported) | yes | 1 failed, 14 passed in 6.65s | **red** | ok |
 | 26 | S-comp-n-rerun | `millm/api/schemas/openai.py` | same mutation, negative control after `test_the_schema_refuses_it_for_direct_callers_too` | yes | 1 failed, 2 passed in 2.69s | **red** | ok |
+| 27 | M6 | `millm/services/inference_service.py` | `_unsteered_next_token_logits`: `with self._unsteered()` -> `nullcontext()` | yes | 1 failed, 5 passed in 4.95s | **red** | ok |
+| 28 | M7 | `millm/services/inference_service.py` | chat scoring branch moved after the llama.cpp and `extra_messages` branches | yes | 1 failed, 1 passed in 4.92s | **red** | ok |
+| 29 | M8 | `millm/services/inference_service.py` | `_score_chat_completion`: `add_special_tokens=False` -> `True` (double BOS) | yes | 1 failed in 4.79s | **red** | ok |
+| 30 | M9 | `millm/services/inference_service.py` | `_score_chat_completion` reimplements tokenise/forward/score instead of calling `_score_prompts` | yes | 1 failed, 1 passed in 4.76s | **red** | ok |
+| 31 | C5-top-truncate | `millm/services/inference_service.py` | chat `top_logprobs` no longer truncated to the requested count | yes | 1 failed, 29 passed in 8.12s | **red** | ok |
+| 32 | C5-logprobs-null | `millm/services/inference_service.py` | chat logprobs object built even when only `allowed_token_ids` was sent | yes | 1 failed, 30 passed in 7.99s | **red** | ok |
+| 33 | C5-no-template | `millm/services/inference_service.py` | NO_CHAT_TEMPLATE refusal disabled (scoring would use the generic fallback) | yes | 1 failed, 22 passed in 5.73s | **red** | ok |
+| 34 | C5-bytes | `millm/services/inference_service.py` | chat `bytes` built from the id instead of the decoded text | yes | 1 failed, 27 passed in 8.04s | **red** | ok |
+| 35 | C5-index | `millm/services/inference_service.py` | `_score_prompts` no longer records the failing index | yes | 1 failed, 25 passed in 8.09s | **red** | ok |
+| 36 | C5-schema-stream | `millm/api/schemas/openai.py` | chat scoring `stream=false` limit disabled | yes | 1 failed, 11 passed in 5.17s | **red** | ok |
+| 37 | C5-top-needs-logprobs | `millm/api/schemas/openai.py` | `top_logprobs` without `logprobs: true` accepted | yes | 1 failed, 13 passed in 5.04s | **red** | ok |
+| 38 | C5-table-profile | `millm/api/request_policy.py` | table: `profile` honoured on a scoring request (refuse_if removed) | yes | 1 failed, 17 passed in 5.29s | **red** | ok |
 

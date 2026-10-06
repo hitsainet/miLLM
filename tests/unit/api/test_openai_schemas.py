@@ -143,14 +143,22 @@ class TestChatCompletionRequest:
                 stop=["1", "2", "3", "4", "5"],
             )
 
-    def test_extra_fields_ignored(self):
+    def test_unknown_fields_parse_and_are_kept(self):
+        """Feature 25: `logprobs` is now a real chat field (scoring), so this test — which used it
+        as an "unsupported field silently ignored" example — uses a genuinely unknown one."""
         request = ChatCompletionRequest(
             model="gpt-4",
             messages=[ChatMessage(role="user", content="Hello")],
-            logprobs=True,  # Unsupported field
-            n=5,  # Unsupported field
+            some_unknown_field=True,
+            n=5,
         )
         assert request.model == "gpt-4"
+        assert request.model_extra == {"some_unknown_field": True}
+
+    def test_logprobs_is_chat_scoring_and_carries_its_limits(self):
+        with pytest.raises(Exception, match="max_tokens=1"):
+            ChatCompletionRequest(model="gpt-4", messages=[ChatMessage(role="user", content="x")],
+                                  logprobs=True, n=5)
 
 
 class TestChatCompletionResponse:

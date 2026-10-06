@@ -152,40 +152,40 @@ miStudio 034 to send `X-miLLM-Strict: true` safely.
   - [x] 4.7 Test: with CBM enabled in a test service, a request with `n > 1` is served serially
         (or refused) and never by the CBM path (spy call count 0).
 
-- [ ] 5.0 Chat scoring (covers FR-25.5, FR-25.6, FR-25.7, FR-25.8, FR-25.9)
-  - [ ] 5.1 Extract `_score_prompts` from `_score_text_completion` (`inference_service.py:4964-5022`);
+- [x] 5.0 Chat scoring (covers FR-25.5, FR-25.6, FR-25.7, FR-25.8, FR-25.9)
+  - [x] 5.1 Extract `_score_prompts` from `_score_text_completion` (`inference_service.py:4964-5022`);
         `_score_text_completion` calls it. `test_scoring_completions.py` stays green **unchanged**.
-  - [ ] 5.2 Chat schema fields (`logprobs` bool, `top_logprobs` 0–20, `allowed_token_ids`,
+  - [x] 5.2 Chat schema fields (`logprobs` bool, `top_logprobs` 0–20, `allowed_token_ids`,
         `return_tokens_as_token_ids`), `wants_scores()`, `validate_scoring_mode` with `stream` false,
         `top_logprobs` requires `logprobs: true` (FR-25.5.1–5.3, FR-25.6.1–6.2).
-  - [ ] 5.3 Branch first in `create_chat_completion`, before `:3595` (FR-25.5.8); add
+  - [x] 5.3 Branch first in `create_chat_completion`, before `:3595` (FR-25.5.8); add
         `_score_chat_completion` per FTID §7.2 — render inside `_admit()`, `add_special_tokens=False`,
         no probe/sensing/steering calls (FR-25.5.4–5.6, FR-25.7.1, FR-25.7.3).
-  - [ ] 5.4 No chat template → `NoChatTemplateError` (T-55, FR-25.5.9).
-  - [ ] 5.5 Table rows: scoring with `profile`, `steering_intensity`, `steering`, `response_format`
+  - [x] 5.4 No chat template → `NoChatTemplateError` (T-55, FR-25.5.9).
+  - [x] 5.5 Table rows: scoring with `profile`, `steering_intensity`, `steering`, `response_format`
         refused (FR-25.6.4, FR-25.7.2; X-09).
-  - [ ] 5.6 GGUF row refused before auto-load; resident llama.cpp refused in the service
+  - [x] 5.6 GGUF row refused before auto-load; resident llama.cpp refused in the service
         (FR-25.6.3).
-  - [ ] 5.7 Response shape: `ChatLogprobs`, `bytes` from decoded text, id form in `token`,
+  - [x] 5.7 Response shape: `ChatLogprobs`, `bytes` from decoded text, id form in `token`,
         `top_logprobs` length, `logprobs: null` with `allowed_token_ids` alone, `finish_reason:
         "length"`, usage sums (FR-25.8.1–8.9).
-  - [ ] 5.8 `extra_messages`: one conversation at a time, index order, one slot, failure names the
+  - [x] 5.8 `extra_messages`: one conversation at a time, index order, one slot, failure names the
         index, `X-miLLM-Batch` = choices (FR-25.9.1–9.5).
-  - [ ] 5.9 Tests — parity (`test_chat_scoring.py`): chat scoring of `messages` equals completion
+  - [x] 5.9 Tests — parity (`test_chat_scoring.py`): chat scoring of `messages` equals completion
         scoring of `_format_chat_messages(messages)` with `add_special_tokens=False`: identical
         token ids and logprobs, exact on CPU (SC-4 unit form; M8).
-  - [ ] 5.10 Test: `_score_prompts` is called once per request with the rendered texts and
+  - [x] 5.10 Test: `_score_prompts` is called once per request with the rendered texts and
         `add_special_tokens=False` (payload + count; M9).
-  - [ ] 5.11 Test: an `extra_messages` scoring request returns one scored choice per conversation
+  - [x] 5.11 Test: an `extra_messages` scoring request returns one scored choice per conversation
         in order — proves the branch precedes the batched path (M7).
-  - [ ] 5.12 Test: with an SAE attached and a profile active, chat scoring equals scoring with none
+  - [x] 5.12 Test: with an SAE attached and a profile active, chat scoring equals scoring with none
         attached; suppression entered in the worker thread (SC-5; M6, for both endpoints).
-  - [ ] 5.13 Test: no probe, sensing or circuit-sensing context opens during chat scoring (spies,
+  - [x] 5.13 Test: no probe, sensing or circuit-sensing context opens during chat scoring (spies,
         count 0) and `generate()` is never called (FR-25.7.3–7.4).
-  - [ ] 5.14 Tests — refusals: `max_tokens: 2`, `n: 2`, `stream: true`, temperature 1e-4,
+  - [x] 5.14 Tests — refusals: `max_tokens: 2`, `n: 2`, `stream: true`, temperature 1e-4,
         `top_logprobs` without `logprobs`, `profile` with scoring, `response_format` with scoring,
         no template, GGUF row (no load), out-of-vocabulary id, empty render (index named).
-  - [ ] 5.15 Tests — shape: `token_id:<id>` form with correct `bytes`; `top_logprobs: 0` → `[]`;
+  - [x] 5.15 Tests — shape: `token_id:<id>` form with correct `bytes`; `top_logprobs: 0` → `[]`;
         `allowed_token_ids` alone → `logprobs: null` and a constrained `content`.
 
 - [ ] 6.0 Seed and system fingerprint (covers FR-25.13, FR-25.14)

@@ -1,8 +1,9 @@
 # Feature PRD: Embedding Options
 
 **Document ID:** 030_FPRD|Embedding_Options
-**Version:** 1.0 (planned)
-**Status:** Planned. Feature PRD written 2026-10-06; FTDD, FTID and FTASKS follow.
+**Version:** 1.1 (planned)
+**Status:** Planned. Feature PRD written 2026-10-06; v1.1 the same day applies the operator's
+Feature-PRD decisions (P-18; technical defaults T-91–T-95). FTDD, FTID and FTASKS follow.
 **Source:** BRD-04 (miLLM — Dataworks Support) §5.9: R-04.35–R-04.37, plus R-04.5 (`dimensions`)
 from §5.1. The *refusal* path for `dimensions` is built in Feature 25 (FR-25.3); this feature owns
 the honour-or-refuse decision per model.
@@ -11,13 +12,15 @@ the honour-or-refuse decision per model.
 time" (which covers embedding rows) and "Degrade optional capabilities rather than refuse to serve"
 (GGUF embeddings)
 **Binding decisions:** checkpoint decisions and technical defaults of 2026-10-06
-(`~/app/miDataworks/0xcc/docs/brd-decisions-2026-10-05.md`, "Checkpoint decisions")
+(`~/app/miDataworks/0xcc/docs/brd-decisions-2026-10-05.md`, "Checkpoint decisions"); Feature-PRD
+decisions of 2026-10-06 (same file, "Feature-PRD decisions"), and the technical register
+(`~/app/miDataworks/0xcc/docs/fprd-open-questions-2026-10-06.md`, T-91–T-95, all accepted)
 **Depends on:** Feature 25 (the output-changing field list and unknown-field reporting); Feature 23
 (GGUF embeddings through `_llamacpp_embeddings`). Reuses `_unsteered`.
 **Consumers:** miDataworks BRD-03 R-03.18 (embedding near-deduplication, clustering, diversity
-figures), through miDataworks feature 004 (FR-004.14 and FR-004.24). That feature's Open Question 6
-asks whether embeddings are in its phase 1; its ADR-027 blocks embedding operators against miLLM
-until this feature is served.
+figures), through miDataworks feature 004 (FR-004.14 and FR-004.24). Its ADR-027 blocks embedding
+operators against miLLM until this feature is served. **P-18: embeddings are not required for
+miDataworks M1**; a lexical fallback is allowed and recorded. So nothing here blocks M1.
 
 Code references are to miLLM at `7aa659c` (HEAD, 2026-10-06).
 
@@ -82,8 +85,7 @@ index. No vector is returned for any input in that request. No forward pass runs
 13). miDataworks then skips the row with reason `over_input_cap` (004 FPRD §2 edge cases).
 
 **US-3. Client asks for shortened vectors.** As an OpenAI-SDK client, I send `dimensions: 256`.
-*Acceptance:* on a model that declares truncated-embedding support, every vector has 256 components.
-On any other model, the request returns `400` naming `dimensions`, before any model is loaded
+*Acceptance:* in v1 no model declares truncated-embedding support (T-91), so on every model the request returns `400` naming `dimensions`, before any model is loaded
 (BRD-04 acceptance 2).
 
 **US-4. Existing retrieval client is unaffected.** As Open WebUI's retrieval feature, I send
@@ -98,8 +100,8 @@ evicted to find this out.
 **Secondary scenarios.**
 - A client sends 10,000 inputs in one request. The request is refused with `400`, naming the cap and
   the count, before any model is loaded.
-- A client sends `normalize: true` with `dimensions` on a declaring model. Truncation happens first,
-  then normalisation, so the returned vector is unit length.
+- A client sends `normalize: true` with `dimensions`. In v1 the request is refused (T-91). Once a
+  model can declare support, truncation happens first, then normalisation, so the vector is unit length.
 - Feature 26 packs embedding rows of different lengths into one padded forward pass. Each row's
   vector ignores the padding positions.
 
@@ -110,10 +112,11 @@ evicted to find this out.
 | Two inputs over the limit, at indices 3 and 7 | One `400`. `param` names the first; the message names both (FR-30.3.4). |
 | Input 0 fits, input 1 is over the limit | `400`. Input 0 is not embedded first; all inputs are checked before any forward pass (FR-30.3.3). |
 | `pooling: "max"` | `400` naming `pooling` (schema validation). |
-| `dimensions` larger than the model's width, on a declaring model | `400` naming `dimensions` and the width (FR-30.1.4). |
+| `dimensions` larger than the model's width, on a declaring model | `400` naming `dimensions` and the width (FR-30.1.4; inactive in v1, T-91). |
 | `dimensions` equal to the width, on a model that declares nothing | `400` (FR-30.1.6). |
 | A pooled vector with zero or non-finite norm under `normalize: true` | Error naming the index. Never `NaN` in the output (FR-30.2.6). |
-| `pooling: "cls"` on a causal decoder | Served as specified; see Open Question 2. |
+| `pooling: "cls"` on a causal decoder | Served as specified and documented (T-92). |
+| `input: ""`, `[]`, or an empty string in a list | `400` naming `input` (T-94). |
 | GGUF model loaded with embeddings disabled | Existing refusal naming `GGUF_ENABLE_EMBEDDINGS` (`inference_service.py:5198-5205`), unchanged. |
 | A steering profile or circuit is active | Vectors are identical to those with no SAE attached (FR-30.2.8). |
 
@@ -136,25 +139,26 @@ return `400`. (R-04.5)
 
 - **FR-30.1.1** A model *declares* support only through an explicit declaration recorded for it.
   No such declaration exists today: the model row's columns (`millm/db/models/model.py:81-166`)
-  carry none. Where the declaration comes from is Open Question 1. Until it is answered, no model
-  declares support, so every `dimensions` request is refused.
+  carry none. **T-91: there is no declaration in version 1.** No model declares support, so every
+  `dimensions` request is refused, on both engines.
 - **FR-30.1.2** The refusal SHALL happen before any auto-load, because the decision depends only on
   the request and the model row (FR-25.3.8). The message names the model and says it does not
   declare truncated-embedding support.
-- **FR-30.1.3** When honoured, the vector SHALL be truncated *after* pooling to its first
+- **FR-30.1.3** *(Inactive in v1 under T-91; specified for the increment that adds a declaration.)*
+  When honoured, the vector SHALL be truncated *after* pooling to its first
   `dimensions` components. If `normalize` is true, the truncated vector SHALL then be L2-normalised.
   A vector normalised before truncation is not unit length after it, so normalising only before
   truncation is non-conformant.
-- **FR-30.1.4** A `dimensions` larger than the model's native width SHALL be refused, naming the
+- **FR-30.1.4** *(Inactive in v1 under T-91.)* A `dimensions` larger than the model's native width SHALL be refused, naming the
   width. If the declaration lists allowed sizes, any other size SHALL be refused, naming them.
-- **FR-30.1.5** Truncation SHALL apply identically on the transformers and llama.cpp engines. It is
+- **FR-30.1.5** *(Inactive in v1 under T-91.)* Truncation SHALL apply identically on the transformers and llama.cpp engines. It is
   post-processing in miLLM, after the engine returns the pooled vector.
 - **FR-30.1.6** On a model that declares nothing, `dimensions` SHALL be refused whatever its value,
   including the native width. `dimensions` has no neutral value in Feature 25's list (FR-25.3.4).
 - **FR-30.1.7** This requirement replaces the *refused until Feature 30* outcome for `dimensions` in
   Feature 25's list (FR-25.3.3, FR-25.3.7). The list module stays the single source. Its entry for
   `dimensions` reads the per-model decision; no endpoint keeps its own copy.
-- **FR-30.1.8** With `encoding_format: "base64"`, the encoded vector SHALL be the truncated one: its
+- **FR-30.1.8** *(Inactive in v1 under T-91.)* With `encoding_format: "base64"`, the encoded vector SHALL be the truncated one: its
   decoded length equals `dimensions`.
 
 ### 3.2 Pooling and normalisation
@@ -181,8 +185,8 @@ default, `last`, `cls`) and `normalize` (default false). (R-04.35)
   that token's position. The API reference SHALL say this.
 - **FR-30.2.5** The API reference SHALL state what `cls` means on a causal decoder. Position 0
   attends only to itself, so its vector depends only on the first token. Where the tokenizer adds a
-  fixed beginning-of-sequence token, every input gets the same `cls` vector. Whether to refuse `cls`
-  on such models is Open Question 2.
+  fixed beginning-of-sequence token, every input gets the same `cls` vector. **T-92: `cls` is served and
+  documented**, not refused.
 - **FR-30.2.6** `normalize: true` SHALL L2-normalise the final vector (after any truncation,
   FR-30.1.3). Each returned vector SHALL have norm 1 within 1e-5. A vector whose norm is zero or
   non-finite SHALL produce an error naming its index. The output SHALL never contain `NaN` or
@@ -225,19 +229,21 @@ capped with a stated default. (R-04.36)
 - **FR-30.3.4** The refusal SHALL use code `context_length_exceeded` and `param` `input[i]` for the
   first over-limit index (`input` when `input` is a string). The message SHALL name every over-limit
   index with its token count, and the limit. The list SHALL be bounded; if indices are left out, the
-  message says how many. Today the registered handler always sends `param: null`
-  (`errors.py:145`), so the design must carry `param` through.
+  message says how many. Today the registered handler sends no `param` for a
+  `MiLLMError` (`millm/api/exception_handlers.py:118-123`, registered at `millm/main.py:543`), so the
+  design must carry `param` through.
 - **FR-30.3.5** On llama.cpp, miLLM SHALL count tokens with the instance's own tokenizer before
   calling the engine, and SHALL ensure the engine does not truncate. Whether llama-cpp-python
   truncates inside `create_embedding` is unverified here (the library is not installed in the
   development environment); the FTDD verifies it.
 - **FR-30.3.6** The number of inputs per request SHALL be capped by a setting, with its default
-  stated in configuration and in the API reference. The value is Open Question 3. A request over
+  stated in configuration and in the API reference. **T-93: the FTDD sets the value from measured latency.** A request over
   the cap SHALL be refused naming `input`, the cap and the count, before any auto-load.
 - **FR-30.3.7** `usage.prompt_tokens` SHALL remain the total tokens embedded. With truncation gone,
   it equals the sum of each input's full token count.
-- **FR-30.3.8** Empty input (`""` or `[]`) is Open Question 4. Today `[]` returns `200` with no data
-  after auto-loading the model.
+- **FR-30.3.8** Empty input SHALL be refused with `400` naming `input`, before any auto-load
+  (**T-94**). Empty means `""`, `[]`, or an empty string at any index of a list. Today `[]` returns
+  `200` with no data after auto-loading the model.
 
 ### 3.4 Route comments
 
@@ -276,9 +282,9 @@ No Admin UI change (PPRD Feature 30, "UI Tab: none"). The user experience is the
 - **Request fields** on `EmbeddingRequest` (`millm/api/schemas/openai.py:287-296`): `pooling`
   (`"mean" | "last" | "cls"`, default `"mean"`) and `normalize` (boolean, default false).
   `dimensions` already exists (`:293`).
-- **Truncated-embedding declaration** per model: source and storage per Open Question 1. If it is a
-  model-row field, it needs a migration. It SHALL default to "not declared", so existing rows are
-  refused rather than guessed.
+- **Truncated-embedding declaration** per model: none in v1 (T-91), so no migration. A later
+  increment that adds one SHALL default it to "not declared", so existing rows are refused rather
+  than guessed.
 - **Setting:** the input-count cap (FR-30.3.6). Name chosen in the FTDD, beside the existing GGUF
   embedding setting (`millm/core/config.py:280-290`).
 - **Response shape:** unchanged (`EmbeddingResponse`, `openai.py:449-455`).
@@ -319,7 +325,7 @@ No Admin UI change (PPRD Feature 30, "UI Tab: none"). The user experience is the
 | Condition | `param` | Before auto-load? |
 |---|---|---|
 | `dimensions` on a model that declares nothing | `dimensions` | yes |
-| `dimensions` above the width or outside the declared sizes | `dimensions` | yes if the declaration states them |
+| `dimensions` above the width or outside the declared sizes (inactive in v1, T-91) | `dimensions` | yes if the declaration states them |
 | `pooling` not in the enum | `pooling` | yes (schema) |
 | `pooling` `last` or `cls` on a GGUF model | `pooling` | yes |
 | more inputs than the cap | `input` | yes |
@@ -353,7 +359,7 @@ tools call this route; that decision is miStudio's.
 - Training or converting models for truncated embeddings. This feature only reads a declaration.
 - Packing embedding rows. Feature 26 owns packing; this feature only makes pooling correct under it.
 - Steered embeddings. Embeddings are always unsteered.
-- Provenance headers stating which options were applied (Open Question 5).
+- Provenance headers stating which options were applied (T-95: not added).
 - MCP tools (BRD-MIS-DATAWORKS-001).
 
 ## 10. Dependencies
@@ -424,7 +430,7 @@ items in §11.
 - **Recommended approach:** one pure function `pool(hidden, mask, mode)`, unit-tested directly, and
   one post-processing step for truncation and normalisation shared by both engines. Tokenise and
   check every input first, then run the forwards.
-- **Error `param`:** the registered handler drops `param` (`errors.py:145`). Either raise a
+- **Error `param`:** the registered handler drops `param` (`exception_handlers.py:118-123`). Either raise a
   structured error the handler can read, or return the envelope from the route.
 - **Limit source:** `_served_max_context` can return `None` (`inference_service.py:3043-3044`), and
   the check is then skipped. With truncation removed, such an input runs at full length. The FTDD
@@ -436,31 +442,25 @@ items in §11.
 
 ## 14. Open Questions
 
-Batched for the operator. Each carries the default this PRD assumes until answered.
+All five questions of v1.0 are resolved. The operator accepted each technical default
+(`fprd-open-questions-2026-10-06.md`, T-91–T-95), and P-18 settles the consumer's phase.
 
-1. **Where does a model declare truncated-embedding support?** Options: (a) an operator-set field on
-   the model row; (b) derived from the checkpoint's own configuration where it states trained
-   output sizes; (c) no declaration in version 1. Default: (c) — no model declares support, so
-   every `dimensions` request is refused. This PRD found no declaration in the model row
-   (`model.py:81-166`). Truncating a vector the model was not trained to truncate keeps an
-   arbitrary prefix of its components.
-2. **`cls` on causal decoders.** Every model miLLM serves today is a causal decoder, where the
-   first-position vector depends only on the first token. Serve it as R-04.35 states, with the API
-   reference saying so (default), or refuse `cls` when the model is causal?
-3. **Input-count cap default.** No source gives a value. OpenAI's own limit is 2,048 inputs per
-   request. Default assumed: none chosen; the FTDD proposes a value from measured per-input latency,
-   so a capped request finishes inside the request timeout.
-4. **Empty input.** Refuse `""` and `[]` with `400` (default; OpenAI rejects empty input), or keep
-   today's behaviour (`[]` returns `200` with no data, after auto-loading)?
-5. **Provenance header.** Should the response state the pooling, normalisation and dimensions it
-   applied (for example an `X-miLLM-Embedding` header), as BRD-04's goal "every answer says how it
-   was produced" suggests? Default: not added; no BRD-04 requirement names it, and miDataworks
-   records the specification it sent (004 FR-004.14).
+| ID | Question (v1.0 number) | Resolution | Effect here |
+|---|---|---|---|
+| T-91 | Where a model declares truncated-embedding support (OQ 1) | No declaration in v1; all `dimensions` refused | FR-30.1.1; FR-30.1.3–30.1.5 and 30.1.8 inactive |
+| T-92 | `cls` on causal decoders (OQ 2) | Serve, documented | FR-30.2.5 |
+| T-93 | Input-count cap default (OQ 3) | The FTDD sets it from measured latency | FR-30.3.6 |
+| T-94 | Empty input (OQ 4) | Refuse with `400` | FR-30.3.8 |
+| T-95 | Provenance header (OQ 5) | Not added | §9 non-goal |
+| P-18 | Are embeddings needed for miDataworks M1? | No; a lexical fallback is allowed and recorded | Header "Consumers"; nothing here blocks M1 |
+
+**Still open:** none at the product level. Two technical items move to the FTDD: llama-cpp-python's
+truncation behaviour (FR-30.3.5) and the measured cap value (T-93).
 
 ## 15. Decisions from Clarifying Questions
 
 Clarifying rounds were waived. Each question is pre-answered from a cited source. Questions with no
-source are Open Questions above.
+source were Open Questions, now resolved in §14.
 
 | # | Question | Answer | Source |
 |---|---|---|---|
@@ -481,6 +481,12 @@ source are Open Questions above.
 | D15 | Stale comment: fix or remove? | Replace with an accurate one, or remove; plus two more stale docstrings | R-04.37; `embeddings.py:6, 56-57, 64-73` |
 | D16 | Is `pooling` output-changing? | Yes; added to Feature 25's list | R-04.3 rule ("honoured or refused"); FR-25.3.1 |
 | D17 | MCP tools? | None here | BRD-04 §4 out of scope; BRD-MIS-DATAWORKS-001 |
+| D18 | Truncated-embedding declaration? | None in v1; all `dimensions` refused | T-91 |
+| D19 | `cls` on causal decoders? | Served, documented | T-92 |
+| D20 | Input-count cap? | Set in the FTDD from measured latency | T-93 |
+| D21 | Empty input? | `400` | T-94 |
+| D22 | Provenance header? | Not added | T-95 |
+| D23 | Is this M1-blocking for miDataworks? | No | P-18 |
 
 ### Coverage
 
@@ -488,9 +494,9 @@ Every BRD-04 requirement this feature owns is covered.
 
 | BRD-04 | Topic | PPRD FR | Refined in this PRD | Status |
 |---|---|---|---|---|
-| R-04.5 | `dimensions` honoured or refused | FR-30.1 | FR-30.1.1 – FR-30.1.8 | covered (declaration source: Open Question 1) |
-| R-04.35 | `pooling`, `normalize` | FR-30.2 | FR-30.2.1 – FR-30.2.11 | covered (`cls` on causal models: Open Question 2) |
-| R-04.36 | No silent truncation; input cap | FR-30.3 | FR-30.3.1 – FR-30.3.8 | covered (cap value: Open Question 3; empty input: Open Question 4) |
+| R-04.5 | `dimensions` honoured or refused | FR-30.1 | FR-30.1.1 – FR-30.1.8 | covered: refused for every model in v1 (T-91); 30.1.3–30.1.5, 30.1.8 inactive |
+| R-04.35 | `pooling`, `normalize` | FR-30.2 | FR-30.2.1 – FR-30.2.11 | covered (`cls` served and documented, T-92) |
+| R-04.36 | No silent truncation; input cap | FR-30.3 | FR-30.3.1 – FR-30.3.8 | covered (cap value from FTDD measurement, T-93; empty input refused, T-94) |
 | R-04.37 | Comments match code | FR-30.4 | FR-30.4.1 – FR-30.4.3 | covered |
 
 **Acceptance mapping:** BRD-04 §6 item 2 (`dimensions` half) → FR-30.1; item 13 → FR-30.2.6,

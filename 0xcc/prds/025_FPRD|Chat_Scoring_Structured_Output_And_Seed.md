@@ -1,14 +1,18 @@
 # Feature PRD: Chat Scoring, Structured Output, Seed and Request Validation
 
 **Document ID:** 025_FPRD|Chat_Scoring_Structured_Output_And_Seed
-**Version:** 1.0 (planned)
-**Status:** Planned. Feature PRD written 2026-10-06; FTDD, FTID and FTASKS follow.
+**Version:** 1.1 (planned)
+**Status:** Planned. v1.0 written 2026-10-06; v1.1 (same day) resolves every open question from the
+operator's Feature-PRD decisions and the technical register (T-55–T-62, X-09). FTDD, FTID and FTASKS
+follow this version.
 **Source:** BRD-04 (miLLM — Dataworks Support) §5.1–§5.4: R-04.1–R-04.4 and R-04.6–R-04.15.
 R-04.5 (`dimensions`) moved to Feature 30; its *refusal* path is built here (FR-25.3).
 **PPRD:** Feature 25 (FR-25.1 – FR-25.14), PPRD v1.5 · **PADR:** v1.5 §1 rows "Request validation
 (v1.5)" and "Chat scoring (v1.5)"; v1.5 §10 "Dataworks Support (Features 25–30)" trade-offs
 **Binding decisions:** checkpoint technical defaults of 2026-10-06
-(`~/app/miDataworks/0xcc/docs/brd-decisions-2026-10-05.md`, "Checkpoint decisions")
+(`~/app/miDataworks/0xcc/docs/brd-decisions-2026-10-05.md`, "Checkpoint decisions"); Feature-PRD
+decisions of 2026-10-06 (same file: P-01–P-25, X-01–X-11; X-09 binds here); technical defaults
+T-55–T-62 (`~/app/miDataworks/0xcc/docs/fprd-open-questions-2026-10-06.md`)
 **Depends on:** none new. Reuses `_score_text_completion`, `next_token_scores` and `_unsteered`;
 Feature 23 (GGUF refused before auto-load).
 **Co-release:** miStudio BRD-MIS-DATAWORKS-001 tools `millm_score_chat` and `millm_generate`
@@ -147,8 +151,10 @@ logged warning. A field SHALL never be dropped without a trace. (R-04.1)
 warning when any field would be ignored, naming every such field. (R-04.2)
 
 - **FR-25.2.1** The error message lists every unused field location, not only the first.
-- **FR-25.2.2** Header values are case-insensitive. `true` and `1` enable strict mode. Any other
-  value, or no header, leaves it off. An unrecognised value SHALL NOT silently mean strict.
+- **FR-25.2.2** Header values are case-insensitive. `true` and `1` enable strict mode; `false` and
+  `0`, or no header, leave it off. Any other value is refused with `400` naming the header: a client
+  that wrote `yes` meant strict, and silently serving it lenient is the drop this feature removes.
+  The header name matches what miStudio sends (`X-miLLM-Strict: true`, miStudio 034 FTDD TD5, T-100).
 - **FR-25.2.3** The refusal happens before any auto-load whenever it can be decided from the
   request and the model row. Case (b) of FR-25.1.2 is decidable from the row (`gguf_files`,
   `millm/db/models/model.py:126`).
@@ -178,7 +184,13 @@ not. Each SHALL be honoured or refused with `400`. A test SHALL assert every ent
   | `steering` | refused until Feature 28 | refused | refused until Feature 28 | refused |
   | `tools`, `tool_choice` | refused | refused | refused | refused |
   | `logit_bias` | refused | refused | refused | refused |
+  | `max_completion_tokens` | honoured as `max_tokens` (T-58) | honoured as `max_tokens` | honoured as `max_tokens` | refused |
 
+- **FR-25.3.3a** `max_completion_tokens` is honoured as `max_tokens` (T-58). Sent together with a
+  different `max_tokens`, the request is refused naming both. It counts toward the scoring limit
+  `max_tokens: 1` exactly as `max_tokens` does.
+- **FR-25.3.3b** `user` is reported as unused, so strict mode refuses it (T-57). It is never read in
+  `millm/`, and R-04.1 reports every field not used.
 - **FR-25.3.4** A refusal fires even when the value is the field's neutral value, except where the
   OpenAI default is explicitly neutral: `n: 1`, `logprobs: false`, `response_format: {"type":
   "text"}`, `tools: []`, `logit_bias: {}`. A neutral value is honoured as "no change".
@@ -199,11 +211,11 @@ OpenAI indexes them, or return `400` for `n > 1`. (R-04.4)
 
 - **FR-25.4.1** Today `create_text_completion` never reads `n` (`inference_service.py:4780-4928`).
   The only read is the scoring-mode check (`openai.py:269-270`). This silent drop SHALL end.
-- **FR-25.4.2** If implemented: a list of P prompts with `n = N` returns P × N choices. Choice
-  `index` = prompt position × N + completion position, as OpenAI indexes them.
-- **FR-25.4.3** If refused: `n > 1` returns `400` naming `n`, on every engine path, before any
-  auto-load.
-- **FR-25.4.4** Which of the two ships in v1 is Open Question 2.
+- **FR-25.4.2** *Deferred.* Implementing `n` (P prompts × N choices, `index` = prompt position × N +
+  completion position) is not in v1.
+- **FR-25.4.3** `n > 1` returns `400` naming `n`, on every engine path, before any auto-load.
+- **FR-25.4.4** Decided: refuse in v1 (T-56, accepting this PRD's default; R-04.4 allows it; BRD-03
+  R-03.28 accepts "implemented or refused").
 
 ### 3.2 Scoring on chat completions
 
@@ -233,9 +245,10 @@ rendered prompt's special tokens a second time. (R-04.6)
   batched (`extra_messages`) and CBM branches (`inference_service.py:3595-3610`). This mirrors
   `create_text_completion` (`inference_service.py:4795-4796`). Otherwise an `extra_messages`
   scoring request would be generated by the batched path with its scores dropped.
-- **FR-25.5.9** If the loaded model has no chat template, the request is handled per Open
-  Question 1. Today `_format_chat_messages` falls back to a generic Gemma-style format
+- **FR-25.5.9** If the loaded model has no chat template, a scoring request is refused with `400`
+  naming the model (T-55). Today `_format_chat_messages` falls back to a generic Gemma-style format
   (`inference_service.py:5653-5679`), which would score a prompt the model was never trained on.
+  Generation keeps its existing fallback; only scoring refuses.
 
 **FR-25.6 Chat scoring limits.** Chat scoring SHALL carry the completion-scoring limits (`max_tokens`
 1, `n` 1, no streaming, the temperature floor) and SHALL refuse a GGUF model before any auto-load.
@@ -256,7 +269,8 @@ be suppressed, and probes and sensing SHALL record nothing for it. (R-04.8)
 - **FR-25.7.1** Suppression uses `_unsteered` (`inference_service.py:1176-1199`), entered in the
   worker thread that runs the forward pass, covering every attached SAE.
 - **FR-25.7.2** `profile`, `steering_intensity` or `steering` on a scoring request is refused, naming
-  the field. Scoring cannot honour it, and ignoring it is the silent drop R-04.3 forbids.
+  the field. Scoring cannot honour it, and ignoring it is the silent drop R-04.3 forbids. Scoring is
+  always unsteered, on chat and completions alike (X-09: "025 and 028 win").
 - **FR-25.7.3** No probe context, sensing context or circuit-sensing context is opened. No probe
   event or sensing event is written.
 - **FR-25.7.4** Feature 27's discovery test (FR-27.9) must be able to classify chat scoring as a
@@ -316,14 +330,14 @@ the output parses and validates. (R-04.11)
   to validate, the response is an error, never a 200 with invalid JSON.
 - **FR-25.10.7** Structured output composes with steering (`profile`, `steering_intensity`). The
   constraint restricts tokens; steering changes activations.
-- **FR-25.10.8** The constrained-decoding library is chosen in the FTDD (PADR §10 "Constrained
+- **FR-25.10.8** The constrained-decoding library is chosen in the FTDD (T-62; PADR §10 "Constrained
   decoding on the transformers engine, library chosen at design"). It must work with
   `transformers>=5.15.1,<6` (`pyproject.toml:52`) and the served tokenizers (LFM2, Gemma, Llama,
-  Granite).
+  Granite). The FTDD chose xgrammar on measured evidence (025_FTDD §3).
 - **FR-25.10.9** The supported JSON Schema subset is declared in one place, published in the API
   reference, and checked before generation.
 - **FR-25.10.10** Each combination with `n > 1`, `extra_messages` and streaming is honoured or
-  refused per FR-25.3. Streaming is Open Question 5.
+  refused per FR-25.3. Streaming with `response_format` is refused in v1 (T-59: refuse until proven).
 
 **FR-25.11 Refusal where unsupported.** Where structured output is unsupported, the request SHALL
 return `400` naming `response_format` and the reason — before any auto-load when decidable from the
@@ -348,8 +362,8 @@ report `finish_reason: "length"` and never return truncated JSON as complete; th
 - **FR-25.12.3** `X-miLLM-Constrained` is present whenever a constraint was applied, absent otherwise.
   Its value names the type and, for `json_schema`, the schema `name`, as a structured header in the
   style of `X-miLLM-Circuit-Rung` (`chat.py:209`).
-- **FR-25.12.4** On a streaming response (if Open Question 5 allows it) the header is sent with the
-  stream's headers; the final chunk carries the `finish_reason`.
+- **FR-25.12.4** Streaming structured output is refused in v1 (T-59). If a later version honours it,
+  the header is sent with the stream's headers and the final chunk carries the `finish_reason`.
 
 ### 3.4 Reproducibility
 
@@ -366,8 +380,8 @@ revision, precision and engine. (R-04.14)
   seed, request body, loaded model and batch shape.
 - **FR-25.13.4** With `temperature: 0` (greedy) the seed is accepted and echoed. It changes nothing.
 - **FR-25.13.5** In scoring mode the seed is accepted and echoed. Scoring is deterministic.
-- **FR-25.13.6** `X-miLLM-Seed` echoes the seed applied. It is absent when no seed was sent (see
-  Open Question 6).
+- **FR-25.13.6** `X-miLLM-Seed` echoes the seed applied. It is absent when no seed was sent: miLLM
+  does not choose a seed of its own (T-60).
 - **FR-25.13.7** A seeded sampled request is never served by the CBM. It is routed to the serial
   path, as the CBM gate already routes differing sampling parameters
   (`inference_service.py:967-970`).
@@ -387,8 +401,9 @@ refused. (R-04.15)
   (`inference_service.py:3409-3420`). The seed header then states the scope "batch shape".
 - **FR-25.14.2** On the serial single-conversation path the scope is "request".
 - **FR-25.14.3** On llama.cpp the seed is forwarded to the engine, or the request is refused before
-  auto-load. Which one is decided in the FTDD by measurement (Open Question 7). Today
-  `_llamacpp_params` forwards no seed (`inference_service.py:3933-3954`).
+  auto-load. Decided (T-61): forward it if two runs on the reference GGUF model are measured
+  identical, otherwise refuse. Until that measurement passes, the outcome is *refused* (fail closed).
+  Today `_llamacpp_params` forwards no seed (`inference_service.py:3933-3954`).
 - **FR-25.14.4** A response never claims a scope wider than what was measured.
 
 ### 3.5 Coverage of BRD-04 requirements
@@ -399,8 +414,8 @@ Every BRD-04 requirement this feature owns is covered. R-04.5 is listed for comp
 |---|---|---|---|---|
 | R-04.1 | Report unused fields | FR-25.1 | FR-25.1.1 – FR-25.1.9 | covered |
 | R-04.2 | Strict mode | FR-25.2 | FR-25.2.1 – FR-25.2.4 | covered |
-| R-04.3 | Output-changing list | FR-25.3 | FR-25.3.1 – FR-25.3.8 | covered |
-| R-04.4 | `n` on completions | FR-25.4 | FR-25.4.1 – FR-25.4.4 | covered (choice: Open Question 2) |
+| R-04.3 | Output-changing list | FR-25.3 | FR-25.3.1 – FR-25.3.8 (incl. 3.3a, 3.3b) | covered |
+| R-04.4 | `n` on completions | FR-25.4 | FR-25.4.1 – FR-25.4.4 | covered (refused in v1, T-56) |
 | R-04.5 | `dimensions` | FR-30.1 | refusal only: FR-25.3.3, FR-25.3.7 | owned by Feature 30 |
 | R-04.6 | Chat scoring, shared path | FR-25.5 | FR-25.5.1 – FR-25.5.9 | covered |
 | R-04.7 | Scoring limits, GGUF refusal | FR-25.6 | FR-25.6.1 – FR-25.6.4 | covered |
@@ -411,9 +426,9 @@ Every BRD-04 requirement this feature owns is covered. R-04.5 is listed for comp
 | R-04.12 | Refusal where unsupported | FR-25.11 | FR-25.11.1 – FR-25.11.5 | covered |
 | R-04.13 | `finish_reason` and `X-miLLM-Constrained` | FR-25.12 | FR-25.12.1 – FR-25.12.4 | covered |
 | R-04.14 | Seed, `X-miLLM-Seed`, `system_fingerprint` | FR-25.13 | FR-25.13.1 – FR-25.13.10 | covered |
-| R-04.15 | Seed scope; llama.cpp | FR-25.14 | FR-25.14.1 – FR-25.14.4 | covered (llama.cpp: Open Question 7) |
+| R-04.15 | Seed scope; llama.cpp | FR-25.14 | FR-25.14.1 – FR-25.14.4 | covered (llama.cpp by measurement, T-61) |
 
-Totals: 14 of 14 owned requirements covered, 14 PPRD FRs refined into 89 testable items.
+Totals: 14 of 14 owned requirements covered, 14 PPRD FRs refined into 91 testable items.
 
 ## 4. User Experience Requirements
 
@@ -592,32 +607,28 @@ completions.
 
 ## 14. Open Questions
 
-Batched for the operator. Each carries the default this PRD assumes until answered.
+**None open for this PRD.** v1.0 listed eight. The operator accepted every proposed default
+(`fprd-open-questions-2026-10-06.md`, T-55–T-62, "Accept"; Feature-PRD decisions 2026-10-06: the
+register's technical questions keep their proposed defaults). Each is now a requirement:
 
-1. **Chat scoring on a model with no chat template.** Refuse with `400` (default), or score the
-   generic Gemma-style fallback (`inference_service.py:5653-5679`)? The fallback scores a prompt the
-   model was not trained on, and the response would not say so.
-2. **`n > 1` on `/v1/completions` in v1.** Refuse with `400` (default; R-04.4 allows it and BRD-03
-   R-03.28 accepts "implemented or refused"), or implement `n` choices per prompt now?
-3. **`user`.** It is declared and never read in `millm/`. Report it as unused, so strict mode
-   refuses it (default, the literal reading of R-04.1), or treat it as accepted metadata?
-4. **`max_completion_tokens`.** Newer OpenAI clients send it instead of `max_tokens`. Today it is
-   silently ignored and generation runs to 512 tokens. Add it to the output-changing list and honour
-   it as `max_tokens` (default), or only report it?
-5. **Streaming structured output.** Honour `response_format` on streaming chat in v1, or refuse it
-   (default: refuse until the FTDD shows the chosen library works with the streamer)?
-6. **Server-chosen seed.** When no seed is sent, should miLLM pick one, apply it and echo it, so any
-   sampled row can be reproduced later? Default: no; `X-miLLM-Seed` is absent.
-7. **Seed on llama.cpp** (technical, resolved in the FTDD). Forward it if two runs on the reference
-   GGUF model are measured identical; otherwise refuse. R-04.15 allows either.
-8. **Constrained-decoding library** (technical, resolved in the FTDD; PADR §10). Candidates are
-   judged on transformers 5 compatibility, served tokenizers, the declarable schema subset and
-   per-token overhead.
+| v1.0 question | Resolution | Source | Now in |
+|---|---|---|---|
+| 1. Chat scoring with no chat template | Refuse `400` | T-55 | FR-25.5.9 |
+| 2. `n > 1` on `/v1/completions` | Refuse `400` in v1 | T-56 | FR-25.4.3, FR-25.4.4 |
+| 3. `user` | Report as unused; strict mode refuses | T-57 | FR-25.3.3b |
+| 4. `max_completion_tokens` | Honour as `max_tokens` | T-58 | FR-25.3.3a |
+| 5. Streaming structured output | Refuse until proven | T-59 | FR-25.10.10, FR-25.12.4 |
+| 6. Server-chosen seed | No | T-60 | FR-25.13.6 |
+| 7. Seed on llama.cpp | Forward if two runs match, else refuse; refused until measured | T-61 | FR-25.14.3 |
+| 8. Constrained-decoding library | Chosen in the FTDD (xgrammar) | T-62 | FR-25.10.8; 025_FTDD §3 |
+
+Work that still depends on a measurement (not a decision) is the T-61 run on the node and the
+hardware acceptance items; the FTASKS carries both.
 
 ## 15. Decisions from Clarifying Questions
 
-Clarifying rounds were waived. Each question is pre-answered from a cited source. Questions with no
-source are Open Questions above.
+Clarifying rounds were waived. Each question is pre-answered from a cited source. D18–D27 record the
+operator's answers to v1.0's open questions and the one cross-feature contradiction that binds here.
 
 | # | Question | Answer | Source |
 |---|---|---|---|
@@ -638,3 +649,13 @@ source are Open Questions above.
 | D15 | `tools`, `tool_choice`, `logit_bias`? | Refused in v1 | R-04.3; BRD-04 §7 (function calling not implemented) |
 | D16 | `dimensions`, `steering`? | Refused until Features 30 and 28 | PPRD v1.5 split note; FR-25.3 |
 | D17 | Streaming with `n > 1` or `extra_messages`? | Refused | R-04.3; `stream_chat_completion` reads neither (`inference_service.py:4288`) |
+| D18 | Chat scoring with no template? | Refused | T-55 |
+| D19 | `n > 1` on completions? | Refused in v1 | T-56 |
+| D20 | `user`? | Reported as unused; strict refuses | T-57 |
+| D21 | `max_completion_tokens`? | Honoured as `max_tokens` | T-58 |
+| D22 | Streaming structured output? | Refused in v1 | T-59 |
+| D23 | Server-chosen seed? | No | T-60 |
+| D24 | Seed on llama.cpp? | Forward if measured identical; refused until then | T-61 |
+| D25 | Constrained-decoding library? | xgrammar, chosen in the FTDD on measured evidence | T-62 |
+| D26 | Is completion or chat scoring ever steered? | No, always unsteered; miDataworks 005 conforms | X-09 |
+| D27 | Unrecognised `X-miLLM-Strict` value? | Refused `400`; header name aligned with miStudio 034 | R-04.2; miStudio 034 FTDD TD5, T-100 |

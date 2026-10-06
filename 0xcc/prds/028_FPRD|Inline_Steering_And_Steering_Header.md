@@ -1,14 +1,17 @@
 # Feature PRD: Inline Steering and Steering-State Header
 
 **Document ID:** 028_FPRD|Inline_Steering_And_Steering_Header
-**Version:** 1.0 (planned)
-**Status:** Planned. Feature PRD written 2026-10-06; FTDD, FTID and FTASKS follow.
+**Version:** 1.1 (planned)
+**Status:** Planned. Feature PRD written 2026-10-06; v1.1 the same day records the operator's
+answers (T-78–T-83, P-22, X-07, X-09). FTDD, FTID and FTASKS written.
 **Source:** BRD-04 (miLLM — Dataworks Support) §5.8: R-04.31–R-04.34.
 **PPRD:** Feature 28 (FR-28.1 – FR-28.4), PPRD v1.5 · **PADR:** v1.5 §10 "Dataworks Support
 (Features 25–30)" trade-offs "Inline per-request steering vs saved profiles" and "Steering state
 after generation and in a final stream chunk vs a request echo"
 **Binding decisions:** checkpoint technical defaults of 2026-10-06
-(`~/app/miDataworks/0xcc/docs/brd-decisions-2026-10-05.md`, "Checkpoint decisions")
+(`~/app/miDataworks/0xcc/docs/brd-decisions-2026-10-05.md`, "Checkpoint decisions"), and the
+Feature-PRD decisions of 2026-10-06 in the same file (P-22, X-07, X-09) with the technical defaults
+T-78–T-83 in `~/app/miDataworks/0xcc/docs/fprd-open-questions-2026-10-06.md`
 **Depends on:** Feature 25 (the output-changing field list names `steering`, FR-25.3); F10/F14
 per-request dial; F16 steering epoch. Reuses `_apply_request_steering`, `_restore_request_profile`,
 `_unsteered` and `clamp_steering`.
@@ -18,7 +21,7 @@ each response checked against the reported steering state) and R-03.25 (each lab
 steering state). Feature 26 (Batch API) writes this feature's steering value into each output line
 (FR-26.10.1).
 
-Code references are to miLLM at `7aa659c` (HEAD, 2026-10-06).
+Code references are to miLLM at `7aa659c`, re-checked at `f5c71b6` (HEAD, 2026-10-06; no code change between them).
 
 ---
 
@@ -104,10 +107,11 @@ FR-21).
 | Scenario | Outcome |
 |---|---|
 | `steering` and `profile` both sent | `400`, naming both fields (FR-28.2.1) |
-| `steering` and `steering_intensity` both sent | `400` by default (Open Question 1) |
+| `steering` and `steering_intensity` both sent | `400`, naming both (FR-28.2.4; T-78) |
 | `sae_id` names an SAE that is not attached | `400 SAE_NOT_ATTACHED`, naming the SAE (FR-28.1.4) |
 | `sae_id` omitted while more than one SAE is attached | `400`, naming the attached SAEs (FR-28.1.3) |
 | `sae_id` omitted and no SAE attached, `features` not empty | `400 SAE_NOT_ATTACHED` |
+| Non-empty `steering` on a request that names a model which is not resident | `400 SAE_NOT_ATTACHED`, before any auto-load (FR-28.1.11; T-82) |
 | `features: []` with no SAE attached | Accepted; nothing to suppress; header `none` |
 | A feature index outside `[0, d_sae)` | `400 INVALID_FEATURE_INDEX`, naming index and `d_sae` |
 | The same index twice | `400`, naming the index (FR-28.1.6) |
@@ -155,7 +159,9 @@ per-request apply/restore lifecycle. No saved profile is created. An unattached 
 - **FR-28.1.5 Exactly this set.** The request runs under exactly the inline set: the selected SAE
   carries only these features, and every other attached SAE adds no steering for this request. The
   apply clears before it sets, as the profile path does, because `set_steering_batch` merges
-  (`inference_service.py:2137-2138`; `millm/ml/sae_wrapper.py:413-429`). (Default; Open Question 2.)
+  (`inference_service.py:2137-2138`; `millm/ml/sae_wrapper.py:413-429`). **Decided: T-79.** Other
+  entries are disabled with `enable_steering(False)`, not suppressed, so their sensing and monitoring
+  keep recording (FR-28.2.3).
 - **FR-28.1.6 Validation.** Each index must lie in `[0, d_sae)` of the selected SAE, or the request
   is refused with `INVALID_FEATURE_INDEX` (`errors.py:355-359`). An index listed twice is refused,
   because a dictionary merge would keep one strength silently. A non-finite strength is refused.
@@ -172,6 +178,15 @@ per-request apply/restore lifecycle. No saved profile is created. An unattached 
   When the model row is GGUF, the refusal comes before any auto-load (FR-25.3.8).
 - **FR-28.1.10 No stored artefact.** Inline steering writes no profile row, no active-profile change,
   and no steering epoch bump. It is not an authoritative writer.
+- **FR-28.1.11 Refused before an auto-load (T-82).** A request carrying a non-empty `steering` set
+  and naming a model that is not resident is refused with `SAE_NOT_ATTACHED` before the route
+  auto-loads anything. This is decidable from the request: SAEs attach only to the resident model,
+  and no load path re-attaches one (`SAERepository.get_active_attachment` has no caller;
+  `millm/db/repositories/sae_repository.py:294`). Attaching an SAE also auto-locks the resident
+  model, which already refuses the swap (`millm/services/sae_service.py:1932-1942`;
+  `millm/services/model_service.py:1472-1479`), but that lock is best-effort
+  (`sae_service.py:1941-1942`), so the route does not rely on it. `steering: {"features": []}` is
+  not refused: there is nothing to attach.
 
 ### FR-28.2 Mutual exclusion and explicit unsteered (R-04.32)
 
@@ -184,11 +199,11 @@ explicitly unsteered.
   whatever profile, circuit or manual steering is live. An `sae_id` beside an empty list is refused,
   because it suggests a scope the empty form does not have.
 - **FR-28.2.3** Sensing, monitoring and probes treat an explicitly unsteered generation as any other
-  generation. The request is still sensed and still scored. (Default; Open Question 3.) Probes read
+  generation. The request is still sensed and still scored. **Decided: T-80.** Probes read
   the pre-steering residual from their own hook (PADR v1.4, Probe Monitor Runtime), so they are
   unaffected either way.
 - **FR-28.2.4** `steering` with `steering_intensity` is refused with `400` by default. The dial
-  scales a profile or circuit, and an inline set has no stored intensity to scale. (Open Question 1.)
+  scales a profile or circuit, and an inline set has no stored intensity to scale. **Decided: T-78.**
 
 ### FR-28.3 Steering-state report (R-04.33)
 
@@ -213,16 +228,21 @@ lines carry it in the body.
   | Kind | Fields |
   |---|---|
   | `none` | — |
-  | `profile` | profile name; `source` (`request` or `active`); effective intensity; SAE ID; feature count; hash |
-  | `inline` | SAE ID; feature count; hash |
-  | `manual` | SAE ID; feature count; hash |
+  | `profile` | profile name; `source` (`request` or `active`); effective intensity; SAE ID; layer; feature count; hash |
+  | `inline` | SAE ID; layer; feature count; hash |
+  | `manual` | SAE ID; layer; feature count; hash |
   | `circuit` | circuit ID; effective intensity; `composed` when more than one circuit serves a layer |
+  | `unknown` | optional reason (FR-28.3.7) |
 
-  Any item whose applied values were clamped also carries the clamped count.
+  A `profile`, `inline` or `manual` item whose applied values were clamped also carries the clamped
+  count. The kinds `manual` and `unknown` are decided (T-83); miDataworks stores the value verbatim.
+  The exact grammar is FTDD §5.2.
 - **FR-28.3.4 Hash.** The hash is a SHA-256 digest of a canonical form of the applied set: the SAE ID
-  and the `(index, strength)` pairs sorted by index. The canonical form is published in the API
-  reference, so a client can recompute it from the set it sent. The same set always gives the same
-  hash, whichever kind applied it. Float formatting in the canonical form is decided in the FTDD.
+  and the non-zero `(index, strength)` pairs sorted by index, each strength written as its IEEE-754
+  binary64 bit pattern. The exact serialisation and four published test vectors are in FTDD §5.3
+  and the API reference, so a client can recompute the hash from the set it sent. The same set
+  always gives the same hash, whichever kind applied it. **This definition is canonical across the
+  suite (X-07): miDataworks 007 cites it and pins the test vectors.**
 - **FR-28.3.5 Format.** The header is an RFC 8941 structured-field list, as `X-miLLM-Probe-Verdicts`
   and `X-miLLM-Circuit-Rung` are (`chat.py:46-47`, `chat.py:203-209`). Illustrative only; the FTDD
   fixes the grammar:
@@ -236,8 +256,8 @@ lines carry it in the body.
 - **FR-28.3.6 Supersession.** If the steering epoch changes between admission and the end of
   generation, the report says so (a `changed` flag). An operator write landing mid-request means
   part of the answer ran under other steering, and the header must not describe one state as the
-  whole (`sae_service.py:475-500`; restore skip at `inference_service.py:2183-2186`). (Default;
-  Open Question 4.)
+  whole (`sae_service.py:475-500`; restore skip at `inference_service.py:2183-2186`). **Decided:
+  T-81** (`changed` flag; the items describe the state at the end).
 - **FR-28.3.7 Unknown, not guessed.** If the state cannot be determined, the header says `unknown`.
   It is never omitted on a successful response and never guessed. Reading the state never fails the
   request, as the rung echo already guarantees (`chat.py:203-212`).
@@ -264,6 +284,8 @@ choose or refuse the active profile.
 
 - **FR-28.4.1** `TextCompletionRequest` gains the three fields with the same types and validators as
   `ChatCompletionRequest` (`openai.py:120-128`, `openai.py:182-195`).
+- **FR-28.4.6 Scoring stays unsteered (X-09).** A text or chat completion in scoring mode is always
+  unsteered and refuses every steering field (FR-25.7.2). Its report is `none` (FR-28.3.1).
 - **FR-28.4.2** `create_text_completion` applies and restores them inside its existing `_admit()`
   block (`inference_service.py:4828`), around every prompt of a multi-prompt request. One request
   has one steering state and one header.
@@ -426,34 +448,44 @@ inline-versus-profile pair, each header checked by hand.
   (`sae_wrapper.py:576`, `sae_wrapper.py:681`). If FR-28.2.3 holds, the unsteered form must disable
   the steering delta only, as the λ = 0 path does with `enable_steering(False)`
   (`inference_service.py:2081`), on every attached SAE.
-- **Observation, not in scope:** the profile path steers only the first attached SAE
-  (`attached_sae`, `sae_service.py:509-512`). With several SAEs attached and no circuit, a named
-  profile reaches only layer 0's entry. Recorded for the FTDD to confirm; inline steering avoids it
-  through `sae_id`.
+- **Recorded defect, not fixed here (Open Question 1):** both profile paths steer the FIRST attached
+  SAE (`attached_sae`, `sae_service.py:509-512`) and never read the profile's own `sae_id` and
+  `layer` (`millm/db/models/profile.py:58-67`). The per-request path is
+  `inference_service.py:1990`; global activation validates against the same first entry
+  (`millm/services/profile_service.py:302`) and applies through `SAEService.set_steering_batch`
+  (`profile_service.py:461`), which writes to it too (`sae_service.py:2581`). A profile authored for SAE B is applied to SAE A
+  whenever A is first, which is silent when its indices happen to lie in range. It is the defect
+  class of the 2026-10-04 embeddings fix (`inference_service.py:1178-1182`). BRD-04 does not cover
+  profile targeting, and fixing only the per-request path would make a profile steer different
+  SAEs depending on how it was invoked. So 028 does not change targeting. It makes the defect
+  observable: the `profile` item names the SAE and layer the values were applied to, and a
+  mismatch with the profile's recorded `sae_id` logs `profile_sae_mismatch`. Inline steering avoids
+  the defect through `sae_id`.
 - **Estimate:** about 3–5 days including tests and the API reference.
 
 ## 14. Open Questions
 
-Batched for the operator. Each carries the default this PRD assumes until answered.
+The six questions of v1.0 are answered (operator, 2026-10-06, accepting the technical defaults):
 
-1. **`steering` with `steering_intensity`.** Refuse with `400` (default), or scale the inline
-   strengths by the dial? Scaling would let one feature set serve a dose sweep, but an inline set has
-   no stored intensity, so the dial's absolute semantics have nothing to override.
-2. **Other attached SAEs under inline steering.** Inline steering runs under exactly its own set,
-   with every other attached SAE unsteered (default). The alternative leaves a live circuit or
-   manual steering on other layers in place and reports both. R-04.32's empty-list rule suggests the
-   default; BRD-04 does not say.
-3. **Sensing and monitoring on an explicitly unsteered generation.** Keep recording (default), or
-   suppress them as chat scoring does (R-04.8)? R-04.32 says "suppressed", which in code also stops
-   capture (`sae_wrapper.py:576`).
-4. **Mid-request steering changes.** Report a `changed` flag and describe the state at the end
-   (default), or describe the state at admission? Neither describes an answer produced under two
-   states; the flag at least says so.
-5. **A request that would auto-load another model.** Can inline steering with a non-empty set be
-   refused before the load? That is right only if a freshly loaded model never has an SAE attached.
-   Not verified in code (technical; resolved in the FTDD).
-6. **Header vocabulary.** BRD-04 names four states. This PRD adds `manual` and `unknown`, because
-   live values with no profile, and an unreadable state, both occur. Confirm the added kinds.
+| v1.0 # | Question | Resolution | ID |
+|---|---|---|---|
+| 1 | `steering` with `steering_intensity` | Refuse with `400` | T-78 |
+| 2 | Other attached SAEs under inline steering | Unsteered for the request | T-79 |
+| 3 | Sensing and monitoring on an explicitly unsteered generation | Keep recording | T-80 |
+| 4 | Mid-request steering change | `changed` flag; state at the end | T-81 |
+| 5 | Refuse inline steering before an auto-load | Resolved in the FTDD: refuse (FR-28.1.11) | T-82 |
+| 6 | Added header kinds `manual`, `unknown` | Add both | T-83 |
+
+Still open, for the operator:
+
+1. **Profiles steer the first attached SAE, not their own.** Both the per-request and the global
+   activation path apply a profile to `AttachedSAEState().attached_sae`, the first entry
+   (`sae_service.py:509-512`), ignoring the profile's recorded `sae_id` and `layer`
+   (`profile.py:58-67`). Should a follow-up fix both paths together: select the entry by the
+   profile's `sae_id` and `layer`, and refuse when it is not attached? 028 does not change it,
+   because BRD-04 does not cover profile targeting and fixing one path alone would split behaviour.
+   028 makes it visible instead (§13). *Recommended:* yes, as its own small increment, mirroring the
+   2026-10-04 embeddings fix.
 
 ## 15. Decisions from Clarifying Questions
 
@@ -479,3 +511,13 @@ source are Open Questions above.
 | D15 | CBM routing for inline steering? | Serial | `inference_service.py:1002-1007`; FR-25.3.6 |
 | D16 | New database state? | None | R-04.31 ("No saved profile is created") |
 | D17 | Streaming text completion? | Stays refused | `completions.py:79-84` |
+| D18 | `steering` with `steering_intensity`? | Refused, `400` | T-78 |
+| D19 | Other attached SAEs under inline steering? | Unsteered, via `enable_steering(False)` | T-79 |
+| D20 | Sensing and monitoring on explicit unsteered? | Keep recording | T-80 |
+| D21 | Mid-request change? | `changed` flag, state at the end | T-81 |
+| D22 | Refuse before auto-load? | Yes, `SAE_NOT_ATTACHED` (FR-28.1.11) | T-82; `sae_repository.py:294` (no caller) |
+| D23 | Header kinds `manual`, `unknown`? | Added | T-83 |
+| D24 | Whose hash definition is canonical? | This feature's FR-28.3.4; miDataworks 007 cites it | X-07 |
+| D25 | Is completion scoring ever steered? | No; always unsteered, report `none` | X-09 |
+| D26 | What is "one feature axis"? | One SAE feature index; the hash distinguishes two settings of it | P-22 |
+| D27 | Fix the first-attached-SAE profile defect here? | No; recorded and made observable; Open Question 1 | BRD-04 §4 scope (profile targeting absent) |

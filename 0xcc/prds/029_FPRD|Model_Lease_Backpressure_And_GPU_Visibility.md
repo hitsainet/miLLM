@@ -1,8 +1,11 @@
 # Feature PRD: Model Lease, Backpressure and GPU Visibility
 
 **Document ID:** 029_FPRD|Model_Lease_Backpressure_And_GPU_Visibility
-**Version:** 1.0 (planned)
-**Status:** Planned. Feature PRD written 2026-10-06; FTDD, FTID and FTASKS follow.
+**Version:** 1.1 (planned)
+**Status:** Planned. v1.0 written 2026-10-06. v1.1 (2026-10-06) records the operator's Feature-PRD
+decisions: P-05, X-01, X-08, the 2-hour default TTL, and register defaults T-66 and T-84 – T-90
+(`~/app/miDataworks/0xcc/docs/brd-decisions-2026-10-05.md`, "Feature-PRD decisions";
+`~/app/miDataworks/0xcc/docs/fprd-open-questions-2026-10-06.md`). FTDD, FTID and FTASKS follow.
 **Source:** BRD-04 (miLLM — Dataworks Support) §5.10–§5.12: R-04.38–R-04.45.
 **PPRD:** Feature 29 (FR-29.1 – FR-29.8), PPRD v1.5 · **PADR:** v1.5 §1 rows "Model lease (v1.5)" and
 "Backpressure & GPU visibility (v1.5)"; v1.5 §10 trade-offs "A model lease with holder and expiry vs
@@ -98,13 +101,13 @@ data shows the same lease.
 **US-6: memory with no model loaded.** After a model is unloaded, a caller reads the per-card
 endpoint.
 *Acceptance:* each card shows total, used and free memory, and miLLM's own allocated and reserved
-memory. The figures match `nvidia-smi` within 256 MiB. (BRD-04 acceptance 16; see Open Question 7)
+memory. The figures match `nvidia-smi` within 256 MiB. (BRD-04 acceptance 16; comparison fixed by T-89, FTDD §5.4)
 
 **Secondary scenarios:**
 - **Renewal.** The holder renews before expiry. The expiry moves to now plus the new TTL.
 - **Release.** The holder releases on completion, cancellation or failure. The lease ends at once.
 - **Holder swaps its own model.** The holder unloads the leased model with its lease ID. The unload
-  proceeds, and the lease ends with it (FR-29.3.4; Open Question 3).
+  proceeds, and the lease ends with it (FR-29.3.4; T-85).
 - **Steering beside a lease.** An SAE is attached to a leased model. `locked` is set as today. Both
   guards apply independently (C8).
 
@@ -113,14 +116,14 @@ memory. The figures match `nvidia-smi` within 256 MiB. (BRD-04 acceptance 16; se
 | Situation | Required behaviour |
 |---|---|
 | Lease requested while another holder's lease is live | `409 MODEL_LEASED`, naming holder and expiry; no new lease |
-| Lease requested on a model that is not resident | Refused, naming the resident model (FR-29.1.3; Open Question 3) |
+| Lease requested on a model that is not resident | `409 MODEL_NOT_RESIDENT`, naming the resident model (FR-29.1.3; T-85) |
 | Lease requested while a load or unload is running | `503 model_busy` with `Retry-After` |
 | `ttl_seconds` above 7200, zero or negative | `400`, naming `ttl_seconds` and the limit; never clamped silently |
 | Renew or release with a wrong or expired lease ID | `404` for an unknown ID, `409` for an expired one; nothing changes |
 | A `/v1` request names the leased model, without the lease ID | Proceeds; a lease blocks swaps, not use |
 | A refuse-policy request names a model that is loading now | `503 model_loading` with `Retry-After`; this request starts nothing |
 | A `503` raised inside a stream whose `200` is already sent | No header is possible; the in-stream error carries `retry_after` |
-| A restart while a lease is held | The lease ends with the resident model (FR-29.1.9) |
+| A restart while a lease is held | Every lease ends; startup reconciliation clears the registry (FR-29.1.9; X-01) |
 | `nvidia-smi` absent or hung | The GPU endpoint returns `200` with `cards: []` and a stated reason, never fabricated zeros |
 
 ## 3. Functional Requirements
@@ -136,17 +139,21 @@ statements. Error responses on `/v1` use the OpenAI error envelope
 `{holder, ttl_seconds, reason}` and return a lease ID. One lease SHALL exist at a time, renewable and
 releasable by its holder, reported by `GET`, and expiring on its own at its TTL. (R-04.38)
 
-- **FR-29.1.1** `holder`, `ttl_seconds` and `reason` are all required. `holder` and `reason` are
-  non-empty strings with a maximum length fixed in the FTDD. `holder` is free text: miLLM has no
+- **FR-29.1.1** `holder` and `reason` are required. `ttl_seconds` is optional and defaults to 2 hours
+  (FR-29.1.2). `holder` and `reason` are non-empty strings with a maximum length fixed in the FTDD. `holder` is free text: miLLM has no
   sign-in (BRD-04 §3), so it is a label for attribution, not an identity check.
-- **FR-29.1.2** `ttl_seconds` is an integer from 1 to `LEASE_MAX_TTL_SECONDS`, default 7200 (checkpoint
-  technical default: maximum 2 hours, renewable). A value outside that range is refused with `400`
+- **FR-29.1.2** `ttl_seconds` is an integer from 1 to `LEASE_MAX_TTL_SECONDS` (7200). Omitted, it is
+  `LEASE_DEFAULT_TTL_SECONDS` (7200). Checkpoint technical default: maximum 2 hours, renewable; the
+  operator's Feature-PRD decisions fix the default at 2 hours. A value outside that range is refused with `400`
   naming the field and the limit. It is never clamped.
 - **FR-29.1.3** A lease is granted only on the resident model, in state `LOADED`. A request for any
-  other model is refused, naming the resident model or "none". Open Question 3 records the
-  alternative.
-- **FR-29.1.4** One lease exists per server, not per model, because one model is resident at a time.
-  A request while another lease is live returns `409 MODEL_LEASED` with holder, reason and expiry.
+  other model is refused with `409 MODEL_NOT_RESIDENT`, naming the resident model or "none".
+  **Decided: T-85** (resident model only; the lease ends with residency).
+- **FR-29.1.4** **One lease per model (X-08).** The registry is keyed by model. Because only the
+  resident model can be leased (FR-29.1.3) and one model is resident at a time, at most one lease is
+  live at any moment. A request while another lease on that model is live returns
+  `409 MODEL_LEASED` with holder, reason and expiry. miDataworks holds one shared lease per model
+  and runs its jobs under it (X-08; register T-21); miLLM sees one holder.
 - **FR-29.1.5** The response returns `lease_id`, `model_id`, `model_name`, `holder`, `reason`,
   `acquired_at`, `expires_at` and `ttl_seconds`. Times are ISO 8601 in UTC.
 - **FR-29.1.6** **The lease ID is the only proof of holding.** It is returned once, to the caller that
@@ -160,8 +167,11 @@ releasable by its holder, reported by `GET`, and expiring on its own at its TTL.
   `acquired_at`, `expires_at` and `seconds_remaining`. An expired lease reads as none.
 - **FR-29.1.9** A lease ends when its model stops being resident, whoever unloads it. This includes a
   restart: residency does not survive one (`millm/main.py:134-139` resets `loaded` rows to `ready`),
-  so neither does the lease. If lease rows are persisted, `STALE_STATE_RESETS` (`main.py:134`) gains
-  an entry for them, and the startup-reset test binds to it.
+  so neither does the lease. **Decided: X-01** — a restart ends every lease, and no lease survives
+  it. A resumed Feature 26 batch re-acquires a lease once its model is resident, and does not run
+  until it holds one (T-66). Leases live in process memory, and startup reconciliation clears the
+  registry explicitly by a named function called from `lifespan`, with a test that fails when the
+  call is removed (memory `startup-reset-lists-hide-omissions`).
 - **FR-29.1.10** Expiry needs no background task to be correct. Every check compares the current time
   with `expires_at`, so an expired lease never refuses anything.
 - **FR-29.1.11** Every grant, renewal, release, expiry and refusal is logged with holder, model and
@@ -200,8 +210,8 @@ by anyone else SHALL be refused with `409 MODEL_LEASED`, naming holder and expir
   `409 MODEL_LEASED`. A wrong lease ID on a request that needs no lift is ignored, with a logged
   warning.
 - **FR-29.3.4** When the holder unloads or swaps the leased model, the operation proceeds and the
-  lease ends under FR-29.1.9. The holder takes a new lease on the new model. Open Question 3 asks
-  whether the lease should follow the holder's swap instead.
+  lease ends under FR-29.1.9. The holder takes a new lease on the new model. **Decided: T-85** — the
+  lease does not follow a swap.
 
 **FR-29.4 Refuse-load policy.** `X-miLLM-Load-Policy: refuse` SHALL turn an auto-load of a
 non-resident model into `409`. The default SHALL stay auto-load. (R-04.41)
@@ -232,8 +242,8 @@ Admin UI's model page. (R-04.42)
   second request.
 - **FR-29.5.4** The display refreshes at least every 10 seconds while the Models page is open. An
   expired lease disappears without a page reload.
-- **FR-29.5.5** The Admin UI offers no lease action in this feature. Open Question 4 asks about an
-  operator force-release.
+- **FR-29.5.5** The Admin UI offers no lease action in this feature. **Decided: T-86** — no operator
+  force-release; the TTL of at most 2 hours bounds a stale lease.
 
 ### 3.2 Backpressure
 
@@ -251,15 +261,19 @@ envelope and codes unchanged. (R-04.43)
   each code that can be produced and asserts the header. A second test fails if a new `503` site
   bypasses the choke point.
 - **FR-29.6.3** The value is a whole number of seconds, at least 1, as HTTP's `delay-seconds` form
-  requires. Each code has a stated rule, fixed in the FTDD:
-  - `QUEUE_FULL`: from the estimated wait (FR-29.7.4), rounded up.
-  - `MODEL_BUSY` and `MODEL_LOADING`: from load progress where known, else a configured default.
-  - `MODEL_NOT_LOADED` and `INSUFFICIENT_MEMORY`: a configured default.
+  requires. Each code has a stated rule (T-88: values fixed in the FTDD §5.3):
+  - `QUEUE_FULL`: the estimated wait (FR-29.7.4) rounded up, clamped to a configured maximum; a
+    configured default when there is no estimate.
+  - `MODEL_BUSY` and `MODEL_LOADING`: a configured default for a load in progress, a shorter one for
+    an unload in progress.
+  - `MODEL_NOT_LOADED` and `INSUFFICIENT_MEMORY`: a configured default. For `MODEL_NOT_LOADED` the
+    message also says that retrying succeeds only after a model is loaded.
   - `HUB_UNAVAILABLE`: the circuit breaker's remaining recovery time (`cluster_hub_service.py:57`).
   - The readiness probe: a configured default.
 - **FR-29.6.4** Status codes, error types, codes and messages stay as they are. Only the header is
-  added. The error body also carries `retry_after` with the same value, so a client that reads only
-  bodies sees it.
+  added. (v1.1: the body field proposed in v1.0 is dropped for HTTP responses. A body field that
+  every builder must remember is a second place to forget; the header is enforced at one choke
+  point, FR-29.6.2.)
 - **FR-29.6.5** A refusal yielded inside a stream whose `200` is already committed
   (`inference_service.py:673-697`, `raise_refusal=False`) cannot carry a header. Its in-stream error
   carries `retry_after` instead.
@@ -278,18 +292,21 @@ contract. (R-04.44)
   documented as it is: requests waiting **plus** running.
 - **FR-29.7.3** New fields:
   - `in_flight`: requests holding a request-queue slot now. The idle cache release also takes a slot
-    (`inference_service.py:756`); the FTDD decides whether it counts, and the documentation says.
+    (`inference_service.py:756`) and counts, because a request arriving then waits for it (T-90).
   - `queue_waiting`: `queue_pending` minus `in_flight`.
   - `batch_backlog_rows`: rows not yet run across in-progress batches. `null` until Feature 26 ships,
     meaning "no batch API", never `0`.
   - `estimated_wait_seconds`: an estimate of how long a request arriving now waits for a slot.
     `null` when there is no measurement to base it on.
-- **FR-29.7.4** The estimate is computed from measured recent request durations and the work ahead,
-  including the batch backlog once Feature 26 exists. The formula is fixed in the FTDD and stated in
-  the documentation. The field name and the documentation both call it an estimate.
+- **FR-29.7.4** The estimate is computed from measured recent slot-holding durations and the
+  interactive work ahead (FTDD §7.3). The batch backlog is **not** added: interactive requests go
+  first at every chunk boundary (026 FTDD §7, constraint 2), so a backlog delays a new request by at
+  most the chunk already holding the slot. The formula is stated in the documentation. The field name and the documentation both call it an estimate.
 - **FR-29.7.5** When continuous batching (CBM) is running, requests it serves hold no queue slot
-  (`inference_service.py:745-747`). `in_flight` then either includes CBM's active requests or is
-  `null`, never a count that silently leaves them out.
+  (`inference_service.py:745-747`). The CBM backend exposes no active count
+  (`millm/services/cbm_backend.py:29`), so `in_flight`, `queue_waiting` and
+  `estimated_wait_seconds` are `null` while `cbm_running` is true (T-90). They are never a count
+  that silently leaves CBM's requests out.
 - **FR-29.7.6** The contract is documented in `manual/docs/api/management-api.md` and in
   `docs/mcp-contract.md`, whose `GET /api/health/detailed` row (`docs/mcp-contract.md:92`) gains the
   new fields. A schema test pins the field set, so removing a field turns a test red.
@@ -308,13 +325,13 @@ reserved memory on that card. (R-04.45)
   with `torch_index: null`, not dropped.
 - **FR-29.8.3** `millm_allocated_mb` and `millm_reserved_mb` come from torch's allocator on that card.
 - **FR-29.8.4** **Reading a card never creates a CUDA context on it.** A context costs memory that
-  other tenants of the node place against (`millm/ml/model_loader.py:220-226`). On a card where torch
-  holds no context, both miLLM fields are `0` with `torch_context: false`, which is a true reading,
-  not an estimate.
+  other tenants of the node place against (`millm/ml/model_loader.py:220-226`). torch is read only on
+  cards miLLM has placed a transformers model on. On any other card both miLLM fields are `null` with
+  `torch_measured: false`. (v1.1: v1.0 said `0`; a zero would claim a reading that was not taken.)
 - **FR-29.8.5** llama.cpp memory is not torch's (`model_loader.py:343-345`). When a GGUF model is
   resident, each card it occupies reports `engine_memory: "not_measured_by_torch"`. The torch fields
-  stay true for what torch holds. The FTDD decides whether a per-process read can fill the gap
-  (Open Question 7).
+  stay true for what torch holds. Each card also reports nvidia-smi's per-process list where the
+  pod can read it (T-89; FTDD §5.4), which is the only measurement of llama.cpp memory.
 - **FR-29.8.6** The `nvidia-smi` read runs in a worker thread. It can take up to its 5-second timeout
   (`nvidia_smi.py:66-85`), and called inline it would stall the event loop, as the load pre-check once
   did (`model_service.py:866-871`).
@@ -326,14 +343,14 @@ reserved memory on that card. (R-04.45)
 
 | BRD-04 | Topic | PPRD FR | Refined in this PRD | Status |
 |---|---|---|---|---|
-| R-04.38 | Lease: take, renew, release, read, TTL | FR-29.1 | FR-29.1.1 – FR-29.1.11 | covered (scope: Open Question 3) |
+| R-04.38 | Lease: take, renew, release, read, TTL | FR-29.1 | FR-29.1.1 – FR-29.1.11 | covered (scope: T-85; X-08) |
 | R-04.39 | `409 MODEL_LEASED` for others' loads and swaps | FR-29.2 | FR-29.2.1 – FR-29.2.6 | covered |
 | R-04.40 | `X-miLLM-Lease` lets the holder through | FR-29.3 | FR-29.3.1 – FR-29.3.4 | covered |
 | R-04.41 | `X-miLLM-Load-Policy: refuse` | FR-29.4 | FR-29.4.1 – FR-29.4.6 | covered |
 | R-04.42 | Lease state in health and Admin UI | FR-29.5 | FR-29.5.1 – FR-29.5.5 | covered |
 | R-04.43 | `Retry-After` on every `503` | FR-29.6 | FR-29.6.1 – FR-29.6.6 | covered |
 | R-04.44 | In-flight, backlog, estimated wait | FR-29.7 | FR-29.7.1 – FR-29.7.6 | covered (backlog fed by Feature 26) |
-| R-04.45 | Per-card memory endpoint | FR-29.8 | FR-29.8.1 – FR-29.8.8 | covered (GGUF gap: Open Question 7) |
+| R-04.45 | Per-card memory endpoint | FR-29.8 | FR-29.8.1 – FR-29.8.8 | covered (GGUF and comparison: T-89) |
 
 Totals: 8 of 8 owned requirements covered, 8 PPRD FRs refined into 52 testable items. No BRD-04
 requirement outside §5.10–§5.12 is claimed here. R-04.22 (a batch takes the lease) is Feature 26's and
@@ -358,13 +375,17 @@ uses FR-29.1–FR-29.3.
 
 - **Lease record:** `lease_id` (random, unguessable), `model_id`, `holder`, `reason`, `acquired_at`,
   `expires_at`, `ttl_seconds`, `released_at`, `end_reason` (`released`, `expired`, `model_unloaded`,
-  `restart`). Whether it lives in process memory or a table is an FTDD choice. Either way FR-29.1.9
-  holds: a restart ends it.
-- **If persisted:** a migration in `alembic/`, an entry in `STALE_STATE_RESETS` (`main.py:134`), and
-  the lease ID stored as a hash, since it is the only proof of holding (FR-29.1.6).
+  `restart`). **Decided (v1.1): process memory, no table, no migration** (X-01: a restart ends every
+  lease, so there is nothing to persist). A named startup function clears the registry, and a test
+  fails when its call is removed from `lifespan` (FR-29.1.9).
+- **In-process API for Feature 26** (026 FTDD §7): acquire with holder, TTL and reason; renew by
+  lease ID; release by lease ID; validate a caller's lease ID and read its model, holder and
+  `expires_at`. These serve T-64 (a batch renews its caller's lease and never releases it), X-01 and
+  T-66 (re-acquire after a restart, else wait) and FR-26.7.7 (attach a re-taken lease to a waiting
+  batch).
 - **`models.locked`** is unchanged (C8). No column is added to it or reinterpreted.
 - **Request-duration samples** for the estimated wait: a bounded in-memory window. Nothing persisted.
-- **Configuration** (`millm/core/config.py`): `LEASE_MAX_TTL_SECONDS` (default 7200) and the
+- **Configuration** (`millm/core/config.py`): `LEASE_MAX_TTL_SECONDS` and `LEASE_DEFAULT_TTL_SECONDS` (both 7200) and the
   `Retry-After` defaults per code. Each documented in `manual/docs/reference/configuration.md`.
 
 ## 6. Technical Constraints
@@ -428,12 +449,12 @@ gains a producer (FR-29.6.6).
   touches. It is recorded as tracked debt (section 13), not fixed, because C8 leaves `locked`'s
   meaning alone until it is retired.
 - **Co-residency** of several models, and a GPU scheduler shared with miStudio's workers (BRD-04 §4,
-  §7). Open Question 2 asks whether miStudio's workers take the lease.
+  §7). **Decided: T-84** — miStudio's GPU workers do not take the lease.
 - **Authentication** (decision 7).
 - **MCP tools** for the lease, the GPU endpoint or the queue fields. miStudio owns them (034 FR-18; its
   §9 declines tools for R-04.44 and R-04.45).
 - **Changing `/v1/models`** for a lease. A locked model hides the others there; a lease does not
-  (Open Question 5).
+  (**decided: T-87**, no change).
 - **Changing management status codes.** `MODEL_BUSY` stays `409` and `INSUFFICIENT_MEMORY` stays
   `507` on management routes (`millm/core/errors.py:178`, `199`). They are not `503`, so FR-29.6 does
   not touch them.
@@ -445,7 +466,7 @@ gains a producer (FR-29.6.6).
   (`model_service.py:782`, `1194`, `1442`), `LoadedModelState` (`model_loader.py:277`).
 - **Feature 23:** the GGUF refusals before auto-load, which stay first (FR-29.4.5).
 - **Feature 26:** feeds `batch_backlog_rows` (026 FR-26.4.7) and takes the lease (026 FR-26.7).
-  Feature 29 ships first (RSK-09). Its restart behaviour must match FR-29.1.9 (Open Question 9).
+  Feature 29 ships first (RSK-09). Its restart behaviour follows FR-29.1.9 (X-01; T-66).
 - **Feature 25:** none required. Feature 25's strict mode applies to the lease routes' bodies only if
   they are `/v1`, and they are not.
 - **Libraries:** none new.
@@ -473,7 +494,7 @@ removed, asserting payload and call count (FR-20.3).
    running and two waiting, `in_flight` is 1 and `queue_waiting` is 2.
 7. **GPU visibility (hardware; BRD-04 acceptance 16).** After a model is unloaded, the per-card
    endpoint shows miLLM's reserved memory on each card, matching `nvidia-smi` within 256 MiB under the
-   comparison Open Question 7 fixes. No CUDA context appears on a card miLLM had not used.
+   comparison T-89 fixes (FTDD §5.4). No CUDA context appears on a card miLLM had not used.
 8. **Lease visible.** The Models page and `/api/health/detailed` show holder, reason and expiry, and
    no lease ID appears in either.
 
@@ -502,6 +523,13 @@ removed, asserting payload and call count (FR-20.3).
   re-run as a negative control and recorded.
 - **Fixtures must disagree with the defect.** Lease tests use a clock that can move past expiry, two
   different holders, and a resident model that differs from the requested one.
+- **Startup reconciliation (v1.1, X-01):** a test fills the registry, runs the named startup function
+  for real, and asserts the registry is empty; a second test walks `lifespan`'s AST for the call, so
+  deleting it turns the suite red. A third asserts the read heals itself: a lease whose model is no
+  longer the loader's resident model reads as none.
+- **Every lease-enforcement path has a mutation control** (v1.1): the check in `load_model`, in
+  `unload_model`, in the internal unload a load performs, the lease-ID lift, the refuse policy, and
+  the startup clear.
 - **Hardware:** success criteria 1, 7 on the GPU node.
 
 ## 13. Implementation Considerations
@@ -525,59 +553,44 @@ removed, asserting payload and call count (FR-20.3).
 
 ## 14. Open Questions
 
-Batched for the operator. Each carries the default this PRD assumes until answered.
+**v1.1: every v1.0 open question is resolved.** The operator answered the product questions on
+2026-10-06, and the register's technical defaults were accepted
+(`~/app/miDataworks/0xcc/docs/fprd-open-questions-2026-10-06.md`, rows for 029).
 
-1. **May an agent take a model lease without approval?** (miStudio 034, open question 4.) Acquiring
-   loads nothing, so load approval does not gate it. But an agent's lease blocks the operator's own
-   loads for up to 2 hours. miLLM has no sign-in and no approval mechanism, so this is decided on the
-   miStudio side. *miStudio's recommendation:* no approval; the holder is named in miLLM's refusal and
-   lease state. *Default here:* miLLM grants any well-formed request.
-2. **Should miStudio's GPU workers take the lease too?** (BRD-04 §9 question 6, second part.) It edges
-   into co-residency, which BRD-04 puts out of scope. *Default:* no; the lease covers miLLM's resident
-   model only.
-3. **Lease scope across a swap.** May a lease be taken on a model that is not resident, as a
-   reservation? And when the holder swaps models with its lease ID, should the lease follow to the new
-   model? *Default:* resident model only (FR-29.1.3); the lease ends when its model leaves residency
-   (FR-29.1.9, FR-29.3.4), and the holder takes a new one. Both consumers lease an already-resident
-   model (miDataworks 005 FR-005.37–FR-005.38; miStudio 034 FR-18 "acquiring a lease loads nothing").
-4. **Operator force-release.** Should the operator be able to end someone else's lease from the Admin
-   UI, as a break-glass? BRD-04 names only the holder as releasing (R-04.38). *Default:* no; the TTL of
-   at most 2 hours bounds a stale lease (RSK-04).
-5. **`/v1/models` under a lease.** A locked model is the only one `/v1/models` lists
-   (`models.py:38`, `90`). Should a leased model behave the same, so Open WebUI's picker does not offer
-   models that will be refused? *Default:* no change; the refusal names holder and expiry.
-6. **`Retry-After` values** (technical, resolved in the FTDD). The estimate formula, the per-code
-   defaults, and what `MODEL_NOT_LOADED` should say, since retrying never helps until someone loads a
-   model.
-7. **What acceptance 16 compares against** (technical, resolved in the FTDD). torch's reserved figure
-   excludes the CUDA context itself, which `nvidia-smi` counts as used. The FTDD states whether "miLLM's
-   reserved memory matches `nvidia-smi` within 256 MiB" compares torch-reserved with the process's
-   per-process figure from `nvidia-smi`, or something else, and whether a per-process read works inside
-   the pod's process namespace. That read is also the only way to measure llama.cpp memory
-   (FR-29.8.5).
-8. **`in_flight` under CBM and the idle cache release** (technical, resolved in the FTDD;
-   FR-29.7.3, FR-29.7.5).
-9. **A batch's lease across a restart** (cross-feature, with Feature 26). Feature 26's coverage table
-   maps acceptance 8 to "lease held across restart" (026 FPRD §3, R-04.22 row). Under FR-29.1.9 a
-   restart ends every lease, because the model is no longer resident. *Default:* the resumed batch
-   re-takes the lease once its model is resident again, and waits otherwise. The two FTDDs must agree
-   on one reading.
+| v1.0 question | Resolution | ID |
+|---|---|---|
+| 1. Agent lease without approval | Yes: an agent may take or release a lease with no approval. Taking a lease loads nothing; loading is gated on miStudio's side | **P-05** |
+| 2. miStudio's GPU workers take the lease | No; co-residency is outside BRD-04 | T-84 |
+| 3. Lease scope across a swap | Resident model only; the lease ends with residency and does not follow a swap | T-85 |
+| 4. Operator force-release | No; the 2-hour TTL bounds a stale lease | T-86 |
+| 5. `/v1/models` under a lease | No change | T-87 |
+| 6. `Retry-After` values | Fixed in the FTDD §5.3 | T-88 |
+| 7. Acceptance 16 comparison | Fixed in the FTDD §5.4 | T-89 |
+| 8. `in_flight` under CBM, idle cache release | CBM: `null`; idle release: counted | T-90 |
+| 9. A batch's lease across a restart | A restart ends every lease; a resumed batch re-acquires once its model is resident and runs only while it holds one | **X-01**; T-66 |
+
+Also decided after v1.0: **X-08** (one lease per model; miDataworks shares one per model across its
+jobs) and the **2-hour default TTL**.
+
+**Still open (technical, closed by the FTASKS spikes, not by the operator):**
+- Whether `nvidia-smi --query-compute-apps` returns miLLM's process inside the pod's process
+  namespace (FTASKS 0.2). The design works either way; only acceptance 16's evidence path differs.
 
 ## 15. Decisions from Clarifying Questions
 
 Clarifying rounds were waived. Each question is pre-answered from a cited source. "Derived" marks an
-answer that follows from a cited source rather than stating it. Questions with no source are Open
-Questions above.
+answer that follows from a cited source rather than stating it. v1.1 rows record the operator's
+Feature-PRD decisions and the accepted register defaults.
 
 | # | Question | Answer | Source |
 |---|---|---|---|
 | D1 | Does the lease replace `locked`? | No. Beside it; callers migrate; `locked` retired later | Checkpoint C8; closes BRD-04 §9 question 1 |
 | D2 | Maximum TTL? | 7200 seconds, renewable | Checkpoint technical default; closes BRD-04 §9 question 6, first part |
 | D3 | TTL above the maximum? | Refused with `400`, never clamped | Derived: BRD-04 §2 "every request field is honoured or refused" |
-| D4 | One lease per server or per model? | Per server | R-04.38 "one lease exists at a time"; one resident model (BRD-04 §3) |
+| D4 | One lease per server or per model? | Per model; at most one live, because only the resident model can be leased (v1.1) | X-08; R-04.38; T-85 |
 | D5 | Does a lease block use of the leased model by others? | No; only load, unload and swap | R-04.39; R-04.19 (interactive chat interleaves) |
 | D6 | Is the lease ID returned by reads? | Never | Derived: R-04.40 (the ID is what lets the holder through); no sign-in (BRD-04 §3) |
-| D7 | Does a lease survive a restart? | No | Derived: residency does not survive (`main.py:134-139`); consumers resume on a lost lease (miDataworks 005 FR-005.39) |
+| D7 | Does a lease survive a restart? | No; startup reconciliation clears the registry, and a resumed batch re-acquires (v1.1) | **X-01**; T-66; also derived: residency does not survive (`main.py:134-139`); consumers resume on a lost lease (miDataworks 005 FR-005.39) |
 | D8 | Where does the lease check live? | In `ModelService.load_model` and `unload_model` | Derived: R-04.39 covers five entry points; one guard cannot be forgotten by a route |
 | D9 | Lease or `locked` first when both apply? | Lease first | Derived: R-04.39 requires naming holder and expiry |
 | D10 | Default load policy? | Auto-load | R-04.41 (Open WebUI relies on it) |
@@ -587,7 +600,17 @@ Questions above.
 | D14 | Batch backlog before Feature 26? | `null`, not `0` | Derived: R-04.44 "stable contract"; an unmeasured value is not a zero |
 | D15 | Rename `queue_pending`? | No; document it as waiting plus running | R-04.44 "already in `/api/health/detailed`"; `request_queue.py:107-117` |
 | D16 | Can the GPU read create a CUDA context? | No | `model_loader.py:220-226`; `gpu_placement.py:186-194` |
-| D17 | GGUF memory per card? | Stated as not measured by torch | `model_loader.py:343-345`; Open Question 7 |
-| D18 | Lease controls in the Admin UI? | Display only | R-04.42 "lease state appears"; Open Question 4 |
+| D17 | GGUF memory per card? | Stated as not measured by torch | `model_loader.py:343-345`; T-89 |
+| D18 | Lease controls in the Admin UI? | Display only | R-04.42 "lease state appears"; T-86 |
 | D19 | MCP lease tools? | miStudio's (034 FR-18) | BRD-04 §4 (MCP tools out of scope) |
 | D20 | Does the management load start honouring `locked`? | No; recorded as debt | C8 (no change to `locked` before retirement) |
+| D21 | Approval to take or release a lease? | None needed (v1.1) | **P-05** |
+| D22 | Default TTL? | 2 hours (v1.1) | Operator Feature-PRD decisions, "Default TTL"; FR-29.1.2 |
+| D23 | Lease on a non-resident model; lease across a swap? | Refused; ends with residency (v1.1) | T-85 |
+| D24 | miStudio workers take the lease? | No (v1.1) | T-84 |
+| D25 | Operator force-release? | No (v1.1) | T-86 |
+| D26 | `/v1/models` under a lease? | Unchanged (v1.1) | T-87 |
+| D27 | `Retry-After` values; acceptance 16 comparison; `in_flight` under CBM? | Fixed in the FTDD (v1.1) | T-88, T-89, T-90 |
+| D28 | Body field `retry_after` on HTTP errors? | Dropped; header only, at one choke point; kept for in-stream errors (v1.1) | Derived: FR-29.6.2 (one place to forget, not two) |
+| D29 | Batch backlog in the estimated wait? | Not added; interactive requests go first (v1.1) | 026 FTDD §7 constraint 2 |
+| D30 | Where do leases live? | Process memory, cleared by a named startup function (v1.1) | X-01; memory `startup-reset-lists-hide-omissions` |

@@ -3,15 +3,18 @@
 **Specified in:** BRD-04 §5.6, §5.7 and §5.13 (Dataworks Support, 2026-10-06)
 
 **Document ID:** 027_FPRD|Probe_Scoring_And_Per_Request_Activations
-**Version:** 1.0 (planned)
-**Status:** Planned. Written 2026-10-06 from BRD-04 and the 2026-10-06 checkpoint decisions.
+**Version:** 1.1 (planned)
+**Status:** Planned. v1.0 written 2026-10-06 from BRD-04 and the checkpoint decisions. v1.1
+(2026-10-06) closes all seven open questions from the operator's decisions and adds FR-27.10.
 **Source:** Business Requirements Document (BRD) BRD-04 (miLLM — Dataworks Support), R-04.24 – R-04.30, R-04.46, R-04.47
-**Project PRD (PPRD):** Feature 27 (FR-27.1 – FR-27.9), PPRD v1.5 · **Project Architecture Decision Record (PADR):** v1.5 §10 "Dataworks Support" trade-offs
+**Project PRD (PPRD):** Feature 27 (FR-27.1 – FR-27.9, plus FR-27.10 added here), PPRD v1.5 · **Project Architecture Decision Record (PADR):** v1.5 §10 "Dataworks Support" trade-offs
 **Depends on:** Feature 24 (Probe Monitor Runtime), Feature 25 (request validation, scoring mode)
 **Consumers:** miDataworks BRD-03 R-03.52 (probe-verdict labeler, feature tagging);
 miStudio BRD-MIS-DATAWORKS-001 (`millm_score_probes`, its 034 FPRD FR-17)
 **Binding decisions:** `~/app/miDataworks/0xcc/docs/brd-decisions-2026-10-05.md`, "Checkpoint
-decisions — 2026-10-06", technical defaults
+decisions — 2026-10-06" (technical defaults) and "Feature-PRD decisions — 2026-10-06" (P-03, P-20,
+X-03, X-09); technical defaults T-49 and T-72 – T-77 in
+`~/app/miDataworks/0xcc/docs/fprd-open-questions-2026-10-06.md`
 
 Code references are to miLLM at `7aa659c`, verified on 2026-10-06.
 
@@ -99,11 +102,14 @@ with reason `batched_request` (BRD-04 acceptance 17).
 - **SAE probe whose SAE is not downloaded** → refused with `PROBE_SAE_MISSING`, as arming refuses.
 - **Probe whose scope the runtime cannot score** → refused with arming's scope refusal
   (`millm/services/probe_arming.py:357`).
-- **A window whose boundary is unknown** (for example `response` on bare `token_ids`) → that verdict
-  is `not_scored` with reason `prompt_boundary_unknown`. It is never guessed (see Open Question 1).
+- **A window whose boundary is unknown** (for example `response` on bare `token_ids` with no
+  `prompt_tokens`) → that verdict is `not_scored` with reason `prompt_boundary_unknown`. It is never
+  guessed (T-72).
+- **A score exactly on the bar** → the verdict fires (`>=`), offline and live alike (P-03).
 - **Model unloaded or swapped mid-request** → the remaining inputs fail with a stated reason. No input
   is scored on a different model from the first.
 - **Activation request over the size cap** → `400` before generation.
+- **Activation request with `n > 1`, `extra_messages` or several prompts** → `400` (T-76).
 - **No attached SAE matches `sae_id`** → refused, naming the SAE.
 - **`sae_id` omitted with several SAEs attached** (a circuit) → refused, naming the candidates.
 - **A probe is armed on the same layer during stateless scoring** → the armed hook records nothing,
@@ -129,6 +135,10 @@ FR IDs are those of PPRD v1.5. Each is refined here; lettered items are refineme
   (`monitoring_service.py:122`). It works whether monitoring is enabled or not.
 - g. A request carrying `return_sae_activations` is served on the serial path, as a steering
   override is (`inference_service.py:945-957`).
+- h. **Streaming:** activations arrive in one final chunk with `choices: []` and the `millm` object,
+  after any probe-verdict chunk and before `[DONE]` (T-76).
+- i. **Refused with `400`:** `n > 1`, `extra_messages`, and a text completion with several prompts.
+  Positions are per conversation, so these shapes have no single position axis (T-76).
 
 **FR-27.2 Refusals and the read point.** (R-04.25)
 - a. The request is refused, naming the SAE, unless a matching SAE is attached.
@@ -140,7 +150,8 @@ FR IDs are those of PPRD v1.5. Each is refined here; lettered items are refineme
   technical default.)
 - d. The response states the read point used: `post_steering`, `pre_steering` or `unsteered`.
 - e. Neither read point is an unsteered counterfactual. Steering at earlier layers, and tokens
-  generated under steering, still shape the residual. The response and the manual say so.
+  generated under steering, still shape the residual. The response and the manual say so. No
+  counterfactual read point is offered in v1 (T-77; BRD-04 does not require one).
 - f. The worst-case entry count is checked **before** generation: positions × `top_k`, counting
   `prompt tokens + max_tokens` for `completion` and `all`. Over the configured cap returns `400`. A
   request is never refused after it has generated.
@@ -160,6 +171,14 @@ without generating. (R-04.26)
 **FR-27.4 The endpoint.** `POST /api/probes/score` takes `{probe_ids?, inputs, windows?}`. (R-04.27)
 - a. Each input is exactly one of `token_ids`, `messages` or `text`. `token_ids` is authoritative
   when given.
+- a1. **Boundaries (T-72).** A `token_ids` input may carry `prompt_tokens`, the prompt length. A
+  `messages` input ending in an assistant turn derives it: the length of the rendered conversation
+  before that turn, with the generation prompt. Otherwise windows needing a boundary report
+  `not_scored` with `prompt_boundary_unknown`. The `last_user` window derives its span from
+  `messages` only (`millm/services/probe_turns.py:153`).
+- a2. **Rendering `text` (T-49).** `text` is rendered as one user turn, as miStudio built its
+  training corpus. Before the endpoint ships, the render is checked against one miStudio-evaluated
+  set: miStudio's reported AUROC (area under the ROC curve) must be reproduced.
 - b. The result holds, per input, probe and window: `score`, `threshold`, `verdict`, `rung`,
   `rung_language`, `provisional`, `threshold_revision`, `n_scored_tokens` and, when not scored,
   `not_scored_reason`. These are the fields of `Verdict` (`probe_runtime.py:180-211`).
@@ -178,6 +197,13 @@ without generating. (R-04.26)
 **FR-27.5 Same construction and decision as live.** (R-04.28)
 - a. It works on any imported probe, armed or not, at any evidence rung. No acknowledgement is
   needed, because nothing is armed and every result carries its rung language.
+- a1. **Parity is reported, not required (T-74).** Each probe's result states its stored parity
+  status: passed, failed or never run, and the model and precision it ran against.
+- a2. **`probe_ids` omitted (T-75)** means every imported probe that matches the loaded model.
+  Mismatched probes are listed as skipped, each with its reason. With `probe_ids` given, any
+  mismatch refuses the request.
+- a3. **Unsteered (T-73, X-09).** The forward pass runs with every attached SAE suppressed, as chat
+  and completion scoring do (R-04.8).
 - b. It builds the runtime probe with `armed_probe_from_row` (`probe_arming.py:245`), as the parity
   route does (`probes.py:407`). The encoder comes from `build_probe_encoder`
   (`probe_arm_bridge.py:143`).
@@ -208,6 +234,8 @@ without generating. (R-04.26)
 - f. **Refinement beyond BRD-04's text: the arm route too.** `arm_probe` runs the same parity forward
   through `ProbeArmingService.arm` (`probes.py:363-372`, `probe_arming.py:400`). It has no slot either.
   Feature 24's FR-24.4 promised parity "inside the request queue". Both routes are fixed.
+- g. **Parity and arm forwards run unsteered (T-73).** Today they suppress nothing
+  (`probe_arm_bridge.py:119-140`), so a profile steering an earlier layer can move parity.
 
 **FR-27.7 No global arming, no routing change.** (R-04.30)
 - a. Offline scoring needs no armed probe.
@@ -230,12 +258,28 @@ without generating. (R-04.26)
   (`inference_service.py:5296-5298`).
 - e. `_serial_chat_fallback` needs no change: it calls `create_chat_completion` per conversation
   (`inference_service.py:3540-3544`), which is already wired.
+- f. **The llama.cpp paths** (`_llamacpp_chat_completion`, `_llamacpp_stream_chat_completion`,
+  `_llamacpp_text_completion`) open a context and mark `engine_unsupported`. Arming is refused on
+  llama.cpp, so this never fires in production. It lets FR-27.9 hold on every path with no exemption.
+- g. **Latent defect, fixed here: `/v1/completions` never sends `X-miLLM-Probe-Verdicts`.** Only the
+  chat route reads the verdicts (`millm/api/routes/openai/chat.py:295-297`); the completions route
+  returns without them (`millm/api/routes/openai/completions.py:147-148`). FR-24.7 promised the header
+  on both, and FR-27.8d's `continuous_batching` reason on text completions is invisible without it.
+- h. **Latent defect, fixed here: concurrent CBM requests collide on the runtime's single context.**
+  `begin_request` refuses a second open context (`millm/services/probe_runtime.py:823-828`), and
+  `_probe_begin` turns that refusal into `None` (`inference_service.py:2498-2509`). So with
+  `PROBE_FORCE_SERIAL` false, a second concurrent CBM request records nothing. `_probe_record` also
+  closes whatever context is open (`inference_service.py:2626`), possibly another request's. A path
+  that never scores therefore uses a **detached** context: created for the request, marked with its
+  reason, recorded, and never registered with the runtime.
 
 **FR-27.9 A discovery-based guard.** (R-04.47)
 - a. A test discovers every generation entry point from `InferenceService` itself. An entry point is
   any method whose call graph reaches a generation primitive: `_generate_sync`
-  (`inference_service.py:5492`), the streaming generate thread, the CBM backend's `generate` or
-  `generate_stream`, or a llama.cpp completion.
+  (`inference_service.py:5492`), the streaming thread target `_generate_in_thread`
+  (`inference_service.py:5516`), the CBM backend's `generate` or `generate_stream`, or a llama.cpp
+  completion (`_llamacpp_sync`, `inference_service.py:3849`, and the model's `create_completion` /
+  `create_chat_completion`).
 - b. For each, with a probe armed, the test fails if generation is reached with neither a probe
   context nor a recorded not-scored reason.
 - c. It covers serial, streaming and batched chat; text completion; the three CBM paths; and the
@@ -247,6 +291,26 @@ without generating. (R-04.26)
   exemption names the method and its reason in one place. A test asserts each exempt method reaches
   no generation primitive.
 - f. Removing the FR-27.8 call turns the test red (BRD-04 acceptance 17).
+
+### 3.4 The verdict boundary (Feature-PRD decision P-03, contradiction X-03)
+
+**FR-27.10 A score on the bar fires, on every miLLM surface.** *(New in v1.1; not a BRD-04
+requirement. It implements P-03 for miLLM.)*
+- a. The comparison is `score >= threshold`. It lives in one place: `_verdict_for`
+  (`millm/services/probe_runtime.py:665`).
+- b. **The runtime already does this.** It changed from `>` to `>=` on 2026-10-03 (commit `0c3f3fe`),
+  pinned by `tests/unit/services/test_probe_runtime.py:157`. X-03's premise, "miLLM fires on `>`", is
+  stale. The work left is to keep it so and to say so.
+- c. Stateless scoring decides through the same `_verdict_for`, so it inherits `>=` (FR-27.5d). A test
+  scores an input exactly on the bar through `/api/probes/score` and asserts it fires.
+- d. No other miLLM surface recomputes a verdict from score and threshold. The verdict header reads
+  `fires`; the Admin UI renders stored verdicts. A guard asserts that `_verdict_for` stays the only
+  comparison of a probe score with a threshold in `millm/`.
+- e. `docs/mcp-contract.md` §4d and `manual/docs/features/probe-monitors.md` state the rule. Neither
+  does today.
+- f. **Provisional verdicts keep their flag (P-20).** `probe_events.provisional` already stores it
+  (`millm/db/models/probe.py:200`). Every stateless result carries it. Excluding provisional
+  verdicts from labels is the consumer's job (miDataworks 009).
 
 ## 4. User Experience Requirements
 
@@ -286,8 +350,10 @@ without generating. (R-04.26)
 **New management route:**
 - `POST /api/probes/score` — body `{probe_ids?: [str], inputs: [Input], windows?: [str],
   return_token_ids?: bool}`.
-  `Input` is `{token_ids: [int]} | {messages: [...]} | {text: str}`. Response: `ApiResponse` with one
-  result per input, each holding per-probe, per-window verdict fields (FR-27.4b).
+  `Input` is `{token_ids: [int], prompt_tokens?: int} | {messages: [...]} | {text: str}`. Response:
+  `ApiResponse` with one result per input, each holding per-probe, per-window verdict fields
+  (FR-27.4b); per-probe parity status (FR-27.5a1); and the probes skipped with their reasons
+  (FR-27.5a2).
 
 **Changed OpenAI routes:**
 - `/v1/chat/completions` and `/v1/completions` accept `return_sae_activations`. The response body
@@ -354,6 +420,8 @@ Owned BRD-04 acceptance items: 10, 11 and 17.
   `PROBE_FORCE_SERIAL` false. Removing either call turns a test red.
 - **SC-5:** the parity, arm and score routes each take a slot. Removing the `_admit()` call from any
   of them turns a test red.
+- **SC-7 (P-03):** an input exactly on the bar fires through `/api/probes/score` and live. Changing
+  `>=` to `>` in `_verdict_for` turns both tests red.
 - **SC-6:** every wiring item has a removal test that asserts the payload and the call count, not only
   that a call happened (PPRD FR-20.3).
 
@@ -379,7 +447,8 @@ Owned BRD-04 acceptance items: 10, 11 and 17.
 - **Hardware:** SC-2 on mcs-lnxhost02.
 - **Cross-repo:** the MCP contract consistency tests with `MILLM_REQUIRE_CROSS_REPO_CHECKS=1`.
 - **Mutation controls:** break each load-bearing line, run the suite, restore, and verify the restore.
-  Prioritise the event-write guard, the activation isolation, and the `_admit()` calls.
+  Prioritise the event-write guard, the activation isolation, the `_admit()` calls and the `>=`
+  comparison.
 
 ## 13. Implementation Considerations
 
@@ -391,7 +460,7 @@ Owned BRD-04 acceptance items: 10, 11 and 17.
   choice; if made, suppression must be entered in that thread (§6).
 - **The parity forward runs with steering live.** `build_parity_forward` suppresses no SAE
   (`probe_arm_bridge.py:119-140`). The probe hook reads before its own layer's steering, but a profile
-  steering an earlier layer still moves the residual. See Open Question 3.
+  steering an earlier layer still moves the residual. FR-27.6g fixes it (T-73).
 - **Per-request capture needs its own read** in scoring mode, because suppression disables the SAE
   hook's capture (FR-27.3b). A prepended read-only hook, like the probe hook, is one option.
 - **Risks:** a discovery test that matches comments instead of calls (use the call graph, not
@@ -400,24 +469,9 @@ Owned BRD-04 acceptance items: 10, 11 and 17.
 
 ## 14. Open Questions
 
-1. **Window boundaries on stored input.** How does a caller state where the prompt ends for
-   `prompt`, `response` and `last_user` on stored input? Proposed: optional `prompt_tokens` beside
-   `token_ids`; derive it for `messages` ending in an assistant turn; otherwise `not_scored` with
-   `prompt_boundary_unknown`.
-2. **Rendering `text`.** Is `text` tokenized raw, or rendered as one user turn, as miStudio built its
-   training corpus? The two give different scores.
-3. **Steering during stateless scoring and parity.** Should both run with every attached SAE
-   suppressed, as chat and completion scoring do (R-04.8)? Today the parity and arm forwards suppress
-   nothing, so an earlier-layer profile can move parity.
-4. **Parity status.** Should stateless scoring refuse a probe with no passing parity report against
-   the loaded model, or score it and report its parity status?
-5. **`probe_ids` omitted.** Does that mean every imported probe matching the loaded model, with
-   mismatches listed as skipped, or should `probe_ids` be required?
-6. **Request shapes for activations.** With streaming, should activations come in a final
-   `choices: []` chunk, as probe verdicts do, or be refused? With `n > 1`, `extra_messages` or several
-   prompts, refuse (as sensing skips them) or return per choice?
-7. **An unsteered counterfactual.** Is a third read point needed: a second forward with every SAE
-   suppressed, so completion tokens are read as an unsteered model would read them?
+None open. The seven questions of v1.0 are decided (§15, D14–D20). One verification remains as a
+task, not a question: T-49 requires reproducing miStudio's reported AUROC on one evaluated set before
+the `text` render ships.
 
 ## 15. Decisions from Clarifying Questions
 
@@ -439,6 +493,15 @@ the sources do not settle are in §14.
 | D11 | User interface? | None new; existing status shows the new reasons | PPRD v1.5 Feature 27 "UI Tab" |
 | D12 | Security? | No authentication, as for all miLLM routes | BRD-04 §4, decision 7 |
 | D13 | MCP tool ownership? | miStudio; miLLM documents the route in its MCP contract | BRD-04 §4; BRD-MIS-DATAWORKS-001 |
+| D14 | Former OQ-1: window boundaries on stored input? | Optional `prompt_tokens`; derived for assistant-ended `messages`; else `not_scored` | T-72 |
+| D15 | Former OQ-2: rendering `text`? | One user turn, as miStudio's corpus; reproduce one reported AUROC first | T-49 |
+| D16 | Former OQ-3: steering during stateless scoring and parity? | Suppress every attached SAE in scoring, parity and arm | T-73; X-09 |
+| D17 | Former OQ-4: refuse without passing parity? | No; score and report parity status | T-74 |
+| D18 | Former OQ-5: `probe_ids` omitted? | All matching probes; mismatches listed as skipped | T-75 |
+| D19 | Former OQ-6: activation request shapes? | Final `choices: []` chunk when streaming; refuse `n > 1`, `extra_messages`, several prompts | T-76 |
+| D20 | Former OQ-7: unsteered counterfactual? | Not in v1 | T-77 |
+| D21 | Verdict boundary? | `>=` everywhere; miLLM already compares `>=` and documents it here (FR-27.10) | P-03; X-03 |
+| D22 | Provisional verdicts? | Stored and returned with their flag | P-20 |
 
 ## Appendix: BRD-04 Coverage
 
@@ -457,3 +520,5 @@ Every BRD-04 requirement owned by Feature 27 maps to exactly one FR.
 | R-04.47 | 5.13 | FR-27.9 | 17 |
 
 **9 of 9** owned requirements covered, matching PPRD v1.5's count for Feature 27.
+
+FR-27.10 implements Feature-PRD decision P-03, not a BRD-04 requirement. It adds no coverage row.

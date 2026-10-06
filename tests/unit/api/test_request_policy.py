@@ -87,6 +87,8 @@ class TestTheTableIsComplete:
         ("top_logprobs", Endpoint.COMPLETIONS, Engine.TRANSFORMERS, False),
         ("max_completion_tokens", Endpoint.EMBEDDINGS, Engine.TRANSFORMERS, False),
         ("tool_choice", Endpoint.COMPLETIONS, Engine.LLAMACPP, False),
+        ("max_completion_tokens", Endpoint.CHAT, Engine.LLAMACPP, True),
+        ("max_completion_tokens", Endpoint.COMPLETIONS, Engine.TRANSFORMERS, True),
     ])
     def test_fprd_table_cells(self, field, endpoint, engine, honoured):
         assert isinstance(OUTPUT_CHANGING[field][(endpoint, engine)], Honoured) is honoured
@@ -211,6 +213,15 @@ class TestStrict:
     def test_without_strict_the_same_request_is_reported(self):
         req = chat(foo=1)
         assert evaluate(req, Endpoint.CHAT, Engine.TRANSFORMERS, strict=False).unused == ["foo"]
+
+
+class TestUserIsUnused:
+    def test_user_is_reported_and_strict_refuses_it(self):
+        """T-57 / FR-25.3.3b: `user` is never read, so it is unused."""
+        req = chat(user="alice")
+        assert evaluate(req, Endpoint.CHAT, Engine.TRANSFORMERS, strict=False).unused == ["user"]
+        with pytest.raises(UnusedFieldsRefusedError):
+            evaluate(req, Endpoint.CHAT, Engine.TRANSFORMERS, strict=True)
 
 
 class TestHeaderEncoding:

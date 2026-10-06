@@ -104,7 +104,10 @@ def test_the_table_is_enforced_over_http(field, path, engine, strict):
     refused_here = (
         response.status_code == 400
         and error is not None
-        and error.get("code") == "field_not_honoured"
+        # The table refuses (field_not_honoured), or a schema validator refuses first for a rule
+        # that needs no row (e.g. n > 1 on completions, T-56: invalid_parameter). Both name it.
+        and error.get("code") in ("field_not_honoured", "invalid_parameter")
+        and error.get("type") == "invalid_request_error"
         and (error.get("param") == field or f"'{field}'" in error["message"])
     )
     if isinstance(outcome, Honoured) and outcome.refuse_if is None:

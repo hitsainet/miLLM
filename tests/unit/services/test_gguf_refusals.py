@@ -730,14 +730,22 @@ class TestLlamaCppStreaming:
         """
         from millm.core.errors import EngineUnsupportedError
 
+        from millm.core.errors import FieldNotHonouredError
+
         svc, _ = self._service([self._chunk(finish_reason="stop")])
         for req in (
             _stream_request(profile="humour"),
             _stream_request(steering_intensity=0.5),
-            _stream_request(n=3),
         ):
             with pytest.raises(EngineUnsupportedError):
                 await self._collect(svc, req)
+        # Since Feature 25 a streamed n=3 is refused by the schema (FR-25.3.5), so only a direct
+        # caller can build one — and the service's own streaming guard refuses it, on every
+        # engine, before the engine is even consulted.
+        direct = _stream_request().model_copy(update={"n": 3})
+        with pytest.raises(FieldNotHonouredError):
+            async for _ in svc.stream_chat_completion(direct):
+                pass
 
     @pytest.mark.asyncio
     async def test_chat_template_kwargs_is_ignored_rather_than_refused(self):

@@ -18,6 +18,7 @@ is re-run as a negative control (rows suffixed `-rerun`).
 | Before (main @ `0efff20`) | 3486 passed / 3 skipped / 0 failed (102 s) |
 | After 3.0 (errors) | 3624 passed / 3 skipped / 0 failed |
 | After 2.0 (request policy) | 3872 passed / 3 skipped / 0 failed |
+| After 4.0 (small refusals) | 3898 passed / 3 skipped / 0 failed |
 
 ## Discrepancies between the documents and the code (the code won)
 
@@ -54,6 +55,18 @@ is re-run as a negative control (rows suffixed `-rerun`).
   calls: **11.6 µs** with no unused field, **15.9 µs** with 51 unused locations. No forward pass, no
   database read.
 
+## Latent defects found and fixed in touched code
+
+- **The continuous batching manager (CBM) dropped `n` and the penalties.** `_cbm_chat_completion`
+  builds exactly one choice, and its GenerationConfig is fixed at start-up, while the gate checked
+  only temperature and top_p. A CBM-served `n: 3` returned one choice; a `frequency_penalty` was
+  silently not applied. The gate now routes `n > 1`, a seed, a constraint and a non-zero penalty
+  serial, read in one place (`_cbm_route_kwargs`). Penalties are not on the FR-25.3 list; fixed
+  because it is the same silent drop in the same line (operator rule: fix latent defects in touched
+  code). The CBM is off in Kubernetes.
+- **`n` on `/v1/completions` and a streamed `n`/`extra_messages`** — the FPRD's own FR-25.3.5 and
+  FR-25.4.1 latent defects — refused at the schema and (streaming) in the service.
+
 ## Mutation controls
 
 | # | Control | File | Mutation | Landed | Result | Red | Restore (sha256 + re-grep) |
@@ -74,4 +87,14 @@ is re-run as a negative control (rows suffixed `-rerun`).
 | 14 | P-engine-unused | `millm/api/request_policy.py` | `evaluate()`: ENGINE_UNUSED append removed (chat_template_kwargs on llama.cpp) | yes | 1 failed, 34 passed in 2.30s | **red** | ok |
 | 15 | P-fail-closed | `millm/api/request_policy.py` | `evaluate()`: fail-closed branch for an undeclared field on an honoured cell disabled — SURVIVED: no test reached it | yes | 230 passed in 13.92s | **SURVIVED** | ok |
 | 16 | P-fail-closed-rerun | `millm/api/request_policy.py` | same mutation, negative control after adding `test_an_undeclared_list_field_on_an_honoured_cell_fails_closed` | yes | 1 failed, 35 passed in 2.21s | **red** | ok |
+| 17 | M16 | `millm/services/inference_service.py` | `stream_chat_completion`: the n>1 / extra_messages guard disabled | yes | 1 failed, 6 passed in 2.81s | **red** | ok |
+| 18 | S-comp-n | `millm/api/schemas/openai.py` | `TextCompletionRequest`: n>1 validator disabled — SURVIVED: over HTTP the table refuses `n` too, so no test saw the schema rule direct callers rely on | yes | 85 passed in 6.98s | **SURVIVED** | ok |
+| 19 | S-chat-stream-n | `millm/api/schemas/openai.py` | chat schema: streaming + n>1 validator disabled | yes | 1 failed, 3 passed in 2.75s | **red** | ok |
+| 20 | S-chat-stream-extra | `millm/api/schemas/openai.py` | chat schema: streaming + extra_messages validator disabled | yes | 1 failed, 4 passed in 2.80s | **red** | ok |
+| 21 | S-mct-fold | `millm/api/schemas/openai.py` | `max_completion_tokens` no longer folded into `max_tokens` | yes | 1 failed, 8 passed in 2.85s | **red** | ok |
+| 22 | S-mct-disagree | `millm/api/schemas/openai.py` | disagreeing `max_tokens`/`max_completion_tokens` check disabled | yes | 1 failed, 9 passed in 5.32s | **red** | ok |
+| 23 | CBM-n | `millm/services/inference_service.py` | CBM gate: `n > 1` no longer routes serial | yes | 1 failed, 18 passed in 6.89s | **red** | ok |
+| 24 | CBM-penalty | `millm/services/inference_service.py` | CBM gate: penalties no longer route serial | yes | 1 failed, 19 passed in 6.85s | **red** | ok |
+| 25 | S-user-removed | `millm/api/schemas/openai.py` | `user` re-declared on the chat schema (so it would no longer be reported) | yes | 1 failed, 14 passed in 6.65s | **red** | ok |
+| 26 | S-comp-n-rerun | `millm/api/schemas/openai.py` | same mutation, negative control after `test_the_schema_refuses_it_for_direct_callers_too` | yes | 1 failed, 2 passed in 2.69s | **red** | ok |
 

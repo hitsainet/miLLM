@@ -133,23 +133,23 @@ miStudio 034 to send `X-miLLM-Strict: true` safely.
   - [x] 3.4 Test: an out-of-vocabulary `allowed_token_ids` on `/v1/completions` returns type
         `invalid_request_error`.
 
-- [ ] 4.0 Small refusals and aliases (covers FR-25.3.3a, FR-25.3.3b, FR-25.3.5, FR-25.4)
-  - [ ] 4.1 `TextCompletionRequest`: `n > 1` → error naming `n` (T-56, FR-25.4.3).
-  - [ ] 4.2 Remove `user` from the three request classes (`openai.py:65,232,294`) so it is reported
+- [x] 4.0 Small refusals and aliases (covers FR-25.3.3a, FR-25.3.3b, FR-25.3.5, FR-25.4)
+  - [x] 4.1 `TextCompletionRequest`: `n > 1` → error naming `n` (T-56, FR-25.4.3).
+  - [x] 4.2 Remove `user` from the three request classes (`openai.py:65,232,294`) so it is reported
         (T-57, FR-25.3.3b).
-  - [ ] 4.3 `max_completion_tokens` on chat and completions: equal-or-absent check, folded into
+  - [x] 4.3 `max_completion_tokens` on chat and completions: equal-or-absent check, folded into
         `max_tokens`; on embeddings the table refuses it (T-58, FR-25.3.3a).
-  - [ ] 4.4 Chat schema: `stream` with `n > 1` or `extra_messages` → error; service guard at the top
+  - [x] 4.4 Chat schema: `stream` with `n > 1` or `extra_messages` → error; service guard at the top
         of `stream_chat_completion` (`inference_service.py:4288`) raising `FieldNotHonouredError`
         (FR-25.3.5).
-  - [ ] 4.5 CBM: confirm a listed field the CBM cannot honour never reaches `_cbm_chat_completion`
+  - [x] 4.5 CBM: confirm a listed field the CBM cannot honour never reaches `_cbm_chat_completion`
         (`:5230`) or `_cbm_text_completion` (`:5418`); route or refuse per the table (FR-25.3.6).
-  - [ ] 4.6 Tests: `n: 2` on completions → `400` on transformers and on a GGUF row, before load
+  - [x] 4.6 Tests: `n: 2` on completions → `400` on transformers and on a GGUF row, before load
         (SC-3); streaming `n: 2` → `400`; streaming `extra_messages` → `400`; direct service call
         with `n: 2` streaming raises (M16); `user` reported, strict refuses it;
         `max_completion_tokens: 5` limits generation to 5 tokens; conflicting values → `400` naming
         both; `max_completion_tokens: 1` satisfies scoring's limit.
-  - [ ] 4.7 Test: with CBM enabled in a test service, a request with `n > 1` is served serially
+  - [x] 4.7 Test: with CBM enabled in a test service, a request with `n > 1` is served serially
         (or refused) and never by the CBM path (spy call count 0).
 
 - [ ] 5.0 Chat scoring (covers FR-25.5, FR-25.6, FR-25.7, FR-25.8, FR-25.9)

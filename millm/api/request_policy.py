@@ -189,7 +189,7 @@ OUTPUT_CHANGING: dict[str, dict[tuple[Endpoint, Engine], Outcome]] = {
     "tool_choice": _cells(*([_NO_FUNCTIONS] * 6)),
     "logit_bias": _cells(*([refused("logit_bias is not implemented in v1")] * 6)),
     "max_completion_tokens": _cells(
-        _PENDING, _PENDING, _PENDING, _PENDING,
+        HONOURED, HONOURED, HONOURED, HONOURED,
         refused("embeddings generate no tokens"),
         refused("embeddings generate no tokens"),
     ),

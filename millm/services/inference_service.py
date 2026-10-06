@@ -45,7 +45,10 @@ from millm.api.schemas.openai import (
 from millm.core.errors import (
     ContextLengthExceededError,
     EngineUnsupportedError,
+    FieldNotHonouredError,
     InvalidScoringRequestError,
+    NoChatTemplateError,
+    ResponseFormatUnsupportedError,
     ScoringNumericalError,
     GenerationOutOfMemoryError,
     MiLLMError,
@@ -314,6 +317,34 @@ def _verdict_payload(verdict: Any) -> dict:
         "rung": verdict.rung,
         "rung_language": verdict.rung_language,
     }
+
+
+def _request_n(request: Any) -> int:
+    """`n` as an int; anything that is not an int (absent, a stand-in) reads as 1."""
+    n = getattr(request, "n", 1)
+    return n if isinstance(n, int) and not isinstance(n, bool) and n > 0 else 1
+
+
+def _request_seed(request: Any) -> Optional[int]:
+    """The request's seed, or None when none was sent (T-60: miLLM never chooses one)."""
+    seed = getattr(request, "seed", None)
+    return seed if isinstance(seed, int) and not isinstance(seed, bool) else None
+
+
+def _request_extra_messages(request: Any) -> list:
+    extra = getattr(request, "extra_messages", None)
+    return extra if isinstance(extra, list) else []
+
+
+def _constraint_type(response_format: Any) -> Optional[str]:
+    """`json_object` / `json_schema` when a request asks for a constraint; None for none or text."""
+    if response_format is None:
+        return None
+    kind = (
+        response_format.get("type") if isinstance(response_format, dict)
+        else getattr(response_format, "type", None)
+    )
+    return kind if kind in ("json_object", "json_schema") else None
 
 
 def reset_probe_verdicts() -> None:
@@ -955,11 +986,37 @@ class InferenceService:
             or getattr(request, "steering_intensity", None) is not None
         )
 
+    def _cbm_route_kwargs(self, request: Any) -> dict:
+        """Everything the CBM gate must see about a request, read in ONE place.
+
+        Feature 25 (FR-25.3.6): the manager returns one choice and has no per-request seed or
+        logits processor, so a request carrying `n > 1`, a `seed`, a `response_format`
+        constraint or a frequency/presence penalty (its GenerationConfig is fixed at start-up)
+        would be served with that field DROPPED. Each routes to the serial path instead.
+        """
+        return {
+            "temperature": getattr(request, "temperature", None),
+            "top_p": getattr(request, "top_p", None),
+            "has_steering_override": self._has_steering_override(request),
+            "n": _request_n(request),
+            "seeded": _request_seed(request) is not None,
+            "constrained": _constraint_type(getattr(request, "response_format", None)) is not None,
+            "penalised": any(
+                isinstance(v, (int, float)) and not isinstance(v, bool) and v != 0
+                for v in (getattr(request, "frequency_penalty", 0.0),
+                          getattr(request, "presence_penalty", 0.0))
+            ),
+        }
+
     def _use_cbm_for_request(
         self,
         temperature: Optional[float] = None,
         top_p: Optional[float] = None,
         has_steering_override: bool = False,
+        n: int = 1,
+        seeded: bool = False,
+        constrained: bool = False,
+        penalised: bool = False,
     ) -> bool:
         """
         Whether to route this specific request through the CBM backend.
@@ -1005,6 +1062,16 @@ class InferenceService:
                 reason="per_request_steering_override",
             )
             return False
+        # Feature 25 (FR-25.3.6, FR-25.13.7): fields the manager cannot honour route serial.
+        for flag, reason in (
+            (n > 1, "n_gt_1"),
+            (seeded, "seeded_request"),
+            (constrained, "constrained_output"),
+            (penalised, "repetition_penalty"),
+        ):
+            if flag:
+                logger.info("cbm_routing_fallback_to_serial", reason=reason)
+                return False
         from millm.core.config import settings as _settings
 
         if _settings.SENSING_FORCE_SERIAL:
@@ -3433,11 +3500,7 @@ class InferenceService:
         # CBM has no batched path. Falling through to it would silently drop
         # every conversation after the first, so serve serially instead: slower
         # than a batch, identical in result.
-        if self._use_cbm_for_request(
-            temperature=getattr(request, "temperature", None),
-            top_p=getattr(request, "top_p", None),
-            has_steering_override=self._has_steering_override(request),
-        ):
+        if self._use_cbm_for_request(**self._cbm_route_kwargs(request)):
             logger.info(
                 "batch_serialised", reason="cbm_active",
                 batch_size=len(conversations), request_id=completion_id,
@@ -3602,11 +3665,7 @@ class InferenceService:
             return await self._create_batched_chat_completion(request)
 
         # Delegate to CBM if active and sampling params are compatible
-        if self._use_cbm_for_request(
-            temperature=getattr(request, "temperature", None),
-            top_p=getattr(request, "top_p", None),
-            has_steering_override=self._has_steering_override(request),
-        ):
+        if self._use_cbm_for_request(**self._cbm_route_kwargs(request)):
             return await self._cbm_chat_completion(request)
 
         completion_id = f"chatcmpl-{uuid.uuid4().hex[:24]}"
@@ -4300,7 +4359,19 @@ class InferenceService:
 
         Yields:
             SSE-formatted strings for streaming
+
+        Raises:
+            FieldNotHonouredError: `n > 1` or `extra_messages` — this path builds one choice
+                from one conversation (FR-25.3.5). The schema refuses both for HTTP callers;
+                this guard is for direct callers (Feature 26's batch runner).
         """
+        if _request_n(request) > 1 or _request_extra_messages(request):
+            field_name = "n" if _request_n(request) > 1 else "extra_messages"
+            raise FieldNotHonouredError(
+                f"'{field_name}' is not honoured on a streaming chat completion: the stream "
+                "carries one choice for one conversation",
+                details={"param": field_name},
+            )
         if self._engine_is_llamacpp():
             # Same shape as the CBM delegation below: a second engine's
             # streaming generator yielding the same SSE strings.
@@ -4309,11 +4380,7 @@ class InferenceService:
             return
 
         # Delegate to CBM if active and sampling params are compatible
-        if self._use_cbm_for_request(
-            temperature=getattr(request, "temperature", None),
-            top_p=getattr(request, "top_p", None),
-            has_steering_override=self._has_steering_override(request),
-        ):
+        if self._use_cbm_for_request(**self._cbm_route_kwargs(request)):
             async for chunk in self._cbm_stream_chat_completion(request):
                 yield chunk
             return
@@ -4804,11 +4871,7 @@ class InferenceService:
             return await self._llamacpp_text_completion(request)
 
         # Delegate to CBM if active and sampling params are compatible
-        if self._use_cbm_for_request(
-            temperature=getattr(request, "temperature", None),
-            top_p=getattr(request, "top_p", None),
-            has_steering_override=self._has_steering_override(request),
-        ):
+        if self._use_cbm_for_request(**self._cbm_route_kwargs(request)):
             return await self._cbm_text_completion(request)
 
         completion_id = f"cmpl-{uuid.uuid4().hex[:24]}"

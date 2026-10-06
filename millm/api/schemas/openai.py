@@ -48,6 +48,34 @@ class ChatMessage(BaseModel):
 # Request Schemas
 # =============================================================================
 
+# `user` is deliberately NOT declared on any request (T-57, FR-25.3.3b): nothing in millm reads
+# it, so it lands in `model_extra` and is reported as unused — and refused under X-miLLM-Strict.
+
+
+def _fold_max_completion_tokens(data: Any) -> Any:
+    """`max_completion_tokens` is honoured AS `max_tokens` (T-58, FR-25.3.3a).
+
+    Runs before field validation so every downstream reader — including the scoring check that
+    requires max_tokens=1 — sees one number. Sent together with a DIFFERENT `max_tokens`, the
+    request is refused naming both: picking one would silently drop the other.
+    """
+    if not isinstance(data, dict):
+        return data
+    mct = data.get("max_completion_tokens")
+    if mct is None:
+        return data
+    mt = data.get("max_tokens")
+    if mt is not None and mt != mct:
+        raise ValueError(
+            f"max_completion_tokens ({mct}) and max_tokens ({mt}) disagree; send one, or the "
+            "same value in both"
+        )
+    if mt is None:
+        data = dict(data)
+        data["max_tokens"] = mct
+    return data
+
+
 
 class ChatCompletionRequest(BaseModel):
     """
@@ -64,10 +92,11 @@ class ChatCompletionRequest(BaseModel):
     top_p: float = Field(default=1.0, ge=0.0, le=1.0)
     n: int = Field(default=1, ge=1)
     max_tokens: Optional[int] = Field(default=None, gt=0)
+    #: OpenAI's newer name for `max_tokens`; folded into it (T-58).
+    max_completion_tokens: Optional[int] = Field(default=None, gt=0)
     stop: Optional[Union[str, list[str]]] = None
     frequency_penalty: float = Field(default=0.0, ge=-2.0, le=2.0)
     presence_penalty: float = Field(default=0.0, ge=-2.0, le=2.0)
-    user: Optional[str] = None
 
     # miLLM extension - BATCHED generation.
     #
@@ -185,6 +214,29 @@ class ChatCompletionRequest(BaseModel):
             f'{{"enable_thinking": false}}; got {type(v).__name__}: {v!r}'
         )
 
+    @model_validator(mode="before")
+    @classmethod
+    def _max_completion_tokens(cls, data: Any) -> Any:
+        return _fold_max_completion_tokens(data)
+
+    @field_validator("n")
+    @classmethod
+    def _no_n_when_streaming(cls, v, info):
+        # FR-25.3.5: the streaming path reads neither `n` nor `extra_messages`; a streamed n=3
+        # returned ONE choice. Refused, naming the field (validated after `stream`).
+        if v > 1 and info.data.get("stream"):
+            raise ValueError("n > 1 is not supported with stream=true; send n=1 or stream=false")
+        return v
+
+    @field_validator("extra_messages")
+    @classmethod
+    def _no_extra_messages_when_streaming(cls, v, info):
+        if v and info.data.get("stream"):
+            raise ValueError(
+                "extra_messages (batched conversations) is not supported with stream=true"
+            )
+        return v
+
     @field_validator("steering_intensity", mode="before")
     @classmethod
     def _reject_bool_steering_intensity(cls, v):
@@ -230,12 +282,13 @@ class TextCompletionRequest(BaseModel):
     stream: bool = False
     n: int = Field(default=1, ge=1)
     max_tokens: Optional[int] = Field(default=None, gt=0)
+    #: OpenAI's newer name for `max_tokens`; folded into it (T-58).
+    max_completion_tokens: Optional[int] = Field(default=None, gt=0)
     temperature: float = Field(default=1.0, ge=0.0, le=2.0)
     top_p: float = Field(default=1.0, ge=0.0, le=1.0)
     stop: Optional[Union[str, list[str]]] = None
     frequency_penalty: float = Field(default=0.0, ge=-2.0, le=2.0)
     presence_penalty: float = Field(default=0.0, ge=-2.0, le=2.0)
-    user: Optional[str] = None
     #: SCORING MODE (2026-10-04). Return the log-probabilities of the next token instead of only
     #: generating text — what a typed-decision judge (Jev-style classifiers, jevify) reads its answer
     #: from. Named as OpenAI's legacy completions and vLLM name them, so their clients work unchanged.
@@ -253,6 +306,24 @@ class TextCompletionRequest(BaseModel):
     return_tokens_as_token_ids: bool = False
 
     model_config = {"extra": "allow"}
+
+    @model_validator(mode="before")
+    @classmethod
+    def _max_completion_tokens(cls, data: Any) -> Any:
+        return _fold_max_completion_tokens(data)
+
+    @field_validator("n")
+    @classmethod
+    def _n_greater_than_one_is_refused(cls, v):
+        # T-56 / FR-25.4.3: create_text_completion never read `n`, so n=3 returned one choice per
+        # prompt. Implementing it is deferred (FR-25.4.2); until then it is refused, on every
+        # engine, before any auto-load (schema validation runs first).
+        if v > 1:
+            raise ValueError(
+                "n > 1 is not implemented on /v1/completions in this release (T-56); send n=1 "
+                "and repeat the request for more completions"
+            )
+        return v
 
     @model_validator(mode="after")
     def validate_stop_sequences(self) -> "TextCompletionRequest":
@@ -297,7 +368,6 @@ class EmbeddingRequest(BaseModel):
     input: Union[str, list[str]]
     encoding_format: Literal["float", "base64"] = "float"
     dimensions: Optional[int] = Field(default=None, gt=0)
-    user: Optional[str] = None
 
     model_config = {"extra": "allow"}
 

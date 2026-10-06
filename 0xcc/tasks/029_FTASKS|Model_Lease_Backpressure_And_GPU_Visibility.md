@@ -186,17 +186,17 @@ T-84 – T-90
         and codes unchanged against a snapshot; in-stream error carries `retry_after`; middleware in
         `app.user_middleware` (controls M14, M15).
 
-- [ ] 7.0 Queue state and the health contract (covers FR-29.5.1, FR-29.7, FR-29.7.1 – FR-29.7.6)
-  - [ ] 7.1 `RequestQueue`: `_holding`, the duration window, `holding_count`, `median_hold_seconds`
+- [x] 7.0 Queue state and the health contract (covers FR-29.5.1, FR-29.7, FR-29.7.1 – FR-29.7.6)
+  - [x] 7.1 `RequestQueue`: `_holding`, the duration window, `holding_count`, `median_hold_seconds`
         (FTID §3.6). `pending_count` unchanged.
-  - [ ] 7.2 `backpressure.estimate_wait_seconds` (FTDD §7.3); `null` below 3 samples or under CBM.
-  - [ ] 7.3 Replace the untyped `inference` dict with `InferenceState`; always present, `error` on
+  - [x] 7.2 `backpressure.estimate_wait_seconds` (FTDD §7.3); `null` below 3 samples or under CBM.
+  - [x] 7.3 Replace the untyped `inference` dict with `InferenceState`; always present, `error` on
         failure; `in_flight`/`queue_waiting`/estimate `null` while `cbm_running` (T-90).
-  - [ ] 7.4 `register_backlog_provider` / `backlog_rows` (`null` when none registered; logs and
+  - [x] 7.4 `register_backlog_provider` / `backlog_rows` (`null` when none registered; logs and
         `null` when the provider raises). Feature 26 registers its provider (026 FR-26.4.7).
-  - [ ] 7.5 Add `lease: LeaseStatusResponse | None` to `DetailedHealthResponse`; no `nvidia-smi` on
+  - [x] 7.5 Add `lease: LeaseStatusResponse | None` to `DetailedHealthResponse`; no `nvidia-smi` on
         this path.
-  - [ ] 7.6 Tests: one holding and two waiting → `in_flight` 1, `queue_waiting` 2; the idle cache
+  - [x] 7.6 Tests: one holding and two waiting → `in_flight` 1, `queue_waiting` 2; the idle cache
         release counts as holding; CBM running → `null`s; backlog `null` unregistered (control M16)
         and the provider's value when registered; estimate formula with fixed durations; field-set
         pin for `inference` and `lease`; `test_every_request_queue_slot_is_taken_through_admission`

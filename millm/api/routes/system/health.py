@@ -12,10 +12,11 @@ from typing import Any, Optional
 import structlog
 from fastapi import APIRouter, Depends, status
 from fastapi.responses import JSONResponse
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 from millm import __version__
 from millm.api.dependencies import get_inference_service, get_model_loader
+from millm.api.schemas.lease import LeaseStatusResponse, lease_summary
 from millm.core.backpressure import retry_after_for
 from millm.core.resilience import CircuitBreaker, huggingface_circuit
 from millm.services.sae_service import AttachedSAEState
@@ -87,6 +88,78 @@ class ActiveProfileInfo(BaseModel):
     sensing_enabled: bool = Field(False, description="Sensing intent (Feature 11)")
 
 
+class InferenceState(BaseModel):
+    """The request queue and backend, as a stable contract (Feature 29, FR-29.7).
+
+    ⚠ `queue_pending` counts requests WAITING PLUS HOLDING a slot (it is incremented before the
+    semaphore is taken); `queue_waiting` is the waiting part alone. Unmeasured is null, never 0:
+    `in_flight`, `queue_waiting` and `estimated_wait_seconds` are null while continuous batching
+    runs (its requests hold no queue slot, and it exposes no active count — T-90), and
+    `batch_backlog_rows` is null until a batch API registers a provider (Feature 26).
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    backend: Optional[str] = Field(None, description="'queue' (serial) or 'cbm'")
+    cbm_enabled: Optional[bool] = Field(None, description="Continuous batching configured")
+    cbm_running: Optional[bool] = Field(None, description="Continuous batching serving now")
+    queue_pending: Optional[int] = Field(
+        None, description="Interactive requests waiting PLUS holding a slot"
+    )
+    queue_max_concurrent: Optional[int] = Field(None, description="Slots (MAX_CONCURRENT_REQUESTS)")
+    queue_max_pending: Optional[int] = Field(None, description="MAX_PENDING_REQUESTS")
+    in_flight: Optional[int] = Field(
+        None,
+        description=(
+            "Slots held now, the idle cache release included (T-90), plus batch chunks once "
+            "Feature 26 ships; null while continuous batching runs"
+        ),
+    )
+    queue_waiting: Optional[int] = Field(
+        None,
+        description="Interactive requests waiting: queue_pending - holding; null under CBM",
+    )
+    batch_backlog_rows: Optional[int] = Field(
+        None, description="Rows not yet run across in-progress batches; null with no batch API"
+    )
+    estimated_wait_seconds: Optional[float] = Field(
+        None,
+        description=(
+            "ESTIMATE of a new request's wait for a slot: median recent slot-holding time x "
+            "(queue_waiting + in_flight) / queue_max_concurrent; null below 3 samples or under CBM"
+        ),
+    )
+    error: Optional[str] = Field(
+        None, description="Set when the block could not be read; the other fields are then null"
+    )
+
+
+def read_inference_state(inference_service: Any) -> InferenceState:
+    """The typed `inference` block. Always returns one: a failure is reported in `error`."""
+    from millm.core.backpressure import backlog_rows, estimate_wait_seconds
+
+    try:
+        queue = inference_service.request_queue
+        cbm_enabled = inference_service._cbm_backend is not None
+        cbm_running = bool(inference_service._use_cbm())
+        holding = queue.holding_count
+        return InferenceState(
+            backend="cbm" if cbm_running else "queue",
+            cbm_enabled=cbm_enabled,
+            cbm_running=cbm_running,
+            queue_pending=queue.pending_count,
+            queue_max_concurrent=queue.max_concurrent,
+            queue_max_pending=queue.max_pending,
+            in_flight=None if cbm_running else holding + queue.background_holding_count,
+            queue_waiting=None if cbm_running else max(queue.pending_count - holding, 0),
+            batch_backlog_rows=backlog_rows(),
+            estimated_wait_seconds=estimate_wait_seconds(queue, cbm_running),
+        )
+    except Exception as e:  # noqa: BLE001 - the block is reported, never silently omitted
+        logger.warning("health_inference_state_unavailable", error=str(e))
+        return InferenceState(error=f"{type(e).__name__}: {e}")
+
+
 class DetailedHealthResponse(BaseModel):
     """Detailed health response with all system information."""
 
@@ -125,7 +198,16 @@ class DetailedHealthResponse(BaseModel):
         default_factory=list,
         description="Every attached SAE id, in attachment order (Feature 12)",
     )
-    inference: Optional[dict[str, Any]] = Field(None, description="Inference backend info")
+    inference: InferenceState = Field(
+        ..., description="Request queue and backend state (typed contract, Feature 29)"
+    )
+    lease: Optional[LeaseStatusResponse] = Field(
+        None,
+        description=(
+            "The live lease on the resident model (holder, reason, expiry), or null. Never "
+            "the lease ID (Feature 29)."
+        ),
+    )
     active_profile: Optional[ActiveProfileInfo] = Field(
         None, description="Currently active steering profile (null when none)"
     )
@@ -359,22 +441,20 @@ async def detailed_health_check(
         if overall_status == HealthStatus.HEALTHY:
             overall_status = HealthStatus.DEGRADED
 
-    # Inference backend info
-    inference_info: dict[str, Any] = {}
+    # Inference backend info: typed and always present (FR-29.7.1). It vanished silently on any
+    # error before Feature 29.
+    inference_info = read_inference_state(inference_service)
+
+    # The resident model's lease (FR-29.5.1), through the one lease serialiser. No nvidia-smi
+    # and no database on this path.
+    lease_info: Optional[LeaseStatusResponse] = None
     try:
-        queue = inference_service.request_queue
-        cbm_enabled = inference_service._cbm_backend is not None
-        cbm_running = inference_service._use_cbm()
-        inference_info = {
-            "backend": "cbm" if cbm_running else "queue",
-            "cbm_enabled": cbm_enabled,
-            "cbm_running": cbm_running,
-            "queue_pending": queue.pending_count,
-            "queue_max_concurrent": queue.max_concurrent,
-            "queue_max_pending": queue.max_pending,
-        }
-    except Exception:
-        pass
+        from millm.services.model_lease import get_lease_registry
+
+        record = get_lease_registry().current(model_loader.loaded_model_id)
+        lease_info = lease_summary(record) if record is not None else None
+    except Exception as e:  # noqa: BLE001 - reporting, not a component check
+        logger.warning("health_lease_unavailable", error=str(e))
 
     sae_state = AttachedSAEState()
     # Active steering profile (Feature 9: one-call status for MCP agents).
@@ -412,7 +492,8 @@ async def detailed_health_check(
         # several SAEs, so the singular id alone under-reports what is live.
         sae_count=sae_state.count,
         sae_ids=[e.sae_id for e in sae_state.entries()],
-        inference=inference_info or None,
+        inference=inference_info,
+        lease=lease_info,
         active_profile=active_profile,
     )
 

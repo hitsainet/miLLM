@@ -33,6 +33,15 @@ class FakeRepo:
     async def get_by_id(self, model_id: int) -> Any:
         return self.rows.get(model_id)
 
+    async def get_all(self) -> list[Any]:
+        return list(self.rows.values())
+
+    async def find_by_name(self, name: str) -> Any:
+        return next((r for r in self.rows.values() if r.name == name), None)
+
+    async def get_by_name(self, name: str) -> Any:
+        return next((r for r in self.rows.values() if r.name == name), None)
+
     async def get_locked_model(self) -> Any:
         return next((r for r in self.rows.values() if r.locked), None)
 
@@ -117,3 +126,19 @@ def no_probe_rows():
 def drain_executor(service: Any) -> None:
     """Wait for the background worker `load_model` submitted (it is not awaited)."""
     service._executor.shutdown(wait=True)
+
+
+def resident_inference() -> MagicMock:
+    """An inference stand-in whose loaded-model view is the REAL loader's."""
+    inference = MagicMock()
+    inference.backend_name = "serial"
+    inference.cbm_enabled = lambda: False
+
+    def loaded_info() -> Any:
+        current = LoadedModelState().current
+        if current is None:
+            return None
+        return SimpleNamespace(name=current.model_name, model_id=current.model_id)
+
+    inference.get_loaded_model_info = loaded_info
+    return inference

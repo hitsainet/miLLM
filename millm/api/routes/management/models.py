@@ -6,10 +6,22 @@ Provides endpoints for downloading, loading, unloading, and managing LLM models.
 
 from typing import Annotated
 
-from fastapi import APIRouter, Body, Path
+from fastapi import APIRouter, Body, Header, Path
 
 from millm.api.dependencies import ModelServiceDep
 from millm.api.schemas.common import ApiResponse
+from millm.api.schemas.lease import (
+    EndedLeaseResponse,
+    LeaseCreateRequest,
+    LeaseGrantResponse,
+    LeaseRenewRequest,
+    LeaseStatusEnvelope,
+    LeaseStatusResponse,
+    ended_lease_response,
+    lease_grant_response,
+    lease_summary,
+)
+from millm.services.model_lease import get_lease_registry
 from millm.api.schemas.model import (
     ModelDownloadRequest,
     ModelLoadRequest,
@@ -27,6 +39,12 @@ router = APIRouter(prefix="/api/models", tags=["models"])
 
 # Type alias for model ID path parameter
 ModelId = Annotated[int, Path(description="Model ID", ge=1)]
+
+#: The lease ID, carried as a header and never in a path: paths reach access logs (FR-29.1.6).
+LeaseHeader = Annotated[
+    str | None,
+    Header(alias="X-miLLM-Lease", description="The lease ID returned by the grant"),
+]
 
 
 @router.get(
@@ -56,7 +74,7 @@ async def list_models(
         if progress is not None:
             response.download_progress = progress
         # Inject runtime properties for loaded model
-        responses.append(_with_runtime(response, loaded_info))
+        responses.append(_with_lease(_with_runtime(response, loaded_info)))
     return ApiResponse.ok(responses)
 
 
@@ -81,6 +99,17 @@ async def download_model(
     """
     model = await service.download_model(request)
     return ApiResponse.ok(ModelResponse.from_model(model))
+
+
+def _with_lease(response: ModelResponse) -> ModelResponse:
+    """Add the model's live lease (holder, reason, expiry; never the ID), FR-29.5.3.
+
+    ONE copy for the list and the single-model route, through the one serialiser the lease
+    `GET` and the health endpoint use. Read from the process registry: no database access.
+    """
+    record = get_lease_registry().current(response.id)
+    response.lease = lease_summary(record) if record is not None else None
+    return response
 
 
 def _with_runtime(response: ModelResponse, loaded_info: dict | None) -> ModelResponse:
@@ -126,7 +155,9 @@ async def get_model(
     progress = service.get_download_progress(model_id)
     if progress is not None:
         response.download_progress = progress
-    return ApiResponse.ok(_with_runtime(response, service.get_loaded_model_info()))
+    return ApiResponse.ok(
+        _with_lease(_with_runtime(response, service.get_loaded_model_info()))
+    )
 
 
 @router.delete(
@@ -160,6 +191,7 @@ async def load_model(
     model_id: ModelId,
     service: ModelServiceDep,
     request: Annotated[ModelLoadRequest | None, Body()] = None,
+    x_millm_lease: LeaseHeader = None,
 ) -> ApiResponse[ModelResponse]:
     """
     Load a model into GPU memory.
@@ -169,8 +201,14 @@ async def load_model(
 
     The body is optional: without one (or with `gpu` null / "auto") the model
     goes on the card with the most free memory that fits.
+
+    Feature 29: refused with 409 MODEL_LEASED while another holder leases the resident model;
+    the holder sends its lease ID in `X-miLLM-Lease`. `X-miLLM-Load-Policy` has no effect here
+    — this route loads by explicit request (FR-29.4.6).
     """
-    model = await service.load_model(model_id, gpu=request.gpu if request else None)
+    model = await service.load_model(
+        model_id, gpu=request.gpu if request else None, lease_id=x_millm_lease
+    )
     return ApiResponse.ok(ModelResponse.from_model(model))
 
 
@@ -183,13 +221,15 @@ async def load_model(
 async def unload_model(
     model_id: ModelId,
     service: ModelServiceDep,
+    x_millm_lease: LeaseHeader = None,
 ) -> ApiResponse[ModelResponse]:
     """
     Unload a model from GPU memory.
 
-    Waits for any pending inference requests to complete before unloading.
+    Waits for any pending inference requests to complete before unloading. Refused with
+    409 MODEL_LEASED while another holder leases the model (Feature 29).
     """
-    model = await service.unload_model(model_id)
+    model = await service.unload_model(model_id, lease_id=x_millm_lease)
     return ApiResponse.ok(ModelResponse.from_model(model))
 
 
@@ -370,3 +410,81 @@ async def preview_model(
     )
 
     return ApiResponse.ok(preview)
+
+
+# =============================================================================
+# Model lease (Feature 29, 029 FTDD §5.1)
+# =============================================================================
+
+
+@router.post(
+    "/{model_id}/lease",
+    response_model=ApiResponse[LeaseGrantResponse],
+    status_code=201,
+    summary="Lease the resident model",
+    description=(
+        "Pin the resident model for a holder until the TTL (default and maximum 7200 s). "
+        "The response is the only one that carries lease_id; send it as X-miLLM-Lease."
+    ),
+)
+async def acquire_lease(
+    model_id: ModelId,
+    body: LeaseCreateRequest,
+    service: ModelServiceDep,
+) -> ApiResponse[LeaseGrantResponse]:
+    grant = await service.acquire_lease(
+        model_id, body.holder, body.reason, ttl_seconds=body.ttl_seconds
+    )
+    return ApiResponse.ok(lease_grant_response(grant.lease_id, grant.record))
+
+
+@router.get(
+    "/{model_id}/lease",
+    response_model=ApiResponse[LeaseStatusEnvelope],
+    summary="Read the lease on a model",
+    description="The live lease (or null) and the last one that ended. Never the lease ID.",
+)
+async def get_lease(
+    model_id: ModelId,
+    service: ModelServiceDep,
+) -> ApiResponse[LeaseStatusEnvelope]:
+    live, ended = await service.get_lease(model_id)
+    return ApiResponse.ok(
+        LeaseStatusEnvelope(
+            lease=lease_summary(live) if live is not None else None,
+            last_ended=ended_lease_response(ended) if ended is not None else None,
+        )
+    )
+
+
+@router.post(
+    "/{model_id}/lease/renew",
+    response_model=ApiResponse[LeaseStatusResponse],
+    summary="Renew a lease",
+    description="New expiry = now + ttl_seconds. The lease ID travels in X-miLLM-Lease.",
+)
+async def renew_lease(
+    model_id: ModelId,
+    service: ModelServiceDep,
+    x_millm_lease: LeaseHeader = None,
+    body: Annotated[LeaseRenewRequest | None, Body()] = None,
+) -> ApiResponse[LeaseStatusResponse]:
+    record = await service.renew_lease(
+        model_id, x_millm_lease, ttl_seconds=body.ttl_seconds if body else None
+    )
+    return ApiResponse.ok(lease_summary(record))
+
+
+@router.delete(
+    "/{model_id}/lease",
+    response_model=ApiResponse[EndedLeaseResponse],
+    summary="Release a lease",
+    description="End the lease at once. The lease ID travels in X-miLLM-Lease.",
+)
+async def release_lease(
+    model_id: ModelId,
+    service: ModelServiceDep,
+    x_millm_lease: LeaseHeader = None,
+) -> ApiResponse[EndedLeaseResponse]:
+    ended = await service.release_lease(model_id, x_millm_lease)
+    return ApiResponse.ok(ended_lease_response(ended))

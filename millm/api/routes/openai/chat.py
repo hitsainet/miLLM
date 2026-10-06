@@ -8,9 +8,9 @@ Requires a model to already be loaded via the Management API.
 """
 
 import asyncio
-from typing import Union
+from typing import Annotated, Union
 
-from fastapi import APIRouter, Depends, Request, Response
+from fastapi import APIRouter, Depends, Header, Request, Response
 from fastapi.responses import JSONResponse, StreamingResponse
 
 from millm.api import json_schema_subset
@@ -21,6 +21,7 @@ from millm.api.request_policy import (
     apply_request_policy,
     ignored_fields_header,
 )
+from millm.api.routes.openai.load_policy import apply_load_policy, parse_load_policy
 from millm.api.routes.openai.errors import (
     embedding_model_error,
     is_embedding_only,
@@ -121,6 +122,8 @@ async def create_chat_completion(
     response: Response,
     http_request: Request,
     inference: InferenceService = Depends(get_inference_service),
+    x_millm_lease: Annotated[str | None, Header(alias="X-miLLM-Lease")] = None,
+    x_millm_load_policy: Annotated[str | None, Header(alias="X-miLLM-Load-Policy")] = None,
 ) -> Union[ChatCompletionResponse, StreamingResponse, JSONResponse]:
     """
     Create a chat completion.
@@ -177,10 +180,19 @@ async def create_chat_completion(
     # change: swapping the weights out from under an attached SAE would leave
     # the steering vectors pointing at a different model. load_model_and_wait
     # raises ModelLockedError for that, and only that.
+    # Feature 29: `X-miLLM-Load-Policy: refuse` promises this request never causes a swap.
+    # After the pre-load refusals above, before the auto-load below (FR-29.4.5).
+    load_policy = parse_load_policy(x_millm_load_policy)
+    policy_refusal = await apply_load_policy(load_policy, model, inference, service)
+    if policy_refusal is not None:
+        return policy_refusal
+
     model_info = inference.get_loaded_model_info()
     if not model_info or model_info.name != request.model:
         try:
-            await service.load_model_and_wait(model.id)
+            # The holder's lease ID lifts a lease refusal on the swap; a foreign lease answers
+            # 409 model_leased through load_refused_error below (never model_locked).
+            await service.load_model_and_wait(model.id, lease_id=x_millm_lease)
         except ModelLockedError as exc:
             locked_name = (exc.details or {}).get("locked_model_name")
             if not locked_name:
@@ -189,7 +201,8 @@ async def create_chat_completion(
             return model_locked_error(request.model, locked_name)
         except ModelBusyError as exc:
             return model_busy_error(
-                f"{exc}. Retry once it finishes before requesting '{request.model}'."
+                f"{exc}. Retry once it finishes before requesting '{request.model}'.",
+                exc.details,
             )
         except asyncio.TimeoutError:
             return server_error(

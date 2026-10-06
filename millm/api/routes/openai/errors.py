@@ -29,6 +29,7 @@ def create_openai_error(
     code: Optional[str] = None,
     param: Optional[str] = None,
     status_code: int = 500,
+    retry_after: Optional[int] = None,
 ) -> JSONResponse:
     """
     Create OpenAI-format error response.
@@ -40,6 +41,9 @@ def create_openai_error(
         code: Machine-readable error code (e.g., "model_not_found")
         param: Parameter that caused the error (e.g., "model")
         status_code: HTTP status code
+        retry_after: Seconds for a `Retry-After` HEADER (Feature 29: every 503 carries one,
+            from `backpressure.retry_after_for`). Never a body field: the envelope stays
+            exactly OpenAI's (FR-29.6.4).
 
     Returns:
         JSONResponse with OpenAI error format
@@ -54,6 +58,7 @@ def create_openai_error(
                 "code": code,
             }
         },
+        headers={"Retry-After": str(retry_after)} if retry_after else None,
     )
 
 
@@ -207,11 +212,17 @@ async def openai_exception_handler(request: Request, exc: MiLLMError) -> JSONRes
 
 def model_not_loaded_error() -> JSONResponse:
     """Create error response for when no model is loaded."""
+    from millm.core.backpressure import retry_after_for
+
     return create_openai_error(
-        message="No model is currently loaded. Load a model first using the Management API.",
+        message=(
+            "No model is currently loaded. Load a model first using the Management API; "
+            "a retry succeeds only after a model is loaded."
+        ),
         error_type="server_error",
         code="model_not_loaded",
         status_code=503,
+        retry_after=retry_after_for("MODEL_NOT_LOADED"),
     )
 
 
@@ -378,16 +389,19 @@ def load_refused_error(model_id: str, exc: MiLLMError) -> JSONResponse:
     Codes without a row keep their own status, typed server_error — the fallback
     millm_error_handler uses.
     """
+    from millm.core.backpressure import retry_after_for
+
     status_code, error_type = ERROR_STATUS_MAP.get(exc.code, (exc.status_code, "server_error"))
     return create_openai_error(
         message=f"Could not load '{model_id}': {exc}",
         error_type=error_type,
         code=exc.code.lower() if exc.code else None,
         status_code=status_code,
+        retry_after=retry_after_for(exc.code, exc.details) if status_code == 503 else None,
     )
 
 
-def model_busy_error(message: str) -> JSONResponse:
+def model_busy_error(message: str, details: Optional[dict] = None) -> JSONResponse:
     """A request that will succeed once a load or unload in progress finishes: 503 model_busy.
 
     The same answer millm_error_handler gives a ModelBusyError raised past the
@@ -395,12 +409,17 @@ def model_busy_error(message: str) -> JSONResponse:
     found it. It was a 500 server_error from the route and, for a request that
     caught its model mid-unload, a 500 device-mismatch error (hardware
     acceptance, 2026-09-14, item 11).
+
+    `details` are the ModelBusyError's: an unload in progress gets the shorter Retry-After.
     """
+    from millm.core.backpressure import retry_after_for
+
     return create_openai_error(
         message=message,
         error_type="server_error",
         code="model_busy",
         status_code=503,
+        retry_after=retry_after_for("MODEL_BUSY", details),
     )
 
 

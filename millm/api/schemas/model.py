@@ -8,6 +8,7 @@ from typing import Annotated, Any
 from pydantic import BaseModel, Field, field_validator, model_validator
 
 from millm.db.models.model import ModelSource, ModelStatus, QuantizationType
+from millm.api.schemas.lease import LeaseSummary
 
 
 class ModelDownloadRequest(BaseModel):
@@ -418,6 +419,13 @@ class ModelResponse(BaseModel):
     placement: ModelPlacement | None = Field(
         default=None,
         description="Card(s) the model is on and per-card memory (only available when loaded)",
+    )
+    lease: LeaseSummary | None = Field(
+        default=None,
+        description=(
+            "The live lease on this model (Feature 29): holder, reason, expiry. Never the "
+            "lease ID. Null when the model is not leased."
+        ),
     )
 
     model_config = {"from_attributes": True}

@@ -148,24 +148,24 @@ T-84 – T-90
   - [x] 4.5 Test the self-healing read: empty the loader without calling `unload_model` (the forced
         path), assert the lease reads as none.
 
-- [ ] 5.0 Lease routes, headers and the refuse-load policy (covers FR-29.1.5 – FR-29.1.8, FR-29.3,
+- [x] 5.0 Lease routes, headers and the refuse-load policy (covers FR-29.1.5 – FR-29.1.8, FR-29.3,
       FR-29.4, FR-29.4.1 – FR-29.4.6, FR-29.5.3)
-  - [ ] 5.1 Add `millm/api/schemas/lease.py` (`extra="forbid"`; no `lease_id` on any response but the
+  - [x] 5.1 Add `millm/api/schemas/lease.py` (`extra="forbid"`; no `lease_id` on any response but the
         grant) and the single `lease_summary` serialiser.
-  - [ ] 5.2 Add the four lease routes on the management models router (FTDD §5.1); lease ID read from
+  - [x] 5.2 Add the four lease routes on the management models router (FTDD §5.1); lease ID read from
         `X-miLLM-Lease` on renew and release; a lease ID for another model answers `404`.
-  - [ ] 5.3 Pass `X-miLLM-Lease` from `POST /api/models/{id}/load` and `/unload` to the service.
-  - [ ] 5.4 Implement `load_policy.parse_load_policy` and `apply_load_policy` (FTID §3.4): `auto`
+  - [x] 5.3 Pass `X-miLLM-Lease` from `POST /api/models/{id}/load` and `/unload` to the service.
+  - [x] 5.4 Implement `load_policy.parse_load_policy` and `apply_load_policy` (FTID §3.4): `auto`
         default; invalid value `400`; not resident → `409 model_not_resident` with the resident
         model and its lease summary; model loading now → `503 model_loading` with `Retry-After`.
-  - [ ] 5.5 Wire both headers into the three `/v1` routes; call `apply_load_policy` after the
+  - [x] 5.5 Wire both headers into the three `/v1` routes; call `apply_load_policy` after the
         existing pre-load refusals and before the auto-load; pass `lease_id` to
         `load_model_and_wait`.
-  - [ ] 5.6 Add `ModelResponse.lease` and `_with_lease` on the list and single-model routes.
-  - [ ] 5.7 Tests (routes): 201 grant carries `lease_id`; `GET`, renew, release, `ModelResponse` and
+  - [x] 5.6 Add `ModelResponse.lease` and `_with_lease` on the list and single-model routes.
+  - [x] 5.7 Tests (routes): 201 grant carries `lease_id`; `GET`, renew, release, `ModelResponse` and
         health never carry it (control M12); renew sets new expiry; release ends; 404/409 bodies;
         `400` for each bad TTL and text; reachability in `app.openapi()["paths"]`.
-  - [ ] 5.8 Tests (policy, integration): on each of the three routes, `refuse` + non-resident → `409`
+  - [x] 5.8 Tests (policy, integration): on each of the three routes, `refuse` + non-resident → `409`
         and load call count 0; `refuse` + loading → `503` with `Retry-After`; absent header
         auto-loads as today; invalid header `400`; the GGUF and embedding-only refusals still come
         first; AST test that each route calls `apply_load_policy` before `load_model_and_wait`.

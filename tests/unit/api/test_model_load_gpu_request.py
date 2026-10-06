@@ -86,29 +86,29 @@ class TestTheRoute:
         svc = self._service()
         response = _client(svc).post("/api/models/3/load", json={"gpu": 1})
         assert response.status_code == 202, response.text
-        svc.load_model.assert_awaited_once_with(3, gpu=1)
+        svc.load_model.assert_awaited_once_with(3, gpu=1, lease_id=None)
 
     def test_a_uuid_reaches_the_service_normalised(self):
         svc = self._service()
         _client(svc).post("/api/models/3/load", json={"gpu": NODE_UUIDS[1][4:]})
-        svc.load_model.assert_awaited_once_with(3, gpu=NODE_UUIDS[1])
+        svc.load_model.assert_awaited_once_with(3, gpu=NODE_UUIDS[1], lease_id=None)
 
     def test_no_body_is_auto(self):
         svc = self._service()
         response = _client(svc).post("/api/models/3/load")
         assert response.status_code == 202, response.text
-        svc.load_model.assert_awaited_once_with(3, gpu=None)
+        svc.load_model.assert_awaited_once_with(3, gpu=None, lease_id=None)
 
     def test_auto_is_auto(self):
         svc = self._service()
         _client(svc).post("/api/models/3/load", json={"gpu": "auto"})
-        svc.load_model.assert_awaited_once_with(3, gpu=None)
+        svc.load_model.assert_awaited_once_with(3, gpu=None, lease_id=None)
 
     def test_all_reaches_the_service(self):
         svc = self._service()
         response = _client(svc).post("/api/models/3/load", json={"gpu": "all"})
         assert response.status_code == 202, response.text
-        svc.load_model.assert_awaited_once_with(3, gpu="all")
+        svc.load_model.assert_awaited_once_with(3, gpu="all", lease_id=None)
 
     def test_a_malformed_card_is_422_and_nothing_loads(self):
         svc = self._service()

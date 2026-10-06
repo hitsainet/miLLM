@@ -1227,6 +1227,8 @@ class InferenceService:
             "temperature": getattr(request, "temperature", None),
             "top_p": getattr(request, "top_p", None),
             "has_steering_override": self._has_steering_override(request),
+            # FR-27.1g: a CBM batch row cannot be attributed to one request's positions.
+            "wants_activations": getattr(request, "return_sae_activations", None) is not None,
             "n": _request_n(request),
             "seeded": _request_seed(request) is not None,
             "constrained": _constraint_type(getattr(request, "response_format", None)) is not None,
@@ -1246,6 +1248,7 @@ class InferenceService:
         seeded: bool = False,
         constrained: bool = False,
         penalised: bool = False,
+        wants_activations: bool = False,
     ) -> bool:
         """
         Whether to route this specific request through the CBM backend.
@@ -1297,6 +1300,7 @@ class InferenceService:
             (seeded, "seeded_request"),
             (constrained, "constrained_output"),
             (penalised, "repetition_penalty"),
+            (wants_activations, "return_sae_activations"),
         ):
             if flag:
                 logger.info("cbm_routing_fallback_to_serial", reason=reason)
@@ -1468,6 +1472,85 @@ class InferenceService:
             from millm.services.sae_service import AttachedSAEState
             return AttachedSAEState().attached_sae
         except Exception:
+            return None
+
+    def count_prompt_tokens(self, request: Any, *, chat: bool) -> int:
+        """The request's prompt length, tokenized as the path that will serve it does — for the
+        pre-generation activation cap (FR-27.2f). Scoring renders without special tokens for chat
+        (a template carries its own BOS) and honours `add_special_tokens` for text."""
+        scoring = bool(getattr(request, "wants_scores", lambda: False)())
+        if chat:
+            text = self._format_chat_messages(request.messages, request.chat_template_kwargs)
+            special = not scoring
+        else:
+            prompt = request.prompt
+            text = prompt[0] if isinstance(prompt, list) else prompt
+            special = bool(getattr(request, "add_special_tokens", True)) if scoring else True
+        return len(self._tokenizer(text, add_special_tokens=special)["input_ids"])
+
+    def _activations_begin(self, request: Any, n_prompt: int, read_point: Optional[str] = None):
+        """Open this request's activation capture, if it asked for one. Never raises.
+
+        Validation that should REFUSE a request (no matching SAE, shape, caps) runs in the route,
+        before the slot (`request_activations.validate_request`); this seam only observes. The
+        owner token goes into this task's context, which `asyncio.to_thread` copies into the
+        worker that runs the forward — the SAE hook feeds the capture only from that context.
+        """
+        spec = getattr(request, "return_sae_activations", None)
+        if spec is None:
+            return None
+        try:
+            from millm.core.config import settings as _settings
+            from millm.services.request_activations import (
+                CAPTURE_OWNER,
+                RequestActivationCapture,
+                select_sae,
+            )
+            from millm.services.sae_service import AttachedSAEState
+
+            entry = select_sae(spec, AttachedSAEState().entries())
+            capture = RequestActivationCapture(
+                spec=spec, n_prompt=int(n_prompt), sae=entry.sae, sae_id=entry.sae_id,
+                layer=entry.layer, read_point=read_point or spec.read_point,
+                encode_chunk=int(_settings.SAE_ACTIVATIONS_ENCODE_CHUNK),
+            )
+            entry.sae.begin_request_capture(capture)
+            CAPTURE_OWNER.set(capture.owner)
+            return capture
+        except Exception as exc:  # noqa: BLE001 - an observer never fails a request
+            logger.warning("sae_activations_begin_failed", error=str(exc))
+            return None
+
+    def _activations_close(self, capture) -> None:
+        """Close `capture` if it is still open on its SAE. Idempotent; never raises."""
+        if capture is None:
+            return
+        try:
+            from millm.services.request_activations import CAPTURE_OWNER
+
+            if capture.sae.request_capture is capture:
+                capture.sae.end_request_capture()
+            if CAPTURE_OWNER.get() == capture.owner:
+                CAPTURE_OWNER.set(None)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("sae_activations_close_failed", error=str(exc))
+
+    def _activations_finish(self, capture, full_ids) -> Optional[Any]:
+        """Close the capture and build the response's `millm` object. Never raises."""
+        if capture is None:
+            return None
+        self._activations_close(capture)
+        try:
+            from millm.api.schemas.millm_extension import MillmExtension
+
+            block = capture.build(full_ids)
+            logger.debug(
+                "sae_activations", sae=capture.sae_id, positions=len(block["positions"]),
+                entries=sum(len(p["features"]) for p in block["positions"]),
+            )
+            return MillmExtension(sae_activations=block)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("sae_activations_finish_failed", error=str(exc))
             return None
 
     def _close_request_captures(self, reason: str) -> int:
@@ -4059,6 +4142,8 @@ class InferenceService:
                         request_id=completion_id,
                     )
             _sensing_full_ids = None
+            _activations = None
+            _millm = None
 
             try:
                 # Tokenize input
@@ -4070,6 +4155,8 @@ class InferenceService:
                 )
                 _sensing_full_ids = inputs.input_ids  # prefill-only fallback
                 self._sensing_mark_history(_sensing_sae, inputs.input_ids)
+                # Feature 27: this request's own activations (n == 1; the route refuses n > 1).
+                _activations = self._activations_begin(request, prompt_tokens)
 
                 # Build generation config
                 gen_config = GenerationConfig.from_request(request)
@@ -4152,7 +4239,9 @@ class InferenceService:
                 # `X-miLLM-Probe-Verdicts`. A verdict computed in the `finally` would exist only
                 # after the response had already been handed back.
                 _probe_verdicts = self._probe_finish(_probe_ctx)
+                _millm = self._activations_finish(_activations, _sensing_full_ids)
             finally:
+                self._activations_close(_activations)
                 # Restore steering to its pre-request state regardless of success/failure.
                 self._restore_request_profile(_saved_steering)
                 # Flush sensing hits (post-generation, inside the semaphore
@@ -4175,6 +4264,7 @@ class InferenceService:
                 completion_tokens=total_completion_tokens,
                 total_tokens=total_prompt_tokens + total_completion_tokens,
             ),
+            millm=_millm,
         )
 
     @staticmethod
@@ -4869,6 +4959,7 @@ class InferenceService:
             _sensing_sae = self._sensing_begin(completion_id)
             _circuit_sensing = self._circuit_sensing_begin(completion_id)
             _id_capture = None
+            _activations = None
 
             # Setup runs BEFORE the try/finally below that restores the
             # per-request steering, so any exception in this window
@@ -4884,6 +4975,7 @@ class InferenceService:
                     _probe_ctx, request.messages, inputs["input_ids"], request.chat_template_kwargs
                 )
                 self._sensing_mark_history(_sensing_sae, inputs["input_ids"])
+                _activations = self._activations_begin(request, prompt_tokens)
 
                 # Set up streamer
                 streamer = TextIteratorStreamer(
@@ -4919,6 +5011,7 @@ class InferenceService:
                     _sensing_sae is not None
                     or _circuit_sensing is not None
                     or _probe_ctx is not None
+                    or _activations is not None
                 ) and stopping_criteria is not None:
                     _id_capture = _make_id_capture_criteria()
                     if _id_capture is not None:
@@ -4929,10 +5022,16 @@ class InferenceService:
                 thread = Thread(
                     target=self._generate_in_thread,
                     args=(generation_kwargs, thread_error),
-                    kwargs=_seed_kwargs(gen_config),
+                    # A plain Thread does not copy the caller's context, so the capture's owner
+                    # is handed over explicitly (Feature 27): without it the hook would see no
+                    # owner and this request's activations would never be recorded.
+                    kwargs={**_seed_kwargs(gen_config),
+                            **({"capture_owner": _activations.owner}
+                               if _activations is not None else {})},
                 )
                 thread.start()
             except BaseException as setup_error:
+                self._activations_close(_activations)
                 self._restore_request_profile(_saved_steering)
                 # Close the sensing boundary too — a stale open boundary
                 # would let later non-begin passes sense with garbage
@@ -5143,6 +5242,21 @@ class InferenceService:
                     _probe_verdicts, completion_id, created, model_name
                 ):
                     yield _probe_extra
+                # T-76: the activations, in ONE `choices: []` chunk AFTER the probe chunk and
+                # before [DONE]. Read from the captured ids, which include generated tokens.
+                if _activations is not None:
+                    _act_ids = (_id_capture.latest_ids
+                                if _id_capture is not None and _id_capture.latest_ids is not None
+                                else inputs["input_ids"])
+                    _millm = self._activations_finish(_activations, _act_ids)
+                    if _millm is not None:
+                        import json as _act_json
+
+                        yield "data: " + _act_json.dumps({
+                            "id": completion_id, "object": "chat.completion.chunk",
+                            "created": created, "model": model_name, "choices": [],
+                            "millm": _millm.model_dump(),
+                        }) + "\n\n"
                 yield "data: [DONE]\n\n"
 
             except Exception as e:
@@ -5173,6 +5287,7 @@ class InferenceService:
                 # request's window).
                 stop_event.set()
                 thread.join(timeout=5.0)
+                self._activations_close(_activations)
                 if thread.is_alive():
                     # The generation thread did not finish within 5 seconds.  This
                     # typically means model.generate() is stuck (CUDA deadlock, OOM
@@ -5327,6 +5442,8 @@ class InferenceService:
             if _probe_ctx is not None and len(prompts) > 1:
                 _probe_ctx.mark_not_scored("batched_request")
             _sensing_full_ids = None
+            _activations = None
+            _millm = None
 
             try:
                 for i, prompt_text in enumerate(prompts):
@@ -5341,6 +5458,9 @@ class InferenceService:
                         _probe_ctx.set_last_user_span(None, "text_completion_has_no_user_turn")
                     self._sensing_mark_history(_sensing_ctx, inputs.input_ids)
                     self._check_context_length(prompt_tokens, gen_config.max_new_tokens)
+                    # Feature 27: one prompt only (the route refuses several, T-76).
+                    if i == 0:
+                        _activations = self._activations_begin(request, prompt_tokens)
 
                     # Generate - offload to thread to avoid blocking the event loop
                     generate_kwargs = self._build_generate_kwargs(
@@ -5398,7 +5518,9 @@ class InferenceService:
                 if gen_config.seed is not None:
                     note_request_outcome(seed_scope=self._seed_scope(SEED_SCOPE_REQUEST))
                 _probe_verdicts = self._probe_finish(_probe_ctx)
+                _millm = self._activations_finish(_activations, _sensing_full_ids)
             finally:
+                self._activations_close(_activations)
                 await self._notify_sensing(_sensing_ctx, _sensing_full_ids)
                 await self._notify_circuit_sensing(_circuit_sensing, _sensing_full_ids)
                 await self._probe_record(_probe_ctx, _probe_verdicts, full_ids=_sensing_full_ids)
@@ -5416,6 +5538,7 @@ class InferenceService:
                 completion_tokens=total_completion_tokens,
                 total_tokens=total_prompt_tokens + total_completion_tokens,
             ),
+            millm=_millm,
         )
 
     async def _score_text_completion(
@@ -5455,6 +5578,8 @@ class InferenceService:
                 allowed=request.allowed_token_ids,
                 temperature=request.temperature,
                 top_k=request.logprobs or 0,
+                activations_request=request,
+                millm_out=(_millm_out := []),
             )
             for index, (prompt_text, (scores, prompt_tokens)) in enumerate(zip(prompts, scored, strict=True)):
                 choices.append(
@@ -5477,7 +5602,9 @@ class InferenceService:
         if request.seed is not None:
             note_request_outcome(seed_scope=SEED_SCOPE_REQUEST)  # scoring is deterministic
         model_info = self.get_loaded_model_info()
+        _millm = next((m for m in _millm_out if m is not None), None)
         return TextCompletionResponse(
+            millm=_millm,
             id=completion_id,
             created=created,
             model=model_info.name if model_info else "unknown",
@@ -5538,6 +5665,8 @@ class InferenceService:
                 temperature=request.temperature,
                 top_k=top_n,
                 label="conversation",
+                activations_request=request,
+                millm_out=(_millm_out := []),
             )
 
             def key(token_id: int, decoded: str) -> str:
@@ -5571,7 +5700,9 @@ class InferenceService:
         if request.seed is not None:
             note_request_outcome(seed_scope=SEED_SCOPE_REQUEST)  # scoring is deterministic
         model_info = self.get_loaded_model_info()
+        _millm = next((m for m in _millm_out if m is not None), None)
         return ChatCompletionResponse(
+            millm=_millm,
             id=completion_id,
             created=created,
             model=model_info.name if model_info else "unknown",
@@ -5592,6 +5723,8 @@ class InferenceService:
         temperature: float,
         top_k: int,
         label: str = "prompt",
+        activations_request: Any = None,
+        millm_out: Optional[list] = None,
     ) -> list[tuple[Any, int]]:
         """THE scorer: one unsteered forward pass per text, in order; `(NextTokenScores,
         prompt_tokens)` for each. Chat and completion scoring BOTH call this, so the arithmetic
@@ -5623,9 +5756,22 @@ class InferenceService:
                         f"{label} {index} tokenises to nothing, so there is no position to score"
                     )
                 self._check_context_length(prompt_tokens, 1)
-                # Suppression is entered INSIDE the worker thread (`_unsteered_next_token_logits`);
-                # entered around this await it would suppress nothing there.
-                logits = await asyncio.to_thread(self._unsteered_next_token_logits, inputs)
+                # Feature 27 (FR-27.3): activations in scoring mode are read UNSTEERED — every SAE
+                # is suppressed in the worker, and the capture still records under suppression.
+                # `last` is the last prompt position, the one whose distribution is scored.
+                capture = (
+                    self._activations_begin(activations_request, prompt_tokens, "unsteered")
+                    if activations_request is not None and index == 0 else None
+                )
+                try:
+                    # Suppression is entered INSIDE the worker thread
+                    # (`_unsteered_next_token_logits`); around this await it would suppress
+                    # nothing there.
+                    logits = await asyncio.to_thread(self._unsteered_next_token_logits, inputs)
+                    if capture is not None and millm_out is not None:
+                        millm_out.append(self._activations_finish(capture, inputs.input_ids))
+                finally:
+                    self._activations_close(capture)
                 # The vocabulary is what the model actually scores — its logits — not a config
                 # field or an embedding matrix some wrappers do not expose (review round 1).
                 vocab = int(logits.shape[-1])
@@ -6177,7 +6323,11 @@ class InferenceService:
         raise refusal
 
     def _generate_in_thread(
-        self, generation_kwargs: dict, errors: Optional[list] = None, seed: Optional[int] = None
+        self,
+        generation_kwargs: dict,
+        errors: Optional[list] = None,
+        seed: Optional[int] = None,
+        capture_owner: Optional[str] = None,
     ) -> None:
         """
         Run generation in thread for streaming.
@@ -6195,6 +6345,12 @@ class InferenceService:
         GenerationOutOfMemoryError, after its memory is released.
         """
         failure: Optional[Exception] = None
+        if capture_owner is not None:
+            # This plain Thread starts with an empty context; the request's capture owner is set
+            # here so the SAE hook may feed that request's activations (Feature 27).
+            from millm.ml.sae_wrapper import CAPTURE_OWNER
+
+            CAPTURE_OWNER.set(capture_owner)
         try:
             with seeded_rng(seed), torch.no_grad():
                 self._model.generate(**generation_kwargs)

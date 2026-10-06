@@ -20,6 +20,8 @@ from typing import Annotated, Any, Literal, Optional, Union
 
 from pydantic import BaseModel, Field, ValidationInfo, field_validator, model_validator
 
+from millm.api.schemas.millm_extension import MillmExtension, ReturnSaeActivations
+
 
 # =============================================================================
 # Message Types
@@ -363,6 +365,10 @@ class ChatCompletionRequest(BaseModel):
             raise ValueError("steering_intensity must be within [0, 2]")
         return v
 
+    #: Feature 27 (FR-27.1): this request's own SAE activations, in the response's `millm` object.
+    #: Declared, so Feature 25's policy knows it (never reported as an ignored field).
+    return_sae_activations: Optional[ReturnSaeActivations] = None
+
     model_config = {"extra": "allow"}
 
     @model_validator(mode="after")
@@ -444,6 +450,9 @@ class TextCompletionRequest(BaseModel):
     #: Reproducible sampling (FR-25.13). Applied per prompt — each prompt is its own generate(),
     #: so prompt i's output does not depend on prompt i-1's length (FTID I7).
     seed: Optional[int] = Field(default=None, ge=0, le=SEED_MAX)
+    #: Feature 27 (FR-27.1): this request's own SAE activations, in the response's `millm` object.
+    #: Declared, so Feature 25's policy knows it (never reported as an ignored field).
+    return_sae_activations: Optional[ReturnSaeActivations] = None
 
     model_config = {"extra": "allow"}
 
@@ -589,6 +598,9 @@ class ChatCompletionResponse(BaseModel):
     usage: Usage
     #: model, revision, precision and engine (FR-25.13.8-13.10); set by the route.
     system_fingerprint: Optional[str] = Field(default=None, exclude_if=lambda v: v is None)
+    #: Feature 27: the `millm` extension object. OMITTED when absent, so a client that asked for
+    #: nothing new receives exactly the body it did before (FR-27.1e).
+    millm: Optional[MillmExtension] = Field(default=None, exclude_if=lambda v: v is None)
 
 
 # =============================================================================
@@ -678,6 +690,9 @@ class TextCompletionResponse(BaseModel):
     usage: Usage
     #: model, revision, precision and engine (FR-25.13.8-13.10); set by the route.
     system_fingerprint: Optional[str] = Field(default=None, exclude_if=lambda v: v is None)
+    #: Feature 27: the `millm` extension object. OMITTED when absent, so a client that asked for
+    #: nothing new receives exactly the body it did before (FR-27.1e).
+    millm: Optional[MillmExtension] = Field(default=None, exclude_if=lambda v: v is None)
 
 
 # =============================================================================

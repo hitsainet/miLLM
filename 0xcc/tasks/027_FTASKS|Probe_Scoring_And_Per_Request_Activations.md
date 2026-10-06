@@ -184,32 +184,32 @@
   - [x] 5.4 Confirm P-20 on the live path: `probe_events.provisional` is written for a provisional
         window (`db/models/probe.py:200`); existing test or add one.
 
-- [ ] 6.0 Per-request SAE activations (covers FR-27.1, FR-27.2, FR-27.3)
-  - [ ] 6.1 Schemas: `ReturnSaeActivations` (`extra="forbid"`, positions union, `read_point`), and
+- [x] 6.0 Per-request SAE activations (covers FR-27.1, FR-27.2, FR-27.3)
+  - [x] 6.1 Schemas: `ReturnSaeActivations` (`extra="forbid"`, positions union, `read_point`), and
         `MillmExtension` in its own module; `millm` on both responses, omitted when `None` by a wrap
         serializer. Test a response without the field serialises byte-identical to today's.
-  - [ ] 6.2 `LoadedSAE.begin_request_capture` / `end_request_capture`, refusing a second open capture;
+  - [x] 6.2 `LoadedSAE.begin_request_capture` / `end_request_capture`, refusing a second open capture;
         hook calls before and after `apply_steering` (`sae_hooker.py:186-211`), running under
         suppression too. Tests: pre vs post differ when this layer steers; under suppression the capture
         still records and reports `unsteered`.
-  - [ ] 6.3 `RequestActivationCapture`: position resolution (`last`, `prompt`, `completion`, `all`,
+  - [x] 6.3 `RequestActivationCapture`: position resolution (`last`, `prompt`, `completion`, `all`,
         range); offset advances by the full pass width; the final sampled token is not reported;
         `features` then `top_k`; scoring mode's `last` is the last prompt position (FR-27.3c). Tests for
         each.
-  - [ ] 6.4 Route-level refusals before the slot: no matching SAE (`SAENotAttachedError`), ambiguous SAE
+  - [x] 6.4 Route-level refusals before the slot: no matching SAE (`SAENotAttachedError`), ambiguous SAE
         (names candidates), `n > 1`, `extra_messages`, several prompts (T-76), llama.cpp, feature index
         out of range, `top_k` over cap, worst-case entries over cap (FR-27.2f). Test each, and that no
         generation ran.
-  - [ ] 6.5 Chunked encode and one host copy per pass. Test with a wide fake SAE that encode is called
+  - [x] 6.5 Chunked encode and one host copy per pass. Test with a wide fake SAE that encode is called
         in chunks of `SAE_ACTIVATIONS_ENCODE_CHUNK`.
-  - [ ] 6.6 Wire the seams into the serial chat, streaming chat and text paths, and scoring mode. Serial
+  - [x] 6.6 Wire the seams into the serial chat, streaming chat and text paths, and scoring mode. Serial
         routing for activation requests (as `_has_steering_override`, `inference_service.py:945-957`).
         Register the field with Feature 25's known-field set. Removal tests per seam (payload + count).
-  - [ ] 6.7 Streaming: one `choices: []` chunk with `millm` after the probe chunk and before `[DONE]`
+  - [x] 6.7 Streaming: one `choices: []` chunk with `millm` after the probe chunk and before `[DONE]`
         (T-76). Test the order.
-  - [ ] 6.8 Isolation (BRD-04 acceptance 10): two interleaved requests each get only their own
+  - [x] 6.8 Isolation (BRD-04 acceptance 10): two interleaved requests each get only their own
         positions. **M18** (capture never cleared) and **M19** (read point ignored) → red. Record.
-  - [ ] 6.9 The response `note` states the read point is not a counterfactual (FR-27.2e, T-77). Test the
+  - [x] 6.9 The response `note` states the read point is not a counterfactual (FR-27.2e, T-77). Test the
         text is present.
 
 - [ ] 7.0 Configuration, contracts and documentation (covers FR-27.4g, FR-27.10e)

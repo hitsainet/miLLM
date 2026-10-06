@@ -165,6 +165,12 @@ async def create_completion(
         if model_info.name != request.model:
             return model_not_found_error(request.model, model_info.name)
 
+    # Feature 27: every `return_sae_activations` refusal, after the model is resident and before
+    # any slot or generation (FR-27.1i, FR-27.2). A refused request never generated anything.
+    from millm.services.request_activations import refuse_before_generation
+
+    refuse_before_generation(request, inference, chat=False)
+
     logger.info(
         "text_completion_request",
         model=request.model,
@@ -190,4 +196,9 @@ async def create_completion(
     probe_header = build_probe_verdicts_header(get_probe_verdicts())
     if probe_header:
         response.headers["X-miLLM-Probe-Verdicts"] = probe_header
+    if request.wants_scores() and request.return_sae_activations is not None:
+        # X-09: scoring is always unsteered, and a scoring response carrying activations says so
+        # in the header as well as in `read_point: "unsteered"` (FTDD §5.3; 028 owns the header
+        # on every other response).
+        response.headers["X-miLLM-Steering"] = "none"
     return result

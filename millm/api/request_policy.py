@@ -130,6 +130,9 @@ _PENDING = refused("not implemented on this endpoint yet")
 _STEER_LC = refused("steering needs forward hooks on a PyTorch module tree; llama.cpp has none")
 _STEER_CHAT_ONLY = refused("steering profiles and the intensity dial apply to /v1/chat/completions")
 _NEVER_STEERED = refused("embeddings are never steered")
+_ACTIVATIONS_LC = refused(
+    "per-request SAE activations need forward hooks on a PyTorch module tree; llama.cpp has none"
+)
 _SCORING_UNSTEERED = "scoring is always unsteered (X-09), so a steering field cannot be honoured"
 
 #: THE output-changing list (FR-25.3.3). Field -> (endpoint, engine) -> outcome.
@@ -198,6 +201,13 @@ OUTPUT_CHANGING: dict[str, dict[tuple[Endpoint, Engine], Outcome]] = {
     "steering_intensity": _cells(
         _unless_scoring(_SCORING_UNSTEERED), _STEER_LC,
         _STEER_CHAT_ONLY, _STEER_CHAT_ONLY, _NEVER_STEERED, _NEVER_STEERED,
+    ),
+    # Feature 27 (FR-27.1, FR-27.2g): refused on a GGUF row BEFORE any auto-load — llama.cpp
+    # exposes no layer to read — and on embeddings, which generate no positions to report.
+    "return_sae_activations": _cells(
+        HONOURED, _ACTIVATIONS_LC, HONOURED, _ACTIVATIONS_LC,
+        refused("per-request SAE activations apply to chat and text completions"),
+        refused("per-request SAE activations apply to chat and text completions"),
     ),
 }
 

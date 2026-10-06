@@ -183,6 +183,12 @@ class SAEHooker:
                 )
                 sae.to_device(str(hidden_states.device))
 
+            # ── Per-request activations, pre-steering read (Feature 27) ──────
+            # Before monitoring and steering, and NOT gated on suppression: scoring mode reads its
+            # activations with every SAE suppressed (FR-27.3). Owner-checked inside.
+            if getattr(sae, "request_capture", None) is not None:
+                sae.feed_request_capture(hidden_states, "pre")
+
             # ── Monitoring ────────────────────────────────────────────────────
             if sae.is_monitoring_enabled:
                 with torch.no_grad():
@@ -209,6 +215,11 @@ class SAEHooker:
 
             # ── Steering ──────────────────────────────────────────────────────
             modified = sae.apply_steering(hidden_states)
+
+            # ── Per-request activations, post-steering read (Feature 27) ─────
+            # What the model computed at this layer: after this layer's steering delta.
+            if getattr(sae, "request_capture", None) is not None:
+                sae.feed_request_capture(modified, "post")
 
             # ── Reconstruct output with same type ────────────────────────────
             if isinstance(output, Tensor):

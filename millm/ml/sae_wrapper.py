@@ -10,6 +10,7 @@ Where decoder_direction_i = W_dec[feature_idx_i, :] is the decoder column for fe
 This applies steering directly to the residual stream, uniformly to all token positions.
 """
 
+import contextvars
 import logging
 import threading
 from contextlib import contextmanager
@@ -39,6 +40,14 @@ from millm.ml.edge_sensing import (
 from millm.ml.sae_config import SAEConfig
 
 logger = logging.getLogger(__name__)
+
+#: Which request's activation capture a forward in THIS context may feed (Feature 27). Set by the
+#: request before its forward; copied into worker threads by `asyncio.to_thread` (and passed to the
+#: streaming path's plain `Thread` explicitly). `None` in every other forward — a continuous-
+#: batching generation, a hung thread from an earlier request — so those never feed a capture.
+CAPTURE_OWNER: contextvars.ContextVar[Optional[str]] = contextvars.ContextVar(
+    "millm_capture_owner", default=None
+)
 
 
 @dataclass
@@ -1318,6 +1327,21 @@ class LoadedSAE:
     @property
     def request_capture(self) -> Optional[Any]:
         return self._request_capture
+
+    def feed_request_capture(self, hidden_states: Tensor, phase: str) -> None:
+        """Called by the forward hook before (`pre`) and after (`post`) `apply_steering`.
+
+        Feeds the open capture only from a forward whose context carries its owner token, and runs
+        whether or not this SAE is suppressed — scoring mode's activations are read under
+        suppression (FR-27.3). Never raises into the forward pass.
+        """
+        capture = self._request_capture
+        if capture is None or getattr(capture, "owner", None) != CAPTURE_OWNER.get():
+            return
+        try:
+            capture.observe(hidden_states, phase)
+        except Exception as exc:  # an observer must never break generation
+            logger.warning("request_capture_observe_failed: %s", exc)
 
     @property
     def _suppressed(self) -> bool:

@@ -46,6 +46,7 @@ VALUES = {
     "max_completion_tokens": 1,
     "profile": "some-profile",
     "steering_intensity": 1.0,
+    "return_sae_activations": {"top_k": 2, "positions": "last"},
 }
 
 #: Companion fields a value needs to pass schema validation (chat `top_logprobs` needs logprobs).

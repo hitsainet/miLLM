@@ -142,3 +142,47 @@ M13/M14/M20 re-run afterwards, all RED.
 still the only comparison (the guard asserts the flagged set EQUALS `{_verdict_for}`). 5.4 had no
 existing test that an event ROW keeps `provisional`; one was added.
 
+## Task 6 — per-request SAE activations (M18, M19, A1–A12, H1–H2)
+
+Tests: `test_request_activations.py`, `tests/unit/api/test_return_sae_activations.py`.
+
+| # | Mutation | Result | Restore |
+|---|---|---|---|
+| M18 | `_activations_close` never ends the capture (shared across requests) | RED | sha ✔ grep ✔ |
+| M19 | capture phase always `pre` (read point ignored) | RED | ✔ ✔ |
+| A1 | serial chat: `_activations_begin` → `None` | RED (seam payload+count) | ✔ ✔ |
+| A2 | streaming chat: same | RED | ✔ ✔ |
+| A3 | text completion: same | RED | ✔ ✔ |
+| A4 | scoring (`_score_prompts`): same | RED | ✔ ✔ |
+| A5 | `_generate_in_thread` never sets the owner (streaming records nothing) | RED | ✔ ✔ |
+| A6 | `feed_request_capture` drops the owner check (a foreign forward feeds the capture) | RED (isolation) | ✔ ✔ |
+| A7 | serial-routing flag for `return_sae_activations` removed | RED | ✔ ✔ |
+| A8 | chat route: `refuse_before_generation` removed | RED | ✔ ✔ |
+| A9 | completions route: `X-miLLM-Steering: none` dropped | RED | ✔ ✔ |
+| A10 | offset advances by kept count instead of pass width | RED | ✔ ✔ |
+| A11 | serial chat response loses `millm=_millm` | RED | ✔ ✔ |
+| A12 | worst-case entry cap disabled | RED | ✔ ✔ |
+| H1 | SAE hook: drop the pre-steering feed | RED | ✔ ✔ |
+| H2 | SAE hook: drop the post-steering feed | RED | ✔ ✔ |
+
+**16 controls, 0 survived first time.**
+
+**Design decision beyond the FTDD (recorded):** the FTDD isolates captures by "one open capture per
+SAE, opened inside the slot". That does NOT isolate against a continuous-batching generation, which
+takes no slot and runs the same SAE hook concurrently — it would have written its positions into the
+open capture. Captures therefore carry an owner token held in a ContextVar (`sae_wrapper.CAPTURE_OWNER`);
+`asyncio.to_thread` copies it into the worker, the streaming path hands it to its plain `Thread`
+explicitly, and the hook feeds only matching forwards. Control A6 proves the check bites.
+
+**Other deviations / discrepancies:**
+- FTID §5 asks for a `@model_serializer(mode="wrap")` to omit `millm`; the schemas already use
+  pydantic's `exclude_if` for the same purpose (`system_fingerprint`), so `millm` uses it too. Same
+  wire result (no key when absent, OpenAI nulls untouched), tested.
+- `return_sae_activations` is registered as a row in Feature 25's `OUTPUT_CHANGING` table (honoured
+  on transformers chat/completions, refused on llama.cpp and embeddings), which is how FR-27.2g's
+  "GGUF refused before any auto-load" is enforced; the HTTP coverage test exercises every cell.
+- X-09: `X-miLLM-Steering: none` is set on scoring-mode responses that carry activations only;
+  Feature 28 owns the header elsewhere. `/api/probes/score` carries none (tested).
+- 2.8's capture slot (`begin_request_capture`/`end_request_capture`) was built in task 2 so the
+  hung-thread guard could close it; task 6 added the hook reads.
+

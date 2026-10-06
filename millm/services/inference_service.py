@@ -412,6 +412,12 @@ def _constraint_type(response_format: Any) -> Optional[str]:
 #: Feature 25: what this request's generation actually did, for the route's headers — the seed
 #: scope that was promised (X-miLLM-Seed) and the constraint that was applied
 #: (X-miLLM-Constrained). Request-scoped like the probe verdicts above; reset with them.
+#: The asyncio TASK holding the request-queue slot, set by `_admit` while the slot is held
+#: (Feature 26, FTDD §7 constraint 1). `_admit` re-enters ONLY when this is the current task.
+_SLOT_OWNER: "contextvars.ContextVar[Optional[asyncio.Task]]" = contextvars.ContextVar(
+    "millm_slot_owner", default=None
+)
+
 _REQUEST_OUTCOME: "contextvars.ContextVar[Optional[dict[str, Any]]]" = contextvars.ContextVar(
     "millm_request_outcome", default=None
 )
@@ -803,7 +809,7 @@ class InferenceService:
 
     @asynccontextmanager
     async def _admit(
-        self, raise_refusal: bool = True
+        self, raise_refusal: bool = True, background: bool = False
     ) -> AsyncIterator[Optional[ModelBusyError]]:
         """A request-queue slot for work on the loaded model, or a refusal while that model unloads.
 
@@ -822,12 +828,40 @@ class InferenceService:
 
         With `raise_refusal` False the refusal is yielded instead of raised, for
         a stream whose 200 is already committed.
+
+        Feature 26 (026 FTDD §7):
+
+        * `background=True` takes the slot through `RequestQueue.acquire_background()` — a batch
+          chunk, never counted as pending, always behind a waiting interactive request.
+        * ⚠ RE-ENTRANT FOR THE TASK THAT HOLDS THE SLOT, AND ONLY THAT TASK. A batch chunk holds
+          the one slot (MAX_CONCURRENT_REQUESTS=1) and runs each row through the unchanged
+          synchronous service method, which enters `_admit()` itself; without re-entry that call
+          waits forever for a slot its own task holds. The owner is a TASK, read from
+          `_SLOT_OWNER`, and compared with `asyncio.current_task()`: a child task created inside
+          the slot inherits the context variable but is a DIFFERENT task, so it queues normally
+          and can never run concurrently with its parent by mistake. Re-entry still refuses
+          while the model unloads, and does no bookkeeping (the outer acquisition owns it).
         """
+        owner = _SLOT_OWNER.get()
+        current = asyncio.current_task()
+        # ⚠ `owner is current`, not merely "the variable is set": a child task inherits the
+        # variable and must NOT inherit the slot (mutation control M3).
+        if owner is not None and owner is current:
+            refusal = self._unloading_refusal()
+            if refusal is not None and raise_refusal:
+                raise refusal
+            yield refusal
+            return
         refusal = self._unloading_refusal()
         if refusal is None:
             admitted = False
             try:
-                async with self._request_queue.acquire():
+                slot = (
+                    self._request_queue.acquire_background()
+                    if background
+                    else self._request_queue.acquire()
+                )
+                async with slot:
                     refusal = self._unloading_refusal()
                     if refusal is None or not raise_refusal:
                         if refusal is None:
@@ -836,7 +870,11 @@ class InferenceService:
                             self._idle_release_generation = (
                                 getattr(self, "_idle_release_generation", 0) + 1
                             )
-                        yield refusal
+                        token = _SLOT_OWNER.set(current)
+                        try:
+                            yield refusal
+                        finally:
+                            _SLOT_OWNER.reset(token)
                         return
             finally:
                 if admitted:
@@ -901,7 +939,9 @@ class InferenceService:
             if self._engine_is_llamacpp() or self._use_cbm() or not self._loaded_gpu_indices():
                 return
             delay = float(settings.TRANSFORMERS_IDLE_CACHE_RELEASE_S)
-            if delay < 0 or getattr(self._request_queue, "pending_count", 0):
+            # `occupied_count`, not `pending_count`: a batch chunk waiting for or holding the slot
+            # is work too (026 FTDD §7), and a release must not be timed around it.
+            if delay < 0 or getattr(self._request_queue, "occupied_count", 0):
                 return
             generation = getattr(self, "_idle_release_generation", 0)
             loop = asyncio.get_running_loop()
@@ -926,7 +966,7 @@ class InferenceService:
         """
         if generation != getattr(self, "_idle_release_generation", 0):
             return
-        if self._request_queue.pending_count or self._use_cbm():
+        if self._request_queue.occupied_count or self._use_cbm():
             return
         indices = self._loaded_gpu_indices()
         if not indices or self._engine_is_llamacpp():

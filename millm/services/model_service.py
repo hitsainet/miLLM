@@ -1457,10 +1457,15 @@ class ModelService:
                     from millm.api.dependencies import get_inference_service
                     svc = get_inference_service()
                 queue = svc.request_queue
-                if queue.pending_count > 0:
+                # `occupied_count`, not `pending_count`: a batch chunk waits and holds OUTSIDE the
+                # interactive count (Feature 26), and the weights must not move under it.
+                if queue.occupied_count > 0:
                     grace = float(settings.GRACEFUL_UNLOAD_TIMEOUT)
                     logger.info(
-                        "waiting_for_pending_inference", pending=queue.pending_count, timeout=grace
+                        "waiting_for_pending_inference",
+                        pending=queue.pending_count,
+                        occupied=queue.occupied_count,
+                        timeout=grace,
                     )
                     if not await queue.wait_idle(grace):
                         logger.warning(

@@ -55,6 +55,7 @@ test_openai_load_refusal_status.py; each restored, sha256 verified, git diff unc
 from __future__ import annotations
 
 import ast
+from pathlib import Path
 import asyncio
 import inspect
 import threading
@@ -455,6 +456,7 @@ def test_every_request_queue_slot_is_taken_through_admission():
     does no work on the model."""
     tree = ast.parse(inspect.getsource(inference_service))
     callers: list[str] = []
+    background: list[str] = []
 
     class _Visitor(ast.NodeVisitor):
         def __init__(self):
@@ -470,12 +472,71 @@ def test_every_request_queue_slot_is_taken_through_admission():
         def visit_Call(self, node):
             target = node.func
             if (
-                isinstance(target, ast.Attribute) and target.attr == "acquire"
+                isinstance(target, ast.Attribute) and target.attr in ("acquire", "acquire_background")
                 and isinstance(target.value, ast.Attribute) and target.value.attr == "_request_queue"
             ):
-                callers.append(self.stack[-1] if self.stack else "<module>")
+                bucket = callers if target.attr == "acquire" else background
+                bucket.append(self.stack[-1] if self.stack else "<module>")
             self.generic_visit(node)
 
     _Visitor().visit(tree)
 
     assert sorted(callers) == ["_admit", "_release_idle_cache"]
+    # Feature 26 (FTASKS 2.4): a batch chunk's slot has exactly ONE caller, `_admit`, so it gets
+    # the unloading check and the owner bookkeeping like every other slot.
+    assert background == ["_admit"]
+
+
+def test_nothing_outside_the_inference_service_takes_a_queue_slot():
+    """`acquire_background` (and `acquire`) are reached ONLY through `_admit`: no batch module
+    may open a second path to the slot (FR-26.4.1)."""
+    import millm
+
+    root = Path(millm.__file__).resolve().parent
+    offenders: list[str] = []
+    for path in root.rglob("*.py"):
+        if path.name in ("inference_service.py", "request_queue.py"):
+            continue
+        for node in ast.walk(ast.parse(path.read_text())):
+            if (
+                isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
+                and node.func.attr in ("acquire_background",)
+            ):
+                offenders.append(f"{path.relative_to(root)}:{node.lineno}")
+    assert not offenders, f"acquire_background called outside _admit: {offenders}"
+
+
+async def test_the_unload_waits_for_a_batch_chunk_holding_the_slot():
+    """Feature 26 task 2.6 / M14's target. A batch chunk holds the slot OUTSIDE `pending_count`;
+    a drain that read `pending_count` would see an idle queue and move the weights under it."""
+    weights = _Weights()
+    inference, svc, _, _client = _stack(weights)
+    let_chunk_end = asyncio.Event()
+    in_chunk = asyncio.Event()
+
+    async def chunk():
+        async with inference._admit(background=True):
+            in_chunk.set()
+            await let_chunk_end.wait()
+
+    running = asyncio.create_task(chunk())
+    await asyncio.wait_for(in_chunk.wait(), WAIT_S)
+    assert inference.request_queue.pending_count == 0, "the chunk must not count as pending"
+    draining = _watch_the_drain(inference)
+    unload = asyncio.create_task(svc.unload_model(3))
+    await asyncio.wait_for(draining.wait(), WAIT_S)
+    for _ in range(50):
+        await asyncio.sleep(0)
+    assert not weights.moving.is_set(), "a weight moved while a batch chunk held the slot"
+
+    let_chunk_end.set()
+    await asyncio.wait_for(running, WAIT_S)
+    assert await asyncio.to_thread(weights.moving.wait, WAIT_S), "the unload never went on"
+
+    # The next chunk's admission is REFUSED while the model unloads (the runner turns this into
+    # waiting, never a failed batch — FTASKS 5.6).
+    with pytest.raises(ModelBusyError):
+        async with inference._admit(background=True):
+            pass
+    weights.let_move.set()
+    await asyncio.wait_for(unload, WAIT_S)

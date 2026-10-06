@@ -72,14 +72,19 @@ class RequestQueue:
         self._max_pending = max_pending
         self._max_concurrent = max_concurrent
         self._lock = asyncio.Lock()
-        #: Set while no request holds or waits for a slot (wait_idle).
+        #: Over `_lock`: a background waiter sleeps here until no interactive request is waiting
+        #: (Feature 26, FTDD §7 constraint 2). Every change to `_pending` or `_holding` notifies it.
+        self._cond = asyncio.Condition(self._lock)
+        #: Set while no request holds or waits for a slot — interactive OR background (wait_idle).
         self._idle = asyncio.Event()
         self._idle.set()
         #: Interactive requests HOLDING a slot now (Feature 29). `_pending` counts waiting
         #: plus holding, so `pending_count - holding_count` is the number waiting.
         self._holding = 0
-        #: Feature 26's batch chunks holding the slot. Nothing in this feature changes it;
-        #: it exists so `in_flight` reads one attribute rather than guessing (026 FTDD §7).
+        #: Feature 26's batch chunks waiting for, and holding, the slot. ⚠ NEVER in `_pending`:
+        #: a batch must not count against MAX_PENDING_REQUESTS nor ever receive QUEUE_FULL, and an
+        #: interactive request's QUEUE_FULL threshold must not move while a batch runs (FR-26.4.4).
+        self._background_waiting = 0
         self._background_holding = 0
         #: Recent slot-holding durations in seconds, for the estimated wait (FR-29.7.4).
         from millm.core.config import settings
@@ -167,6 +172,8 @@ class RequestQueue:
             acquired = True
             self._holding += 1
             started = time.monotonic()
+            # A background waiter may now find no interactive request waiting.
+            await self._notify()
 
             logger.debug("request_slot_acquired", pending=self._pending)
             yield
@@ -176,22 +183,91 @@ class RequestQueue:
                 self._holding -= 1
                 self._durations.append(time.monotonic() - started)
                 self._semaphore.release()
-            async with self._lock:
+            async with self._cond:
                 self._pending -= 1
-                if self._pending == 0:
-                    self._idle.set()
+                self._set_idle_if_empty()
+                # A waiter that left (or a holder that finished) changes the background predicate.
+                self._cond.notify_all()
                 logger.debug(
                     "request_slot_released",
                     pending=self._pending,
                 )
 
+    def _background_may_enter(self) -> bool:
+        """No interactive request waiting (`_pending - _holding == 0`) and a free slot."""
+        return self._pending - self._holding == 0 and not self._semaphore.locked()
+
+    async def _notify(self) -> None:
+        async with self._cond:
+            self._cond.notify_all()
+
+    def _set_idle_if_empty(self) -> None:
+        """`_idle` only when NOTHING holds or waits — a batch chunk included (FTDD §7)."""
+        if self.occupied_count == 0:
+            self._idle.set()
+
+    @asynccontextmanager
+    async def acquire_background(self) -> AsyncGenerator[None, None]:
+        """A slot for a batch chunk (Feature 26). Never `QUEUE_FULL`; always behind interactive work.
+
+        ⚠ THREE RULES, each load-bearing (FR-26.4.3, FR-26.4.4):
+
+        * It never reads `max_pending` and never touches `_pending`. A batch waits outside the
+          interactive count, so it can never be refused with QUEUE_FULL, and the 11th interactive
+          request is refused exactly as it was before any batch existed.
+        * Before it takes the semaphore it waits until NO interactive request is waiting
+          (`_pending - _holding == 0`). So at every chunk boundary an interactive waiter goes
+          first, whatever the interpreter's semaphore fairness — the image runs Python 3.11,
+          whose `Semaphore` lets a newcomer overtake a woken waiter (FTDD §7).
+        * It counts itself in `_background_waiting` / `_background_holding`, so `wait_idle` (the
+          unload drain) waits for a running chunk and `in_flight` sees it.
+
+        A race where an interactive request arrives between the wait and the semaphore costs that
+        request one chunk, which is what "answered within one chunk's duration" allows.
+
+        Taken ONLY through `InferenceService._admit(background=True)`
+        (`test_every_request_queue_slot_is_taken_through_admission`).
+        """
+        acquired = False
+        started = time.monotonic()
+        try:
+            async with self._cond:
+                self._background_waiting += 1
+                self._idle.clear()
+                # ⚠ Interactive priority (mutation control M2). The chunk moves only when NO
+                # interactive request is waiting AND the slot is free, so it never queues on the
+                # semaphore at all: it cannot be ahead of a chat request there, on 3.11's
+                # unfair Semaphore or 3.12's fair one.
+                await self._cond.wait_for(self._background_may_enter)
+            # The predicate saw a free semaphore under the lock, with no await since: this
+            # acquire does not suspend, so nothing can overtake it in between.
+            await self._semaphore.acquire()
+            acquired = True
+            started = time.monotonic()
+            async with self._cond:
+                self._background_waiting -= 1
+                self._background_holding += 1
+            logger.debug("background_slot_acquired", pending=self._pending)
+            yield
+        finally:
+            async with self._cond:
+                if acquired:
+                    self._background_holding -= 1
+                    self._durations.append(time.monotonic() - started)
+                    self._semaphore.release()
+                else:
+                    self._background_waiting -= 1
+                self._set_idle_if_empty()
+                self._cond.notify_all()
+
     async def wait_idle(self, timeout: Optional[float] = None) -> bool:
         """Wait until no request holds or waits for a slot. False if `timeout` passes first.
 
         The unload's drain (ModelService.unload_model): woken by the last request
-        leaving, not by polling.
+        leaving, not by polling. A batch chunk counts (`occupied_count`), so an unload never moves
+        the weights under a running chunk.
         """
-        if self._pending == 0:
+        if self.occupied_count == 0:
             return True
         try:
             await asyncio.wait_for(self._idle.wait(), timeout=timeout)
@@ -211,8 +287,22 @@ class RequestQueue:
 
     @property
     def background_holding_count(self) -> int:
-        """Batch chunks holding a slot now (Feature 26); 0 until that feature counts them."""
+        """Batch chunks holding a slot now (Feature 26)."""
         return self._background_holding
+
+    @property
+    def background_waiting_count(self) -> int:
+        """Batch chunks waiting for a slot now (Feature 26)."""
+        return self._background_waiting
+
+    @property
+    def occupied_count(self) -> int:
+        """Everything holding or waiting: interactive pending + background waiting + holding.
+
+        What the unload drain and the idle-cache release read (026 FTDD §7). `pending_count` keeps
+        its interactive-only meaning, so QUEUE_FULL and the health field are unchanged.
+        """
+        return self._pending + self._background_waiting + self._background_holding
 
     def median_hold_seconds(self) -> Optional[float]:
         """Median of the recent slot-holding durations; None with fewer than three samples."""

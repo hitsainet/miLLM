@@ -2364,7 +2364,10 @@ class SAEService:
                 # Serial path requests wait in the RequestQueue; CBM requests
                 # bypass it entirely, so pending_count is 0 during CBM
                 # generation.  Sum both so detach drains either backend.
-                count = inference_svc.request_queue.pending_count
+                queue = inference_svc.request_queue
+                # A batch chunk (Feature 26) holds the slot OUTSIDE pending_count, and a
+                # generation row inside it runs through these hooks.
+                count = queue.pending_count + queue.background_holding_count
                 cbm = getattr(inference_svc, "_cbm_backend", None)
                 if cbm is not None:
                     count += getattr(cbm, "inflight_count", 0)

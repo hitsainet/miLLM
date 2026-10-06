@@ -13,6 +13,7 @@ One pytest process at a time throughout.
 | Baseline (`39c6f8e`, before any edit) | 4052 passed / 3 skipped / 0 failed (155 s) |
 | After 1.0 (errors, settings, value policy) | 4103 passed / 3 skipped / 0 failed |
 | After 2.0 + 3.0 (registry, service API, enforcement) | 4179 passed / 3 skipped / 0 failed |
+| After 4.0 (startup reconciliation, self-heal) | 4184 passed / 3 skipped / 0 failed |
 
 ## 2. Task 0.1 — cited lines re-verified at HEAD (`39c6f8e`)
 

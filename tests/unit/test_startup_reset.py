@@ -304,3 +304,54 @@ class TestAnInterruptedDownloadIsNotLeftRunningForever:
         _event, sql, _table = self._download_reset()
         assert "WHERE status = 'downloading'" in sql
 
+
+
+class TestLeasesEndAtRestart:
+    """Feature 29, X-01: a restart ends every model lease (task 4.4).
+
+    The reconciliation is RUN for real against a filled registry; the AST is used only to prove
+    `lifespan` calls it (memory `startup-reset-lists-hide-omissions`: a new in-memory state left
+    out of startup reconciliation has shipped three times in this estate).
+    """
+
+    def test_clear_leases_on_startup_empties_a_filled_registry(self):
+        from millm.services.model_lease import (
+            LeaseRegistry,
+            clear_leases_on_startup,
+            get_lease_registry,
+            set_lease_registry,
+        )
+
+        set_lease_registry(LeaseRegistry(resident_model_id=lambda: 1))
+        registry = get_lease_registry()
+        registry.grant(1, "m1", "midataworks", "label run", 7200)
+        assert registry.current(1) is not None
+
+        assert clear_leases_on_startup() == 1
+
+        assert registry.current(1) is None
+        assert registry.last_ended(1).end_reason == "restart"
+
+    def test_lifespan_calls_it(self):
+        import ast
+        import inspect
+
+        import millm.main as main
+
+        tree = ast.parse(inspect.getsource(main.lifespan))
+        calls = [
+            node.func.id
+            for node in ast.walk(tree)
+            if isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
+        ]
+        assert calls, "the scanner found no calls in lifespan, so it is not reading it"
+        assert calls.count("clear_leases_on_startup") == 1, (
+            f"lifespan does not call clear_leases_on_startup; calls seen: {sorted(set(calls))}"
+        )
+
+    def test_the_name_lifespan_calls_is_the_real_function(self):
+        """A local stub named `clear_leases_on_startup` in main.py would satisfy the AST test."""
+        import millm.main as main
+        from millm.services import model_lease
+
+        assert main.clear_leases_on_startup is model_lease.clear_leases_on_startup

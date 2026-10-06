@@ -400,3 +400,24 @@ class TestEnforcementIsCalledInEachMethod:
                  if _call_name(c) == "load_model"]
         assert len(loads) == 1
         assert any(kw.arg == "lease_id" for kw in loads[0].keywords)
+
+
+class TestSelfHealingRead:
+    """Task 4.5: the loader emptied WITHOUT unload_model (the forced path) → no lease."""
+
+    async def test_forced_unload_leaves_no_lease(self, env):
+        """Control M8."""
+        service, _, registry, _ = env
+        await _lease(service)
+        service.loader.unload()  # what the timeout branch does; unload_model's success never ran
+        assert registry.current(1) is None
+        assert registry.last_ended(1).end_reason == "model_unloaded"
+        live, _ = await service.get_lease(1)
+        assert live is None
+
+    async def test_a_new_model_loaded_behind_the_lease_is_not_leased(self, env):
+        service, _, registry, _ = env
+        await _lease(service)
+        set_resident(2, "m2")  # residency moved without the service seeing it
+        assert registry.current(1) is None
+        assert registry.current(2) is None

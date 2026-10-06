@@ -18,6 +18,7 @@ from millm.api.routes import register_routes
 from millm.core.config import settings
 from millm.core.errors import MiLLMError
 from millm.core.logging import get_logger, setup_logging
+from millm.services.model_lease import clear_leases_on_startup
 
 logger = get_logger(__name__)
 
@@ -377,6 +378,11 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     # and a test that reads source cannot tell a statement that RUNS from one that is merely
     # present. Gating this whole block behind `if False:` left my first version of that test green.
     await disarm_probes_on_startup(async_session_factory)
+
+    # Feature 29 (X-01): a restart ends every model lease. The registry is process memory, so
+    # it starts empty anyway; the call makes the reconciliation explicit and testable — the
+    # shape and reason of `disarm_probes_on_startup` above. Never raises.
+    clear_leases_on_startup()
 
     # F19 R3-15: `reconcile()` is NOT called here, deliberately.
     #

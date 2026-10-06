@@ -135,17 +135,17 @@ T-84 – T-90
         (FR-29.2.4).
   - [x] 3.8 AST call tests: `_refuse_if_leased` in each of the three method bodies.
 
-- [ ] 4.0 Restart reconciliation and the self-healing read (covers FR-29.1.9; X-01; T-66)
-  - [ ] 4.1 Implement `clear_leases_on_startup()` in `model_lease.py`: clears the registry with
+- [x] 4.0 Restart reconciliation and the self-healing read (covers FR-29.1.9; X-01; T-66)
+  - [x] 4.1 Implement `clear_leases_on_startup()` in `model_lease.py`: clears the registry with
         reason `restart`, logs `leases_cleared_on_startup` with the count, never raises.
-  - [ ] 4.2 Call it from `lifespan` beside `disarm_probes_on_startup` (`main.py:379`).
-  - [ ] 4.3 Implement the residency branch of `current()`: a lease whose model is no longer the
+  - [x] 4.2 Call it from `lifespan` beside `disarm_probes_on_startup` (`main.py:379`).
+  - [x] 4.3 Implement the residency branch of `current()`: a lease whose model is no longer the
         loader's resident model ends with `model_unloaded`.
-  - [ ] 4.4 **Startup reconciliation test (required):** in `tests/unit/test_startup_reset.py`, fill
+  - [x] 4.4 **Startup reconciliation test (required):** in `tests/unit/test_startup_reset.py`, fill
         the registry, run `clear_leases_on_startup()` for real, assert empty and `end_reason ==
         "restart"`; a second test walks `lifespan`'s AST for the call (memory
         `startup-reset-lists-hide-omissions`).
-  - [ ] 4.5 Test the self-healing read: empty the loader without calling `unload_model` (the forced
+  - [x] 4.5 Test the self-healing read: empty the loader without calling `unload_model` (the forced
         path), assert the lease reads as none.
 
 - [ ] 5.0 Lease routes, headers and the refuse-load policy (covers FR-29.1.5 – FR-29.1.8, FR-29.3,

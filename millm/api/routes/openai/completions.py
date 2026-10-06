@@ -7,10 +7,16 @@ Requires a model to already be loaded via the Management API.
 """
 
 import asyncio
-from fastapi import APIRouter, Depends, Response
+from fastapi import APIRouter, Depends, Request, Response
 from fastapi.responses import JSONResponse
 
 from millm.api.dependencies import ModelServiceDep, get_inference_service
+from millm.api.request_policy import (
+    IGNORED_FIELDS_HEADER,
+    Endpoint,
+    apply_request_policy,
+    ignored_fields_header,
+)
 from millm.api.routes.openai.errors import (
     create_openai_error,
     embedding_model_error,
@@ -52,6 +58,7 @@ async def create_completion(
     request: TextCompletionRequest,
     service: ModelServiceDep,
     response: Response,
+    http_request: Request,
     inference: InferenceService = Depends(get_inference_service),
 ) -> TextCompletionResponse | JSONResponse:
     """
@@ -70,6 +77,10 @@ async def create_completion(
     # loading costs time and VRAM to reach an answer guaranteed to be nonsense.
     if is_embedding_only(getattr(model, "architecture", None)):
         return embedding_model_error(request.model, model.architecture)
+
+    # Feature 25 request policy, before anything that could load a model (see chat.py).
+    policy = apply_request_policy(request, Endpoint.COMPLETIONS, model, http_request.headers)
+    ignored_header = ignored_fields_header(policy)
 
     # Streaming has never been implemented on /v1/completions at all, on any
     # engine. Refused here rather than after the auto-load below: the answer
@@ -145,4 +156,7 @@ async def create_completion(
     )
 
     response.headers["X-miLLM-Backend"] = inference.backend_name
-    return await inference.create_text_completion(request)
+    result = await inference.create_text_completion(request)
+    if ignored_header:
+        response.headers[IGNORED_FIELDS_HEADER] = ignored_header
+    return result

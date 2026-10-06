@@ -51,11 +51,13 @@ class TestChatMessage:
         with pytest.raises(ValidationError):
             ChatMessage(role="invalid", content="Test")
 
-    def test_extra_fields_ignored(self):
+    def test_extra_fields_are_accepted_and_kept_for_reporting(self):
+        """Feature 25: extras are no longer dropped silently — they land in model_extra so the
+        request policy can report them as messages[i].<key> (was extra="ignore")."""
         msg = ChatMessage(role="user", content="Hello", name="John", extra_field="ignored")
         assert msg.role == "user"
         assert msg.content == "Hello"
-        assert not hasattr(msg, "extra_field")
+        assert msg.model_extra == {"name": "John", "extra_field": "ignored"}
 
 
 class TestChatCompletionRequest:
@@ -464,7 +466,8 @@ class TestSteeringIntensityField:
         with pytest.raises(ValidationError, match=r"\[0, 2\]"):
             self.make(steering_intensity=5.0)
 
-    def test_extra_ignore_retained(self):
-        """Unknown fields must still be ignored — rollout safety (FTID §2)."""
+    def test_unknown_fields_still_parse(self):
+        """Unknown fields must still PARSE — rollout safety (FTID §2). Since Feature 25 they are
+        kept in model_extra and reported (X-miLLM-Ignored-Fields), not silently dropped."""
         request = self.make(some_future_field={"nested": True})
-        assert not hasattr(request, "some_future_field")
+        assert request.model_extra == {"some_future_field": {"nested": True}}

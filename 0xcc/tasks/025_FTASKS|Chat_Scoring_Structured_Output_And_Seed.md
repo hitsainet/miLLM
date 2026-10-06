@@ -78,47 +78,47 @@ miStudio 034 to send `X-miLLM-Strict: true` safely.
         `IGNORED_FIELDS_HEADER_MAX_BYTES=1024`; `.env.example` entries.
   - [x] 1.3 Test: settings load with defaults and env overrides.
 
-- [ ] 2.0 Request policy: unused fields, strict mode, output-changing table (covers FR-25.1, FR-25.2, FR-25.3)
-  - [ ] 2.1 Schemas: `extra="allow"` at `openai.py:39,198,249,296`; update the docstring note
+- [x] 2.0 Request policy: unused fields, strict mode, output-changing table (covers FR-25.1, FR-25.2, FR-25.3)
+  - [x] 2.1 Schemas: `extra="allow"` at `openai.py:39,198,249,296`; update the docstring note
         (`:12`) and the stale comment (`:87-89`).
-  - [ ] 2.2 `request_policy.py`: `Endpoint`, `Engine`, `OUTPUT_CHANGING` with **every cell filled**
+  - [x] 2.2 `request_policy.py`: `Endpoint`, `Engine`, `OUTPUT_CHANGING` with **every cell filled**
         per FPRD FR-25.3.3 (incl. 3.3a `max_completion_tokens`), `NEUTRAL` (FR-25.3.4),
         `ENGINE_UNUSED` (`chat_template_kwargs` on llama.cpp, FR-25.1.2b).
-  - [ ] 2.3 `evaluate()`: list fields first (declared via `model_fields_set`, extras via
+  - [x] 2.3 `evaluate()`: list fields first (declared via `model_fields_set`, extras via
         `model_extra`), refused + non-neutral → `FieldNotHonouredError`; then unused locations at
         top level, `messages[i]`, `extra_messages[j][i]` (FR-25.1.3, FR-25.1.4).
-  - [ ] 2.4 `parse_strict()`: `true`/`1` on, `false`/`0`/absent off, else `400 INVALID_PARAMETER`
+  - [x] 2.4 `parse_strict()`: `true`/`1` on, `false`/`0`/absent off, else `400 INVALID_PARAMETER`
         naming the header (FR-25.2.2). Strict + unused → `UnusedFieldsRefusedError` listing every
         location (FR-25.2.1).
-  - [ ] 2.5 Log event `request_fields_unused` (warning): endpoint, request id, locations — never
+  - [x] 2.5 Log event `request_fields_unused` (warning): endpoint, request id, locations — never
         values (FR-25.1.8).
-  - [ ] 2.6 Chat route: call `apply_request_policy` after the embedding-only check
+  - [x] 2.6 Chat route: call `apply_request_policy` after the embedding-only check
         (`chat.py:124-125`), before auto-load (`chat.py:143`); set the header on non-streaming
         responses after generation and on `stream_headers` (`chat.py:249-258`) (FR-25.1.5, FR-25.1.7).
-  - [ ] 2.7 Completions route (`completions.py:71-72` → before `:110`) and embeddings route
+  - [x] 2.7 Completions route (`completions.py:71-72` → before `:110`) and embeddings route
         (before its auto-load): same call and header.
-  - [ ] 2.8 Engine from the row (`gguf_files`, `millm/db/models/model.py:126`) so refusals precede
+  - [x] 2.8 Engine from the row (`gguf_files`, `millm/db/models/model.py:126`) so refusals precede
         auto-load (FR-25.2.3, FR-25.3.8).
-  - [ ] 2.9 `encode_field_list()`: RFC 8941 sf-strings, escaping, percent-encoding outside
+  - [x] 2.9 `encode_field_list()`: RFC 8941 sf-strings, escaping, percent-encoding outside
         printable ASCII, 1,024-byte bound with `"+N more"` (FR-25.1.6; FTDD §8).
-  - [ ] 2.10 Measure policy cost on a 50-message request; record in the review file (FPRD §8).
-  - [ ] 2.11 Tests — unit: table completeness (every field × endpoint × engine has a cell);
+  - [x] 2.10 Measure policy cost on a 50-message request; record in the review file (FPRD §8).
+  - [x] 2.11 Tests — unit: table completeness (every field × endpoint × engine has a cell);
         neutral values; `model_fields_set` (default `n=1` not a presence); location strings;
         strict values incl. `yes` → 400; header bound; a key containing `\r\n` is escaped.
-  - [ ] 2.12 Tests — coverage (`test_request_policy_coverage.py`): enumerate `/v1` POST paths from
+  - [x] 2.12 Tests — coverage (`test_request_policy_coverage.py`): enumerate `/v1` POST paths from
         `app.openapi()["paths"]`; an unmapped path fails; for every list field and path, POST it
         through the test client with a non-neutral value and assert `400` with `param` = field where
         refused, and not `400`-for-that-field where honoured, **with and without** strict
         (FR-25.3, SC-2). Spy `load_model_and_wait`: call count 0 for every refusal decidable from
         the row.
-  - [ ] 2.13 Tests — HTTP (`test_unused_fields_http.py`): `foo: 1` → `X-miLLM-Ignored-Fields:
+  - [x] 2.13 Tests — HTTP (`test_unused_fields_http.py`): `foo: 1` → `X-miLLM-Ignored-Fields:
         "foo"`; with strict → `400` naming `foo`; `messages[0].name` reported; absent header when
         nothing ignored; streaming carries the header; `chat_template_kwargs` on a GGUF row reported
         (and refused under strict, before load); the response body is unchanged by an unused field
         (FR-25.1.9; SC-1).
-  - [ ] 2.14 Test: a message extra never reaches `apply_chat_template` (spy the template call's
+  - [x] 2.14 Test: a message extra never reaches `apply_chat_template` (spy the template call's
         message dicts) — guards the `extra="allow"` switch.
-  - [ ] 2.15 Test: the log event carries locations and not a sentinel value placed in the field
+  - [x] 2.15 Test: the log event carries locations and not a sentinel value placed in the field
         (privacy; mutation M4).
 
 - [x] 3.0 Errors and the error map (covers FR-25.3.2, FR-25.11; latent defect FTDD §5.5)

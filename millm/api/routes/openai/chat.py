@@ -10,10 +10,16 @@ Requires a model to already be loaded via the Management API.
 import asyncio
 from typing import Union
 
-from fastapi import APIRouter, Depends, Response
+from fastapi import APIRouter, Depends, Request, Response
 from fastapi.responses import JSONResponse, StreamingResponse
 
 from millm.api.dependencies import ModelServiceDep, get_inference_service
+from millm.api.request_policy import (
+    IGNORED_FIELDS_HEADER,
+    Endpoint,
+    apply_request_policy,
+    ignored_fields_header,
+)
 from millm.api.routes.openai.errors import (
     embedding_model_error,
     is_embedding_only,
@@ -102,6 +108,7 @@ async def create_chat_completion(
     request: ChatCompletionRequest,
     service: ModelServiceDep,
     response: Response,
+    http_request: Request,
     inference: InferenceService = Depends(get_inference_service),
 ) -> Union[ChatCompletionResponse, StreamingResponse, JSONResponse]:
     """
@@ -123,6 +130,12 @@ async def create_chat_completion(
     # an error because it looks like output.
     if is_embedding_only(getattr(model, "architecture", None)):
         return embedding_model_error(request.model, model.architecture)
+
+    # Feature 25 request policy: every output-changing field honoured or refused, every
+    # unused field reported (or refused under X-miLLM-Strict). Decided from the request and
+    # the ROW, so it runs before the auto-load below would evict the resident model.
+    policy = apply_request_policy(request, Endpoint.CHAT, model, http_request.headers)
+    ignored_header = ignored_fields_header(policy)
 
     # Load the requested model on demand.
     #
@@ -247,6 +260,9 @@ async def create_chat_completion(
                 "Please retry shortly."
             )
         stream_headers = {"X-miLLM-Backend": backend}
+        if ignored_header:
+            # Detection finished before the first byte (FR-25.1.7).
+            stream_headers[IGNORED_FIELDS_HEADER] = ignored_header
         if echo_intensity is not None:
             stream_headers["X-miLLM-Steering-Intensity"] = echo_intensity
         if echo_circuit_rung is not None:
@@ -283,6 +299,8 @@ async def create_chat_completion(
         # best-effort statement of intent — recorded as known debt in the F18
         # review notes rather than papered over.
         result = await inference.create_chat_completion(request)
+        if ignored_header:
+            response.headers[IGNORED_FIELDS_HEADER] = ignored_header
         if echo_circuit_rung is not None and not circuit_apply_failed():
             response.headers["X-miLLM-Circuit-Rung"] = echo_circuit_rung
 

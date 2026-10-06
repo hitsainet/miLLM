@@ -7,10 +7,16 @@ Requires a model to already be loaded via the Management API.
 """
 
 import asyncio
-from fastapi import APIRouter, Depends, Response
+from fastapi import APIRouter, Depends, Request, Response
 from fastapi.responses import JSONResponse
 
 from millm.api.dependencies import ModelServiceDep, get_inference_service
+from millm.api.request_policy import (
+    IGNORED_FIELDS_HEADER,
+    Endpoint,
+    apply_request_policy,
+    ignored_fields_header,
+)
 from millm.api.routes.openai.errors import (
     create_openai_error,
     load_refused_error,
@@ -48,6 +54,7 @@ async def create_embeddings(
     request: EmbeddingRequest,
     service: ModelServiceDep,
     response: Response,
+    http_request: Request,
     inference: InferenceService = Depends(get_inference_service),
 ) -> EmbeddingResponse | JSONResponse:
     """
@@ -61,17 +68,16 @@ async def create_embeddings(
     if not model:
         return model_not_found_error(request.model)
 
-    # Embeddings are impossible on the llama.cpp engine, not merely
-    # unimplemented: llama.cpp needs embedding=True at CONSTRUCTION and pools
-    # internally, so there is no hidden_states[-1] to mean-pool.
-    # `InferenceService.create_embeddings` already refuses — but it refuses
-    # AFTER the auto-load below has evicted the resident transformers model and
-    # any SAEs attached to it, and spent minutes and tens of GB bringing up a
-    # model that could never have answered. `gguf_files` on the row is set at
-    # DOWNLOAD time, so the answer is knowable with nothing resident. Same
-    # signal and same reason as the GGUF guard in completions.py and the text
-    # completion guard in completions.py.
- 
+    # A GGUF model embeds (llama.cpp loaded with embedding=True and MEAN pooling,
+    # measured on the RTX 3090 — test_gguf_refused_before_load.py), so there is no
+    # engine refusal here. A stale comment claiming one, with no code under it, was
+    # removed in Feature 25.
+
+    # Feature 25 request policy, before the auto-load (see chat.py). `dimensions` is refused
+    # here until Feature 30: it was declared and silently ignored, returning full-width vectors.
+    policy = apply_request_policy(request, Endpoint.EMBEDDINGS, model, http_request.headers)
+    ignored_header = ignored_fields_header(policy)
+
     # Load on demand, same as chat and completions. Open WebUI calls this for
     # RAG with its own embedding model selected, which is a DIFFERENT model from
     # the chat one — so refusing anything not already loaded broke retrieval
@@ -110,4 +116,7 @@ async def create_embeddings(
     )
 
     response.headers["X-miLLM-Backend"] = inference.backend_name
-    return await inference.create_embeddings(request)
+    result = await inference.create_embeddings(request)
+    if ignored_header:
+        response.headers[IGNORED_FIELDS_HEADER] = ignored_header
+    return result

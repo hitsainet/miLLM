@@ -9,7 +9,11 @@ Key implementation notes:
 2. model_dump() replaces deprecated .dict()
 3. model_dump_json() for SSE chunk serialization
 4. Field() with ge/le for range validation
-5. extra="ignore" allows unknown fields for forward compatibility
+5. extra="allow" (Feature 25): unknown fields are ACCEPTED and kept in `model_extra`, so
+   `millm/api/request_policy.py` can report them (X-miLLM-Ignored-Fields) or, under
+   X-miLLM-Strict, refuse them. They were `extra="ignore"`, which dropped them with no trace.
+   Nothing in millm dumps a request object, so an extra never reaches generation
+   (test_unused_fields_http pins that a message extra never reaches apply_chat_template).
 """
 
 from typing import Any, Literal, Optional, Union
@@ -35,8 +39,9 @@ class ChatMessage(BaseModel):
     # older clients see exactly the payload they saw before.
     reasoning_content: Optional[str] = None
 
-    # Allow extra fields (OpenAI clients may send name, function_call, etc.)
-    model_config = {"extra": "ignore"}
+    # Extra fields (OpenAI clients send name, function_call, ...) are kept so the request
+    # policy can REPORT them as messages[i].<key>; they are never passed to the template.
+    model_config = {"extra": "allow"}
 
 
 # =============================================================================
@@ -48,8 +53,8 @@ class ChatCompletionRequest(BaseModel):
     """
     Chat completion request - OpenAI format.
 
-    Supports all standard OpenAI chat completion parameters.
-    Unsupported fields are ignored with extra="ignore".
+    Supports all standard OpenAI chat completion parameters. Unknown fields are kept
+    (extra="allow") and reported or refused by `millm/api/request_policy.py`.
     """
 
     model: str
@@ -84,9 +89,10 @@ class ChatCompletionRequest(BaseModel):
     # index 0 is `messages`, index i is `extra_messages[i-1]`. Clients must
     # demultiplex on `index`, never on wire order.
     #
-    # IMPORTANT for clients: this schema is extra="ignore", so a server that
-    # predates this field ACCEPTS it and silently returns a single choice.
-    # Detect support via the X-miLLM-Batch response header before relying on it.
+    # For clients: a server that predates this field ACCEPTS it and silently returns a
+    # single choice (those servers were extra="ignore"). Since Feature 25 an unknown field is
+    # reported in X-miLLM-Ignored-Fields (or refused under X-miLLM-Strict), and X-miLLM-Batch
+    # remains the capability probe for this one.
     extra_messages: Optional[list[list[ChatMessage]]] = None
 
     # miLLM extension - chat-template variables (the vLLM/SGLang convention).
@@ -195,7 +201,7 @@ class ChatCompletionRequest(BaseModel):
             raise ValueError("steering_intensity must be within [0, 2]")
         return v
 
-    model_config = {"extra": "ignore"}
+    model_config = {"extra": "allow"}
 
     @model_validator(mode="after")
     def validate_stop_sequences(self) -> "ChatCompletionRequest":
@@ -246,7 +252,7 @@ class TextCompletionRequest(BaseModel):
     #: (vLLM's name for the same switch).
     return_tokens_as_token_ids: bool = False
 
-    model_config = {"extra": "ignore"}
+    model_config = {"extra": "allow"}
 
     @model_validator(mode="after")
     def validate_stop_sequences(self) -> "TextCompletionRequest":
@@ -293,7 +299,7 @@ class EmbeddingRequest(BaseModel):
     dimensions: Optional[int] = Field(default=None, gt=0)
     user: Optional[str] = None
 
-    model_config = {"extra": "ignore"}
+    model_config = {"extra": "allow"}
 
 
 # =============================================================================

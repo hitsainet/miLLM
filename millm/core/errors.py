@@ -73,6 +73,15 @@ class InvalidScoringRequestError(MiLLMError):
 # =============================================================================
 
 
+class InvalidParameterError(MiLLMError):
+    """A request parameter or header with a value miLLM does not accept, e.g. an
+    `X-miLLM-Strict` value other than true/1/false/0 (FR-25.2.2). The code has had an
+    ERROR_STATUS_MAP row for a long time; this is its first class."""
+
+    code = "INVALID_PARAMETER"
+    status_code = 400
+
+
 class FieldNotHonouredError(MiLLMError):
     """An output-changing field this endpoint and engine cannot honour (FR-25.3).
 

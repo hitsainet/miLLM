@@ -20,7 +20,13 @@ from __future__ import annotations
 
 import pytest
 
-from millm.api.request_policy import ENDPOINT_PATHS, OUTPUT_CHANGING, Engine, Honoured
+from millm.api.request_policy import (
+    CONTROL_PATHS,
+    ENDPOINT_PATHS,
+    OUTPUT_CHANGING,
+    Engine,
+    Honoured,
+)
 from tests.unit.f25_fixtures import make_client, model_row, unloaded_inference
 
 BASE = {
@@ -67,9 +73,14 @@ def _openapi_v1_post_paths() -> set[str]:
 def test_every_v1_post_path_has_a_table_column():
     live = _openapi_v1_post_paths()
     assert live, "the OpenAPI document listed no /v1 POST path; the guard would assert nothing"
-    unmapped = live - set(ENDPOINT_PATHS)
+    unmapped = live - set(ENDPOINT_PATHS) - set(CONTROL_PATHS)
     assert not unmapped, f"/v1 POST paths with no request-policy column: {sorted(unmapped)}"
     assert set(ENDPOINT_PATHS) <= live, "the table names a path the app does not serve"
+    # Feature 26: the control-plane set is checked against the live app too, and may never
+    # overlap the table — a path cannot be both a generation path and exempt from it.
+    assert not set(CONTROL_PATHS) & set(ENDPOINT_PATHS)
+    served_control = set(CONTROL_PATHS) & live
+    assert "/v1/files" in served_control, "the control-plane exemption names nothing served"
 
 
 def _value(field: str, path: str):

@@ -5,7 +5,8 @@ All configuration is loaded from environment variables,
 with support for .env files.
 """
 
-from typing import Literal, Optional
+import warnings
+from typing import Any, Literal, Optional
 
 from pydantic import Field, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -256,6 +257,9 @@ class Settings(BaseSettings):
     #: (positions x d_sae) encode on a long prefill against a wide SAE.
     SAE_ACTIVATIONS_ENCODE_CHUNK: int = 512
     PROBE_MAX_EVENTS_PER_PROBE: int = 5000
+    #: Feature 26 (T-70): events from BATCH generation rows have their own cap, so a 50,000-row
+    #: labelling run never evicts the live-traffic history PROBE_MAX_EVENTS_PER_PROBE keeps.
+    PROBE_MAX_BATCH_EVENTS_PER_PROBE: int = 50000
     PROBE_MAX_AGE_DAYS: int = 30
     PROBE_EVENT_CONTEXT_TOKENS: int = 24      # +-K decoded tokens around the top firing position
     PROBE_HUB_TAG: str = "mistudio-probe-definition"
@@ -279,6 +283,39 @@ class Settings(BaseSettings):
     # p95 0.0313 s -> 512; Llama-3.1-8B-Instruct p95 0.1636 s -> 128 (256 would be ~42 s). One
     # global setting must hold for the largest model served, so 128.
     EMBEDDINGS_MAX_INPUTS: int = Field(default=128, ge=1, le=2048)
+
+    # --- Feature 26: the Batch API (026 FTID §9) ---
+    #: Where uploaded and assembled batch file BYTES live (metadata is in PostgreSQL). k8s sets
+    #: /data/batch_files, on the data volume, so the bytes survive a pod restart (FR-26.3.7).
+    BATCH_FILES_DIR: str = "/app/batch_files"
+    #: OpenAI's documented limits (FR-26.8.1). A file over either is refused at upload, whole.
+    BATCH_MAX_ROWS: int = 50000
+    BATCH_MAX_FILE_BYTES: int = 209_715_200
+    #: Per input line: a longer line is an invalid line (`line_too_large`), never parsed.
+    BATCH_MAX_LINE_BYTES: int = 1_048_576
+    #: T-63: scoring and embedding rows are packed unless the acceptance-7 measurement finds a
+    #: packed row whose top token differs from its single-row answer; then this becomes false.
+    #: ⚠ An unparseable value FAILS TO THE DEFAULT (true), never to false (`_bool_to_default`).
+    BATCH_PACK_DEFAULT: bool = True
+    #: Single-row forwards per chunk (one admission slot each chunk). Acceptance 9 bounds it.
+    BATCH_CHUNK_ROWS: int = 8
+    BATCH_PACK_MAX_ROWS: int = 16
+    BATCH_PACK_MAX_TOKENS: int = 16384
+    #: T-65: `completion_window` accepts whole hours 1..this (OpenAI's own value is "24h").
+    BATCH_MAX_COMPLETION_WINDOW_HOURS: int = 168
+    #: T-68: input files expire this many days after upload. Output/error files follow the
+    #: batch's `output_expires_after` (default the same 30 days, FR-26.9.1).
+    BATCH_FILE_RETENTION_DAYS: int = 30
+    #: The batch's OWN lease TTL; renewed when a third of it has passed. ≤ LEASE_MAX_TTL_SECONDS.
+    BATCH_LEASE_TTL_S: int = 900
+    #: How often a waiting batch retries its lease (`model_not_resident`, `lease_unavailable`).
+    BATCH_WAIT_POLL_S: float = 10.0
+    #: `batch:progress` at most this often per batch, plus every status transition.
+    BATCH_PROGRESS_MIN_INTERVAL_S: float = 1.0
+    #: Validation errors listed in the batch object's `errors.data` (the error FILE has all).
+    BATCH_ERRORS_SHOWN: int = 100
+    #: How often expired batch files are pruned (also once at startup, FR-26.9.4).
+    BATCH_RETENTION_INTERVAL_S: float = 3600.0
 
     # Feature 29: model lease (process memory only; a restart ends every lease, X-01).
     # The default TTL is also the maximum (2 hours); a TTL outside 1..LEASE_MAX_TTL_SECONDS
@@ -477,6 +514,27 @@ class Settings(BaseSettings):
     # Trades throughput for monitoring fidelity. Default False (batch-level monitoring).
     CBM_FORCE_SERIAL_MONITORING: bool = False
 
+    @field_validator("BATCH_PACK_DEFAULT", mode="before")
+    @classmethod
+    def _bool_to_default(cls, value: Any) -> Any:
+        """A boolean setting fails to its DEFAULT, not to False (this suite's `dry_run` lesson).
+
+        `BATCH_PACK_DEFAULT=ture` must not quietly turn packing off — nor raise and stop the
+        server starting over a typo in a switch whose default is already safe.
+        """
+        if isinstance(value, bool):
+            return value
+        text = str(value).strip().lower()
+        if text in ("1", "true", "yes", "on"):
+            return True
+        if text in ("0", "false", "no", "off"):
+            return False
+        warnings.warn(
+            f"BATCH_PACK_DEFAULT={value!r} is not a boolean; using the default (true)",
+            stacklevel=2,
+        )
+        return True
+
     @field_validator("GGUF_TENSOR_SPLIT")
     @classmethod
     def _validate_gguf_tensor_split(cls, value: str) -> str:
@@ -496,6 +554,16 @@ class Settings(BaseSettings):
         if value < 0:
             raise ValueError(f"TRANSFORMERS_CUDA_CONTEXT_MB must be 0 or more, got {value}")
         return value
+
+    @model_validator(mode="after")
+    def _validate_batch_lease_ttl(self) -> "Settings":
+        """The batch's own lease is a Feature 29 lease: its TTL must be one 029 would grant."""
+        if not 1 <= self.BATCH_LEASE_TTL_S <= self.LEASE_MAX_TTL_SECONDS:
+            raise ValueError(
+                f"BATCH_LEASE_TTL_S must be between 1 and LEASE_MAX_TTL_SECONDS "
+                f"({self.LEASE_MAX_TTL_SECONDS}), got {self.BATCH_LEASE_TTL_S}"
+            )
+        return self
 
     @model_validator(mode="after")
     def _validate_lease_ttls(self) -> "Settings":

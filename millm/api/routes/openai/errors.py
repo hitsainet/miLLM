@@ -175,6 +175,15 @@ ERROR_STATUS_MAP: dict[str, tuple[int, str]] = {
     "SAE_NOT_ATTACHED": (400, "invalid_request_error"),
     "SAE_NOT_FOUND": (404, "invalid_request_error"),
     "SAE_SET_INCOMPLETE": (422, "invalid_request_error"),
+    # Feature 26: the Batch API.
+    "INVALID_BATCH_REQUEST": (400, "invalid_request_error"),
+    "BATCH_FILE_LIMIT": (400, "invalid_request_error"),
+    "FILE_NOT_FOUND": (404, "invalid_request_error"),
+    "FILE_EXPIRED": (404, "invalid_request_error"),
+    "FILE_DELETED": (404, "invalid_request_error"),
+    "FILE_IN_USE": (409, "invalid_request_error"),
+    "BATCH_NOT_FOUND": (404, "invalid_request_error"),
+    "BATCH_STATE_CONFLICT": (409, "invalid_request_error"),
     # Resource errors
     "INSUFFICIENT_MEMORY": (503, "server_error"),
     "RATE_LIMIT_EXCEEDED": (429, "rate_limit_error"),

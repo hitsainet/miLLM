@@ -73,6 +73,19 @@ ENDPOINT_PATHS: dict[str, Endpoint] = {
 }
 
 
+#: `/v1` POST paths that carry NO generation body (Feature 26): the batch and file control plane.
+#: They have no column in the output-changing table because nothing they accept changes a model's
+#: output; `POST /v1/batches` applies the unknown-field rule through `evaluate_control` instead
+#: (FR-26.1.6). The coverage test requires every live `/v1` POST path to be in exactly one of
+#: `ENDPOINT_PATHS` and this set, so a new GENERATION path still cannot slip in uncovered.
+CONTROL_PATHS: frozenset[str] = frozenset({
+    "/v1/files",
+    "/v1/batches",
+    "/v1/batches/{batch_id}/cancel",
+    "/v1/batches/{batch_id}/lease",
+})
+
+
 @dataclass(frozen=True)
 class Honoured:
     """The field is served. `refuse_if`, when set, names a request shape in which this
@@ -413,6 +426,22 @@ def evaluate(
             details={"param": unused[0], "fields": unused},
         )
     return PolicyResult(unused=unused, endpoint=endpoint, engine=engine)
+
+
+def evaluate_control(request: Any, path: str, *, strict: bool) -> PolicyResult:
+    """The unknown-field rule for a control-plane body (FR-26.1.6): every undeclared key is
+    reported, or refused under `X-miLLM-Strict: true`. Nothing here changes an output, so there
+    is no table to apply."""
+    unused = list(dict.fromkeys(request.model_extra or {}))
+    if unused and strict:
+        raise UnusedFieldsRefusedError(
+            f"{STRICT_HEADER} is set and this request carries fields the server would not use: "
+            + ", ".join(unused),
+            details={"param": unused[0], "fields": unused},
+        )
+    if unused:
+        logger.warning("request_fields_unused", endpoint=path, fields=unused, count=len(unused))
+    return PolicyResult(unused=unused)
 
 
 def _path_name(endpoint: Endpoint) -> str:

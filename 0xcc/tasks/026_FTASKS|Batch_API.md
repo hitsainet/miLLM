@@ -73,14 +73,16 @@
   - [x] 2.6 Edge case: unload during a chunk — the drain waits for the chunk; the next chunk's `_admit` refusal makes the batch wait, not fail. Implement in 5.6; test here with a fake model service.
     - → `test_unload_admission.py::test_the_unload_waits_for_a_batch_chunk_holding_the_slot` (real services, held weights): no weight moves while the chunk holds; the next background admission is refused `ModelBusyError`. The runner's wait-not-fail half is tested in 5.12. **Also fixed (latent, touched by this feature):** the SAE detach drain read `pending_count` only, so it would remove hooks under a running batch generation row; it now adds `background_holding_count`.
 
-- [ ] 3.0 Files surface, limits and retention (covers FR-26.1.1, FR-26.6.5, FR-26.6.9, FR-26.6.10, FR-26.8, FR-26.9)
-  - [ ] 3.1 `FileStore` (`write`, `read_line`, `assemble`, `delete`, orphan sweep); generated paths under `BATCH_FILES_DIR`.
-  - [ ] 3.2 Routes `POST /v1/files`, `GET /v1/files`, `GET /v1/files/{id}`, `GET /v1/files/{id}/content` (`application/jsonl`), `DELETE /v1/files/{id}`; include `files_router` in `openai_router`.
-  - [ ] 3.3 Limits: `Content-Length` pre-check, byte cap while copying, row count; refusal names limit and measured value; nothing stored.
-  - [ ] 3.4 Errors: bad `purpose` → `400`; unknown id → `404`; expired/deleted content → `404 file_expired|file_deleted`; delete of a referenced file → `409 file_in_use` naming the batch.
-  - [ ] 3.5 Retention: `expires_at` on every file (30 days input — T-68; output/error by `output_expires_after`, default 30 days); `prune_expired_files(now)` skips files referenced by a non-terminal batch; hourly loop plus startup run.
-  - [ ] 3.6 Security: client filename never reaches the filesystem; per-line cap.
-  - [ ] 3.7 Tests: OpenAI file-object fields; list shape and paging; over-row and over-byte uploads refused, nothing on disk; content streams with the stated media type; delete refused while referenced, allowed after; prune with an injected clock removes only expired, unreferenced files; orphan sweep. **Reachability:** each route present in `create_app().openapi()["paths"]` and exercised via `TestClient`; removing the router include turns these red (M12).
+- [x] 3.0 Files surface, limits and retention (covers FR-26.1.1, FR-26.6.5, FR-26.6.9, FR-26.6.10, FR-26.8, FR-26.9)
+  - [x] 3.1 `FileStore` (`write`, `read_line`, `assemble`, `delete`, orphan sweep); generated paths under `BATCH_FILES_DIR`.
+  - [x] 3.2 Routes `POST /v1/files`, `GET /v1/files`, `GET /v1/files/{id}`, `GET /v1/files/{id}/content` (`application/jsonl`), `DELETE /v1/files/{id}`; include `files_router` in `openai_router`.
+  - [x] 3.3 Limits: `Content-Length` pre-check, byte cap while copying, row count; refusal names limit and measured value; nothing stored.
+  - [x] 3.4 Errors: bad `purpose` → `400`; unknown id → `404`; expired/deleted content → `404 file_expired|file_deleted`; delete of a referenced file → `409 file_in_use` naming the batch.
+  - [x] 3.5 Retention: `expires_at` on every file (30 days input — T-68; output/error by `output_expires_after`, default 30 days); `prune_expired_files(now)` skips files referenced by a non-terminal batch; hourly loop plus startup run.
+    - → `services/batch/retention.py`; the startup run and the hourly loop are started by the one lifespan function in 5.10 (`start_batch_api`). **Defect avoided:** an hourly orphan sweep with no age floor would delete an upload whose bytes were renamed into place before its row committed; the sweep spares files younger than 10 minutes (startup passes 0).
+  - [x] 3.6 Security: client filename never reaches the filesystem; per-line cap.
+  - [x] 3.7 Tests: OpenAI file-object fields; list shape and paging; over-row and over-byte uploads refused, nothing on disk; content streams with the stated media type; delete refused while referenced, allowed after; prune with an injected clock removes only expired, unreferenced files; orphan sweep. **Reachability:** each route present in `create_app().openapi()["paths"]` and exercised via `TestClient`; removing the router include turns these red (M12).
+    - → `tests/unit/api/test_batch_file_routes.py` (10), `tests/unit/services/batch/test_retention.py` (7). The control-plane POST paths join `request_policy.CONTROL_PATHS`, so the coverage guard still requires every `/v1` POST path to be either a table column or an explicit control path (and never both). **Code wins:** the upload parses multipart by hand (`request.form()`) so `Content-Length` is checked BEFORE the body is read — a declared `UploadFile` parameter is parsed before the handler runs.
 
 - [ ] 4.0 Validation before any row runs (covers FR-26.1.2 – FR-26.1.6, FR-26.2, FR-26.7.3)
   - [ ] 4.1 Schemas in `millm/api/schemas/batch.py`: create request (incl. `pack`, `output_expires_after`, `metadata`), batch object with `millm` extension, list object.

@@ -915,3 +915,61 @@ class SaeActivationsRefusedError(MiLLMError):
 
     code = "SAE_ACTIVATIONS_REFUSED"
     status_code = 400
+
+
+# =============================================================================
+# Batch API (Feature 26)
+#
+# Every refusal names the field, limit, model or batch that caused it (FPRD §4). On `/v1` they
+# render through the OpenAI envelope with `param` from `details["param"]`.
+# =============================================================================
+
+
+class InvalidBatchRequestError(MiLLMError):
+    """A files/batches request field outside its bounds (purpose, endpoint, window, …)."""
+
+    code = "INVALID_BATCH_REQUEST"
+    status_code = 400
+
+
+class BatchFileLimitError(MiLLMError):
+    """An upload over BATCH_MAX_FILE_BYTES or BATCH_MAX_ROWS (FR-26.8.2). Nothing is stored."""
+
+    code = "BATCH_FILE_LIMIT"
+    status_code = 400
+
+
+class BatchFileNotFoundError(MiLLMError):
+    code = "FILE_NOT_FOUND"
+    status_code = 404
+
+
+class BatchFileExpiredError(MiLLMError):
+    """The file's bytes were pruned by retention (FR-26.9.3); the record remains."""
+
+    code = "FILE_EXPIRED"
+    status_code = 404
+
+
+class BatchFileDeletedError(MiLLMError):
+    code = "FILE_DELETED"
+    status_code = 404
+
+
+class BatchFileInUseError(MiLLMError):
+    """DELETE of a file a non-terminal batch references (FR-26.6.10); names the batch."""
+
+    code = "FILE_IN_USE"
+    status_code = 409
+
+
+class BatchNotFoundError(MiLLMError):
+    code = "BATCH_NOT_FOUND"
+    status_code = 404
+
+
+class BatchStateConflictError(MiLLMError):
+    """A transition the batch's current status does not allow (FR-26.3.5); names the status."""
+
+    code = "BATCH_STATE_CONFLICT"
+    status_code = 409

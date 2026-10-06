@@ -49,7 +49,10 @@ def parse_load_policy(raw: str | None) -> LoadPolicy:
 
 
 async def apply_load_policy(
-    policy: LoadPolicy, model_row: Any, inference: Any, service: Any
+    policy: LoadPolicy,
+    model_row: Any,
+    inference: Any,  # noqa: ARG001 - FTID §3.4 signature; residency is read from the loader
+    service: Any,
 ) -> JSONResponse | None:
     """None when the request may continue; otherwise the refusal to return.
 

@@ -31,12 +31,12 @@ class RetryAfterMiddleware:
     def __init__(self, app: Any) -> None:
         self.app = app
 
-    async def __call__(self, scope: dict, receive: Any, send: Any) -> None:
+    async def __call__(self, scope: dict[str, Any], receive: Any, send: Any) -> None:
         if scope["type"] != "http":
             await self.app(scope, receive, send)
             return
 
-        async def wrapped(message: dict) -> None:
+        async def wrapped(message: dict[str, Any]) -> None:
             if message["type"] == "http.response.start" and message["status"] == 503:
                 headers = list(message.get("headers", []))
                 if not any(key.lower() == b"retry-after" for key, _ in headers):

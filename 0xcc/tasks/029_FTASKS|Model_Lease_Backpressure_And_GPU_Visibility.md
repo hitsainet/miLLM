@@ -34,7 +34,8 @@ T-84 – T-90
 - Docs: `docs/mcp-contract.md`, `manual/docs/api/models.md`, `manual/docs/api/management-api.md`,
   `manual/docs/reference/error-codes.md`, `manual/docs/reference/configuration.md`,
   `manual/docs/features/model-management.md`
-- Review record (new): `0xcc/reviews/review_feature029_model_lease_<date>.md`
+- Review record: `0xcc/reviews/029_implementation_controls_2026-10-06.md` (controls, acceptance walk, discrepancies, debt)
+- Also created: `tests/unit/lease_fixtures.py` (real-service harness), `tests/unit/core/test_backpressure.py`, `admin-ui/src/components/models/leaseTime.ts`; `tests/conftest.py` gains a fresh-registry autouse fixture
 
 ### Notes
 - Tests: `pytest tests/unit` (backend), `cd admin-ui && npm test`; `ruff`, `mypy millm/`,
@@ -241,31 +242,31 @@ T-84 – T-90
         new test reading `docs/` skips loudly when the file is absent (mirror).
 
 - [ ] 11.0 Feature Acceptance
-  - [ ] 11.1 Walk each FPRD edge case (§2 table) and success criterion (§11) against its test; record
+  - [x] 11.1 Walk each FPRD edge case (§2 table) and success criterion (§11) against its test; record
         the test name per row in the review record.
-  - [ ] 11.2 Full suites: `pytest tests/unit`, the same with `0xcc/` hidden (the mirror's view),
+  - [x] 11.2 Full suites: `pytest tests/unit`, the same with `0xcc/` hidden (the mirror's view),
         `admin-ui` Vitest, `tsc`, lint, `mypy millm/`.
-  - [ ] 11.3 **Hardware — lease (BRD-04 acceptance 14, success criteria 1–3).** On the node, with
+  - [?] 11.3 **Hardware — lease (BRD-04 acceptance 14, success criteria 1–3).** _needs hardware — operator session._ On the node, with
         JEV-9B-decision or LFM2.5-1.2B resident: take a lease as `midataworks` with TTL 120; a chat
         request naming another model → `409 model_leased` naming holder and expiry;
         `POST /api/models/{other}/load` without the header → `409 MODEL_LEASED`; with the header →
         proceeds and the lease ends; re-lease, wait past 120 s without renewing → the same load
         succeeds. A `refuse` request for a non-resident model → `409 model_not_resident` and no load
         in the logs.
-  - [ ] 11.4 **Hardware — GPU visibility (BRD-04 acceptance 16, success criterion 7).** Load and
+  - [?] 11.4 **Hardware — GPU visibility (BRD-04 acceptance 16, success criterion 7).** _needs hardware — operator session._ Load and
         unload a model; read `/api/health/gpus`; on each card miLLM touched, compare
         `millm_reserved_mb + cuda_context_mb` (from 0.2) with the node's per-process
         `used_memory`, within 256 MiB (T-89). Confirm no new CUDA context appears on the card miLLM
         did not touch (its process list unchanged).
-  - [ ] 11.5 **Hardware — backpressure and restart (success criteria 4–6, X-01).** Eleven concurrent
+  - [?] 11.5 **Hardware — backpressure and restart (success criteria 4–6, X-01).** _needs hardware — operator session._ Eleven concurrent
         requests → a `503 queue_full` with `Retry-After`; `/api/health/detailed` shows `in_flight`,
         `queue_waiting` and an estimate during the burst. Take a lease, restart the pod, confirm the
         lease is gone (`GET` none, renew `404` with the restart sentence) and that the Admin UI
         badge is gone.
-  - [ ] 11.6 **Mutation controls M1–M18** (FTID §8.4): run each, show it red, restore, verify the
+  - [x] 11.6 **Mutation controls M1–M18** (FTID §8.4): run each, show it red, restore, verify the
         restore with `git diff` and a re-grep of the mutated line. A survivor gets a test, then the
         mutation is re-run as a negative control. Record all in the review record.
-  - [ ] 11.7 Record the tracked debt (management load/unload ignore `locked`; single-process
+  - [x] 11.7 Record the tracked debt (management load/unload ignore `locked`; single-process
         registry) in the review record; update miLLM's Document Inventory and Current Status. Do not
         mark the feature ✅ until 11.3–11.5 pass.
 

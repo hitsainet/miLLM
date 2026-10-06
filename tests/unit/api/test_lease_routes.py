@@ -350,3 +350,19 @@ def test_grant_response_json_is_the_only_place_the_id_appears(env):
     for text in texts:
         assert lease_id not in text
         assert "lease_id" not in json.loads(text).__repr__()
+
+
+def test_only_the_grant_schema_declares_lease_id(env):
+    """M12 follow-up. The first M12 mutation (the shared serialiser emitting an undeclared
+    `lease_id`) SURVIVED because FastAPI's response_model drops undeclared fields — the guard
+    against a leak on a read is the DECLARED schema of every read route. Pin it from the live
+    app's OpenAPI: of every lease route's response, only the grant's schema has `lease_id`."""
+    _, _, _, _, _, app = env
+    spec = app.openapi()
+    schemas = spec["components"]["schemas"]
+    declaring = sorted(name for name, schema in schemas.items()
+                       if "lease_id" in schema.get("properties", {}))
+    assert declaring == ["LeaseGrantResponse"], declaring
+    grant_ref = json.dumps(spec["paths"]["/api/models/{model_id}/lease"]["post"]["responses"])
+    get_ref = json.dumps(spec["paths"]["/api/models/{model_id}/lease"]["get"]["responses"])
+    assert "LeaseGrantResponse" in grant_ref and "LeaseGrantResponse" not in get_ref

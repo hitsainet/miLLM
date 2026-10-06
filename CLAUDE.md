@@ -1,6 +1,21 @@
 # Project: miLLM - Mechanistic Interpretability LLM Server
 
 ## Current Status
+- **⏳ FEATURE 29 MODEL LEASE, BACKPRESSURE AND GPU VISIBILITY: TASKS 1–10 SHIPPED ON
+  `feat/029-model-lease` (2026-10-06), NOT MERGED, NOT ✅.** A caller pins the resident model with
+  a lease (`/api/models/{id}/lease`, holder + reason + TTL ≤ 7200 s, lease ID returned once and
+  held only as a digest); `ModelService._refuse_if_leased` guards `load_model`, `unload_model` and
+  `load_model_and_wait` (lease checked before `locked`); `X-miLLM-Load-Policy: refuse` on the three
+  `/v1` routes; `Retry-After` on every 503 (one policy, `core/backpressure.py`, plus a pure-ASGI
+  fallback that logs `retry_after_defaulted`); typed `inference` block + `lease` on
+  `/api/health/detailed`; `GET /api/health/gpus`; Admin UI lease badge. A restart ends every lease
+  (`clear_leases_on_startup` in `lifespan`). MCP contract **v1.9** (no tools: miStudio 034
+  FR-18/FR-19 own them). Backend `tests/unit` **4312 passed / 3 skipped**; mirror view 4269 / 46
+  skipped / 0 failed; admin-ui **468 passed**. **40 mutation controls, 1 survived first time (M12,
+  a structural no-op over HTTP — the declared response schema is the guard; now pinned).** Record:
+  `0xcc/reviews/029_implementation_controls_2026-10-06.md`. **Open: 0.2 spike and 11.3–11.5 need
+  the GPU node.** ⚠ The management load/unload still ignore `locked` (tracked debt; the manual
+  claimed otherwise and was corrected).
 - **⏳ NATIVE-DTYPE LOADING (2026-10-03), shared with miStudio.** This server loaded every non-GGUF
   row in bfloat16 (FP32 rows too) and reported `model.dtype`; miStudio fitted every probe in float16;
   the 0.10 parity floor was absorbing that gap. Now: `millm/ml/native_dtype.py` applies the rule in
@@ -210,7 +225,7 @@ refactor(services): extract HuggingFace logic
 
 ### Project Level Documents
 - ⏳ 0xcc/prds/BRD-04-miLLM-Dataworks-Support.md (miLLM additions for miDataworks: chat scoring, structured output, seed, batch API, per-request SAE activations, stateless probe scoring, inline steering, embedding options, model lease, backpressure, GPU visibility, probe-path fixes; 47 requirements R-04.1–47; needed by miDataworks BRD-03 and miStudio BRD-MIS-DATAWORKS-001; 2026-10-06)
-- ⏳ PPRD v1.5 (Features 25–30, FR-25.x–FR-30.x, BRD-04 coverage 47/47) · PADR v1.5 (§1 "(v1.5)" rows, §10 Dataworks Support trade-offs) — ✅ feature chains 025–030 complete 2026-10-06 — FPRD v1.1 (operator decisions applied, FR IDs unchanged), FTDD, FTID, FTASKS each: 025 Chat_Scoring_Structured_Output_And_Seed (10/83, xgrammar measured), 026 Batch_API (10/63), 027 Probe_Scoring_And_Per_Request_Activations (9/66), 028 Inline_Steering_And_Steering_Header (9/58, hash test vectors TV-1..4), 029 Model_Lease_Backpressure_And_GPU_Visibility (12/71), 030 Embedding_Options (9/44) — parent/sub-task counts; BRD-04 coverage 47/47 — Stage 3 consistency review 2026-10-06 (`0xcc/reviews/stage3_dataworks_consistency_2026-10-06.md`): PADR amendments applied (xgrammar, jsonschema, http-sfv dev-only; GGUF structured output refused; `_score_prompts` shared; lease debts; first-SAE profile debt), 026↔029 lease API names aligned, hash vectors TV-1..4 reproduced
+- ⏳ PPRD v1.5 (Features 25–30, FR-25.x–FR-30.x, BRD-04 coverage 47/47) · PADR v1.5 (§1 "(v1.5)" rows, §10 Dataworks Support trade-offs) — ✅ feature chains 025–030 complete 2026-10-06 — FPRD v1.1 (operator decisions applied, FR IDs unchanged), FTDD, FTID, FTASKS each: 025 Chat_Scoring_Structured_Output_And_Seed (10/83, xgrammar measured), 026 Batch_API (10/63), 027 Probe_Scoring_And_Per_Request_Activations (9/66), 028 Inline_Steering_And_Steering_Header (9/58, hash test vectors TV-1..4), 029 Model_Lease_Backpressure_And_GPU_Visibility (12/71; ⏳ implemented 2026-10-06 through task 10, hardware 0.2/11.3–11.5 open), 030 Embedding_Options (9/44) — parent/sub-task counts; BRD-04 coverage 47/47 — Stage 3 consistency review 2026-10-06 (`0xcc/reviews/stage3_dataworks_consistency_2026-10-06.md`): PADR amendments applied (xgrammar, jsonschema, http-sfv dev-only; GGUF structured output refused; `_score_prompts` shared; lease debts; first-SAE profile debt), 026↔029 lease API names aligned, hash vectors TV-1..4 reproduced
 - ⏳ 0xcc/prds/BRD-MILLM-PROBES-001.md (Probe Monitor Runtime; consumes miStudio's `mistudio.probe-definition/v1`; sibling BRD-MIS-PROBES-001; handed off 2026-09-25)
 - ⏳ PPRD v1.4 (Feature 24, FR-24.1–24.15) · PADR v1.4 (§1 probe rows, §10 Probe Monitor Runtime trade-offs)
 

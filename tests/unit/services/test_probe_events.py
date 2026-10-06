@@ -64,6 +64,19 @@ class TestRecording:
         assert row.score is None
         assert "not scored: continuous_batching" in row.summary
 
+    async def test_a_provisional_verdict_is_STORED_provisional(self, ctx):
+        """P-20 (Feature 27, task 5.4): a provisional window's event keeps its flag in the row.
+        Excluding provisional verdicts from labels is the consumer's job, so it must reach them."""
+        repo, events, service, probe = ctx
+        await service.record("chatcmpl-p", [
+            verdict(probe_id=probe.id, window="response", provisional=True, threshold_revision=3),
+            verdict(probe_id=probe.id, window="all", provisional=False),
+        ])
+        rows = {r.window: r for r in await events.list_events(probe_id=probe.id)}
+        assert rows["response"].provisional is True
+        assert rows["response"].threshold_revision == 3
+        assert rows["all"].provisional is False
+
     async def test_the_request_id_links_the_event_to_its_response(self, ctx):
         repo, events, service, probe = ctx
         await service.record("chatcmpl-abc", [verdict(probe_id=probe.id)])

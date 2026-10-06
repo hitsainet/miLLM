@@ -129,3 +129,16 @@ Tests: `test_probe_scoring.py`, `test_probe_score_writes_nothing.py`, `test_prob
 the same tests. Both removed (recorder on the module logger + caplog; plain `TestClient(app)`);
 M13/M14/M20 re-run afterwards, all RED.
 
+## Task 5 — the verdict boundary (M12, M12b, P-20)
+
+| # | Mutation | Tests | Result | Restore |
+|---|---|---|---|---|
+| M12 (live) | `value >= threshold` → `value > threshold` at `probe_runtime.py:665` | `test_probe_runtime.py` (the exactly-on-the-bar test) | RED | sha ✔ grep ✔ |
+| M12 (stateless) | same mutation | `test_probe_score_route.py::test_a_score_EXACTLY_on_the_bar_fires_through_the_route` | RED | ✔ ✔ |
+| M12b | a second comparison: `verdict_payload` recomputes `v.score >= v.threshold` | `test_verdict_boundary_is_one_place.py` | RED | ✔ ✔ |
+| P20 | event service stores `provisional: False` | `test_probe_events.py` (new provisional test) | RED | ✔ ✔ |
+
+**4 controls, 0 survived first time.** `>=` confirmed at `millm/services/probe_runtime.py:665`,
+still the only comparison (the guard asserts the flagged set EQUALS `{_verdict_for}`). 5.4 had no
+existing test that an event ROW keeps `provisional`; one was added.
+

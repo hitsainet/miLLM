@@ -173,15 +173,15 @@
         (`unknown` for old reports). Test each.
   - [x] 4.13 No routing change (FR-27.7): after a scoring call, `_use_cbm_for_request` answers as before.
 
-- [ ] 5.0 The verdict boundary (covers FR-27.10; P-03, X-03, P-20)
-  - [ ] 5.1 Stateless boundary test: an exactly representable fixture (as
+- [x] 5.0 The verdict boundary (covers FR-27.10; P-03, X-03, P-20)
+  - [x] 5.1 Stateless boundary test: an exactly representable fixture (as
         `test_probe_runtime.py:157-173`) scored through the score route returns `verdict: true` with
         `score == threshold`.
-  - [ ] 5.2 `test_verdict_boundary_is_one_place.py`: AST guard; the set of probe-score/threshold
+  - [x] 5.2 `test_verdict_boundary_is_one_place.py`: AST guard; the set of probe-score/threshold
         comparisons in `millm/` is exactly `{_verdict_for}` (FTID §8).
-  - [ ] 5.3 **M12:** `>=` → `>` at `probe_runtime.py:665` → the live test (`test_probe_runtime.py:157`)
+  - [x] 5.3 **M12:** `>=` → `>` at `probe_runtime.py:665` → the live test (`test_probe_runtime.py:157`)
         **and** 5.1 go red. Add a second comparison anywhere in `millm/` → 5.2 red. Record both.
-  - [ ] 5.4 Confirm P-20 on the live path: `probe_events.provisional` is written for a provisional
+  - [x] 5.4 Confirm P-20 on the live path: `probe_events.provisional` is written for a provisional
         window (`db/models/probe.py:200`); existing test or add one.
 
 - [ ] 6.0 Per-request SAE activations (covers FR-27.1, FR-27.2, FR-27.3)

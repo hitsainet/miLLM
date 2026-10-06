@@ -124,10 +124,6 @@ _NO_DISTRIBUTION = refused(
     "per-token distribution"
 )
 _EMB_NO_TOKENS = refused("embeddings return vectors, not token probabilities")
-_T61 = refused(
-    "seed on the llama.cpp engine is not yet measured to reproduce (T-61), so it is refused "
-    "rather than echoed unapplied"
-)
 _NO_FUNCTIONS = refused("function calling is not implemented")
 #: A cell whose phase of Feature 25 has not landed yet: refused, never silently dropped.
 _PENDING = refused("not implemented on this endpoint yet")
@@ -159,7 +155,8 @@ OUTPUT_CHANGING: dict[str, dict[tuple[Endpoint, Engine], Outcome]] = {
         refused("embeddings return vectors, not text"),
     ),
     "seed": _cells(
-        HONOURED, _T61, HONOURED, _T61,
+        # llama.cpp honours seed since T-61 passed on hardware (2026-10-06; 025_FTASKS 6.6).
+        HONOURED, HONOURED, HONOURED, HONOURED,
         refused("embeddings are deterministic; there is no sampling for a seed to fix"),
         refused("embeddings are deterministic; there is no sampling for a seed to fix"),
     ),

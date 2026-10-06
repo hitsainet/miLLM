@@ -4232,12 +4232,6 @@ class InferenceService:
         # Feature 25 defence in depth: the request policy refuses these from the model ROW before
         # any load; a direct caller (Feature 26) or a row/engine mismatch must not reach here and
         # be served with the field dropped.
-        if _request_seed(request) is not None:
-            raise FieldNotHonouredError(
-                "seed on the llama.cpp engine is not yet measured to reproduce (T-61); it is "
-                "refused rather than echoed unapplied.",
-                details={"param": "seed"},
-            )
         if _constraint_type(getattr(request, "response_format", None)) is not None:
             raise ResponseFormatUnsupportedError(
                 "Structured output on a GGUF model is refused in this release.",
@@ -4276,6 +4270,11 @@ class InferenceService:
         # from request.stop was a second implementation of the same rule.
         if gen_config.stop_sequences:
             params["stop"] = list(gen_config.stop_sequences)
+        # T-61, measured 2026-10-06 on the 3090 (LFM2.5-1.2B-Instruct Q4_K_M, temperature 1.0):
+        # seed 7 twice in one instance AND in a fresh instance gave byte-identical text, and
+        # seed 8 differed. So the seed is forwarded, not refused (025_FTASKS 6.6).
+        if gen_config.seed is not None:
+            params["seed"] = gen_config.seed
         return params
 
     def _llamacpp_messages(self, request: ChatCompletionRequest) -> list[dict]:
@@ -4559,11 +4558,6 @@ class InferenceService:
 
         prompts = request.prompt if isinstance(request.prompt, list) else [request.prompt]
         gen_config = GenerationConfig.from_request(request)
-        if gen_config.seed is not None:  # defence in depth; the policy refuses it before load
-            raise FieldNotHonouredError(
-                "seed on the llama.cpp engine is not yet measured to reproduce (T-61).",
-                details={"param": "seed"},
-            )
         params = self._llamacpp_params(gen_config, request)
 
         completion_id = f"cmpl-{uuid.uuid4().hex[:24]}"

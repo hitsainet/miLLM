@@ -225,12 +225,11 @@ class TestOverHttp:
         ("/v1/chat/completions", {"model": "tiny", "messages": MESSAGES, "seed": 7}),
         ("/v1/completions", {"model": "tiny", "prompt": "w1", "seed": 7}),
     ])
-    def test_a_gguf_seed_is_refused_before_load(self, path, body):
-        client, svc = make_client(unloaded_inference(), model_row(gguf_files=["m.gguf"]))
-        r = client.post(path, json=body)
-        assert r.status_code == 400 and r.json()["error"]["param"] == "seed"
-        assert "T-61" in r.json()["error"]["message"]
-        assert svc.load_model_and_wait.call_count == 0
+    def test_a_gguf_seed_is_not_refused_by_the_policy(self, path, body):
+        """T-61 passed on hardware, so the policy lets a GGUF seed through to the engine."""
+        from millm.api.request_policy import CHAT, COMPLETIONS, HONOURED, LC, OUTPUT_CHANGING
+        endpoint = CHAT if path.endswith("chat/completions") else COMPLETIONS
+        assert OUTPUT_CHANGING["seed"][(endpoint, LC)] is HONOURED
 
     def test_a_fingerprint_is_on_every_chat_and_completion_response(self, client):
         for path, body in (
@@ -244,17 +243,25 @@ class TestOverHttp:
             assert r.json()["system_fingerprint"] == "millm:tiny@abc123:float32/FP16:transformers"
 
 
-async def test_llamacpp_refuses_a_seed_in_the_service_too(svc):
-    """Defence in depth (a direct caller, or a row/engine mismatch)."""
-    from millm.core.errors import FieldNotHonouredError
+def test_llamacpp_params_forward_the_seed(svc):
+    """T-61 passed: the seed reaches llama.cpp, and an omitted seed sends no key at all."""
+    from millm.ml.generation_config import GenerationConfig
 
+    seeded = chat(seed=7)
+    params = svc._llamacpp_params(GenerationConfig.from_request(seeded), seeded)
+    assert params["seed"] == 7
+    unseeded = chat()
+    assert "seed" not in svc._llamacpp_params(GenerationConfig.from_request(unseeded), unseeded)
+
+
+async def test_llamacpp_chat_sends_the_seed_to_the_model(svc):
+    """The wiring, not just the helper: the call that reaches the engine carries the seed."""
+    calls = []
     svc._engine_is_llamacpp = lambda: True
-    with pytest.raises(FieldNotHonouredError) as exc:
-        await svc.create_chat_completion(chat(seed=7))
-    assert exc.value.details["param"] == "seed"
-    with pytest.raises(FieldNotHonouredError):
-        await svc.create_text_completion(
-            TextCompletionRequest(model="tiny", prompt="w1", seed=7))
+    svc._llamacpp_sync = lambda messages, params: calls.append(params) or {
+        "choices": [{"message": {"content": "ok"}, "finish_reason": "stop"}], "usage": {}}
+    await svc.create_chat_completion(chat(seed=7))
+    assert len(calls) == 1 and calls[0]["seed"] == 7
 
 
 class TestFingerprint:

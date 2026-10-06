@@ -63,14 +63,14 @@ miStudio 034 to send `X-miLLM-Strict: true` safely.
 ## Tasks
 
 - [ ] 0.0 Spikes and measurements that gate later work (covers FR-25.10.8, FR-25.14.3; FTDD §12)
-  - [?] 0.1 **gemma-4 tokenizer spike** (before 7.x ships): on the node, build
+  - [x] 0.1 **gemma-4 tokenizer spike** (before 7.x ships): on the node, build
         `xgr.TokenizerInfo.from_huggingface` from the served gemma-4 tokenizer and compile the FTDD
         §3.1 test schema; require the target string accepted. Record compile time and mask timing.
         If it fails, add a refusal row for that model family and record why. *needs hardware — operator session.*
   - [?] 0.2 **xgrammar on the node's CUDA stack:** in the deployed image, run one constrained
         `generate()` on LFM2.5-1.2B on the 3090 (the triton bitmask kernel path). A failure blocks
         7.x. *needs hardware — operator session.*
-  - [?] 0.3 **T-61 llama.cpp seed measurement** (before 6.6): forward `seed` to llama.cpp on the
+  - [x] 0.3 **T-61 llama.cpp seed measurement** (before 6.6): forward `seed` to llama.cpp on the
         reference GGUF model, run the same sampled request twice, compare bytes. Record the
         result; 6.6 implements the matching outcome. Until it passes the outcome stays *refused*. *needs hardware — operator session.*
 
@@ -202,8 +202,7 @@ miStudio 034 to send `X-miLLM-Strict: true` safely.
   - [x] 6.5 Scope reporting: `request` / `batch-shape` / `best-effort`; route sets `X-miLLM-Seed`
         only when a seed was sent (FR-25.13.6, FR-25.14.1–14.2, FR-25.14.4; T-60).
   - [x] 6.6 llama.cpp: implement the outcome 0.3 measured — forward `seed` in `_llamacpp_params`
-        (`:3933-3954`) and flip the table cell, or keep *refused* (FR-25.14.3; T-61). *Done as "keep refused": 0.3 is unmeasured, so the table cell and a
-        service guard refuse; flipping it is part of 0.3 (hardware).*
+        (`:3933-3954`) and flip the table cell, or keep *refused* (FR-25.14.3; T-61). *Flipped 2026-10-06 after 0.3 PASSED on the 3090 (LFM2.5-1.2B-Instruct Q4_K_M): seed 7 identical within one instance and across a fresh one, seed 8 differs. Table cells honoured; `_llamacpp_params` forwards `seed`; 2 mutation controls red.*
   - [x] 6.7 `system_fingerprint.py` and the route assignment on chat and text completion responses
         (FR-25.13.8–13.10).
   - [x] 6.8 Tests: same sampled request with `seed: 7` twice → byte-identical text and

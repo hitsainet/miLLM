@@ -367,6 +367,74 @@ def _model_placement(model_loader: Any) -> Optional[dict[str, Any]]:
         return None
 
 
+class GpuProcess(BaseModel):
+    """One compute process on a card, as nvidia-smi counts it (CUDA context included)."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    pid: int
+    used_mb: int
+
+
+class GpuCardMemory(BaseModel):
+    """One card's memory (Feature 29, FR-29.8). Unmeasured is null, never 0."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    smi_index: int = Field(..., description="nvidia-smi's index")
+    uuid: Optional[str] = None
+    name: Optional[str] = None
+    total_mb: Optional[int] = None
+    used_mb: Optional[int] = None
+    free_mb: Optional[int] = None
+    torch_index: Optional[int] = Field(
+        None, description="torch's index, matched by UUID; null when torch cannot see the card"
+    )
+    torch_measured: bool = Field(
+        ..., description="True only on a card miLLM placed a transformers model on"
+    )
+    millm_allocated_mb: Optional[int] = Field(None, description="torch allocated; null unmeasured")
+    millm_reserved_mb: Optional[int] = Field(
+        None, description="torch reserved (excludes the CUDA context); null unmeasured"
+    )
+    engine_memory: Optional[str] = Field(
+        None, description="'not_measured_by_torch' on cards a resident GGUF model occupies"
+    )
+    processes: Optional[list[GpuProcess]] = Field(
+        None, description="nvidia-smi's per-process list for this card; null when unavailable"
+    )
+    processes_reason: Optional[str] = None
+
+
+class GpuMemoryResponse(BaseModel):
+    """`GET /api/health/gpus`."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    read_at: datetime
+    cards: list[GpuCardMemory]
+    reason: Optional[str] = Field(None, description="Why `cards` is empty, when it is")
+
+
+@router.get(
+    "/gpus",
+    response_model=GpuMemoryResponse,
+    summary="Per-card GPU memory",
+    description=(
+        "Total, used and free memory per card from nvidia-smi, and miLLM's own allocated and "
+        "reserved memory on the cards it placed a transformers model on. Never creates a CUDA "
+        "context; takes no request-queue slot."
+    ),
+)
+async def gpu_memory() -> GpuMemoryResponse:
+    """nvidia-smi can take its five-second timeout, so the read runs in a worker thread."""
+    import asyncio
+
+    from millm.services.gpu_memory import read_gpu_memory
+
+    return GpuMemoryResponse.model_validate(await asyncio.to_thread(read_gpu_memory))
+
+
 @router.get(
     "/detailed",
     response_model=DetailedHealthResponse,

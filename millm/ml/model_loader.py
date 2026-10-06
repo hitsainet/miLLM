@@ -150,6 +150,18 @@ ENGINE_TRANSFORMERS = "transformers"
 ENGINE_LLAMACPP = "llamacpp"
 
 
+#: Torch indices of every card a TRANSFORMERS model has been placed on in this process
+#: (Feature 29, FR-29.8.4). Never shrinks: a CUDA context outlives the model that created it,
+#: so a card stays "touched" after the unload. `/api/health/gpus` reads torch's allocator only
+#: on these cards, so the read never creates a context on a card miLLM had not used.
+_TORCH_TOUCHED_INDICES: set[int] = set()
+
+
+def torch_touched_indices() -> frozenset[int]:
+    """The cards torch has worked on in this process (see `_TORCH_TOUCHED_INDICES`)."""
+    return frozenset(_TORCH_TOUCHED_INDICES)
+
+
 @dataclass
 class LoadedModel:
     """Represents a model loaded in GPU memory."""
@@ -335,6 +347,10 @@ class LoadedModelState:
         with self._lock:
             self._loaded = model
             self._unloading = False
+            # llama.cpp's memory is not torch's, and a torch read on its cards would only
+            # create a context there; record transformers placements alone (FR-29.8.4).
+            if model.engine == ENGINE_TRANSFORMERS:
+                _TORCH_TOUCHED_INDICES.update(model.gpu_indices)
 
     def clear(self) -> None:
         """Clear the currently loaded model and free GPU memory."""

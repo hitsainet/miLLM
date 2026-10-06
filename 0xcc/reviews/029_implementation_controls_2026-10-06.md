@@ -17,6 +17,7 @@ One pytest process at a time throughout.
 | After 5.0 (lease routes, headers, refuse policy) | 4251 passed / 3 skipped / 0 failed |
 | After 6.0 (Retry-After on every 503) | 4276 passed / 3 skipped / 0 failed |
 | After 7.0 (queue state, health contract) | 4293 passed / 3 skipped / 0 failed |
+| After 8.0 (GPU memory endpoint) | 4311 passed / 3 skipped / 0 failed |
 
 ## 2. Task 0.1 — cited lines re-verified at HEAD (`39c6f8e`)
 

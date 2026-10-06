@@ -89,3 +89,52 @@ def query_gpus() -> list[dict[str, Any]]:
     """Every card nvidia-smi reports. Empty when nvidia-smi is unavailable."""
     stdout = _run_query()
     return parse_nvidia_smi_gpus(stdout) if stdout else []
+
+
+#: Per-process query. `used_memory` is what the node's nvidia-smi counts for each process,
+#: CUDA context included — the only measurement of llama.cpp's memory (Feature 29, T-89).
+COMPUTE_APPS_QUERY = "gpu_uuid,pid,used_memory"
+
+
+def parse_compute_apps(stdout: str) -> list[dict[str, Any]]:
+    """Parse `--query-compute-apps=gpu_uuid,pid,used_memory` CSV, one process per line.
+
+    A line that does not parse is skipped rather than reported as zero memory.
+    """
+    apps: list[dict[str, Any]] = []
+    for line in stdout.strip().splitlines():
+        parts = [part.strip() for part in line.split(",")]
+        if len(parts) < 3 or not parts[1].isdigit():
+            continue
+        try:
+            used = int(float(parts[2]))
+        except ValueError:
+            continue
+        apps.append({"gpu_uuid": parts[0], "pid": int(parts[1]), "used_mb": used})
+    return apps
+
+
+def query_compute_apps() -> Optional[list[dict[str, Any]]]:
+    """Every compute process nvidia-smi can see, or None when it is absent, fails or hangs.
+
+    `[]` means it ran and listed nothing — inside a container's PID namespace it may see no
+    process at all, which is an answer, not a failure (T-89).
+    """
+    try:
+        result = subprocess.run(
+            [
+                "nvidia-smi",
+                f"--query-compute-apps={COMPUTE_APPS_QUERY}",
+                "--format=csv,noheader,nounits",
+            ],
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+    except (subprocess.TimeoutExpired, FileNotFoundError, OSError) as e:
+        logger.debug("nvidia_smi_compute_apps_failed", error=str(e))
+        return None
+    if result.returncode != 0:
+        logger.debug("nvidia_smi_compute_apps_nonzero_exit", returncode=result.returncode)
+        return None
+    return parse_compute_apps(result.stdout)

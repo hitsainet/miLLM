@@ -202,15 +202,15 @@ T-84 – T-90
         pin for `inference` and `lease`; `test_every_request_queue_slot_is_taken_through_admission`
         stays green.
 
-- [ ] 8.0 GPU memory endpoint (covers FR-29.8, FR-29.8.1 – FR-29.8.8)
-  - [ ] 8.1 `nvidia_smi.query_compute_apps()` with parser and 5-second timeout.
-  - [ ] 8.2 Touched-card set in `model_loader.py`, recorded in `LoadedModelState.set()` for
+- [x] 8.0 GPU memory endpoint (covers FR-29.8, FR-29.8.1 – FR-29.8.8)
+  - [x] 8.1 `nvidia_smi.query_compute_apps()` with parser and 5-second timeout.
+  - [x] 8.2 Touched-card set in `model_loader.py`, recorded in `LoadedModelState.set()` for
         transformers models.
-  - [ ] 8.3 `gpu_memory.read_gpu_memory()` (FTID §7): torch read only on touched cards
+  - [x] 8.3 `gpu_memory.read_gpu_memory()` (FTID §7): torch read only on touched cards
         (`torch_measured`), `null` otherwise; `engine_memory` for a resident GGUF model; processes by
         UUID or `null` with a reason; `cards: []` + `reason` without `nvidia-smi`.
-  - [ ] 8.4 `GET /api/health/gpus` via `asyncio.to_thread`; no request-queue slot.
-  - [ ] 8.5 Tests: one- and two-card fixtures; a card torch cannot see listed with `torch_index:
+  - [x] 8.4 `GET /api/health/gpus` via `asyncio.to_thread`; no request-queue slot.
+  - [x] 8.5 Tests: one- and two-card fixtures; a card torch cannot see listed with `torch_index:
         null`; untouched card never calls `memory_reserved` (control M17); GGUF label; absent
         `nvidia-smi`; route reachable; read runs in a thread (patched `to_thread` call count 1).
 

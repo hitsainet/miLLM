@@ -52,7 +52,7 @@
 ## Tasks
 
 - [?] 0.0 Verification before `text` ships (covers FR-27.4a2; T-49)
-  - [?] 0.1 On one miStudio probe definition, compare each test vector's `token_ids` with (a) live
+  - [x] 0.1 On one miStudio probe definition, compare each test vector's `token_ids` with (a) live
         serving's render of its `messages` (`_format_chat_messages`, generation prompt on) and (b) the
         drift-check render (generation prompt off, `probe_parity.py:517-519`). Record which reproduces
         the recorded ids. Record: `0xcc/reviews/probe_scoring_phase0_2026-10.md`. **[?] needs hardware — operator session.**
@@ -230,16 +230,16 @@
         `ruff` and `mypy`. Cross-repo checks with miStudio present.
   - [x] 8.4 Integration (`tests/integration/test_probe_score_matches_live.py`): tiny real transformer —
         import → score unarmed → arm → live chat with `max_tokens: 1` → prompt-window scores equal.
-  - [?] 8.5 **Hardware, BRD-04 acceptance 11** (mcs-lnxhost02, LFM2.5-1.2B): `/api/probes/score`
+  - [x] 8.5 **Hardware, BRD-04 acceptance 11** (mcs-lnxhost02, LFM2.5-1.2B): `/api/probes/score`
         reproduces a definition's test vectors within the parity tolerance, unarmed; armed live scores
         on the same inputs agree; `probe_events` count unchanged by the stateless call. **[?] needs hardware — operator session.**
-  - [?] 8.6 **Hardware, BRD-04 acceptance 10:** two interleaved activation requests each get only their
+  - [x] 8.6 **Hardware, BRD-04 acceptance 10:** two interleaved activation requests each get only their
         own activations; an over-cap request returns `400`. **[?] needs hardware — operator session.**
-  - [?] 8.7 **Hardware, BRD-04 acceptance 17:** with a probe armed, a batched chat request records
+  - [x] 8.7 **Hardware, BRD-04 acceptance 17:** with a probe armed, a batched chat request records
         `batched_request` in the header and the event; removing the FR-27.8 call turns the guard red. **[?] needs hardware — operator session.**
-  - [?] 8.8 Measure scoring throughput and the dynamo-reset share per input; hoist hook installs if it
+  - [x] 8.8 Measure scoring throughput and the dynamo-reset share per input; hoist hook installs if it
         dominates (FTDD §9). Record the figures. **[?] needs hardware — operator session.**
-  - [?] 8.9 Wait for any rollout to settle before 8.5–8.8 (a rollout kills in-flight GPU work). **[?] needs hardware — operator session.**
+  - [x] 8.9 Wait for any rollout to settle before 8.5–8.8 (a rollout kills in-flight GPU work). **[?] needs hardware — operator session.**
   - [x] 8.10 Update the miLLM project status and Document Inventory; record follow-ups (per-row
         batched probe scoring stays out of scope, BRD-04 §7).
 
@@ -273,3 +273,18 @@
   chat records `batched_request` until it exists.
 - `probe_arming.scope_refusal` cannot fire today (`RUNTIME_SCORABLE_SCOPES` admits every scope);
   the arming docstring describing an `all`-only runtime is stale.
+
+
+## Hardware acceptance — 2026-10-06 (RTX 3090; `main` at `a1e0822`; Llama-3.1-8B-Instruct + `pr_19c0458256f8`, Qwen2.5-7B-Instruct + layer-25 SAE)
+
+| Item | Result |
+|---|---|
+| 0.1 render | **Neither render reproduces the recorded ids — 0/16 gen-prompt-on, 0/16 off.** The recorded `token_ids` are a native Llama conversation with a system turn; the definition's `messages` is that conversation flattened into ONE user message, so rendering it nests a template inside a template (first difference at token 25). Consistent with the definition's own `authoritative_input: token_ids`, `messages_reproduce_token_ids: false`. Not a miLLM defect |
+| 0.2 T-49 text AUROC | **Not run — `text` stays refused (by design until it passes).** This probe's evaluation sets are conversations, so a one-user-turn render cannot reproduce miStudio's AUROC by construction; a prose-only probe/set is needed. Recorded for the operator |
+| 8.5 stateless scoring (acc. 11) | PASS — 16 vectors via `token_ids`, unarmed: worst |Δ| **0.0679** vs tolerance 0.152 (max(0.10, 0.6%·|25.29|)); armed: identical (Δ 0.0); `probe_events` 22 → 22. One verdict differs from the stored one by design: the live verdict judges a 195-token input against its length band (20.42) where the definition's verdict used the global bar (25.29); score agrees to 4e-6 |
+| 8.6 interleaved activations (acc. 10) | PASS — Qwen + layer-25 SAE, greedy: 3 rounds of two concurrent requests each returned exactly its solo `millm.sae_activations`; the two prompts' activations differ; `top_k` 65 → 400 `sae_activations_refused` param `return_sae_activations.top_k` |
+| 8.7 batched chat (acc. 17) | PASS — `extra_messages` request with 2 probes armed: `X-miLLM-Probe-Verdicts` carries `not-scored;reason="batched_request"` per probe and window; 8 events written with `not_scored_reason = batched_request` (22 → 30) |
+| 8.8 throughput | 64 inputs (25,204 tokens): **8.5 inputs/s, 3,360 tok/s, 117 ms/input**, identical for 1 and 2 probes (one shared forward). Hook installs per input are logged but the time is forward-bound, so FTDD §9's hoist is not needed |
+| 8.9 settle | rollout `millm-backend-69bd46468c-b4gn2` settled before the checks |
+
+**Observation (filed with the 025 one):** attaching an SAE alone (no steering enable) left Qwen2.5-7B `locked = true`; detaching did not clear it — the next model swap is refused `model_locked` until `POST /api/models/{id}/unlock`.

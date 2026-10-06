@@ -21,7 +21,7 @@ import json
 import time
 from collections import OrderedDict
 from dataclasses import dataclass, field
-from typing import Any, Optional
+from typing import Any
 
 import torch
 from transformers import LogitsProcessor
@@ -29,7 +29,7 @@ from transformers import LogitsProcessor
 from millm.core.errors import ConstrainedOutputInvalidError
 
 
-def constraint_kind(response_format: Any) -> Optional[str]:
+def constraint_kind(response_format: Any) -> str | None:
     kind = (
         response_format.get("type") if isinstance(response_format, dict)
         else getattr(response_format, "type", None)
@@ -37,7 +37,7 @@ def constraint_kind(response_format: Any) -> Optional[str]:
     return kind if kind in ("json_object", "json_schema") else None
 
 
-def schema_of(response_format: Any) -> Optional[dict]:
+def schema_of(response_format: Any) -> dict[str, Any] | None:
     """The user's JSON Schema for `json_schema`, else None."""
     if constraint_kind(response_format) != "json_schema":
         return None
@@ -45,12 +45,12 @@ def schema_of(response_format: Any) -> Optional[dict]:
     return getattr(spec, "schema_", None)
 
 
-def schema_name(response_format: Any) -> Optional[str]:
+def schema_name(response_format: Any) -> str | None:
     spec = getattr(response_format, "json_schema", None)
     return getattr(spec, "name", None)
 
 
-def constrained_header(response_format: Any) -> Optional[str]:
+def constrained_header(response_format: Any) -> str | None:
     """`X-miLLM-Constrained`: `json_object`, or `json_schema;name="judge_v1"` (FR-25.12.3)."""
     kind = constraint_kind(response_format)
     if kind == "json_schema":
@@ -80,8 +80,8 @@ class CompiledConstraint:
     grammar: Any
     vocab_size: int
     stop_ids: list[int]
-    header: Optional[str] = None
-    processors: list = field(default_factory=list)  # every processor built, for mask timing
+    header: str | None = None
+    processors: list[Any] = field(default_factory=list)  # every processor built, for mask timing
 
 
 class GrammarCache:
@@ -102,7 +102,7 @@ class GrammarCache:
             tokenizer, vocab_size=self.vocab_size, stop_token_ids=self.stop_ids or None
         )
         self._compiler = xgr.GrammarCompiler(info)
-        self._grammars: "OrderedDict[str, Any]" = OrderedDict()
+        self._grammars: OrderedDict[str, Any] = OrderedDict()
         self.hits = 0
         self.misses = 0
 
@@ -141,7 +141,7 @@ class JsonConstraintProcessor(LogitsProcessor):
         self._xgr = xgr
         self._matchers = [xgr.GrammarMatcher(grammar) for _ in range(batch_size)]
         self._bitmask = xgr.allocate_token_bitmask(batch_size, vocab_size)
-        self._device_bitmask: Optional[torch.Tensor] = None
+        self._device_bitmask: torch.Tensor | None = None
         self._started = False
         self.mask_ms = 0.0
 

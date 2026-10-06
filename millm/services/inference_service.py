@@ -344,7 +344,7 @@ def _request_seed(request: Any) -> Optional[int]:
     return seed if isinstance(seed, int) and not isinstance(seed, bool) else None
 
 
-def _request_extra_messages(request: Any) -> list:
+def _request_extra_messages(request: Any) -> list[Any]:
     extra = getattr(request, "extra_messages", None)
     return extra if isinstance(extra, list) else []
 
@@ -363,8 +363,8 @@ def _constraint_type(response_format: Any) -> Optional[str]:
 #: Feature 25: what this request's generation actually did, for the route's headers — the seed
 #: scope that was promised (X-miLLM-Seed) and the constraint that was applied
 #: (X-miLLM-Constrained). Request-scoped like the probe verdicts above; reset with them.
-_REQUEST_OUTCOME: "contextvars.ContextVar[dict]" = contextvars.ContextVar(
-    "millm_request_outcome", default={}
+_REQUEST_OUTCOME: "contextvars.ContextVar[Optional[dict[str, Any]]]" = contextvars.ContextVar(
+    "millm_request_outcome", default=None
 )
 
 
@@ -373,12 +373,12 @@ def reset_request_outcome() -> None:
 
 
 def note_request_outcome(**values: Any) -> None:
-    """Record part of this request's outcome. A new dict each time: the default is shared."""
-    _REQUEST_OUTCOME.set({**_REQUEST_OUTCOME.get(), **values})
+    """Record part of this request's outcome — always a new dict, never mutated in place."""
+    _REQUEST_OUTCOME.set({**(_REQUEST_OUTCOME.get() or {}), **values})
 
 
-def get_request_outcome() -> dict:
-    return dict(_REQUEST_OUTCOME.get())
+def get_request_outcome() -> dict[str, Any]:
+    return dict(_REQUEST_OUTCOME.get() or {})
 
 
 #: Seed scopes (FR-25.13.6, FR-25.14). A response never claims a wider scope than measured.
@@ -391,7 +391,7 @@ def _rng_devices() -> list[int]:
     """Every CUDA device whose generator `torch.manual_seed` reseeds — all of them, once CUDA is
     initialised. Forking only the model's own cards would leave the others permanently reseeded
     (manual_seed seeds every device), so every initialised device is saved and restored."""
-    if torch.cuda.is_available() and torch.cuda.is_initialized():
+    if torch.cuda.is_available() and torch.cuda.is_initialized():  # type: ignore[no-untyped-call]
         return list(range(torch.cuda.device_count()))
     return []
 
@@ -413,7 +413,7 @@ def seeded_rng(seed: Optional[int]) -> Iterator[None]:
         yield
 
 
-def _seed_kwargs(gen_config: Any) -> dict:
+def _seed_kwargs(gen_config: Any) -> dict[str, Any]:
     """`{"seed": n}` for a seeded request, else `{}` — so an unseeded call is exactly the call it
     was before Feature 25 (stand-ins that take one positional argument keep working)."""
     seed = getattr(gen_config, "seed", None)
@@ -708,6 +708,8 @@ class InferenceService:
         # for another model and is not kept (see _get_draft_model). Review round
         # 3, 2026-09-14.
         self._model_epoch = 0
+        # Feature 25: (model identity, GrammarCache) for the loaded model; dropped on unload.
+        self._grammar_cache_entry: Optional[tuple[Any, GrammarCache]] = None
         # Advanced by every admitted request; an idle cache release scheduled under an
         # older value is void (_schedule_idle_cache_release).
         self._idle_release_generation = 0
@@ -1170,7 +1172,7 @@ class InferenceService:
             or getattr(request, "steering_intensity", None) is not None
         )
 
-    def _cbm_route_kwargs(self, request: Any) -> dict:
+    def _cbm_route_kwargs(self, request: Any) -> dict[str, Any]:
         """Everything the CBM gate must see about a request, read in ONE place.
 
         Feature 25 (FR-25.3.6): the manager returns one choice and has no per-request seed or
@@ -5307,7 +5309,7 @@ class InferenceService:
                 temperature=request.temperature,
                 top_k=request.logprobs or 0,
             )
-            for index, (prompt_text, (scores, prompt_tokens)) in enumerate(zip(prompts, scored)):
+            for index, (prompt_text, (scores, prompt_tokens)) in enumerate(zip(prompts, scored, strict=True)):
                 choices.append(
                     TextCompletionChoice(
                         index=index,

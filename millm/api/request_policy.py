@@ -33,9 +33,10 @@ per line and MUST call `evaluate(..., strict=True)`; the per-line extension valu
 from __future__ import annotations
 
 import uuid
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
-from enum import Enum
-from typing import Any, Callable, Mapping, Optional
+from enum import StrEnum
+from typing import Any
 
 from millm.core.errors import (
     FieldNotHonouredError,
@@ -52,13 +53,13 @@ STRICT_HEADER = "X-miLLM-Strict"
 IGNORED_FIELDS_HEADER = "X-miLLM-Ignored-Fields"
 
 
-class Endpoint(str, Enum):
+class Endpoint(StrEnum):
     CHAT = "chat"
     COMPLETIONS = "completions"
     EMBEDDINGS = "embeddings"
 
 
-class Engine(str, Enum):
+class Engine(StrEnum):
     TRANSFORMERS = "transformers"
     LLAMACPP = "llamacpp"
 
@@ -78,7 +79,7 @@ class Honoured:
     endpoint still cannot honour it (e.g. a steering profile on a scoring request, which is
     always unsteered — X-09) and returns the reason, or None."""
 
-    refuse_if: Optional[Callable[[Any], Optional[str]]] = None
+    refuse_if: Callable[[Any], str | None] | None = None
 
 
 @dataclass(frozen=True)
@@ -234,11 +235,11 @@ class PolicyResult:
     """What the route reports: unused field locations, in request order, no duplicates."""
 
     unused: list[str] = field(default_factory=list)
-    endpoint: Optional[Endpoint] = None
-    engine: Optional[Engine] = None
+    endpoint: Endpoint | None = None
+    engine: Engine | None = None
 
 
-def parse_strict(value: Optional[str]) -> bool:
+def parse_strict(value: str | None) -> bool:
     """`X-miLLM-Strict`: `true`/`1` on; `false`/`0`/absent off; anything else refused.
 
     A client that wrote `yes` meant strict, and serving it lenient would be the silent drop this
@@ -428,7 +429,7 @@ def apply_request_policy(
     return result
 
 
-def ignored_fields_header(result: PolicyResult) -> Optional[str]:
+def ignored_fields_header(result: PolicyResult) -> str | None:
     """The header value for a policy result, or None when nothing was ignored."""
     if not result.unused:
         return None

@@ -18,7 +18,7 @@ Key implementation notes:
 
 from typing import Annotated, Any, Literal, Optional, Union
 
-from pydantic import BaseModel, Field, model_validator, field_validator
+from pydantic import BaseModel, Field, ValidationInfo, field_validator, model_validator
 
 
 # =============================================================================
@@ -303,12 +303,12 @@ class ChatCompletionRequest(BaseModel):
 
     @field_validator("seed", mode="before")
     @classmethod
-    def _seed_not_bool(cls, v):
+    def _seed_not_bool(cls, v: Any) -> Any:
         return _reject_bool_seed(v)
 
     @field_validator("response_format")
     @classmethod
-    def _response_format_combinations(cls, v, info):
+    def _response_format_combinations(cls, v: Any, info: ValidationInfo) -> Any:
         """Refused combinations, naming `response_format` (FR-25.11.5, T-59, FR-25.6.4):
         * `stop` — a stop string can cut a document and report finish_reason "stop", which is
           truncated JSON reported as complete;
@@ -331,7 +331,7 @@ class ChatCompletionRequest(BaseModel):
 
     @field_validator("n")
     @classmethod
-    def _no_n_when_streaming(cls, v, info):
+    def _no_n_when_streaming(cls, v: Any, info: ValidationInfo) -> Any:
         # FR-25.3.5: the streaming path reads neither `n` nor `extra_messages`; a streamed n=3
         # returned ONE choice. Refused, naming the field (validated after `stream`).
         if v > 1 and info.data.get("stream"):
@@ -340,7 +340,7 @@ class ChatCompletionRequest(BaseModel):
 
     @field_validator("extra_messages")
     @classmethod
-    def _no_extra_messages_when_streaming(cls, v, info):
+    def _no_extra_messages_when_streaming(cls, v: Any, info: ValidationInfo) -> Any:
         if v and info.data.get("stream"):
             raise ValueError(
                 "extra_messages (batched conversations) is not supported with stream=true"
@@ -374,7 +374,7 @@ class ChatCompletionRequest(BaseModel):
 
     @field_validator("top_logprobs")
     @classmethod
-    def _top_logprobs_needs_logprobs(cls, v, info):
+    def _top_logprobs_needs_logprobs(cls, v: Any, info: ValidationInfo) -> Any:
         # OpenAI's rule (FR-25.5.3): alternatives are only returned when logprobs is true.
         # `logprobs` is declared before `top_logprobs`, so it is already in info.data.
         if v is not None and info.data.get("logprobs") is not True:
@@ -449,7 +449,7 @@ class TextCompletionRequest(BaseModel):
 
     @field_validator("seed", mode="before")
     @classmethod
-    def _seed_not_bool(cls, v):
+    def _seed_not_bool(cls, v: Any) -> Any:
         return _reject_bool_seed(v)
 
     @model_validator(mode="before")
@@ -459,7 +459,7 @@ class TextCompletionRequest(BaseModel):
 
     @field_validator("n")
     @classmethod
-    def _n_greater_than_one_is_refused(cls, v):
+    def _n_greater_than_one_is_refused(cls, v: int) -> int:
         # T-56 / FR-25.4.3: create_text_completion never read `n`, so n=3 returned one choice per
         # prompt. Implementing it is deferred (FR-25.4.2); until then it is refused, on every
         # engine, before any auto-load (schema validation runs first).

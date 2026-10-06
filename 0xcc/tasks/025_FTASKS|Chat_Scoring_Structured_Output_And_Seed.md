@@ -30,7 +30,10 @@ miStudio 034 to send `X-miLLM-Strict: true` safely.
 - `tests/hardware/` (new scripts): chat-scoring parity, structured output, seed, constraint cost,
   llama.cpp seed
 - `manual/` OpenAI API reference page
-- `0xcc/reviews/review_feature025_<date>.md` (new at acceptance): mutation-control record
+- `0xcc/reviews/025_implementation_controls_2026-10-06.md`: mutation-control record (73 controls), discrepancies, measurements, operator records
+- `tests/hardware/feature25_acceptance.py`: the hardware acceptance script (parity, unsteered, structured, seed, llamacpp-seed, tokenizer-spike)
+- `tests/unit/f25_fixtures.py`: tiny real models and tokenizers shared by the Feature 25 tests
+- `tests/unit/services/test_streaming_refusals.py`, `tests/unit/api/test_error_map_complete.py`: as named above
 
 ### Notes
 - Backend tests: `pytest tests/unit` (and the new files individually). Lint/type: `ruff`, `mypy millm/`.
@@ -60,16 +63,16 @@ miStudio 034 to send `X-miLLM-Strict: true` safely.
 ## Tasks
 
 - [ ] 0.0 Spikes and measurements that gate later work (covers FR-25.10.8, FR-25.14.3; FTDD §12)
-  - [ ] 0.1 **gemma-4 tokenizer spike** (before 7.x ships): on the node, build
+  - [?] 0.1 **gemma-4 tokenizer spike** (before 7.x ships): on the node, build
         `xgr.TokenizerInfo.from_huggingface` from the served gemma-4 tokenizer and compile the FTDD
         §3.1 test schema; require the target string accepted. Record compile time and mask timing.
-        If it fails, add a refusal row for that model family and record why.
-  - [ ] 0.2 **xgrammar on the node's CUDA stack:** in the deployed image, run one constrained
+        If it fails, add a refusal row for that model family and record why. *needs hardware — operator session.*
+  - [?] 0.2 **xgrammar on the node's CUDA stack:** in the deployed image, run one constrained
         `generate()` on LFM2.5-1.2B on the 3090 (the triton bitmask kernel path). A failure blocks
-        7.x.
-  - [ ] 0.3 **T-61 llama.cpp seed measurement** (before 6.6): forward `seed` to llama.cpp on the
+        7.x. *needs hardware — operator session.*
+  - [?] 0.3 **T-61 llama.cpp seed measurement** (before 6.6): forward `seed` to llama.cpp on the
         reference GGUF model, run the same sampled request twice, compare bytes. Record the
-        result; 6.6 implements the matching outcome. Until it passes the outcome stays *refused*.
+        result; 6.6 implements the matching outcome. Until it passes the outcome stays *refused*. *needs hardware — operator session.*
 
 - [x] 1.0 Dependencies and configuration (covers FR-25.10.8; FTDD §11)
   - [x] 1.1 `pyproject.toml`: add `xgrammar>=0.2.8,<0.3` and `jsonschema>=4.23,<5` with a comment
@@ -262,31 +265,31 @@ miStudio 034 to send `X-miLLM-Strict: true` safely.
         scopes, chat logprobs shape, `system_fingerprint` format.
 
 - [ ] 9.0 Feature Acceptance
-  - [ ] 9.1 Verify each FPRD success criterion SC-1…SC-8 and each user story US-1…US-7 against its
+  - [x] 9.1 Verify each FPRD success criterion SC-1…SC-8 and each user story US-1…US-7 against its
         test; tick or file the gap.
-  - [ ] 9.2 Run every FTID §8.3 mutation control (M1–M16): back up, mutate one line, confirm it
+  - [x] 9.2 Run every FTID §8.3 mutation control (M1–M16): back up, mutate one line, confirm it
         landed, run, require red, restore, confirm `git diff` clean. Record results in
         `0xcc/reviews/review_feature025_<date>.md`. Any survivor gets a regression test and is
         re-run as a negative control (SC-8).
-  - [ ] 9.3 **Hardware — BRD-04 acceptance 3 (chat scoring parity):** JEV-9B-decision, bfloat16, on
+  - [?] 9.3 **Hardware — BRD-04 acceptance 3 (chat scoring parity):** JEV-9B-decision, bfloat16, on
         the 3090: 200 prompts, chat scoring of `messages` vs completion scoring of the same rendered
-        prompt — identical token ids, every logprob within 1e-5 absolute.
-  - [ ] 9.4 **Hardware — BRD-04 acceptance 4:** with a profile active, chat scoring equals scoring
-        with no SAE attached.
-  - [ ] 9.5 **Hardware — BRD-04 acceptance 5:** 100 `json_schema` requests on transformers all parse
+        prompt — identical token ids, every logprob within 1e-5 absolute. *needs hardware — operator session.*
+  - [?] 9.4 **Hardware — BRD-04 acceptance 4:** with a profile active, chat scoring equals scoring
+        with no SAE attached. *needs hardware — operator session.*
+  - [?] 9.5 **Hardware — BRD-04 acceptance 5:** 100 `json_schema` requests on transformers all parse
         and validate; record the GPU per-token constraint cost against unconstrained; the same request
         on a GGUF model returns `400` with no model load (verify by the resident model's `loaded_at`
-        unchanged).
-  - [ ] 9.6 **Hardware — BRD-04 acceptance 6:** the same sampled request with `seed: 7` twice on the
+        unchanged). *needs hardware — operator session.*
+  - [?] 9.6 **Hardware — BRD-04 acceptance 6:** the same sampled request with `seed: 7` twice on the
         serial path gives byte-identical text and echoes the seed; include a run with the speculative
-        draft configured if the node has one.
-  - [ ] 9.7 **BRD-04 acceptance 1 and 2** over HTTP against the deployed pod: `foo: 1` reported;
+        draft configured if the node has one. *needs hardware — operator session.*
+  - [?] 9.7 **BRD-04 acceptance 1 and 2** over HTTP against the deployed pod: `foo: 1` reported;
         strict refuses; every refused list field returns `400` with and without strict; `n: 2` on
-        completions returns `400`.
-  - [ ] 9.8 Full suite: `pytest tests/unit` green; `ruff`, `mypy millm/` clean; the existing
+        completions returns `400`. *needs hardware — operator session.*
+  - [x] 9.8 Full suite: `pytest tests/unit` green; `ruff`, `mypy millm/` clean; the existing
         `test_scoring_completions.py` unchanged and green; also run with `0xcc/` hidden (the public
         mirror's view) so no test depends on these documents.
-  - [ ] 9.9 Records for the operator (this pass may not edit them): CLAUDE.md Document Inventory and
+  - [x] 9.9 Records for the operator (this pass may not edit them): CLAUDE.md Document Inventory and
         status, PPRD Feature 25 status, and the PADR amendments listed in FTDD §14 (stack: xgrammar,
         jsonschema; GGUF structured output closed as refused; `_score_prompts` as the shared scorer).
         File any follow-up found during acceptance as new tasks.

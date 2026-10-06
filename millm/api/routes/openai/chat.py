@@ -13,8 +13,8 @@ from typing import Union
 from fastapi import APIRouter, Depends, Request, Response
 from fastapi.responses import JSONResponse, StreamingResponse
 
-from millm.api.dependencies import ModelServiceDep, get_inference_service
 from millm.api import json_schema_subset
+from millm.api.dependencies import ModelServiceDep, get_inference_service
 from millm.api.request_policy import (
     IGNORED_FIELDS_HEADER,
     Endpoint,
@@ -38,11 +38,12 @@ from millm.api.schemas.openai import (
 )
 from millm.core.errors import (
     MiLLMError,
-    ResponseFormatUnsupportedError,
     ModelBusyError,
     ModelLockedError,
+    ResponseFormatUnsupportedError,
 )
 from millm.core.logging import get_logger
+from millm.ml.constrained_decoding import constraint_kind, schema_of
 from millm.services.inference_service import (
     InferenceService,
     circuit_apply_failed,
@@ -51,7 +52,6 @@ from millm.services.inference_service import (
     reset_steering_memo,
 )
 from millm.services.system_fingerprint import build_system_fingerprint
-from millm.ml.constrained_decoding import constraint_kind, schema_of
 
 
 def seed_header(seed: int, scope: str) -> str:

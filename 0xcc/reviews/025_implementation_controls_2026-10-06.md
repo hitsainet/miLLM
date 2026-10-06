@@ -23,6 +23,7 @@ is re-run as a negative control (rows suffixed `-rerun`).
 | After 6.0 (seed + fingerprint) | 3964 passed / 3 skipped / 0 failed |
 | After 7.0 (structured output) | 4050 passed / 3 skipped / 0 failed |
 | After 8.0 (hand-offs, docs) | 4052 passed / 3 skipped / 0 failed |
+| Final (after 9.0 non-hardware) | 4052 passed / 3 skipped / 0 failed |
 
 ## Discrepancies between the documents and the code (the code won)
 
@@ -126,6 +127,76 @@ is re-run as a negative control (rows suffixed `-rerun`).
   `system_fingerprint`, and five error rows. It also said scoring refusals were `422`; on `/v1` they
   are `400` (the validation handler), corrected.
 
+## 9.1 Success criteria and user stories → tests
+
+| Criterion | Unit / HTTP evidence (this workstation) | Hardware |
+|---|---|---|
+| SC-1 unknown fields | `test_unused_fields_http.py` (`foo`, `messages[0].name`, strict 400, streaming header, body unchanged); M1, M3, M5 | 9.7 over the deployed pod |
+| SC-2 output-changing list | `test_request_policy_coverage.py`: every field × every OpenAPI-derived `/v1` POST path × both engines, lenient and strict, load count 0; M2 | 9.7 |
+| SC-3 `n` | `test_streaming_refusals.py` (completions `n: 2` → 400 on both engines before load; streamed `n: 2` → 400; direct service call); M16 | 9.7 |
+| SC-4 chat scoring parity | `test_chat_scoring.py::test_identical_token_ids_and_logprobs` (identical ids, exact logprobs on CPU), payload + count of `_score_prompts`; M8, M9 | **9.3** — JEV-9B bf16, 200 prompts |
+| SC-5 unsteered | `test_scoring_with_steering_active_equals_scoring_with_none` (a real thread-local steering hook, both endpoints); M6 | **9.4** |
+| SC-6 structured output | `test_structured_output.py` (json_schema validates for 5 seeds, json_object, strict:false, n=2, extra_messages, truncation = length, header, GGUF 400 with no load); M10, M11 | **9.5** — 100 requests + GPU per-token cost |
+| SC-7 seed | `test_seed_and_fingerprint.py` (byte-identical at seed 7, seed 8 differs, global RNG restored, scopes, header); M12, M13 | **9.6** |
+| SC-8 reachability | every wiring line in the controls table below has a red control | — |
+
+US-1 → SC-1 tests; US-2 → SC-2/SC-3; US-3 → `TestParityWithCompletionScoring`, `TestShape`; US-4 →
+`test_extra_messages_score_one_choice_per_conversation_in_order`; US-5 → SC-5; US-6 → SC-6 and the
+header tests; US-7 → SC-7 and the fingerprint tests. No gap was filed: each criterion has its unit
+form here and its absolute form is a hardware item.
+
+## 9.8 Lint, types, mirror view
+
+- **ruff** is not installed in miLLM's venv (nor `mypy`); installing them was outside this pass's
+  allowance, so ruff ran from an ephemeral `uvx ruff` (pyproject's config) and mypy from miStudio's
+  venv binary against miLLM's interpreter. New modules: **ruff clean, mypy strict clean**. Touched
+  modules: no new ruff finding beyond the files' existing `Optional[...]` style (UP045, kept for
+  consistency with every other line in those files); the two remaining B039/B905 findings in
+  `inference_service.py` are pre-existing (`_PROBE_VERDICTS`, an embeddings `zip`). `mypy millm/`:
+  **581 errors at `main` (0efff20), 581 after** — no new error (one fewer; 14 introduced along the
+  way were fixed).
+- **Mirror view (0xcc hidden):** the tracked tree minus `0xcc/` copied to the scratchpad and run
+  with `PYTHONPATH` at the copy: **4020 passed / 35 skipped / 0 failed**. The 32 extra skips are
+  pre-existing tests that look for a sibling miStudio checkout or an 0xcc document; none is a
+  Feature 25 test.
+
+## 9.9 For the operator (this pass did not edit them)
+
+- **CLAUDE.md:** Document Inventory and Current Status for Feature 25 — implemented on
+  `feat/025-chat-scoring`, not merged, hardware acceptance outstanding (0.1–0.3, 9.3–9.7).
+- **PPRD:** Feature 25 status → implemented, hardware acceptance pending.
+- **PADR:** the three FTDD §14 amendments are already applied (Stage 3); add, if wanted: (a) the
+  seed is applied over the whole serial `n` loop, not per `generate()`; (b) `system_fingerprint` is
+  not carried on streamed chunks (FTDD §5.2), a reading narrower than FR-25.13.8.
+- **Follow-ups found:** streamed chunks carry no fingerprint; `echo`, `suffix` and `best_of` on
+  `/v1/completions` are reported as unused rather than refused (not on the FR-25.3 list, but output-
+  changing); `multipleOf` appears enforced on this probe and could join the subset after a
+  served-tokenizer probe; xgrammar `max_whitespace_cnt` is unset; ruff/mypy are not in the dev
+  venv.
+
+## Hardware session — what must run (all marked `[?]` in the FTASKS)
+
+**Ordering caveat:** the FTASKS gate 7.x behind 0.1 and 0.2 ("before 7.x ships"). 7.x is
+implemented and tested on the CPU path but NOT shipped (the branch is unmerged); 0.1 and 0.2 must
+pass before it is merged, or a refusal row added for the failing model family.
+
+`tests/hardware/feature25_acceptance.py` (written here, `--help`- and lint-checked; only
+`tokenizer-spike` was exercised, on a cached TinyLlama tokenizer: pass, compile 0.05 s, mask median
+0.6 µs):
+
+1. **0.1** `tokenizer-spike --tokenizer <served gemma-4 tokenizer>` — target accepted, timings.
+2. **0.2** one constrained `generate()` on LFM2.5-1.2B on the 3090 in the deployed image (the triton
+   bitmask path; this workstation exercised only the CPU path). `structured --n 1` covers it.
+3. **0.3** `llamacpp-seed --gguf <reference GGUF>` — pass flips the llama.cpp `seed` cells and
+   forwards `seed` in `_llamacpp_params` (6.6); fail keeps the refusal.
+4. **9.3** `parity --model JEV-9B-decision --tokenizer autotrust/JEV-9B --n 200` (bf16).
+5. **9.4** `unsteered` with a profile active and with no SAE, then `--compare`.
+6. **9.5** `structured --n 100 --gguf-model <a GGUF row>` — all validate, per-token cost, GGUF 400
+   with `loaded_at` unchanged.
+7. **9.6** `seed`, plus a run with a speculative draft configured if the node has one.
+8. **9.7** BRD-04 acceptance 1 and 2 over HTTP against the pod (`foo: 1` reported, strict refuses,
+   each refused list field 400, completions `n: 2` 400).
+
 ## Mutation controls
 
 | # | Control | File | Mutation | Landed | Result | Red | Restore (sha256 + re-grep) |
@@ -204,3 +275,9 @@ is re-run as a negative control (rows suffixed `-rerun`).
 | 72 | C7-table-scoring-rerun | `millm/api/request_policy.py` | same mutation, negative control after `test_the_table_refuses_response_format_on_scoring_for_a_direct_caller` | yes | 1 failed, 63 passed in 2.29s | **red** | ok |
 | 73 | C8-gguf-scoring | `millm/api/request_policy.py` | table: `logprobs` honoured on GGUF completions (after the route check was deleted) | yes | 1 failed, 32 passed in 5.55s | **red** | ok |
 
+
+**Totals:** the table above lists every control run, in order; `-rerun` rows are negative controls
+for a survivor. Survivors on first run: `P-fail-closed`, `S-comp-n`, `C7-table-scoring` — each was a
+defence-in-depth line that the HTTP path never reached (a stricter layer refused first), so the
+test that covers a direct caller was missing; each now has one and its re-run is red. The
+FTID's M1–M16 are all present (M5 three times, once per route).

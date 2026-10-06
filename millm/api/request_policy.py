@@ -150,7 +150,7 @@ OUTPUT_CHANGING: dict[str, dict[tuple[Endpoint, Engine], Outcome]] = {
         HONOURED, _NO_DISTRIBUTION, HONOURED, _NO_DISTRIBUTION, _EMB_NO_TOKENS, _EMB_NO_TOKENS,
     ),
     "response_format": _cells(
-        _PENDING,
+        _unless_scoring("scoring returns one token's log-probabilities, not a document"),
         refused("structured output on a GGUF model is refused in v1"),
         refused("structured output is served on /v1/chat/completions only"),
         refused("structured output is served on /v1/chat/completions only"),

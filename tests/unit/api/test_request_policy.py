@@ -294,3 +294,18 @@ def test_policy_cost_on_a_50_message_request_is_small():
         evaluate(req, Endpoint.CHAT, Engine.TRANSFORMERS, strict=False)
     per_call = (time.perf_counter() - t0) / 200
     assert per_call < 0.01, per_call
+
+
+def test_the_table_refuses_response_format_on_scoring_for_a_direct_caller():
+    """Over HTTP the chat schema refuses this combination first, so only a caller that builds or
+    copies a request object (Feature 26's batch lines call `evaluate`) reaches the table cell.
+    Found by control C7-table-scoring surviving."""
+    scoring = chat(max_tokens=1, logprobs=True)
+    fmt = chat(response_format={"type": "json_object"}).response_format
+    req = scoring.model_copy(update={"response_format": fmt})
+    req.model_fields_set.add("response_format")
+    with pytest.raises(FieldNotHonouredError) as exc:
+        evaluate(req, Endpoint.CHAT, Engine.TRANSFORMERS, strict=False)
+    assert exc.value.details["param"] == "response_format"
+    plain = chat(response_format={"type": "json_object"})
+    evaluate(plain, Endpoint.CHAT, Engine.TRANSFORMERS, strict=True)

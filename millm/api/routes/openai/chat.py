@@ -14,6 +14,7 @@ from fastapi import APIRouter, Depends, Request, Response
 from fastapi.responses import JSONResponse, StreamingResponse
 
 from millm.api.dependencies import ModelServiceDep, get_inference_service
+from millm.api import json_schema_subset
 from millm.api.request_policy import (
     IGNORED_FIELDS_HEADER,
     Endpoint,
@@ -37,6 +38,7 @@ from millm.api.schemas.openai import (
 )
 from millm.core.errors import (
     MiLLMError,
+    ResponseFormatUnsupportedError,
     ModelBusyError,
     ModelLockedError,
 )
@@ -49,6 +51,7 @@ from millm.services.inference_service import (
     reset_steering_memo,
 )
 from millm.services.system_fingerprint import build_system_fingerprint
+from millm.ml.constrained_decoding import constraint_kind, schema_of
 
 
 def seed_header(seed: int, scope: str) -> str:
@@ -144,6 +147,19 @@ async def create_chat_completion(
     # the ROW, so it runs before the auto-load below would evict the resident model.
     policy = apply_request_policy(request, Endpoint.CHAT, model, http_request.headers)
     ignored_header = ignored_fields_header(policy)
+
+    # Structured output refusals decidable without a load (FR-25.11): a schema keyword outside
+    # the enforced subset, and the continuous batching manager. (GGUF rows were refused by the
+    # policy table above.)
+    if constraint_kind(request.response_format) is not None:
+        if constraint_kind(request.response_format) == "json_schema":
+            json_schema_subset.check(schema_of(request.response_format))
+        if inference.cbm_enabled() is True:
+            raise ResponseFormatUnsupportedError(
+                "Structured output is refused while continuous batching is enabled on this "
+                "server: the batching manager applies no per-request constraint.",
+                details={"param": "response_format"},
+            )
 
     # Load the requested model on demand.
     #
@@ -321,6 +337,8 @@ async def create_chat_completion(
             response.headers["X-miLLM-Seed"] = seed_header(
                 request.seed, outcome.get("seed_scope") or inference.seed_scope_for(request)
             )
+        if outcome.get("constrained"):
+            response.headers["X-miLLM-Constrained"] = outcome["constrained"]
         result.system_fingerprint = build_system_fingerprint(model, inference.loaded_model())
         if echo_circuit_rung is not None and not circuit_apply_failed():
             response.headers["X-miLLM-Circuit-Rung"] = echo_circuit_rung

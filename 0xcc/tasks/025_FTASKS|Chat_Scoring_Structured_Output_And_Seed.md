@@ -211,39 +211,39 @@ miStudio 034 to send `X-miLLM-Strict: true` safely.
         `unrecorded`; `"unknown"` dtype → `unrecorded`; changes when the loaded dtype changes; present
         on unseeded responses.
 
-- [ ] 7.0 Structured output (covers FR-25.10, FR-25.11, FR-25.12)
-  - [ ] 7.1 Schemas: `ResponseFormat` union (`text`, `json_object`, `json_schema` with `name`,
+- [x] 7.0 Structured output (covers FR-25.10, FR-25.11, FR-25.12)
+  - [x] 7.1 Schemas: `ResponseFormat` union (`text`, `json_object`, `json_schema` with `name`,
         `schema`, `description`, `strict`) (FR-25.10.1, FR-25.10.4); validators refuse it with
         `stop` (FR-25.11.5), `stream` (T-59) and scoring.
-  - [ ] 7.2 `json_schema_subset.py`: allowlist per FTDD §4.3; `check()` with JSON pointers; size caps
+  - [x] 7.2 `json_schema_subset.py`: allowlist per FTDD §4.3; `check()` with JSON pointers; size caps
         (FR-25.10.9, FR-25.11.2).
-  - [ ] 7.3 Chat route: subset check after policy, before auto-load; table refuses GGUF
+  - [x] 7.3 Chat route: subset check after policy, before auto-load; table refuses GGUF
         (FR-25.11.1), completions and embeddings (FR-25.11.4), and the CBM when enabled
         (FR-25.11.3).
-  - [ ] 7.4 `constrained_decoding.py`: `GrammarCache` (per load, LRU 64, stop ids from the generation
+  - [x] 7.4 `constrained_decoding.py`: `GrammarCache` (per load, LRU 64, stop ids from the generation
         config, logits-width vocab), `JsonConstraintProcessor` (no `assert`, device bitmask once),
         `validate_output` (FTID §3.3).
-  - [ ] 7.5 Service: compile before `_admit()` via `asyncio.to_thread`; `_build_generate_kwargs`
+  - [x] 7.5 Service: compile before `_admit()` via `asyncio.to_thread`; `_build_generate_kwargs`
         (`:2366`) appends a fresh processor per `generate()` and drops `assistant_model` with a log
         (FR-25.10.5).
-  - [ ] 7.6 Batched rows: one matcher per row in `_create_batched_chat_completion`; serial `n`:
+  - [x] 7.6 Batched rows: one matcher per row in `_create_batched_chat_completion`; serial `n`:
         fresh processor per loop iteration (FR-25.10.10).
-  - [ ] 7.7 `finish_reason`: complete iff last generated id ∈ stop ids, else `"length"`
+  - [x] 7.7 `finish_reason`: complete iff last generated id ∈ stop ids, else `"length"`
         (FR-25.12.1–12.2); route sets `X-miLLM-Constrained` when a constraint ran (FR-25.12.3).
-  - [ ] 7.8 Complete output validated; failure → `ConstrainedOutputInvalidError` (500), logged
+  - [x] 7.8 Complete output validated; failure → `ConstrainedOutputInvalidError` (500), logged
         without content (FR-25.10.6).
-  - [ ] 7.9 Defence in depth: `_llamacpp_chat_completion` raises `ResponseFormatUnsupportedError` if
+  - [x] 7.9 Defence in depth: `_llamacpp_chat_completion` raises `ResponseFormatUnsupportedError` if
         a constraint arrives.
-  - [ ] 7.10 Tests — subset honesty: for each allowlisted keyword, a violating string is rejected by
+  - [x] 7.10 Tests — subset honesty: for each allowlisted keyword, a violating string is rejected by
         the installed xgrammar matcher; a missing example fails; `uniqueItems` added to the allowlist
         turns it red (M14).
-  - [ ] 7.11 Tests — end to end on the tiny char-tokenizer model: `json_object` output parses;
+  - [x] 7.11 Tests — end to end on the tiny char-tokenizer model: `json_object` output parses;
         `json_schema` output validates; `strict: false` still enforced; `max_tokens: 5` →
         `finish_reason: "length"` and `X-miLLM-Constrained` present (M11); processor removed →
         validation test red (M10); two rows of `extra_messages` both validate; `n: 2` both validate.
-  - [ ] 7.12 Tests — refusals before load: GGUF row; `multipleOf` (pointer named); schema over
+  - [x] 7.12 Tests — refusals before load: GGUF row; `multipleOf` (pointer named); schema over
         64 KB; with `stop`; with `stream`; on `/v1/completions`; CBM enabled.
-  - [ ] 7.13 Tests: speculative draft dropped for a constrained request (spy, log); grammar cache
+  - [x] 7.13 Tests: speculative draft dropped for a constrained request (spy, log); grammar cache
         hit on the second identical schema; cache dropped on unload.
 
 - [ ] 8.0 Integration hand-offs and documentation (covers FR-25.1.1, FR-25.3.7; FPRD §7, §10)

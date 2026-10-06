@@ -59,6 +59,15 @@ from millm.core.errors import (
     ModelBusyError,
 )
 from millm.core.logging import get_logger
+from millm.ml.constrained_decoding import (
+    CompiledConstraint,
+    GrammarCache,
+    JsonConstraintProcessor,
+    constrained_header,
+    schema_name,
+    stop_token_ids,
+    validate_output,
+)
 from millm.ml.generation_config import GenerationConfig
 from millm.ml.model_loader import LoadedModelState
 from millm.services.request_queue import RequestQueue
@@ -928,6 +937,98 @@ class InferenceService:
         """Whether to use continuous batching for generation."""
         return self._cbm_backend is not None and self._cbm_backend.is_running
 
+    def cbm_enabled(self) -> bool:
+        """The continuous batching manager is configured in this process (running or not).
+        Structured output is refused while it is (FR-25.11.3)."""
+        return self._cbm_backend is not None
+
+    def _logits_width(self) -> int:
+        """The model's logits width — not `len(tokenizer)`, which differs when a head pads its
+        vocabulary; an xgrammar bitmask narrower than the logits would leave the tail unmasked."""
+        model = self._model
+        try:
+            head = model.get_output_embeddings()
+            if head is not None and getattr(head, "weight", None) is not None:
+                return int(head.weight.shape[0])
+        except Exception:  # noqa: BLE001 - fall back to the config
+            pass
+        config = getattr(model, "config", None)
+        width = getattr(config, "vocab_size", None) or getattr(
+            getattr(config, "text_config", None), "vocab_size", None
+        )
+        return int(width or len(self._tokenizer))
+
+    def _grammar_cache(self) -> GrammarCache:
+        """The current model's grammar cache, built on first use after a load (keyed by model id
+        and `loaded_at`, so a reload never reuses a stale TokenizerInfo)."""
+        from millm.core.config import settings
+
+        loaded = self._model_state.current
+        key = (getattr(loaded, "model_id", None), getattr(loaded, "loaded_at", None))
+        entry = getattr(self, "_grammar_cache_entry", None)
+        if entry is None or entry[0] != key:
+            cache = GrammarCache(
+                self._tokenizer,
+                self._logits_width(),
+                stop_token_ids(self._model, self._tokenizer),
+                int(settings.STRUCTURED_OUTPUT_GRAMMAR_CACHE),
+            )
+            entry = (key, cache)
+            self._grammar_cache_entry = entry
+        return entry[1]
+
+    async def _compile_constraint(self, request: Any) -> Optional[CompiledConstraint]:
+        """Compile a request's `response_format` BEFORE the admission slot, off the event loop:
+        a cold compile is 0.1-0.7 s on the served tokenizers and must never hold the GPU slot."""
+        response_format = getattr(request, "response_format", None)
+        if _constraint_type(response_format) is None:
+            return None
+        cache = self._grammar_cache()
+        grammar = await asyncio.to_thread(cache.compile, response_format)
+        return CompiledConstraint(
+            response_format=response_format,
+            grammar=grammar,
+            vocab_size=cache.vocab_size,
+            stop_ids=list(cache.stop_ids),
+            header=constrained_header(response_format),
+        )
+
+    def _finish_constrained(
+        self, constraint: CompiledConstraint, generated_ids: Any, text: str
+    ) -> str:
+        """`finish_reason` for a constrained generation (FR-25.12): complete iff the LAST
+        generated token is a stop token — never matcher state, which is not consulted after the
+        final token. A complete output is validated; a budget-ended one is "length", whether or
+        not its partial text happens to parse.
+
+        Raises:
+            ConstrainedOutputInvalidError: a complete output that does not validate (500).
+        """
+        last = int(generated_ids[-1]) if len(generated_ids) > 0 else None
+        if last is None or last not in constraint.stop_ids:
+            return "length"
+        try:
+            validate_output(text, constraint.response_format)
+        except MiLLMError as exc:
+            logger.error(
+                "constrained_output_invalid",
+                schema_name=schema_name(constraint.response_format),
+                length=len(text or ""),
+                reason=exc.message,
+            )
+            raise
+        return "stop"
+
+    def _log_constrained(self, constraint: CompiledConstraint, tokens: int, finish: str) -> None:
+        logger.info(
+            "constrained_generation",
+            format=constraint.header,
+            schema_name=schema_name(constraint.response_format),
+            tokens=tokens,
+            finish_reason=finish,
+            mask_ms=round(sum(p.mask_ms for p in constraint.processors), 3),
+        )
+
     def _seed_scope(self, base: str) -> str:
         """The scope a seed can promise on this path: `base`, unless the continuous batching
         manager runs in this process — its thread draws from the same global generator, so the
@@ -1274,6 +1375,8 @@ class InferenceService:
         self._model_epoch = getattr(self, "_model_epoch", 0) + 1
         self._draft_suspended = True
         self._release_draft_model()
+        # A compiled grammar belongs to the unloaded tokenizer (Feature 25).
+        self._grammar_cache_entry = None
         if self._cbm_backend is not None and self._cbm_backend.is_running:
             self._cbm_backend.stop()
 
@@ -2625,6 +2728,31 @@ class InferenceService:
                 # the steered main model.
                 logger.debug("speculative_decoding_with_sae_attached_lower_acceptance_rate_expected")
 
+        # Structured output (Feature 25, FR-25.10.5): a FRESH processor per generate() call —
+        # matchers are stateful, and the serial n-loop and each batched chunk call this anew.
+        constraint = getattr(gen_config, "constraint", None)
+        if constraint is not None:
+            if not isinstance(constraint, CompiledConstraint):
+                # A path that never compiled the constraint must not generate unconstrained.
+                raise ResponseFormatUnsupportedError(
+                    "response_format reached generation without a compiled constraint on this "
+                    "path; it is refused rather than ignored.",
+                    details={"param": "response_format"},
+                )
+            from transformers import LogitsProcessorList
+
+            processor = JsonConstraintProcessor(
+                constraint.grammar, int(inputs["input_ids"].shape[0]), constraint.vocab_size
+            )
+            constraint.processors.append(processor)
+            processors = kwargs.get("logits_processor") or LogitsProcessorList()
+            processors.append(processor)
+            kwargs["logits_processor"] = processors
+            if kwargs.pop("assistant_model", None) is not None:
+                # Assisted generation proposes tokens the processor never sees.
+                kwargs.pop("num_assistant_tokens", None)
+                logger.info("speculative_disabled_for_constraint", format=constraint.header)
+
         return kwargs
 
     # ── Probe monitors (Feature 24) ───────────────────────────────────────────
@@ -3396,7 +3524,11 @@ class InferenceService:
                 completion_text, gen_config.stop_sequences
             )
 
-            if stopped_by_sequence:
+            constraint = getattr(gen_config, "constraint", None)
+            if isinstance(constraint, CompiledConstraint):
+                finish_reason = self._finish_constrained(constraint, trimmed, completion_text)
+                self._log_constrained(constraint, completion_tokens, finish_reason)
+            elif stopped_by_sequence:
                 finish_reason = "stop"
             else:
                 last_token_id = (
@@ -3591,6 +3723,10 @@ class InferenceService:
             for c in conversations
         ]
         gen_config = GenerationConfig.from_request(request)
+        constraint = await self._compile_constraint(request)
+        if constraint is not None:
+            # One matcher per row, built per chunk by _build_generate_kwargs (FR-25.10.10).
+            gen_config = dataclasses.replace(gen_config, constraint=constraint)
 
         choices: list[ChatCompletionChoice] = []
         total_prompt_tokens = 0
@@ -3634,8 +3770,10 @@ class InferenceService:
                         choices.append(
                             ChatCompletionChoice(
                                 index=chunk_start + offset,
-                                message=self._assistant_message(
-                                    row["text"], chunk[offset]
+                                message=(
+                                    ChatMessage(role="assistant", content=row["text"])
+                                    if constraint is not None
+                                    else self._assistant_message(row["text"], chunk[offset])
                                 ),
                                 finish_reason=row["finish_reason"],
                             )
@@ -3644,6 +3782,8 @@ class InferenceService:
                         total_completion_tokens += row["completion_tokens"]
             finally:
                 self._restore_request_profile(_saved_steering)
+            if constraint is not None:
+                note_request_outcome(constrained=constraint.header)
             if gen_config.seed is not None:
                 # Batched rows are deterministic per batch SHAPE only (FR-25.14.1): the batched
                 # GEMM's reduction order depends on the shape, and padding on the other rows.
@@ -3758,6 +3898,9 @@ class InferenceService:
         completion_id = f"chatcmpl-{uuid.uuid4().hex[:24]}"
         created = int(datetime.now().timestamp())
 
+        # Structured output: compiled BEFORE the slot, off the event loop (FR-25.10).
+        constraint = await self._compile_constraint(request)
+
         # Format messages to prompt
         prompt = self._format_chat_messages(
             request.messages, request.chat_template_kwargs
@@ -3816,6 +3959,8 @@ class InferenceService:
 
                 # Build generation config
                 gen_config = GenerationConfig.from_request(request)
+                if constraint is not None:
+                    gen_config = dataclasses.replace(gen_config, constraint=constraint)
                 self._check_context_length(prompt_tokens, gen_config.max_new_tokens)
 
                 # The seed covers the WHOLE n-loop: per-call seeding would make the n choices
@@ -3849,7 +3994,12 @@ class InferenceService:
                         # Determine finish reason.
                         # Pass last_token_id for EOS detection — available only in
                         # the non-streaming path where we have the full output IDs.
-                        if stopped_by_sequence:
+                        if constraint is not None:
+                            finish_reason = self._finish_constrained(
+                                constraint, generated_ids, completion_text
+                            )
+                            self._log_constrained(constraint, completion_tokens, finish_reason)
+                        elif stopped_by_sequence:
                             logger.debug("finish_reason_stop_sequence")
                             finish_reason = "stop"
                         else:
@@ -3865,8 +4015,12 @@ class InferenceService:
                         choices.append(
                             ChatCompletionChoice(
                                 index=i,
-                                message=self._assistant_message(
-                                    completion_text, prompt
+                                # A constrained document is the answer, whole: never split into
+                                # reasoning, even when the template opened a <think> block.
+                                message=(
+                                    ChatMessage(role="assistant", content=completion_text)
+                                    if constraint is not None
+                                    else self._assistant_message(completion_text, prompt)
                                 ),
                                 finish_reason=finish_reason,
                             )
@@ -3877,6 +4031,8 @@ class InferenceService:
 
                 if gen_config.seed is not None:
                     note_request_outcome(seed_scope=self._seed_scope(SEED_SCOPE_REQUEST))
+                if constraint is not None:
+                    note_request_outcome(constrained=constraint.header)
 
                 # ⚠ BEFORE the `finally`, and before the route reads the ContextVar to write
                 # `X-miLLM-Probe-Verdicts`. A verdict computed in the `finally` would exist only
@@ -4478,6 +4634,11 @@ class InferenceService:
                 from one conversation (FR-25.3.5). The schema refuses both for HTTP callers;
                 this guard is for direct callers (Feature 26's batch runner).
         """
+        if _constraint_type(getattr(request, "response_format", None)) is not None:
+            raise ResponseFormatUnsupportedError(
+                "response_format with stream=true is not supported in this release (T-59).",
+                details={"param": "response_format"},
+            )
         if _request_n(request) > 1 or _request_extra_messages(request):
             field_name = "n" if _request_n(request) > 1 else "extra_messages"
             raise FieldNotHonouredError(

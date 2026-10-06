@@ -21,6 +21,7 @@ is re-run as a negative control (rows suffixed `-rerun`).
 | After 4.0 (small refusals) | 3898 passed / 3 skipped / 0 failed |
 | After 5.0 (chat scoring) | 3932 passed / 3 skipped / 0 failed |
 | After 6.0 (seed + fingerprint) | 3964 passed / 3 skipped / 0 failed |
+| After 7.0 (structured output) | 4050 passed / 3 skipped / 0 failed |
 
 ## Discrepancies between the documents and the code (the code won)
 
@@ -91,6 +92,19 @@ is re-run as a negative control (rows suffixed `-rerun`).
   in `inference_service.py`. On resume the tree still carried `return base`; the file was restored
   from the control's pre-mutation backup (sha256 `52d4643c…` matched), every earlier mutated line
   was re-grepped present, the diff was scanned for mutation artifacts, and the control was re-run.
+- **`json_object` compiled with xgrammar's built-in JSON grammar accepted ANY JSON value.** Found
+  by the end-to-end test, not by reading: a random model under the built-in grammar produced a
+  complete JSON array, and `validate_output` correctly refused it with a 500. `json_object` now
+  compiles `{"type": "object"}` (control `C7-json-object`). The second line of defence did exactly
+  its job, and the first line was wrong.
+- **The FTDD's unenforced-keyword list is partly stale on this probe.** Re-running the probe against
+  the installed xgrammar 0.2.8 with a character-level vocabulary: `uniqueItems` and `not` compile and
+  are NOT enforced (as the FTDD says), but `multipleOf` (`{"type":"integer","multipleOf":2}`,
+  document `3`) WAS rejected. `multipleOf` stays refused per the FTDD; it is a candidate for the
+  allowlist once a probe on a served tokenizer confirms it.
+- **`max_whitespace_cnt` is not set.** Under xgrammar's default `any_whitespace=True` a random model
+  emits long whitespace runs inside a valid document (observed on the tiny model). A trained model
+  rarely does, but a budget can be spent on whitespace; worth measuring in 9.5.
 
 ## Mutation controls
 
@@ -153,4 +167,19 @@ is re-run as a negative control (rows suffixed `-rerun`).
 | 55 | C6-llamacpp-chat-seed | `millm/services/inference_service.py` | service defence in depth: llama.cpp chat seed refusal disabled | yes | 1 failed, 25 passed in 15.39s | **red** | ok |
 | 56 | C6-table-seed | `millm/api/request_policy.py` | table: seed honoured on llama.cpp (T-61 refusal removed) | yes | 1 failed, 22 passed in 13.81s | **red** | ok |
 | 57 | C6-bool-seed | `millm/api/schemas/openai.py` | `seed: true` accepted as seed 1 | yes | 1 failed, 19 passed in 13.47s | **red** | ok |
+| 58 | M10 | `millm/services/inference_service.py` | `_build_generate_kwargs`: `processors.append(processor)` removed (unconstrained generation) | yes | 1 failed in 5.06s | **red** | ok |
+| 59 | M11 | `millm/services/inference_service.py` | `_finish_constrained` reads matcher `is_terminated()` instead of the last generated token | yes | 1 failed in 5.01s | **red** | ok |
+| 60 | M14 | `millm/api/json_schema_subset.py` | `uniqueItems` added to ALLOWED_KEYWORDS without enforcement | yes | 1 failed, 62 passed in 10.84s | **red** | ok |
+| 61 | C7-route-subset | `millm/api/routes/openai/chat.py` | chat route: `json_schema_subset.check(...)` call removed | yes | 1 failed, 17 passed in 10.09s | **red** | ok |
+| 62 | C7-route-cbm | `millm/api/routes/openai/chat.py` | chat route: CBM-enabled refusal disabled | yes | 1 failed, 25 passed in 10.66s | **red** | ok |
+| 63 | C7-route-header | `millm/api/routes/openai/chat.py` | chat route: `X-miLLM-Constrained` assignment removed | yes | 1 failed, 12 passed in 6.79s | **red** | ok |
+| 64 | C7-compile-serial | `millm/services/inference_service.py` | serial chat: constraint not compiled (`constraint = None`) | yes | 1 failed in 5.03s | **red** | ok |
+| 65 | C7-compile-batched | `millm/services/inference_service.py` | batched chat: constraint not compiled | yes | 1 failed, 8 passed in 5.29s | **red** | ok |
+| 66 | C7-validate | `millm/services/inference_service.py` | `_finish_constrained`: `validate_output` call removed | yes | 1 failed, 16 passed in 10.21s | **red** | ok |
+| 67 | C7-spec-drop | `millm/services/inference_service.py` | `_build_generate_kwargs`: assistant_model kept for a constrained request | yes | 1 failed, 29 passed in 10.93s | **red** | ok |
+| 68 | C7-unload-drop | `millm/services/inference_service.py` | `on_model_unloading` no longer drops the grammar cache | yes | 1 failed, 31 passed in 10.69s | **red** | ok |
+| 69 | C7-stream-guard | `millm/services/inference_service.py` | `stream_chat_completion`: response_format guard disabled | yes | 1 failed, 27 passed in 10.71s | **red** | ok |
+| 70 | C7-json-object | `millm/ml/constrained_decoding.py` | json_object compiled with xgrammar's builtin JSON grammar (any value) | yes | 1 failed, 5 passed in 5.18s | **red** | ok |
+| 71 | C7-table-scoring | `millm/api/request_policy.py` | table: response_format honoured on a scoring request — SURVIVED: the schema validator refuses first over HTTP, so no test reached the cell a direct caller relies on | yes | 140 passed in 15.78s | **SURVIVED** | ok |
+| 72 | C7-table-scoring-rerun | `millm/api/request_policy.py` | same mutation, negative control after `test_the_table_refuses_response_format_on_scoring_for_a_direct_caller` | yes | 1 failed, 63 passed in 2.29s | **red** | ok |
 

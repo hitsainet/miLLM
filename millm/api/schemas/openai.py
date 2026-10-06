@@ -16,7 +16,7 @@ Key implementation notes:
    (test_unused_fields_http pins that a message extra never reaches apply_chat_template).
 """
 
-from typing import Any, Literal, Optional, Union
+from typing import Annotated, Any, Literal, Optional, Union
 
 from pydantic import BaseModel, Field, model_validator, field_validator
 
@@ -42,6 +42,53 @@ class ChatMessage(BaseModel):
     # Extra fields (OpenAI clients send name, function_call, ...) are kept so the request
     # policy can REPORT them as messages[i].<key>; they are never passed to the template.
     model_config = {"extra": "allow"}
+
+
+# =============================================================================
+# Structured output (Feature 25, FR-25.10)
+# =============================================================================
+
+
+class ResponseFormatText(BaseModel):
+    """No constraint — the neutral value (FR-25.3.4)."""
+
+    type: Literal["text"]
+    model_config = {"extra": "forbid"}
+
+
+class ResponseFormatJsonObject(BaseModel):
+    """The output parses as one JSON object."""
+
+    type: Literal["json_object"]
+    model_config = {"extra": "forbid"}
+
+
+class JsonSchemaSpec(BaseModel):
+    """OpenAI's `json_schema` block. `strict: false` is accepted and the schema is STILL
+    enforced (FR-25.10.4): enforcing more than asked is not a silent drop.
+
+    `schema` is held as `schema_` because `schema` shadows a BaseModel attribute; requests are
+    never dumped, so the alias only matters on input. Unknown keys are refused (`forbid`), so a
+    misspelt field inside the block cannot be dropped silently.
+    """
+
+    name: str = Field(pattern=r"^[A-Za-z0-9_-]{1,64}$")
+    schema_: dict[str, Any] = Field(alias="schema")
+    description: Optional[str] = None
+    strict: Optional[bool] = None
+    model_config = {"extra": "forbid", "populate_by_name": True}
+
+
+class ResponseFormatJsonSchema(BaseModel):
+    type: Literal["json_schema"]
+    json_schema: JsonSchemaSpec
+    model_config = {"extra": "forbid"}
+
+
+ResponseFormat = Annotated[
+    Union[ResponseFormatText, ResponseFormatJsonObject, ResponseFormatJsonSchema],
+    Field(discriminator="type"),
+]
 
 
 # =============================================================================
@@ -183,6 +230,9 @@ class ChatCompletionRequest(BaseModel):
     #: echoed in X-miLLM-Seed with the scope of the promise. Accepted and echoed under greedy
     #: decoding and scoring, where it changes nothing.
     seed: Optional[int] = Field(default=None, ge=0, le=SEED_MAX)
+    #: Structured output (FR-25.10): `json_object` or `json_schema`, constrained during decoding
+    #: on the transformers engine; refused everywhere else, with a reason.
+    response_format: Optional[ResponseFormat] = None
 
     # miLLM extension - steering profile override
     profile: Optional[str] = None
@@ -255,6 +305,29 @@ class ChatCompletionRequest(BaseModel):
     @classmethod
     def _seed_not_bool(cls, v):
         return _reject_bool_seed(v)
+
+    @field_validator("response_format")
+    @classmethod
+    def _response_format_combinations(cls, v, info):
+        """Refused combinations, naming `response_format` (FR-25.11.5, T-59, FR-25.6.4):
+        * `stop` — a stop string can cut a document and report finish_reason "stop", which is
+          truncated JSON reported as complete;
+        * `stream` — refused until proven (T-59);
+        * scoring — scoring returns one token's log-probabilities, not a document.
+        Validated after `stream`, `stop`, `logprobs` and `allowed_token_ids` (declared earlier).
+        """
+        if v is None or getattr(v, "type", "text") == "text":
+            return v
+        data = info.data
+        if data.get("stop"):
+            raise ValueError("response_format cannot be combined with stop: a stop string can "
+                             "cut a document and report it as complete")
+        if data.get("stream"):
+            raise ValueError("response_format with stream=true is not supported in this release")
+        if data.get("logprobs") is True or data.get("allowed_token_ids") is not None:
+            raise ValueError("response_format cannot be combined with scoring (logprobs / "
+                             "allowed_token_ids): scoring returns one token, not a document")
+        return v
 
     @field_validator("n")
     @classmethod

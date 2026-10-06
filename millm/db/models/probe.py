@@ -27,6 +27,7 @@ from sqlalchemy import (
     String,
     Text,
     func,
+    text,
 )
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy import false as sa_false, true as sa_true
@@ -207,6 +208,18 @@ class ProbeEvent(Base):
         Integer, nullable=False, default=1, server_default="1"
     )
 
+    #: `live` for interactive traffic, `batch` for a Feature 26 batch row (T-70, FR-26.4.8).
+    #: ⚠ The two have SEPARATE caps: a 50,000-row batch would otherwise evict every live event
+    #: under PROBE_MAX_EVENTS_PER_PROBE, and an operator's monitoring history would be replaced by
+    #: a labelling run's. The default `live` is true of every row it lands on: no batch API
+    #: existed before this column.
+    origin: Mapped[str] = mapped_column(
+        String(8), nullable=False, default="live", server_default="live"
+    )
+    #: The batch and its 1-based input line, for `origin='batch'`; NULL for live events.
+    batch_id: Mapped[Optional[str]] = mapped_column(String(32), nullable=True)
+    batch_line: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()
     )
@@ -216,6 +229,16 @@ class ProbeEvent(Base):
     __table_args__ = (
         Index("ix_probe_events_probe_created", "probe_id", "created_at"),
         Index("ix_probe_events_request_id", "request_id"),
+        Index("ix_probe_events_probe_origin_created", "probe_id", "origin", "created_at"),
+        # A batch row re-run after a crash (its chunk was never recorded) must not record a
+        # second event for the same (probe, line, window): FR-26.4.8 / FTDD TD12.
+        Index(
+            "uq_probe_events_batch_line",
+            "probe_id", "batch_id", "batch_line", "window",
+            unique=True,
+            postgresql_where=text("batch_id IS NOT NULL"),
+            sqlite_where=text("batch_id IS NOT NULL"),
+        ),
     )
 
     def __repr__(self) -> str:  # pragma: no cover - debugging aid

@@ -2,11 +2,11 @@
 
 ## Mechanistic Interpretability LLM Server
 
-**Document Version:** 1.4
+**Document Version:** 1.5
 **Created:** January 30, 2026
-**Updated:** September 25, 2026 (Probe Monitor Runtime — BRD-MILLM-PROBES-001)
+**Updated:** October 6, 2026 (Dataworks Support — BRD-04, Features 25–30); previously September 25, 2026 (Probe Monitor Runtime — BRD-MILLM-PROBES-001)
 **Status:** Approved
-**Reference:** Project PRD (000_PPRD|miLLM.md v1.3) · BRD-MILLM-CLUSTERS-001 · BRD-MILLM-CIRCUITS-001 · BRD-MILLM-CIRCUITS-002 · BRD-MILLM-PROBES-001
+**Reference:** Project PRD (000_PPRD|miLLM.md v1.5) · BRD-MILLM-CLUSTERS-001 · BRD-MILLM-CIRCUITS-001 · BRD-MILLM-CIRCUITS-002 · BRD-MILLM-PROBES-001 · BRD-04
 
 ---
 
@@ -41,6 +41,14 @@
 | Probe read hook (v1.4) | One prepended, read-only forward hook per armed layer, independent of SAEs | Probes need no SAE; prepending reads the pre-steering residual as sensing does |
 | Probe parity gate (v1.4) | A definition's test vectors must reproduce miStudio's scores on the live model before arming | Scoring the wrong revision or template is silent; parity makes it loud |
 | Probe verdict transport (v1.4) | `X-miLLM-Probe-Verdicts` (RFC 8941) on non-streaming; a final `choices: []` chunk on streaming | OpenAI-compatible shapes; headers are committed before a stream starts |
+| Request validation (v1.5) | Report every unused `/v1` field in `X-miLLM-Ignored-Fields`; refuse with `400` under `X-miLLM-Strict: true`; one named list of output-changing fields always honoured or refused | `extra="ignore"` made unimplemented fields look implemented; warning-by-default keeps lenient clients such as Open WebUI working |
+| Chat scoring (v1.5) | Render the chat template, then call the existing completion scoring function; unsteered | One scoring path, so chat and completion scores of the same rendered prompt agree by construction (BRD-04 acceptance 3) |
+| Batch API (v1.5) | OpenAI-shaped `/v1/files` + `/v1/batches`, persisted in PostgreSQL, rows admitted through `_admit()` one chunk per slot | Survives a pod restart without re-running a recorded row; preserves the serial execution steering, sensing and probes depend on |
+| Packed scoring (v1.5) | Scoring and embedding rows packed by default; `pack: false` for single-row semantics; the difference measured and published | bfloat16 is not batch-invariant; the caller chooses throughput or single-row reproducibility knowingly |
+| Stateless probe scoring (v1.5) | `POST /api/probes/score` reuses the parity forward and armed-probe construction, under `_admit()`, writing no event and arming nothing | Offline detector questions without global arming forcing all traffic serial; one decision code path with live scoring |
+| Inline steering (v1.5) | Per-request `steering` on the existing apply/restore lifecycle; `X-miLLM-Steering` on every generation response | No saved profile per experiment; every answer states the steering that produced it |
+| Model lease (v1.5) | A lease with holder, reason and time to live (TTL), refusing every non-holder load, unload or swap with `409 MODEL_LEASED` | `locked` has no holder and no expiry; a crashed holder must not block model changes forever |
+| Backpressure & GPU visibility (v1.5) | `Retry-After` on every `503`; in-flight, backlog and estimated wait in `/api/health/detailed`; a per-card memory endpoint | Callers can back off correctly; memory held with no model loaded is visible through the API |
 
 ### Decision-Making Criteria
 1. **miStudio Compatibility:** Align architecture for future integration
@@ -1133,6 +1141,65 @@ SAE_CACHE_DIR=./data/saes
 ## 10. Decision Rationale
 
 ### Major Trade-offs
+
+#### Dataworks Support (Features 25–30, 2026-10-06)
+
+Source: BRD-04 (miLLM — Dataworks Support), driven by miDataworks (BRD-03) and miStudio's BRD-MIS-DATAWORKS-001. Requirement numbers R-04.x are BRD-04's.
+
+#### Report-then-opt-in refusal of unknown fields vs rejecting them outright
+**Decision:** Every `/v1` endpoint reports the fields it did not use, top-level and inside `messages`, in `X-miLLM-Ignored-Fields` and a logged warning (R-04.1). A request sending `X-miLLM-Strict: true` gets `400` naming them instead (R-04.2). A single named list of output-changing fields (`response_format`, `seed`, `logprobs`, `top_logprobs`, `allowed_token_ids`, `n`, `dimensions`, `tools`, `tool_choice`, `logit_bias`, `steering`, at least) is never ignored, strict or not: each is honoured or refused with `400` (R-04.3), and one test asserts every entry on every endpoint.
+**Trade-off:** A non-strict caller that never reads the header can still miss an ignored field, vs rejecting unknown fields for every caller and breaking OpenAI-SDK clients and Open WebUI, which send harmless extras (BRD-04 RSK-01).
+**Rationale:** The silent drop is the hazard, not the leniency. Tolerating harmless fields is what the OpenAI ecosystem expects; tolerating a field that changes the output is what lets a labelling job record "structured output, seed 7" against rows produced with neither. The always-refused list removes the dangerous case for every caller, and strict mode (sent by miDataworks on every request) removes the rest for callers who ask. The list lives in one place so a new endpoint cannot forget it.
+
+#### One scoring path for chat and completions vs a separate chat scorer
+**Decision:** Chat scoring renders the chat template with the generation prompt and then calls the same next-token scoring path `/v1/completions` uses (`_score_text_completion`, `next_token_scores`), without adding the rendered prompt's special tokens a second time (R-04.6). It carries the same limits and the same GGUF refusal before auto-load (R-04.7), and is unsteered through `_unsteered` (R-04.8).
+**Trade-off:** The chat route takes a dependency on the completion scorer's signature and must hand it pre-rendered text with special-token handling exactly right, vs a chat-native scorer free to evolve separately.
+**Rationale:** Two scorers drift, and a classifier's labels would then depend on which endpoint a client happened to use. With one path, BRD-04 acceptance 3 (identical token IDs and logprobs within 1e-5 on 200 prompts) is a property of the design, and a test asserting the call keeps it so. Special-token handling is where the two inputs can differ (a rendered template already carries its beginning-of-sequence token), so it is specified rather than left to the implementation.
+
+#### Constrained decoding on the transformers engine, library chosen at design vs committed here
+**Decision:** `response_format` (`json_object`, `json_schema`) is implemented by constrained decoding on the transformers engine (R-04.11); everything outside it — a GGUF model unless BRD-04 open question 3 extends support to llama.cpp grammars, a schema feature outside the declared subset, the continuous batching manager (CBM) path — is refused with `400` naming `response_format` and the reason, before any auto-load where the model row decides it (R-04.12). A constrained generation cut by `max_tokens` reports `finish_reason: "length"` and `X-miLLM-Constrained` names the format applied (R-04.13). BRD-04 names no library, and `pyproject.toml` carries no constrained-decoding package today; the choice is made in Feature 25's technical design.
+**Trade-off:** Deferring the library leaves the supported JSON Schema subset and per-token overhead unknown at this level, vs fixing a dependency before it has been tried against the tokenizers miLLM actually serves.
+**Rationale:** The guarantees that matter are library-independent: output parses and validates, unsupported shapes are refused loudly, truncation is never reported as complete. The design must choose against those guarantees plus compatibility with `transformers>=5.15.1,<6`, coverage of the served tokenizers (LFM2, Gemma, Llama, Granite), and a declared schema subset that the refusal in R-04.12 can check before generation (BRD-04 RSK-05).
+
+#### Batch runner inside the admission path vs a separate batch worker
+**Decision:** The batch API (`/v1/files`, `/v1/batches`, OpenAI's shapes and status values) persists batches and files in PostgreSQL and resumes from the first row without a recorded result after a pod restart, never running a recorded row twice (R-04.16–R-04.18). Rows reach the model only through `_admit()`, taking one slot per chunk and releasing it between chunks, and do not count against `MAX_PENDING_REQUESTS` (R-04.19). A batch names one model, holds the model lease for its whole run and never loads or swaps a model (R-04.22).
+**Trade-off:** Batch throughput is bounded by sharing one slot with interactive traffic, vs a separate worker that would run faster but either needs its own resident model (miLLM keeps one model at a time) or bypasses the serial execution that steering, sensing and probes depend on.
+**Rationale:** `MAX_CONCURRENT_REQUESTS` is 1 by design, and a second path to the model is exactly the kind of path that skipped probes on batched chat. Chunked admission keeps a chat request's wait to one chunk (BRD-04 acceptance 9, RSK-03). Persistence and row-level resume exist because in this suite a rollout takes in-flight GPU work with it and nothing requeues it.
+
+#### Packed scoring by default vs one row at a time
+**Decision:** Scoring and embedding rows in a batch may be packed into one padded forward pass, on by default; `pack: false` gives single-row semantics; the packed-versus-single difference is measured on the reference model and stated in the API reference (R-04.20).
+**Trade-off:** Packed rows are faster but their scores move with batch composition, vs one-at-a-time rows that are reproducible and slower. BRD-04 cites miStudio's measurement that bfloat16 is not batch-invariant: batched against one-at-a-time probe scores differed by up to 0.177 (miStudio `0xcc/reviews/native_dtype_2026-10-03.md`).
+**Rationale:** Throughput is the reason a batch API exists, and the difference is published rather than hidden, so a caller chooses knowingly (RSK-02). What difference is acceptable on JEV-9B-decision before packing must default off is BRD-04 open question 2, settled by the hardware measurement in acceptance 7. miStudio scores a probe definition's test vectors one input at a time for exactly this reason, so whether `/api/probes/score` rows are packable at all is for Features 26 and 27 to decide against the parity tolerance.
+
+#### Stateless probe scoring vs arming a probe to score stored text
+**Decision:** `POST /api/probes/score` scores any imported probe, armed or not, on `token_ids` (authoritative), `messages` or `text`, returning score, threshold, verdict, evidence rung and provisional flag per input, probe and window. It reuses the parity forward (`build_parity_forward`) and the armed-probe construction parity uses, applies the same window bars and length bands as live scoring, refuses an identity mismatch and a GGUF model, takes a slot through `_admit()`, writes no probe event and changes no armed state (R-04.27–R-04.30). The existing parity route is brought under `_admit()` too.
+**Trade-off:** A second entry into the probe decision code to keep equal to live scoring, vs arming globally — which pushes every request off continuous batching and writes an event per request — to answer an offline question.
+**Rationale:** Offline and live scoring must agree or detector operators report scores miLLM would never record (RSK-07); sharing construction and decision code, not copying them, is what makes them agree, and acceptance 11 checks it on hardware. The parity route's missing slot is fixed rather than copied: a forward pass outside `_admit()` can overlap a generation.
+
+#### Inline per-request steering vs saved profiles
+**Decision:** Chat and text completions accept `steering: {sae_id?, features: [{index, strength}]}`, applied inside the admission slot and restored afterwards on the lifecycle `_apply_request_steering` / `_restore_request_profile` already use; no profile is created (R-04.31). `steering` and `profile` are mutually exclusive, and `features: []` means explicitly unsteered (R-04.32). `/v1/completions` gains `profile`, `steering_intensity` and `steering` (R-04.34).
+**Trade-off:** An inline feature set leaves no stored, named artefact to audit later, vs a saved profile per experiment — profile churn, a global mutation for a one-request question, and the single-active-profile invariant in the way of interleaved jobs.
+**Rationale:** The audit gap is closed by reporting rather than storing: `X-miLLM-Steering` states none, profile with intensity, inline with feature count and hash, or circuit on every generation response (R-04.33), so BRD-03 can check each steered pair against what miLLM says produced it. Today a request steered by a globally active profile says nothing.
+
+#### Steering state after generation and in a final stream chunk vs a request echo
+**Decision:** A non-streaming response sets `X-miLLM-Steering` after generation, as `X-miLLM-Circuit-Rung` already is; a streaming response carries it in a final Server-Sent Events (SSE) chunk; batch output lines carry it in the body (R-04.33).
+**Trade-off:** One more extension field in an otherwise OpenAI-shaped stream, vs echoing the request's steering fields before generation, which cannot see a profile or circuit activated by someone else in the meantime.
+**Rationale:** The header must describe what produced the answer, not what was asked for. The final-chunk shape follows Feature 24's verdict transport, which clients already tolerate.
+
+#### A model lease with holder and expiry vs extending the `locked` flag
+**Decision:** `POST /api/models/{id}/lease` takes `{holder, ttl_seconds, reason}` and returns a lease ID; one lease exists at a time, renewable and releasable by its holder and expiring on its own (R-04.38). While leased, a load, unload or swap by anyone else — every `/v1` auto-load and the management load/unload routes — is refused with `409 MODEL_LEASED` naming holder and expiry (R-04.39); the holder's `X-miLLM-Lease` passes (R-04.40). `X-miLLM-Load-Policy: refuse` opts a request out of auto-load, which stays the default for Open WebUI (R-04.41). Lease state appears in `/api/health/detailed` and on the Admin UI model page (R-04.42).
+**Trade-off:** A second mechanism beside `locked` until BRD-04 open question 1 decides whether the lease replaces it, vs widening a boolean that has no owner and no expiry. Today `locked` is documented as "used for steering" (`millm/services/model_service.py:1376`), set only by `set_exclusive_lock` (`millm/db/repositories/model_repository.py:197`), and refuses an auto-load of another model (`model_service.py:1470-1477`).
+**Rationale:** A crashed holder leaves `locked` set and nobody can tell whose it is; a TTL makes a stale lease expire on its own and the holder field makes a live one attributable (RSK-04). Adding columns to `locked` would change the meaning of a flag the steering path and `/v1/models` already read.
+
+#### `Retry-After` and documented queue fields vs leaving backoff to the client
+**Decision:** Every `503` (`QUEUE_FULL`, `MODEL_BUSY`, `MODEL_LOADING`, `MODEL_NOT_LOADED`, `INSUFFICIENT_MEMORY`) carries `Retry-After` in seconds, with the OpenAI error envelope and codes unchanged (R-04.43); `/api/health/detailed` adds the in-flight count, batch backlog and estimated wait as a stable contract (R-04.44); a REST endpoint reports per-card memory including miLLM's own allocated and reserved memory (R-04.45).
+**Trade-off:** An estimate that can be wrong, and a contract to keep stable, vs clients guessing backoff and operators reading `nvidia-smi` on the node.
+**Rationale:** BRD-03 must honour `Retry-After`, and no `Retry-After` is set anywhere in `millm/` today. The per-card read exists because 17,396 MiB held with no model loaded was visible only on the node.
+
+#### Probe-path coverage by discovery vs a list of entry points
+**Decision:** `_create_batched_chat_completion` opens a probe context and, until it can score each row, records `batched_request` as its not-scored reason (R-04.46). A test discovers every generation entry point from the service and fails if any reaches generation with a probe armed and neither a probe context nor a recorded reason; a hand-kept list does not count (R-04.47).
+**Trade-off:** A test coupled to the service's structure, which must be maintained as entry points are refactored, vs a list that is simpler to read and silently stale the day a new path is added.
+**Rationale:** Batched chat skipped armed probes because nothing enumerated it, and the CBM chat and text paths are safe today only because `PROBE_FORCE_SERIAL` routes armed traffic away from them. A probe never goes silently quiet (BRD-MILLM-PROBES-001 BR-006); the guard must cover the path nobody has written yet (RSK-08).
 
 #### Probe Monitor Runtime (Feature 24, 2026-09-25)
 

@@ -2,10 +2,10 @@
 
 ## Mechanistic Interpretability LLM Server
 
-**Document Version:** 1.4
+**Document Version:** 1.5
 **Created:** January 30, 2026
 **Status:** Draft
-**Reference:** BRD v1.0 (January 29, 2026) · BRD-MILLM-CLUSTERS-001 (July 16, 2026) · BRD-MILLM-CIRCUITS-001 (July 20, 2026) · BRD-MILLM-CIRCUITS-002 (July 20, 2026) · BRD-MILLM-PROBES-001
+**Reference:** BRD v1.0 (January 29, 2026) · BRD-MILLM-CLUSTERS-001 (July 16, 2026) · BRD-MILLM-CIRCUITS-001 (July 20, 2026) · BRD-MILLM-CIRCUITS-002 (July 20, 2026) · BRD-MILLM-PROBES-001 · BRD-04
 
 ### Document Revision History
 
@@ -16,6 +16,7 @@
 | 1.2 | 2026-07-20 | Circuit Runtime increment (BRD-MILLM-CIRCUITS-001): Features 12–15 (Multi-SAE Attach & Circuit Serving, Circuit Import + Slice-Fallback + Evidence Ladder, Circuit-Aware OWUI Dial, Circuit Edge Sensing), FR-12.x–FR-15.x, NFR-1.5, matrix extension; retired the former "Multi-SAE Support" future stub (now specified as Feature 12); remaining future stubs renumbered 16+ |
 | 1.3 | July 20, 2026 | Circuit Consolidation increment (BRD-MILLM-CIRCUITS-002): Features 16-20 (steering epoch, request-scoped sensing context, single serving derivation, concurrent circuit serving, MCP circuit surface + reachability assurance), FR-16.x-20.x, matrix columns; future stubs renumbered 21/22. |
 | 1.4 | 2026-09-25 | Probe Monitor Runtime increment (BRD-MILLM-PROBES-001): Feature 24 — import `mistudio.probe-definition/v1` (file / HF tag / MCP), strict model-identity check, parity gate on the definition's test vectors, prepended read hook independent of SAE attachment, dense and k-sparse SAE probes (private encoder copy), per-request scoring on the sensing lifecycle, verdicts in an `X-miLLM-Probe-Verdicts` header and a final stream chunk, `probe_events` with a privacy-stripped live feed, Probe Monitors page (the old "Probe" page renamed "Feature Monitor"), MCP `millm_probes` (contract v1.6). Specified in the planning workspace (ENH-001). |
+| 1.5 | 2026-10-06 | Dataworks Support increment (BRD-04): Features 25–30 — chat scoring, structured output, seed and request validation (unknown fields reported or refused; output-changing fields never ignored); OpenAI-shaped batch API persisted in PostgreSQL and admitted through `_admit()`; stateless probe scoring, per-request SAE activations and the batched-chat probe-skip fix; inline steering and `X-miLLM-Steering`; model lease, `Retry-After` backpressure and per-card GPU memory; embedding pooling, normalisation and `dimensions`. FR-25.x–FR-30.x (47 BRD-04 requirements, coverage table in §6), matrix footnote. |
 
 ---
 
@@ -394,6 +395,71 @@ Organized by logical workflow (matching UI structure):
 - FR-20.3: No capability SHALL be accepted as shipped without a test that FAILS when its user- or agent-facing wiring is removed; a test asserting only that an entry point exists SHALL NOT satisfy this.
 - FR-20.4: Documentation status marks SHALL distinguish "endpoint exists" from "reachable by a user or agent".
 - FR-20.5: `docs/mcp-contract.md` SHALL move to v1.2, additive-only.
+
+#### Chat Scoring, Structured Output, Seed & Request Validation (FR-25.x) — Increment: Dataworks Support
+
+- **FR-25.1:** Every `/v1` endpoint SHALL report the request fields it did not use, top-level and inside `messages`, in an `X-miLLM-Ignored-Fields` response header and a logged warning; a field SHALL never be dropped without a trace. (R-04.1)
+- **FR-25.2:** A request sending `X-miLLM-Strict: true` SHALL get `400` instead of a warning when any field would be ignored, naming every such field. (R-04.2)
+- **FR-25.3:** A single named list of output-changing fields — at least `response_format`, `seed`, `logprobs`, `top_logprobs`, `allowed_token_ids`, `n`, `dimensions`, `tools`, `tool_choice`, `logit_bias` and `steering` — SHALL never be ignored, strict or not; each SHALL be honoured or refused with `400`, and a test SHALL assert every entry on every endpoint. (R-04.3)
+- **FR-25.4:** `n` on `/v1/completions` SHALL either produce `n` choices per prompt, indexed as OpenAI indexes them, or return `400` for `n > 1`. (R-04.4)
+- **FR-25.5:** `/v1/chat/completions` SHALL accept `logprobs`, `top_logprobs` (0–20) and `allowed_token_ids`, render the chat template with the generation prompt, and score through the same next-token scoring path `/v1/completions` uses, without adding the rendered prompt's special tokens a second time. (R-04.6)
+- **FR-25.6:** Chat scoring SHALL carry the completion-scoring limits (`max_tokens` 1, `n` 1, no streaming, the temperature floor) and SHALL refuse a GGUF model before any auto-load. (R-04.7)
+- **FR-25.7:** Chat scoring SHALL be unsteered — every attached sparse autoencoder (SAE) suppressed — and probes and sensing SHALL record nothing for it. (R-04.8)
+- **FR-25.8:** The chat scoring response SHALL use OpenAI's chat logprobs shape (`choices[].logprobs.content[]` with `token`, `logprob`, `bytes`, `top_logprobs[]`), and `return_tokens_as_token_ids` SHALL behave as on completions. (R-04.9)
+- **FR-25.9:** A scoring request carrying `extra_messages` SHALL score each conversation and return one choice per conversation, `index` in input order. (R-04.10)
+- **FR-25.10:** `response_format` on `/v1/chat/completions` SHALL support `json_object` and `json_schema` on the transformers engine through constrained decoding, so the output parses and validates. (R-04.11)
+- **FR-25.11:** Where structured output is unsupported (a GGUF model unless extended, a schema feature outside the supported subset, the continuous batching manager (CBM) path), the request SHALL return `400` naming `response_format` and the reason — before any auto-load when decidable from the model row. (R-04.12)
+- **FR-25.12:** A constrained generation stopped by `max_tokens` SHALL report `finish_reason: "length"` and never return truncated JSON as complete; the response SHALL carry `X-miLLM-Constrained` naming the format applied. (R-04.13)
+- **FR-25.13:** `seed` SHALL be accepted on chat and text completions and applied to sampling; on the serial transformers path the same seed, request, model and batch shape SHALL give identical output, echoed in `X-miLLM-Seed`, with a `system_fingerprint` naming model, revision, precision and engine. (R-04.14)
+- **FR-25.14:** Where a seed cannot promise identical output (batched rows, deterministic per batch shape only; llama.cpp), the response SHALL say so, and on llama.cpp the seed SHALL be forwarded to the engine or the request refused. (R-04.15)
+
+#### Batch API (FR-26.x) — Increment: Dataworks Support
+
+- **FR-26.1:** The system SHALL provide an OpenAI-shaped batch API: `POST /v1/files` (a JSON Lines (JSONL) file, `purpose: "batch"`) and `POST /v1/batches` (`input_file_id`, `endpoint`, `completion_window`), each line holding `custom_id`, `method`, `url` and `body`, for `/v1/chat/completions`, `/v1/completions`, `/v1/embeddings` and `/api/probes/score`. (R-04.16)
+- **FR-26.2:** Every line SHALL be validated against its endpoint's schema, under strict mode, before any row runs; invalid lines SHALL go to the error file with line number and reason, and a file with no valid line SHALL be refused. (R-04.17)
+- **FR-26.3:** Batches SHALL be persisted in PostgreSQL with OpenAI's status values (`validating` … `expired`) and SHALL survive a pod restart, resuming from the first row without a recorded result; no recorded row SHALL run twice. (R-04.18)
+- **FR-26.4:** Batch rows SHALL reach the model only through the single admission path `_admit()`, taking one slot per chunk and releasing it between chunks so interactive requests interleave, and SHALL NOT count against `MAX_PENDING_REQUESTS`. (R-04.19)
+- **FR-26.5:** Scoring and embedding rows MAY be packed into one padded forward pass, on by default, with `pack: false` giving single-row semantics; the packed-versus-single difference SHALL be measured on the reference model and stated in the API reference. (R-04.20)
+- **FR-26.6:** The system SHALL report request counts on `GET /v1/batches/{id}`, emit progress on a Socket.IO event, list batches, return file content, and cancel at the next row boundary keeping completed rows. (R-04.21)
+- **FR-26.7:** A batch SHALL name one model, take the model lease for its whole run, refuse to start if another holder has the lease, and never load or swap a model. (R-04.22)
+- **FR-26.8:** Rows per batch and bytes per file SHALL be configurable with stated defaults; a file over a limit SHALL be refused at upload, never truncated. (R-04.23)
+
+#### Probe Scoring, Per-Request Activations & Probe-Path Fixes (FR-27.x) — Increment: Dataworks Support
+
+- **FR-27.1:** Chat and text completions SHALL accept `return_sae_activations: {sae_id?, features?, top_k, positions}` (`positions`: `last`, `prompt`, `completion`, `all` or an index range) and return this request's activations only, keyed by position, under a `millm` extension object. (R-04.24)
+- **FR-27.2:** The request SHALL be refused, naming the SAE, unless a matching SAE is attached; the response SHALL state whether activations were read before or after steering; positions × `top_k` over a configured cap SHALL return `400`. (R-04.25)
+- **FR-27.3:** `return_sae_activations` SHALL work in scoring mode. (R-04.26)
+- **FR-27.4:** `POST /api/probes/score` SHALL take `{probe_ids?, inputs, windows?}` (`token_ids` authoritative over `messages` or `text`) and return per input, probe and window the score, threshold, verdict, evidence rung and provisional flag, generating nothing, writing no probe event and changing no armed state. (R-04.27)
+- **FR-27.5:** Stateless scoring SHALL work on any imported probe, armed or not, reusing the parity forward and the armed-probe construction parity uses, applying the same window bars and length bands as live scoring, and refusing a probe that fails the identity check (naming the mismatch) or a GGUF model. (R-04.28)
+- **FR-27.6:** Stateless scoring SHALL take a request slot through `_admit()`, with probes on one layer sharing a forward pass per input; the existing parity route SHALL be brought under `_admit()` too. (R-04.29)
+- **FR-27.7:** Offline scoring SHALL need no global arming and SHALL force no other traffic onto the serial path. (R-04.30)
+- **FR-27.8:** `_create_batched_chat_completion` SHALL open a probe context and, until it can score each row, mark the request not scored with reason `batched_request`, so the verdict header and probe status say why no verdict exists. (R-04.46)
+- **FR-27.9:** A test SHALL discover every generation entry point from the service (serial, streaming and batched chat, text completion, the CBM paths, the llama.cpp paths) and fail if any reaches generation with a probe armed and neither a probe context nor a recorded not-scored reason; a hand-kept list SHALL NOT satisfy this. (R-04.47)
+
+#### Inline Steering & Steering-State Header (FR-28.x) — Increment: Dataworks Support
+
+- **FR-28.1:** Chat and text completions SHALL accept `steering: {sae_id?, features: [{index, strength}]}`, applied to this request only inside the admission slot and restored afterwards on the existing per-request apply/restore lifecycle; no saved profile SHALL be created, and an unattached SAE SHALL be refused. (R-04.31)
+- **FR-28.2:** `steering` and `profile` SHALL be mutually exclusive, and `steering: {"features": []}` SHALL mean explicitly unsteered, suppressing every attached SAE. (R-04.32)
+- **FR-28.3:** Every generation response SHALL state its steering state in `X-miLLM-Steering` (none; profile with intensity; inline with feature count and hash; circuit) — after generation on non-streaming responses, in a final Server-Sent Events (SSE) chunk on streaming ones, and in the body of batch output lines. (R-04.33)
+- **FR-28.4:** `/v1/completions` SHALL gain `profile`, `steering_intensity` and `steering`, so a text completion can choose or refuse the active profile. (R-04.34)
+
+#### Model Lease, Backpressure & GPU Visibility (FR-29.x) — Increment: Dataworks Support
+
+- **FR-29.1:** `POST /api/models/{id}/lease` SHALL take `{holder, ttl_seconds, reason}` and return a lease ID; one lease SHALL exist at a time, renewable and releasable by its holder, reported by `GET`, and expiring on its own at its time to live (TTL). (R-04.38)
+- **FR-29.2:** While a model is leased, a load, unload or swap by anyone else — including every `/v1` auto-load and `POST /api/models/{id}/load` / `/unload` — SHALL be refused with `409 MODEL_LEASED`, naming holder and expiry. (R-04.39)
+- **FR-29.3:** Requests and model operations carrying the holder's `X-miLLM-Lease: <id>` SHALL proceed. (R-04.40)
+- **FR-29.4:** `X-miLLM-Load-Policy: refuse` SHALL turn an auto-load of a non-resident model into `409`; the default SHALL stay auto-load. (R-04.41)
+- **FR-29.5:** Lease state SHALL appear in `/api/health/detailed` and on the Admin UI's model page. (R-04.42)
+- **FR-29.6:** Every `503` (`QUEUE_FULL`, `MODEL_BUSY`, `MODEL_LOADING`, `MODEL_NOT_LOADED`, `INSUFFICIENT_MEMORY`) SHALL carry `Retry-After` in seconds, with the OpenAI error envelope and codes unchanged. (R-04.43)
+- **FR-29.7:** `/api/health/detailed` SHALL add the in-flight count, the batch backlog in rows and an estimated wait beside the existing queue depth, documented as a stable contract. (R-04.44)
+- **FR-29.8:** A REST endpoint SHALL return, per card: index, universally unique identifier (UUID), name, total, used and free memory in MiB, and miLLM's own allocated and reserved memory on that card. (R-04.45)
+
+#### Embedding Options (FR-30.x) — Increment: Dataworks Support
+
+- **FR-30.1:** `dimensions` on `/v1/embeddings` SHALL be honoured only for a model whose metadata declares support for truncated embeddings, and otherwise SHALL return `400`. (R-04.5)
+- **FR-30.2:** `/v1/embeddings` SHALL accept `pooling` (`mean` default, `last`, `cls`) and `normalize` (default false). (R-04.35)
+- **FR-30.3:** An input longer than the model's limit SHALL return `400` naming its index and SHALL never be truncated silently; inputs per request SHALL be capped with a stated default. (R-04.36)
+- **FR-30.4:** The embeddings route's comments SHALL match its code (no GGUF guard is described that the route does not contain). (R-04.37)
 
 ### Non-Functional Requirements
 
@@ -900,6 +966,161 @@ lifecycle; F20 MCP contract discipline; F23 (GGUF refused)
 
 ---
 
+### Increment: Dataworks Support (BRD-04)
+
+miLLM as a dependable backend for offline labelling, steered generation and detector work, driven by miDataworks (BRD-03) and the miStudio Model Context Protocol (MCP) tools in BRD-MIS-DATAWORKS-001, which call this HTTP surface. On 2026-10-04/05 miLLM labelled 25,000 rows at 19–21 rows per second through a client loop of single requests to the `/v1/completions` scoring mode. It worked, and it exposed the gaps: scoring on one endpoint only, no job API, nothing protecting a job from a model swap, GPU memory invisible from the REST API, and no way to ask a probe about stored text. **The cross-cutting hazard is the silent drop** — every `/v1` request schema sets `extra="ignore"`, so a client sending `response_format` or `seed` gets a 200 and an answer that ignored them. The increment's rule: every request field is honoured or refused, every long job survives and reports, and every answer says how it was produced. Authentication, co-residency of several models, MCP tools, raising `MAX_CONCURRENT_REQUESTS` and re-enabling continuous batching are out of scope (BRD-04 §4, §7).
+
+#### Feature 25: Chat Scoring, Structured Output, Seed & Request Validation
+**User Value:** A labelling job records exactly what produced each row — no field it sent was quietly ignored — and a chat-format classifier scores without rendering its own template.
+
+**Priority:** ❌ Planned (BRD-04, 2026-10-06). First in the build order (BRD-04 RSK-09).
+
+**UI Tab:** none (OpenAI-compatible API)
+
+**Requirements Covered:** FR-25.1 through FR-25.14
+
+**Key Capabilities:**
+- `X-miLLM-Ignored-Fields` on every `/v1` response that dropped a field; `X-miLLM-Strict: true` turns the warning into `400`
+- One named list of output-changing fields that are always honoured or refused, asserted on every endpoint by one test
+- `n` on `/v1/completions` honoured or refused, never silently one choice
+- Chat scoring (`logprobs`, `top_logprobs`, `allowed_token_ids`, `extra_messages`) through the shared completion-scoring function, unsteered, in OpenAI's chat logprobs shape
+- `response_format` (`json_object`, `json_schema`) through constrained decoding on transformers; `400` with a reason elsewhere; `finish_reason: "length"` instead of truncated JSON
+- `seed` applied and echoed (`X-miLLM-Seed`), `system_fingerprint`, and an explicit statement where a seed cannot promise identical output
+
+**Dependencies:** none new. Reuses `_score_text_completion` / `next_token_scores` and `_unsteered`; F23 (GGUF refused before auto-load). Features 28 and 30 implement two entries on FR-25.3's list (`steering`, `dimensions`).
+
+---
+
+#### Feature 26: Batch API
+**User Value:** A 50,000-row labelling run is one job with server-side progress, cancel and resume — not 50,000 requests that die with the pod.
+
+**Priority:** ❌ Planned (BRD-04, 2026-10-06). After Features 25 and 29 (RSK-09).
+
+**UI Tab:** none (OpenAI-shaped API; progress on Socket.IO)
+
+**Requirements Covered:** FR-26.1 through FR-26.8
+
+**Key Capabilities:**
+- `POST /v1/files` + `POST /v1/batches` in OpenAI's shape, for chat, completions, embeddings and stateless probe scoring
+- Every line validated under strict mode before any row runs; invalid lines to the error file
+- PostgreSQL persistence with OpenAI's status values; resume after a pod restart with no recorded row run twice
+- Rows admitted only through `_admit()`, one slot per chunk, released between chunks so interactive chat interleaves
+- Packed scoring/embedding rows by default, `pack: false` for single-row semantics, with the measured difference published
+- One model per batch, held under the model lease for the whole run; row and byte limits enforced at upload
+
+**Dependencies:** Feature 25 (strict validation per line, chat scoring), Feature 29 (lease), Feature 27 (`/api/probes/score` as a batch endpoint), Feature 28 (`X-miLLM-Steering` in batch output lines)
+
+---
+
+#### Feature 27: Probe Scoring, Per-Request Activations & Probe-Path Fixes
+**User Value:** A detector operator can ask "what would this probe say about these 10,000 rows" without arming anything, can tag stored text with SAE features, and can trust that no generation path silently skips an armed probe.
+
+**Priority:** ❌ Planned (BRD-04, 2026-10-06). R-04.46 closes a latent defect in the shipped Feature 24.
+
+**UI Tab:** none (API); probe status reports the new not-scored reason
+
+**Requirements Covered:** FR-27.1 through FR-27.9
+
+**Key Capabilities:**
+- `return_sae_activations` on chat and text completions, including scoring mode: this request's activations only, keyed by position, with a pre- or post-steering statement and a size cap
+- `POST /api/probes/score`: stateless scoring of any imported probe on `token_ids`, `messages` or `text`, through the parity forward and the armed-probe construction parity uses, same window bars and length bands as live scoring, no event written
+- Stateless scoring and the existing parity route both brought under `_admit()`; no global arming, no traffic forced off continuous batching
+- Batched chat opens a probe context and records `batched_request` as its not-scored reason
+- A discovery-based test over every generation entry point that fails when an armed probe could be skipped silently
+
+**Dependencies:** Feature 24 (probe import, identity check, parity forward, windows and length bands); F11/F17 sensing lifecycle; Feature 25 (scoring mode)
+
+---
+
+#### Feature 28: Inline Steering & Steering-State Header
+**User Value:** A steered-generation job sends its feature set with the request instead of creating a saved profile per experiment, and every answer says which steering produced it.
+
+**Priority:** ❌ Planned (BRD-04, 2026-10-06)
+
+**UI Tab:** none (API)
+
+**Requirements Covered:** FR-28.1 through FR-28.4
+
+**Key Capabilities:**
+- `steering: {sae_id?, features: [{index, strength}]}` on chat and text completions, applied and restored inside the admission slot; no profile created
+- `steering` and `profile` mutually exclusive; `features: []` means explicitly unsteered
+- `X-miLLM-Steering` on every generation response — none, profile + intensity, inline + feature count and hash, or circuit — in a header, a final SSE chunk, or the batch output line body
+- `/v1/completions` gains `profile`, `steering_intensity` and `steering`
+
+**Dependencies:** F10/F14 per-request dial, F16 steering epoch (per-request restore), Feature 25 (`steering` is on FR-25.3's list)
+
+---
+
+#### Feature 29: Model Lease, Backpressure & GPU Visibility
+**User Value:** A long job cannot have its model swapped out from under it by an unrelated request, a busy server says when to retry, and GPU memory held by miLLM is visible without shell access to the node.
+
+**Priority:** ❌ Planned (BRD-04, 2026-10-06). First in the build order with Feature 25 (RSK-09).
+
+**UI Tab:** Models (lease state); Dashboard health
+
+**Requirements Covered:** FR-29.1 through FR-29.8
+
+**Key Capabilities:**
+- A model lease with holder, reason and TTL; renew, release, automatic expiry
+- `409 MODEL_LEASED` for any load, unload or swap by a non-holder, including every `/v1` auto-load; `X-miLLM-Lease` lets the holder through
+- `X-miLLM-Load-Policy: refuse` opts a request out of auto-load; the default stays auto-load for Open WebUI
+- `Retry-After` on every `503`; in-flight count, batch backlog and estimated wait in `/api/health/detailed` as a stable contract
+- A per-card memory endpoint including miLLM's own allocated and reserved memory
+
+**Dependencies:** F1 model management (load/unload, the existing `locked` flag); F23 (GGUF auto-load paths)
+
+---
+
+#### Feature 30: Embedding Options
+**User Value:** Embeddings for retrieval and deduplication use the pooling the caller asked for, and a long input is refused rather than silently cut.
+
+**Priority:** ❌ Planned (BRD-04, 2026-10-06)
+
+**UI Tab:** none (API)
+
+**Requirements Covered:** FR-30.1 through FR-30.4
+
+**Key Capabilities:**
+- `dimensions` honoured only where model metadata declares truncated-embedding support; `400` otherwise
+- `pooling` (`mean` default, `last`, `cls`) and `normalize` (default false)
+- Over-limit input returns `400` naming its index; inputs per request capped
+- Route comments brought in line with the code (GGUF embeddings are served)
+
+**Dependencies:** Feature 25 (`dimensions` is on FR-25.3's list); F23 (GGUF embeddings)
+
+**Split note:** BRD-04 places R-04.5 (`dimensions`) in §5.1 Request validation. It is mapped here rather than to Feature 25 because honouring it is embeddings work: truncation must follow pooling, and a truncated vector must be re-normalised when `normalize` (R-04.35) is set, so the two cannot be designed apart. The *refusal* path is FR-25.3's list mechanism and is built in Feature 25; FR-30.1 owns only the honour-or-refuse decision per model.
+
+---
+
+#### BRD-04 Coverage
+
+Every BRD-04 requirement maps to exactly one feature.
+
+| BRD-04 section | Requirements | Feature | FR |
+|---|---|---|---|
+| 5.1 Request validation | R-04.1–R-04.4 | 25 | FR-25.1–FR-25.4 |
+| 5.1 Request validation | R-04.5 | 30 | FR-30.1 |
+| 5.2 Scoring on chat completions | R-04.6–R-04.10 | 25 | FR-25.5–FR-25.9 |
+| 5.3 Structured output | R-04.11–R-04.13 | 25 | FR-25.10–FR-25.12 |
+| 5.4 Reproducibility | R-04.14–R-04.15 | 25 | FR-25.13–FR-25.14 |
+| 5.5 Batch API | R-04.16–R-04.23 | 26 | FR-26.1–FR-26.8 |
+| 5.6 Per-request SAE activations | R-04.24–R-04.26 | 27 | FR-27.1–FR-27.3 |
+| 5.7 Stateless probe scoring | R-04.27–R-04.30 | 27 | FR-27.4–FR-27.7 |
+| 5.8 Inline steering | R-04.31–R-04.34 | 28 | FR-28.1–FR-28.4 |
+| 5.9 Embeddings | R-04.35–R-04.37 | 30 | FR-30.2–FR-30.4 |
+| 5.10 Model lease | R-04.38–R-04.42 | 29 | FR-29.1–FR-29.5 |
+| 5.11 Backpressure | R-04.43–R-04.44 | 29 | FR-29.6–FR-29.7 |
+| 5.12 GPU visibility | R-04.45 | 29 | FR-29.8 |
+| 5.13 Probes on every generation path | R-04.46–R-04.47 | 27 | FR-27.8–FR-27.9 |
+
+Totals: Feature 25 — 14; Feature 26 — 8; Feature 27 — 9; Feature 28 — 4; Feature 29 — 8; Feature 30 — 4; **47 of 47**.
+
+**Acceptance criteria by feature (BRD-04 §6):** 25 — 1, 2 (`n`), 3, 4, 5, 6; 26 — 7, 8, 9; 27 — 10, 11, 17; 28 — 12; 29 — 14, 15, 16; 30 — 2 (`dimensions`), 13. Each wiring item is accepted only by a test that fails when its registration or call line is removed, asserting payload and call count (FR-20.3).
+
+**Open questions the feature documents must resolve (BRD-04 §9):** whether the lease replaces `locked` or sits beside it (Feature 29); the acceptable packed-versus-single difference on JEV-9B-decision before packing defaults off (Feature 26); structured output on GGUF through llama.cpp grammars or refusal (Feature 25); batch file retention on `/data` (Feature 26); `return_sae_activations` default of pre- or post-steering (Feature 27); maximum lease TTL and whether miStudio's GPU workers take the lease (Feature 29).
+
+---
+
 ### Feature-Requirements Matrix
 
 | Feature | FR-1.x | FR-2.x | FR-3.x | FR-4.x | FR-5.x | FR-6.x | FR-7.x | FR-8.x | FR-9.x | FR-10.x | FR-11.x | FR-12.x | FR-13.x | FR-14.x | FR-15.x | FR-16.x | FR-17.x | FR-18.x | FR-19.x | FR-20.x |
@@ -927,7 +1148,7 @@ lifecycle; F20 MCP contract discipline; F23 (GGUF refused)
 
 ---
 
-*Features 23 (GGUF Serving) and 24 (Probe Monitor Runtime) map one-to-one to their own requirement groups, FR-23.x and FR-24.x.*
+*Features 23 (GGUF Serving) and 24 (Probe Monitor Runtime) map one-to-one to their own requirement groups, FR-23.x and FR-24.x. Features 25–30 (Dataworks Support) likewise map one-to-one to FR-25.x–FR-30.x; their BRD-04 requirement mapping is the coverage table under "Increment: Dataworks Support (BRD-04)".*
 
 
 ## 7. User Experience Goals

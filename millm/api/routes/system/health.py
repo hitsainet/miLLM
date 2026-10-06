@@ -16,6 +16,7 @@ from pydantic import BaseModel, Field
 
 from millm import __version__
 from millm.api.dependencies import get_inference_service, get_model_loader
+from millm.core.backpressure import retry_after_for
 from millm.core.resilience import CircuitBreaker, huggingface_circuit
 from millm.services.sae_service import AttachedSAEState
 
@@ -259,7 +260,13 @@ async def readiness_check(
     )
 
     status_code = status.HTTP_200_OK if is_ready else status.HTTP_503_SERVICE_UNAVAILABLE
-    return JSONResponse(content=response.model_dump(mode="json"), status_code=status_code)
+    # Feature 29: a 503 says when to retry (FR-29.6.1); the readiness probe has its own value.
+    headers = (
+        {"Retry-After": str(retry_after_for("READINESS"))} if not is_ready else None
+    )
+    return JSONResponse(
+        content=response.model_dump(mode="json"), status_code=status_code, headers=headers
+    )
 
 
 def _model_placement(model_loader: Any) -> Optional[dict[str, Any]]:

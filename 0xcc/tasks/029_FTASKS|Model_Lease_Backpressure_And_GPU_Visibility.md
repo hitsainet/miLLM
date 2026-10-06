@@ -171,15 +171,15 @@ T-84 – T-90
         first; AST test that each route calls `apply_load_policy` before `load_model_and_wait`.
         Management load ignores the policy header (FR-29.4.6).
 
-- [ ] 6.0 `Retry-After` on every 503 (covers FR-29.6, FR-29.6.1 – FR-29.6.6)
-  - [ ] 6.1 `create_openai_error` gains `retry_after`; `model_not_loaded_error`, `model_busy_error`
+- [x] 6.0 `Retry-After` on every 503 (covers FR-29.6, FR-29.6.1 – FR-29.6.6)
+  - [x] 6.1 `create_openai_error` gains `retry_after`; `model_not_loaded_error`, `model_busy_error`
         and `load_refused_error` pass it; `MODEL_NOT_LOADED`'s message adds the "only after a model
         is loaded" sentence.
-  - [ ] 6.2 `millm_error_handler` sets the header for every 503 on both API families.
-  - [ ] 6.3 Readiness probe header (`health.py:261-262`).
-  - [ ] 6.4 `_stream_error_event` adds `retry_after` when the code maps to 503 on `/v1`.
-  - [ ] 6.5 Add `RetryAfterMiddleware` and register it in `create_app`.
-  - [ ] 6.6 Tests: parametrised over `QUEUE_FULL` (eleven concurrent requests, BRD-04 acceptance 15),
+  - [x] 6.2 `millm_error_handler` sets the header for every 503 on both API families.
+  - [x] 6.3 Readiness probe header (`health.py:261-262`).
+  - [x] 6.4 `_stream_error_event` adds `retry_after` when the code maps to 503 on `/v1`.
+  - [x] 6.5 Add `RetryAfterMiddleware` and register it in `create_app`.
+  - [x] 6.6 Tests: parametrised over `QUEUE_FULL` (eleven concurrent requests, BRD-04 acceptance 15),
         `MODEL_BUSY` (load and unload), `MODEL_LOADING` (via 5.4), `MODEL_NOT_LOADED`,
         `INSUFFICIENT_MEMORY`, `HUB_UNAVAILABLE`, readiness — each with its own value and **no**
         `retry_after_defaulted` log; a synthetic bare-503 route gets 10 and the warning; envelope

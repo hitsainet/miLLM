@@ -13,6 +13,7 @@ from fastapi.responses import JSONResponse
 
 from millm.api.schemas.common import ApiResponse
 from millm.api.routes.openai.errors import ERROR_STATUS_MAP, create_openai_error
+from millm.core.backpressure import retry_after_for
 from millm.core.errors import MiLLMError
 from millm.core.error_messages import get_user_friendly_message
 from millm.core.logging import get_logger
@@ -110,6 +111,10 @@ async def millm_error_handler(request: Request, exc: MiLLMError) -> JSONResponse
         details=exc.details,
     )
 
+    # Feature 29: every 503 says when to retry, from the one policy (FR-29.6.1, FR-29.6.2).
+    # A header only — the envelope and code are unchanged (FR-29.6.4).
+    retry_after = retry_after_for(exc.code, exc.details) if status_code == 503 else None
+
     # Use OpenAI format for /v1/* endpoints
     if openai_route:
         # An error that knows its OpenAI type says so (GenerationOutOfMemoryError:
@@ -125,6 +130,7 @@ async def millm_error_handler(request: Request, exc: MiLLMError) -> JSONResponse
             code=exc.code.lower() if exc.code else None,
             param=param if isinstance(param, str) else None,
             status_code=status_code,
+            retry_after=retry_after,
         )
 
     # Management API format for everything else
@@ -145,6 +151,7 @@ async def millm_error_handler(request: Request, exc: MiLLMError) -> JSONResponse
     return JSONResponse(
         status_code=exc.status_code,
         content=response.model_dump(),
+        headers={"Retry-After": str(retry_after)} if retry_after else None,
     )
 
 

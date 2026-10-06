@@ -15,6 +15,7 @@ One pytest process at a time throughout.
 | After 2.0 + 3.0 (registry, service API, enforcement) | 4179 passed / 3 skipped / 0 failed |
 | After 4.0 (startup reconciliation, self-heal) | 4184 passed / 3 skipped / 0 failed |
 | After 5.0 (lease routes, headers, refuse policy) | 4251 passed / 3 skipped / 0 failed |
+| After 6.0 (Retry-After on every 503) | 4276 passed / 3 skipped / 0 failed |
 
 ## 2. Task 0.1 — cited lines re-verified at HEAD (`39c6f8e`)
 

@@ -228,10 +228,18 @@ def _stream_error_event(exc: MiLLMError) -> str:
     """
     import json
 
+    from millm.api.routes.openai.errors import ERROR_STATUS_MAP
+    from millm.core.backpressure import retry_after_for
+
     error_type = getattr(exc, "openai_error_type", None) or (
         "invalid_request_error" if exc.status_code < 500 else "server_error"
     )
-    body = {"error": {"message": exc.message, "type": error_type, "code": exc.code.lower()}}
+    error: dict[str, Any] = {"message": exc.message, "type": error_type, "code": exc.code.lower()}
+    # Feature 29 (FR-29.6.5): the 200 is committed, so no Retry-After HEADER is possible. A
+    # refusal that /v1 answers with 503 carries the same number in the event instead.
+    if ERROR_STATUS_MAP.get(exc.code, (exc.status_code, ""))[0] == 503:
+        error["retry_after"] = retry_after_for(exc.code, exc.details)
+    body = {"error": error}
     return f"data: {json.dumps(body)}\n\n"
 
 

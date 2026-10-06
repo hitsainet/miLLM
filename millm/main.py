@@ -14,6 +14,7 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from millm import __version__
 from millm.api.exception_handlers import generic_exception_handler, millm_error_handler
+from millm.api.retry_after import RetryAfterMiddleware
 from millm.api.routes import register_routes
 from millm.core.config import settings
 from millm.core.errors import MiLLMError
@@ -539,6 +540,11 @@ All errors return a standard response format:
         allow_methods=["*"],
         allow_headers=["*"],
     )
+
+    # Feature 29: any 503 that reaches the response without Retry-After gets a distinct
+    # fallback value and a `retry_after_defaulted` warning (FR-29.6.2). Pure ASGI, so SSE
+    # streams pass through untouched.
+    app.add_middleware(RetryAfterMiddleware)
 
     # Exception handlers
     from fastapi.exceptions import RequestValidationError

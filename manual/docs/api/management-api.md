@@ -23,6 +23,12 @@ All endpoints return the [management envelope](/api/overview#the-management-enve
 | `/api/models/{id}/lock` | POST | Lock model (prevent unload) |
 | `/api/models/{id}/unlock` | POST | Unlock model |
 | `/api/models/{id}/cancel` | POST | Cancel in-progress download |
+| `/api/models/{id}/lease` | POST | Lease the resident model (returns `lease_id` once) |
+| `/api/models/{id}/lease` | GET | Live lease and last ended lease (never the ID) |
+| `/api/models/{id}/lease/renew` | POST | Renew (header `X-miLLM-Lease`) |
+| `/api/models/{id}/lease` | DELETE | Release (header `X-miLLM-Lease`) |
+
+`POST …/load` and `…/unload` read `X-miLLM-Lease`; see [Model lease](/api/models#model-lease).
 
 ## SAEs (`/api/saes`) — [full reference](/api/saes)
 
@@ -146,10 +152,66 @@ fired span so clients can highlight it (older events predate the field and carry
 |----------|--------|-------------|
 | `/api/health` | GET | Liveness |
 | `/api/health/ready` | GET | Readiness |
-| `/api/health/detailed` | GET | Component breakdown |
+| `/api/health/detailed` | GET | Component breakdown, queue state (`inference`) and the live `lease` |
+| `/api/health/gpus` | GET | Per-card memory, including what miLLM holds |
 | `/api/health/inference` | GET | Active backend & capabilities |
 | `/api/health/metrics` | GET | App metrics |
 | `/api/health/metrics/prometheus` | GET | Prometheus format |
 | `/api/health/circuits` | GET | Circuit breakers |
 | `/api/health/circuits/{name}/reset` | POST | Reset a breaker |
 | `/api/health/version` | GET | Version |
+
+### Queue state: the `inference` block of `/api/health/detailed`
+
+A stable, typed contract (Feature 29). The block is **always present**; when it cannot be read it
+carries `error` and the other fields are `null`. Unmeasured is `null`, never `0`.
+
+| Field | Type | Meaning |
+|---|---|---|
+| `backend` | `"queue"` \| `"cbm"` | The serial queue, or continuous batching while it runs |
+| `cbm_enabled`, `cbm_running` | bool | Continuous batching configured / serving now |
+| `queue_pending` | int | Interactive requests **waiting plus holding** a slot (it is incremented before the slot is taken — not "waiting" alone) |
+| `queue_max_concurrent`, `queue_max_pending` | int | `MAX_CONCURRENT_REQUESTS`, `MAX_PENDING_REQUESTS` |
+| `in_flight` | int \| null | Slots held now. The idle cache release holds a slot too and counts, because a request arriving then waits for it. Batch chunks count once the batch API ships. `null` while continuous batching runs |
+| `queue_waiting` | int \| null | Interactive requests waiting: `queue_pending − holding`. `null` while continuous batching runs |
+| `batch_backlog_rows` | int \| null | Rows not yet run across in-progress batches; `null` until a batch API exists (not `0`) |
+| `estimated_wait_seconds` | float \| null | An **estimate** of how long a request arriving now waits for a slot |
+| `error` | string \| null | Why the block could not be read |
+
+The estimate is
+
+```
+estimated_wait_seconds = median(last 50 slot-holding durations) × (queue_waiting + in_flight) / queue_max_concurrent
+```
+
+`null` with fewer than 3 measured durations, and while continuous batching runs (its requests
+hold no queue slot). The batch backlog is not added: interactive requests go first at every
+batch chunk boundary. It is an estimate, not a promise.
+
+`/api/health/detailed` also carries **`lease`**: the live lease on the resident model
+(`model_id`, `model_name`, `holder`, `reason`, `acquired_at`, `renewed_at`, `expires_at`,
+`ttl_seconds`, `seconds_remaining`) or `null`. Never the lease ID. No `nvidia-smi` runs on this
+endpoint.
+
+### Per-card memory: `GET /api/health/gpus`
+
+```json
+{"read_at": "2026-10-06T12:00:00Z", "reason": null, "cards": [
+  {"smi_index": 0, "uuid": "GPU-247a…", "name": "NVIDIA GeForce RTX 3090",
+   "total_mb": 24576, "used_mb": 17396, "free_mb": 7180,
+   "torch_index": 0, "torch_measured": true, "millm_allocated_mb": 0, "millm_reserved_mb": 16820,
+   "engine_memory": null, "processes": [{"pid": 4242, "used_mb": 17100}], "processes_reason": null}]}
+```
+
+- Total, used and free come from `nvidia-smi`. `torch_index` is torch's index, matched by UUID;
+  a card torch cannot see is listed with `torch_index: null`, not dropped.
+- `millm_allocated_mb` / `millm_reserved_mb` are torch's allocator on that card. They are read
+  **only** on cards miLLM has placed a transformers model on (`torch_measured: true`); on any
+  other card they are `null`. Reading a card never creates a CUDA context on it. torch's
+  reserved figure excludes the CUDA context itself, which `nvidia-smi` counts per process.
+- A resident GGUF model's memory is llama.cpp's, not torch's: its cards say
+  `engine_memory: "not_measured_by_torch"`, and `processes` (nvidia-smi's per-process list,
+  where the container can read it) is the only measurement of it.
+- Without `nvidia-smi` the answer is `200` with `cards: []` and `reason` — never zeros.
+- The read runs in a worker thread and takes no request-queue slot, so it is safe to poll
+  during a generation.

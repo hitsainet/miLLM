@@ -225,19 +225,19 @@ T-84 – T-90
         timers; lock tooltip still reads "Locked for steering"; no lease action rendered (T-86);
         `refetchInterval` returns 10,000 with a lease.
 
-- [ ] 10.0 Documentation and the cross-repo contract (covers FR-29.7.6 and the API surface of
+- [x] 10.0 Documentation and the cross-repo contract (covers FR-29.7.6 and the API surface of
       FR-29.1 – FR-29.8)
-  - [ ] 10.1 `manual/docs/api/models.md`: lease routes, headers, codes, examples.
-  - [ ] 10.2 `manual/docs/api/management-api.md`: `InferenceState` fields with the estimate formula
+  - [x] 10.1 `manual/docs/api/models.md`: lease routes, headers, codes, examples.
+  - [x] 10.2 `manual/docs/api/management-api.md`: `InferenceState` fields with the estimate formula
         and the `queue_pending` meaning; `lease`; `/api/health/gpus`.
-  - [ ] 10.3 `manual/docs/reference/error-codes.md` (`MODEL_LEASED`, `MODEL_NOT_RESIDENT`,
+  - [x] 10.3 `manual/docs/reference/error-codes.md` (`MODEL_LEASED`, `MODEL_NOT_RESIDENT`,
         `LEASE_NOT_FOUND`, `LEASE_EXPIRED`, `INVALID_LEASE_REQUEST`, `Retry-After`) and
         `configuration.md` (14 settings); `features/model-management.md` (badge, restart ends every
         lease).
-  - [ ] 10.4 `docs/mcp-contract.md`: next additive version; lease routes, both headers, codes, health
+  - [x] 10.4 `docs/mcp-contract.md`: next additive version; lease routes, both headers, codes, health
         fields, GPU route; the `GET /api/health/detailed` row (`docs/mcp-contract.md:92`) gains the
         new fields. Notify miStudio 034 FR-18/FR-19 owners.
-  - [ ] 10.5 Tests: `test_manual_pages_are_reachable` and `test_mcp_contract_consistency` green; any
+  - [x] 10.5 Tests: `test_manual_pages_are_reachable` and `test_mcp_contract_consistency` green; any
         new test reading `docs/` skips loudly when the file is absent (mirror).
 
 - [ ] 11.0 Feature Acceptance

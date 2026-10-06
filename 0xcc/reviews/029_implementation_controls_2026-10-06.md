@@ -18,6 +18,7 @@ One pytest process at a time throughout.
 | After 6.0 (Retry-After on every 503) | 4276 passed / 3 skipped / 0 failed |
 | After 7.0 (queue state, health contract) | 4293 passed / 3 skipped / 0 failed |
 | After 8.0 (GPU memory endpoint) | 4311 passed / 3 skipped / 0 failed |
+| After 10.0 (manual, error codes, configuration, MCP contract v1.9) | 4311 passed / 3 skipped / 0 failed |
 
 Admin UI (`npx vitest run`): **457 passed / 41 files** before 9.0 (468 − the 11 new), **468 passed / 41 files** after; `tsc -b --noEmit` clean; `eslint` on the touched files reports the same 3 pre-existing errors as the base tree (GGUFQuantPicker ×2, ModelLoadForm), none in new code.
 
@@ -59,6 +60,7 @@ section reference only, recorded, not a name drift.
 | D-6 | FTID §5: `LeaseCreateRequest` declares `holder: str`, `reason: str` | Declared `Any` so a missing or non-string holder/reason reaches the service and is `400 INVALID_LEASE_REQUEST` naming the field, like every other bound (a pydantic type error would be a bare 422). |
 | D-7 | FTID §11: `lease_summary(record) -> LeaseSummary` used by ModelResponse, health and the GET route; FTID §7.5 types the health field `LeaseStatusResponse` | One class: `LeaseSummary` is an alias of `LeaseStatusResponse`, so the three reads cannot drift. `_with_lease` reads the process registry directly (no service method, no database). |
 | D-8 | FTDD §5.1: `DELETE` returns "the ended `LeaseStatusResponse`" | Returns `EndedLeaseResponse` (FTID §2's name): the status fields that still mean something plus `end_reason` and `ended_at`. |
+| D-9 | FPRD §2 edge table: "lease requested while a load or unload is running → `503 model_busy` with `Retry-After`"; FTDD §5.1 lists `503 MODEL_BUSY` on the grant | The lease routes are management routes, where `ModelBusyError` is 409 (`errors.py`), and FPRD §9 / D13 keep management `MODEL_BUSY` at 409. The grant answers `409 MODEL_BUSY`, carrying `unloading` when an unload is the cause. A 409 owes no `Retry-After`. Documented as 409 in the manual and contract. |
 | D-4 | FTID §3.6 adds `_holding` only; `in_flight = holding_count + background_holding_count` with the second "Feature 26's" | `RequestQueue.background_holding_count` was added here, fixed at 0, so the estimate reads one real attribute instead of a `getattr` default. Feature 26 increments it. |
 
 ## 5. Pre-existing defects found and fixed
@@ -67,6 +69,7 @@ section reference only, recorded, not a name drift.
 |---|---|---|
 | P-1 | `ModelService.unload_model`'s "already being unloaded" and `load_model_and_wait`'s "still being unloaded" `ModelBusyError`s carried no unload mark, so the new policy would have answered them with the 15 s LOAD value | Both now carry `details["unloading"] = True` → 5 s. |
 | P-3 | Five assertions in `test_model_load_gpu_request.py` pinned `load_model` to `(3, gpu=…)` | Now `(3, gpu=…, lease_id=None)`: the route passes the header. |
+| P-4 | The manual said a management unload of a locked model returns `409 MODEL_LOCKED` and that locking "prevents unload/delete" (`manual/docs/api/models.md`, `features/model-management.md`, `reference/error-codes.md`). The code has never read `locked` on the management load or unload (FPRD §9 tracked debt), and delete refuses on LOADED, not on `locked` | The three pages now say what the code does, name the gap as tracked debt and point to the lease. |
 | P-2 | Five existing assertions in `test_load_refusal_keeps_resident_model.py` pinned `unload_model` to be awaited with exactly `(9)` | Now `(9, lease_id=None)`: the internal unload carries the load's lease ID (FTID §3.3). The assertions' purpose (unloaded once, the right model) is unchanged. |
 
 ## 6. Notes

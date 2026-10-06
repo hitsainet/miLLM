@@ -17,7 +17,32 @@ Machine-readable error codes returned by the management API in the [error envelo
 | `MODEL_NOT_LOADED` | 400 | Operation needs a loaded model |
 | `MODEL_ALREADY_LOADED` | 400 | Load called on the loaded model |
 | `MODEL_BUSY` | 409 | Operation conflicts with one in progress: a load is running, or the model is being unloaded (a second unload, or a load that would unload it again). On `/v1` it is `503 model_busy`, typed `server_error`: the request is fine and succeeds once the other operation finishes, including a request for a model that is being unloaded |
-| `MODEL_LOCKED` | 409 | Unload/delete refused; detach the SAE or unlock first |
+| `MODEL_LOCKED` | 409 | Another model is locked for steering: a lock request, or a `/v1` request that would auto-load over it (`model_locked`). The management load and unload do not read it |
+| `MODEL_LEASED` | 409 | A load, unload or swap while another holder leases the resident model. `details`: `holder`, `reason`, `expires_at`, `leased_model_id`, `leased_model_name`, `operation`, `target_model_id`. On `/v1` it is `409 model_leased`, typed `invalid_request_error` — never `model_locked`, even when the model is also locked. The holder proceeds by sending `X-miLLM-Lease` |
+| `MODEL_NOT_RESIDENT` | 409 | A lease was requested on a model that is not the resident, loaded one; `details` name the resident model. On `/v1`, `model_not_resident` answers `X-miLLM-Load-Policy: refuse` for a model that is not resident: nothing loads |
+| `LEASE_NOT_FOUND` | 404 | Renew or release with an unknown lease ID, or one for another model. The message says that a restart ends every lease |
+| `LEASE_EXPIRED` | 409 | Renew or release with a lease ID that has ended; `details.end_reason` is `released`, `expired`, `model_unloaded` or `restart` |
+| `INVALID_LEASE_REQUEST` | 400 | `holder` (1–128 chars), `reason` (1–512), `ttl_seconds` (1–7200, integer, never clamped) or the `X-miLLM-Lease` header is missing or out of bounds; `details.param` names it and the limit |
+| `MODEL_LOADING` (`/v1`) | 503 | `X-miLLM-Load-Policy: refuse` and the model named is being loaded now; retry after `Retry-After` |
+
+## `Retry-After` on every 503
+
+Every response miLLM sends with status `503`, on any route, carries a `Retry-After` header in whole
+seconds (at least 1). The error envelope, type and code are unchanged — the header is the only
+addition.
+
+| Code | `Retry-After` |
+|---|---|
+| `QUEUE_FULL` | The [estimated wait](/api/management-api#queue-state-the-inference-block-of-apihealthdetailed) rounded up, at most `RETRY_AFTER_MAX_S` (60); `RETRY_AFTER_QUEUE_DEFAULT_S` (5) with no estimate |
+| `MODEL_BUSY`, `MODEL_LOADING` | `RETRY_AFTER_LOAD_S` (15) for a load in progress; `RETRY_AFTER_UNLOAD_S` (5) for an unload |
+| `MODEL_NOT_LOADED` | `RETRY_AFTER_NOT_LOADED_S` (30) — a retry succeeds only after a model is loaded |
+| `INSUFFICIENT_MEMORY` (`/v1`) | `RETRY_AFTER_MEMORY_S` (30) |
+| `HUB_UNAVAILABLE` | The hub circuit breaker's remaining recovery time (1 when it is closed) |
+| `GET /api/health/ready` not ready | `RETRY_AFTER_READINESS_S` (5) |
+| any other 503 | `RETRY_AFTER_FALLBACK_S` (10), added by a safety net that also logs `retry_after_defaulted` |
+
+A refusal raised inside a stream whose `200` is already sent cannot carry a header; its in-stream
+error event carries `"retry_after": <seconds>` instead.
 
 ## Resource errors
 

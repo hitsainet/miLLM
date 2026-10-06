@@ -1,6 +1,6 @@
 # miLLM ↔ Unified MCP Server Contract
 
-**Status:** Normative for miLLM Feature 9 (Unified MCP), Feature 15 (Circuit Edge Sensing / circuit MCP surface), Feature 19 (Concurrent Circuit Serving) and Feature 24 (Probe Monitor Runtime). **Version:** 1.8 (2026-10-02)
+**Status:** Normative for miLLM Feature 9 (Unified MCP), Feature 15 (Circuit Edge Sensing / circuit MCP surface), Feature 19 (Concurrent Circuit Serving) and Feature 24 (Probe Monitor Runtime), and the model-lease / backpressure surface of Feature 29. **Version:** 1.9 (2026-10-06)
 **Consumer:** the unified MCP server that ships in the miStudio repo
 (`backend/src/mcp_server/`), exposing `millm_runtime` / `millm_clusters` /
 `millm_sensing` / `millm_circuits` / `millm_probes` tool categories against a miLLM
@@ -12,6 +12,15 @@ This contract is **additive-only**: miLLM may add endpoints, response fields, an
 error codes; it must not rename or remove anything listed here, change field
 types, or change status-code semantics without a new contract version. The MCP
 server must tolerate unknown fields everywhere.
+
+**v1.9 (2026-10-06)** is a strict additive superset of v1.8: it adds the model-lease routes
+(§4e), the `X-miLLM-Lease` and `X-miLLM-Load-Policy` request headers, the `MODEL_LEASED`,
+`MODEL_NOT_RESIDENT`, `LEASE_NOT_FOUND`, `LEASE_EXPIRED` and `INVALID_LEASE_REQUEST` codes,
+a `Retry-After` header on every `503`, the typed `inference` block and the `lease` field on
+`GET /api/health/detailed`, and `GET /api/health/gpus`. **No tool is added here**: the lease
+tools and the refuse-load header on scoring and generation tools are miStudio's to build
+(miStudio `034` FR-18, FR-19) against this section. Nothing was renamed, removed or re-typed;
+`inference` keeps every field it had, and absent headers reproduce v1.8 behaviour exactly.
 
 **v1.8 (2026-10-02)** is a strict additive superset of v1.7: it adds
 `POST /api/probes/{probe_id}/recalibrate`, the `millm_recalibrate_probe` tool, the
@@ -89,7 +98,8 @@ Every management endpoint (everything under `/api/`) returns:
 | Endpoint | Purpose | Notes |
 |---|---|---|
 | `GET /api/health` | **Gate hot path.** Cheap liveness: `{status, version, timestamp, uptime_seconds}` | No DB read. Poll ≤ 1/10 s (gate TTL). 3 s timeout recommended |
-| `GET /api/health/detailed` | One-call status for `millm_status` | Includes `model_loaded`, `model_name`, `sae_attached`, `sae_id`, `inference`, and `active_profile` |
+| `GET /api/health/detailed` | One-call status for `millm_status` | Includes `model_loaded`, `model_name`, `sae_attached`, `sae_id`, `inference`, `active_profile` and (v1.9) `lease`. `inference` is a typed, always-present block (v1.9): `backend`, `cbm_enabled`, `cbm_running`, `queue_pending` (waiting **plus** holding), `queue_max_concurrent`, `queue_max_pending`, and new `in_flight`, `queue_waiting`, `batch_backlog_rows`, `estimated_wait_seconds`, `error` — each new count `null` when unmeasured (under continuous batching; backlog before a batch API), never `0` |
+| `GET /api/health/gpus` (v1.9) | Per-card memory | `{read_at, cards[], reason}`; per card `smi_index`, `uuid`, `name`, `total_mb`, `used_mb`, `free_mb`, `torch_index` (null when torch cannot see it), `torch_measured`, `millm_allocated_mb`/`millm_reserved_mb` (null unless miLLM placed a transformers model on the card), `engine_memory` (`"not_measured_by_torch"` for a resident GGUF card), `processes[{pid, used_mb}]`/`processes_reason`. `cards: []` + `reason` without nvidia-smi. No tool consumes it (miStudio 034 §9) |
 
 **`active_profile`** (added for this contract):
 `{id, name, source_kind: "manual"|"cluster", intensity, sensing_enabled} | null`.
@@ -630,6 +640,39 @@ Notes:
 - Payload caps: import documents ≤ 1 MB, ≤ 20 members/definition,
   ≤ 50 definitions/bundle.
 
+### 4e. Model lease and refuse-load policy (v1.9 — Feature 29)
+
+No tool in this repo or the MCP server consumes these yet; miStudio `034` FR-18 builds
+`millm_acquire_lease`, `millm_renew_lease`, `millm_release_lease` and `millm_lease_status` on
+them, and FR-19 sends `X-miLLM-Load-Policy: refuse` on every scoring and generation call.
+
+| Endpoint | Body / headers | Success | Refusals |
+|---|---|---|---|
+| `POST /api/models/{id}/lease` | `{holder, reason, ttl_seconds?}` | `201`, `{lease_id, model_id, model_name, holder, reason, acquired_at, renewed_at, expires_at, ttl_seconds, seconds_remaining}` — the ONLY response carrying `lease_id` | `400 INVALID_LEASE_REQUEST`, `404 MODEL_NOT_FOUND`, `409 MODEL_NOT_RESIDENT`, `409 MODEL_LEASED`, `409 MODEL_BUSY` |
+| `GET /api/models/{id}/lease` | — | `200`, `{lease: <the lease without lease_id> \| null, last_ended: {…, end_reason, ended_at} \| null}` | `404 MODEL_NOT_FOUND` |
+| `POST /api/models/{id}/lease/renew` | header `X-miLLM-Lease`; `{ttl_seconds?}` | `200`, the lease (new expiry = now + TTL) | `400`, `404 LEASE_NOT_FOUND`, `409 LEASE_EXPIRED` |
+| `DELETE /api/models/{id}/lease` | header `X-miLLM-Lease` | `200`, the ended lease (`end_reason: released`) | `404 LEASE_NOT_FOUND`, `409 LEASE_EXPIRED` |
+
+- `ttl_seconds`: integer 1–7200, default 7200; outside the range `400`, never clamped.
+  `holder` 1–128 chars, `reason` 1–512, both required free text (no approval step).
+- Only the resident, `LOADED` model can be leased; one live lease at a time. A lease ends on
+  expiry, release, the model stopping being resident (`model_unloaded`) and **every restart**
+  (`restart`: renew then answers `404 LEASE_NOT_FOUND`, "unknown lease; a restart ends every
+  lease"). A lease ID for another model's path is `404`.
+- `POST /api/models/{id}/load` and `/unload` read `X-miLLM-Lease`. Under a foreign lease they are
+  `409 MODEL_LEASED` with `details {holder, reason, expires_at, leased_model_id,
+  leased_model_name, operation, target_model_id}`; with the holder's ID they proceed and the lease
+  ends with the unloaded model. They ignore `X-miLLM-Load-Policy`.
+- `/v1/chat/completions`, `/v1/completions`, `/v1/embeddings` read both headers. Under a
+  foreign lease an auto-load is `409 model_leased` (`invalid_request_error`), never
+  `model_locked`. `X-miLLM-Load-Policy: refuse` (case-insensitive; default `auto`) answers a
+  non-resident model with `409 model_not_resident` (naming requested and resident model, and the
+  resident model's lease) and a model being loaded with `503 model_loading` + `Retry-After`;
+  nothing loads. Any other value is `400 invalid_parameter`, `param: "X-miLLM-Load-Policy"`.
+- **`Retry-After` (v1.9):** every `503` on any route carries it, in whole seconds ≥ 1, with the
+  envelope and code unchanged. A client passes it to the agent unchanged. A refusal inside a
+  committed stream carries `retry_after` in its error event instead.
+
 ## 5. Error codes the MCP client must map
 
 `VALIDATION_ERROR` (422), `PROFILE_NOT_FOUND` (404), `MODEL_NOT_LOADED`
@@ -670,6 +713,14 @@ depth are unreadable; **never defaulted**, because a fabricated `d_model` compar
 cleanly against a definition and means nothing), `PROBE_HOOK_UNSUPPORTED` (409 — the
 loaded runtime, e.g. llama.cpp, exposes no module tree to hook). Reused as-is:
 `UNKNOWN_KIND`, `PAYLOAD_TOO_LARGE`, `HUB_UNAVAILABLE`, `VALIDATION_ERROR`.
+
+**v1.9 lease codes:** `MODEL_LEASED` (409 — another holder leases the resident model; `details`
+name holder, reason, `expires_at`; on `/v1` `model_leased`), `MODEL_NOT_RESIDENT` (409 — a lease
+on a model that is not resident; on `/v1` `model_not_resident` answers the refuse-load policy),
+`LEASE_NOT_FOUND` (404 — unknown ID, another model's ID, or any ID after a restart),
+`LEASE_EXPIRED` (409 — `details.end_reason`), `INVALID_LEASE_REQUEST` (400 — `details.param`
+names the field and limit). `MODEL_LOADING` (503, `/v1`) now has a producer: the refuse-load
+policy for a model being loaded. Every `503` carries `Retry-After`.
 
 ⚠ **`UNVALIDATED_PROBE` and `PROBE_MODEL_MISMATCH` must not be collapsed into one
 "arming failed".** They call for opposite actions — the first is resolved by asserting

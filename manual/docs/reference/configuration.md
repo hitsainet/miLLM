@@ -39,6 +39,28 @@ miLLM is configured entirely through environment variables (with `.env` file sup
 | `GRACEFUL_UNLOAD_TIMEOUT` | `30.0` | Seconds an unload waits for the requests already running on the model before it moves any weight. Requests that arrive once the unload has begun are refused with `503 model_busy` rather than waited for. If the running requests outlast this, the unload goes ahead and they fail. (Until 2026-09-14 this setting was read by nothing and the wait was a fixed 5 s.) |
 | `DOWNLOAD_TIMEOUT` | `3600.0` | Max seconds for a single download |
 
+## Model lease and backpressure
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `LEASE_DEFAULT_TTL_SECONDS` | `7200` | TTL of a lease taken without `ttl_seconds`. Must not exceed the maximum (checked at startup) |
+| `LEASE_MAX_TTL_SECONDS` | `7200` | Largest `ttl_seconds` accepted; larger values are refused with `400`, never clamped |
+| `LEASE_HOLDER_MAX_CHARS` | `128` | Longest `holder` label, after stripping |
+| `LEASE_REASON_MAX_CHARS` | `512` | Longest `reason`, after stripping |
+| `LEASE_ENDED_MEMORY` | `64` | Ended leases remembered, so renew/release of a seen ID answers `409 LEASE_EXPIRED` with its reason instead of `404`. Lost at restart |
+| `QUEUE_DURATION_WINDOW` | `50` | Recent slot-holding durations kept for `estimated_wait_seconds` |
+| `RETRY_AFTER_QUEUE_DEFAULT_S` | `5` | `QUEUE_FULL` with no estimate |
+| `RETRY_AFTER_MAX_S` | `60` | Ceiling on the `QUEUE_FULL` estimate |
+| `RETRY_AFTER_LOAD_S` | `15` | `MODEL_BUSY` / `MODEL_LOADING` while a load runs |
+| `RETRY_AFTER_UNLOAD_S` | `5` | `MODEL_BUSY` while an unload runs |
+| `RETRY_AFTER_NOT_LOADED_S` | `30` | `MODEL_NOT_LOADED` |
+| `RETRY_AFTER_MEMORY_S` | `30` | `INSUFFICIENT_MEMORY` on `/v1` |
+| `RETRY_AFTER_READINESS_S` | `5` | The readiness probe's `503` |
+| `RETRY_AFTER_FALLBACK_S` | `10` | Any other `503` that reached the response without `Retry-After`; logged as `retry_after_defaulted`. Deliberately distinct from every other value |
+
+Leases live in process memory: a restart ends every lease. miLLM runs one worker process; several
+workers would each hold their own lease registry.
+
 ## Performance
 
 | Variable | Default | Description |

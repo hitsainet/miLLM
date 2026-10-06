@@ -87,7 +87,17 @@ Models with Mamba/SSM layers (e.g., `granite-4.0-h-*`) require the `mamba-ssm` p
 
 ## Model Locking
 
-When an SAE is attached, the model is automatically **locked** — the unload and delete actions are refused (`409 MODEL_LOCKED`) so a steering experiment can't lose its substrate mid-run. Detaching the SAE unlocks the model automatically; you can also lock/unlock manually from the model details or via [`POST /api/models/{id}/lock`](/api/models).
+When an SAE is attached, the model is automatically **locked**, so a `/v1` request naming another model cannot auto-load over it (`409 model_locked`). Detaching the SAE unlocks the model automatically; you can also lock/unlock manually from the model details or via [`POST /api/models/{id}/lock`](/api/models). The lock icon's tooltip reads "Locked for steering".
+
+⚠ The management **Load**, **Switch** and **Unload** actions do not read the lock today — a steering model can be unloaded from here. This is tracked debt; the lease below guards every path.
+
+## Model Lease
+
+A caller such as a long labelling job can **lease** the resident model: while the lease is live, nobody else can load another model, unload it, or swap it — from this page, the API, or a `/v1` request — and the refusal (`409 MODEL_LEASED`) names who holds it and until when. Requests that *use* the leased model keep working.
+
+A leased model shows an amber key badge beside the lock icon, on the loaded-model card and in the model details: **"Leased by midataworks · expires in 1h 12m"**, with the reason and exact expiry in the tooltip. The badge counts down and disappears when the lease expires; the page refreshes every 10 seconds while a lease exists.
+
+The Admin UI only displays leases — it cannot take, renew or release one, and there is no force-release. A lease lasts at most 2 hours unless its holder renews it. **A restart of miLLM ends every lease**; holders take a new one once their model is resident. See [Model lease](/api/models#model-lease).
 
 ## Deleting
 

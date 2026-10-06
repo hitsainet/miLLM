@@ -121,16 +121,16 @@ miStudio 034 to send `X-miLLM-Strict: true` safely.
   - [ ] 2.15 Test: the log event carries locations and not a sentinel value placed in the field
         (privacy; mutation M4).
 
-- [ ] 3.0 Errors and the error map (covers FR-25.3.2, FR-25.11; latent defect FTDD §5.5)
-  - [ ] 3.1 `millm/core/errors.py`: `FieldNotHonouredError`, `UnusedFieldsRefusedError`,
+- [x] 3.0 Errors and the error map (covers FR-25.3.2, FR-25.11; latent defect FTDD §5.5)
+  - [x] 3.1 `millm/core/errors.py`: `FieldNotHonouredError`, `UnusedFieldsRefusedError`,
         `ResponseFormatUnsupportedError`, `NoChatTemplateError`, `ConstrainedOutputInvalidError`
         (class-level `code`/`status_code`).
-  - [ ] 3.2 `ERROR_STATUS_MAP` rows for the five, **plus** the missing `INVALID_SCORING_REQUEST`
+  - [x] 3.2 `ERROR_STATUS_MAP` rows for the five, **plus** the missing `INVALID_SCORING_REQUEST`
         (400, invalid_request_error) and `NON_FINITE_LOGITS` (500, server_error) — today a scoring
         400 reaches clients typed `server_error` (`millm/api/exception_handlers.py:93-94`).
-  - [ ] 3.3 Test (`test_error_map_complete.py`): walk `MiLLMError.__subclasses__()` recursively;
+  - [x] 3.3 Test (`test_error_map_complete.py`): walk `MiLLMError.__subclasses__()` recursively;
         every `code` has a row (registry-derived, mutation M15).
-  - [ ] 3.4 Test: an out-of-vocabulary `allowed_token_ids` on `/v1/completions` returns type
+  - [x] 3.4 Test: an out-of-vocabulary `allowed_token_ids` on `/v1/completions` returns type
         `invalid_request_error`.
 
 - [ ] 4.0 Small refusals and aliases (covers FR-25.3.3a, FR-25.3.3b, FR-25.3.5, FR-25.4)

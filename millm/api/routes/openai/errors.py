@@ -105,6 +105,56 @@ ERROR_STATUS_MAP: dict[str, tuple[int, str]] = {
     # must name another model, so not a server fault to retry. Review round 2,
     # 2026-09-14.
     "UNSUPPORTED_QUANTIZATION": (400, "invalid_request_error"),
+    # Scoring (2026-10-04). Without these rows a scoring 400 — a token id outside the
+    # vocabulary — reached OpenAI clients typed "server_error", which their SDKs retry
+    # (Feature 25, 025_FTDD §5.5).
+    "INVALID_SCORING_REQUEST": (400, "invalid_request_error"),
+    "NON_FINITE_LOGITS": (500, "server_error"),
+    # Request validation, chat scoring and structured output (Feature 25).
+    "FIELD_NOT_HONOURED": (400, "invalid_request_error"),
+    "UNUSED_FIELDS_REFUSED": (400, "invalid_request_error"),
+    "RESPONSE_FORMAT_UNSUPPORTED": (400, "invalid_request_error"),
+    "NO_CHAT_TEMPLATE": (400, "invalid_request_error"),
+    "CONSTRAINED_OUTPUT_INVALID": (500, "server_error"),
+    # Every other MiLLMError code, so the map is COMPLETE and a /v1 request never meets
+    # the fallback (exc.status_code, "server_error") — which types a 4xx as a server
+    # fault to retry. test_error_map_complete.py walks MiLLMError.__subclasses__() and
+    # fails on a code with no row. Statuses are each class's own; the type follows it
+    # (4xx a request to change, 5xx a server fault). The two HF-token codes are 401s
+    # about the SERVER's HuggingFace credential, not the caller's API key, so they are
+    # not "authentication_error".
+    "SENSING_EVENT_NOT_FOUND": (404, "invalid_request_error"),
+    "CIRCUIT_SENSING_EVENT_NOT_FOUND": (404, "invalid_request_error"),
+    "CIRCUIT_NOT_FOUND": (404, "invalid_request_error"),
+    "CIRCUIT_LAYER_CONTENTION": (200, "invalid_request_error"),
+    "NO_ACTIVE_CIRCUIT": (200, "invalid_request_error"),
+    "UNVALIDATED_CIRCUIT": (200, "invalid_request_error"),
+    "MODEL_ALREADY_EXISTS": (409, "invalid_request_error"),
+    "MODEL_LOAD_FAILED": (500, "server_error"),
+    "MODEL_LOCKED": (409, "invalid_request_error"),
+    "INVALID_GGUF_TENSOR_SPLIT": (500, "server_error"),
+    "SPLIT_NOT_HONOURED": (409, "invalid_request_error"),
+    "DOWNLOAD_CANCELLED": (499, "invalid_request_error"),
+    "DOWNLOAD_FAILED": (502, "server_error"),
+    "GATED_MODEL_NO_TOKEN": (401, "invalid_request_error"),
+    "INVALID_HF_TOKEN": (401, "invalid_request_error"),
+    "REPO_NOT_FOUND": (404, "invalid_request_error"),
+    "INVALID_LOCAL_PATH": (400, "invalid_request_error"),
+    "INSUFFICIENT_DISK": (507, "server_error"),
+    "GPU_NOT_FOUND": (404, "invalid_request_error"),
+    "HUB_UNAVAILABLE": (503, "server_error"),
+    "INVALID_PROFILE_FORMAT": (400, "invalid_request_error"),
+    "PROFILE_ALREADY_EXISTS": (409, "invalid_request_error"),
+    "PROFILE_INCOMPATIBLE": (400, "invalid_request_error"),
+    "PROBE_DTYPE_MISMATCH": (409, "invalid_request_error"),
+    "PROBE_RECALIBRATION_MISMATCH": (409, "invalid_request_error"),
+    "PROBE_THRESHOLD_UNCALIBRATED": (409, "invalid_request_error"),
+    "SAE_ALREADY_ATTACHED": (409, "invalid_request_error"),
+    "SAE_INCOMPATIBLE": (400, "invalid_request_error"),
+    "SAE_LOAD_FAILED": (500, "server_error"),
+    "SAE_NOT_ATTACHED": (400, "invalid_request_error"),
+    "SAE_NOT_FOUND": (404, "invalid_request_error"),
+    "SAE_SET_INCOMPLETE": (422, "invalid_request_error"),
     # Resource errors
     "INSUFFICIENT_MEMORY": (503, "server_error"),
     "RATE_LIMIT_EXCEEDED": (429, "rate_limit_error"),

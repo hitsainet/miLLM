@@ -64,6 +64,62 @@ class InvalidScoringRequestError(MiLLMError):
     status_code = 400
 
 
+# =============================================================================
+# Request validation, chat scoring and structured output (Feature 25)
+#
+# Every one of these answers a request that miLLM would otherwise have served with a
+# field silently dropped. `details["param"]` names the field; the /v1 handler copies
+# it into the OpenAI envelope's `param`.
+# =============================================================================
+
+
+class FieldNotHonouredError(MiLLMError):
+    """An output-changing field this endpoint and engine cannot honour (FR-25.3).
+
+    Raised whether or not the client asked for strict mode: ignoring such a field
+    returns a 200 whose output is not the output the request described."""
+
+    code = "FIELD_NOT_HONOURED"
+    status_code = 400
+
+
+class UnusedFieldsRefusedError(MiLLMError):
+    """`X-miLLM-Strict: true` and at least one field the request path would not use
+    (FR-25.2). `details["fields"]` lists every location, not only the first."""
+
+    code = "UNUSED_FIELDS_REFUSED"
+    status_code = 400
+
+
+class ResponseFormatUnsupportedError(MiLLMError):
+    """`response_format` cannot be honoured here: a schema keyword outside the declared
+    subset, a GGUF model, the continuous batching manager, or a combination (stop,
+    stream, scoring) that would report truncated JSON as complete (FR-25.11)."""
+
+    code = "RESPONSE_FORMAT_UNSUPPORTED"
+    status_code = 400
+
+
+class NoChatTemplateError(MiLLMError):
+    """Chat scoring on a model without a chat template (T-55, FR-25.5.9).
+
+    Generation keeps its generic fallback format; scoring refuses, because a score of a
+    prompt the model was never trained on looks exactly like a real score."""
+
+    code = "NO_CHAT_TEMPLATE"
+    status_code = 400
+
+
+class ConstrainedOutputInvalidError(MiLLMError):
+    """A COMPLETE constrained generation failed miLLM's own validation (FR-25.10.6).
+
+    A server fault, never the client's: the constraint should have made it impossible.
+    Reported as an error instead of a 200 carrying invalid JSON."""
+
+    code = "CONSTRAINED_OUTPUT_INVALID"
+    status_code = 500
+
+
 class ScoringNumericalError(MiLLMError):
     """The model produced NaN or infinite logits, so no probability can be reported. A fault of the
     model or its weights, not of the request — and reported, never serialised as `NaN`."""

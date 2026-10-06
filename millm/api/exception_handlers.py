@@ -115,10 +115,15 @@ async def millm_error_handler(request: Request, exc: MiLLMError) -> JSONResponse
         # An error that knows its OpenAI type says so (GenerationOutOfMemoryError:
         # the request is too large for the card, not a server fault to retry).
         error_type = getattr(exc, "openai_error_type", None) or error_type
+        # `param` names the field a refusal is about (Feature 25: every refusal names
+        # its field). It was always None here, so a client could not tell WHICH field
+        # a 400 meant without parsing prose.
+        param = exc.details.get("param") if isinstance(exc.details, dict) else None
         return create_openai_error(
             message=exc.message,
             error_type=error_type,
             code=exc.code.lower() if exc.code else None,
+            param=param if isinstance(param, str) else None,
             status_code=status_code,
         )
 

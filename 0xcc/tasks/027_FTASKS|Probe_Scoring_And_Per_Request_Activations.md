@@ -51,15 +51,15 @@
 
 ## Tasks
 
-- [ ] 0.0 Verification before `text` ships (covers FR-27.4a2; T-49)
-  - [ ] 0.1 On one miStudio probe definition, compare each test vector's `token_ids` with (a) live
+- [?] 0.0 Verification before `text` ships (covers FR-27.4a2; T-49)
+  - [?] 0.1 On one miStudio probe definition, compare each test vector's `token_ids` with (a) live
         serving's render of its `messages` (`_format_chat_messages`, generation prompt on) and (b) the
         drift-check render (generation prompt off, `probe_parity.py:517-519`). Record which reproduces
-        the recorded ids. Record: `0xcc/reviews/probe_scoring_phase0_2026-10.md`.
-  - [ ] 0.2 Score one miStudio-evaluated set as `text` (one user turn) through the score service on
+        the recorded ids. Record: `0xcc/reviews/probe_scoring_phase0_2026-10.md`. **[?] needs hardware — operator session.**
+  - [?] 0.2 Score one miStudio-evaluated set as `text` (one user turn) through the score service on
         the probe's model; compute AUROC; it must lie inside miStudio's reported interval. If it does
         not, `text` stays refused and the finding goes to the operator — do not change the render rule
-        silently.
+        silently. **[?] needs hardware — operator session.**
   - [x] 0.3 Until 0.2 passes, `text` inputs are refused with `INVALID_PROBE_SCORE_REQUEST` naming the
         pending verification (FTID §9); test that refusal; remove the gate in the same commit that
         records 0.2's pass.
@@ -221,26 +221,26 @@
   - [x] 7.4 Manual: "Scoring stored text" section, the boundary rule, the new not-scored reasons, and
         `return_sae_activations` in the OpenAI API page with the read-point note.
 
-- [ ] 8.0 Feature Acceptance
-  - [ ] 8.1 Verify each FPRD success criterion (SC-1 … SC-7) and user story (US-1 … US-7) one by one;
+- [?] 8.0 Feature Acceptance
+  - [x] 8.1 Verify each FPRD success criterion (SC-1 … SC-7) and user story (US-1 … US-7) one by one;
         record evidence.
-  - [ ] 8.2 Re-run every mutation control M1–M21; each red, each restore verified. Record in
+  - [x] 8.2 Re-run every mutation control M1–M21; each red, each restore verified. Record in
         `0xcc/reviews/review_feature027_<date>.md`.
-  - [ ] 8.3 Full suite: `pytest tests/unit`, with `0xcc/` hidden as well (the public mirror's view), plus
+  - [x] 8.3 Full suite: `pytest tests/unit`, with `0xcc/` hidden as well (the public mirror's view), plus
         `ruff` and `mypy`. Cross-repo checks with miStudio present.
-  - [ ] 8.4 Integration (`tests/integration/test_probe_score_matches_live.py`): tiny real transformer —
+  - [x] 8.4 Integration (`tests/integration/test_probe_score_matches_live.py`): tiny real transformer —
         import → score unarmed → arm → live chat with `max_tokens: 1` → prompt-window scores equal.
-  - [ ] 8.5 **Hardware, BRD-04 acceptance 11** (mcs-lnxhost02, LFM2.5-1.2B): `/api/probes/score`
+  - [?] 8.5 **Hardware, BRD-04 acceptance 11** (mcs-lnxhost02, LFM2.5-1.2B): `/api/probes/score`
         reproduces a definition's test vectors within the parity tolerance, unarmed; armed live scores
-        on the same inputs agree; `probe_events` count unchanged by the stateless call.
-  - [ ] 8.6 **Hardware, BRD-04 acceptance 10:** two interleaved activation requests each get only their
-        own activations; an over-cap request returns `400`.
-  - [ ] 8.7 **Hardware, BRD-04 acceptance 17:** with a probe armed, a batched chat request records
-        `batched_request` in the header and the event; removing the FR-27.8 call turns the guard red.
-  - [ ] 8.8 Measure scoring throughput and the dynamo-reset share per input; hoist hook installs if it
-        dominates (FTDD §9). Record the figures.
-  - [ ] 8.9 Wait for any rollout to settle before 8.5–8.8 (a rollout kills in-flight GPU work).
-  - [ ] 8.10 Update the miLLM project status and Document Inventory; record follow-ups (per-row
+        on the same inputs agree; `probe_events` count unchanged by the stateless call. **[?] needs hardware — operator session.**
+  - [?] 8.6 **Hardware, BRD-04 acceptance 10:** two interleaved activation requests each get only their
+        own activations; an over-cap request returns `400`. **[?] needs hardware — operator session.**
+  - [?] 8.7 **Hardware, BRD-04 acceptance 17:** with a probe armed, a batched chat request records
+        `batched_request` in the header and the event; removing the FR-27.8 call turns the guard red. **[?] needs hardware — operator session.**
+  - [?] 8.8 Measure scoring throughput and the dynamo-reset share per input; hoist hook installs if it
+        dominates (FTDD §9). Record the figures. **[?] needs hardware — operator session.**
+  - [?] 8.9 Wait for any rollout to settle before 8.5–8.8 (a rollout kills in-flight GPU work). **[?] needs hardware — operator session.**
+  - [x] 8.10 Update the miLLM project status and Document Inventory; record follow-ups (per-row
         batched probe scoring stays out of scope, BRD-04 §7).
 
 ## Coverage Audit

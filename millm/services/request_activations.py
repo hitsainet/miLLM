@@ -42,10 +42,10 @@ def resolve_positions(spec: Any, n_prompt: int, max_new_tokens: int) -> int:
         return max_new_tokens
     if positions == "all":
         return total
-    return max(0, min(positions.end, total) - positions.start)
+    return max(0, min(int(positions.end), total) - int(positions.start))
 
 
-def select_sae(spec: Any, entries: list) -> Any:
+def select_sae(spec: Any, entries: list[Any]) -> Any:
     """The attached entry the request names, or a refusal naming the SAE or the candidates."""
     if spec.sae_id is not None:
         matches = [e for e in entries if e.sae_id == spec.sae_id]
@@ -94,7 +94,7 @@ def check_request_shape(*, n: int = 1, extra_messages: bool = False, n_prompts: 
             )
 
 
-def validate_request(spec: Any, *, entries: list, n_prompt: int, max_new_tokens: int,
+def validate_request(spec: Any, *, entries: list[Any], n_prompt: int, max_new_tokens: int,
                      n: int = 1, extra_messages: bool = False, n_prompts: int = 1) -> Any:
     """Every refusal decidable before generation (FR-27.1i, FR-27.2a-b, f). Returns the entry."""
     from millm.core.config import settings

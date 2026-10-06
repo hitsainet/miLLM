@@ -1,6 +1,24 @@
 # Project: miLLM - Mechanistic Interpretability LLM Server
 
 ## Current Status
+- **⏳ FEATURE 27 PROBE SCORING AND PER-REQUEST ACTIVATIONS: TASKS 1–7 + NON-HARDWARE ACCEPTANCE
+  SHIPPED ON `feat/027-probe-scoring` (2026-10-06), NOT MERGED, NOT ✅.** `POST /api/probes/score`
+  scores stored inputs with any imported probe, armed or not, and persists nothing — built by
+  `armed_probe_from_row`, run by `build_probe_forward`, decided by `_verdict_for` (offline == live),
+  one admission slot per input via the new `InferenceService.run_model_work` (also now taken by
+  the parity and arm routes, which ran with no slot and no steering suppression — steering an
+  earlier layer moved parity by 282 on the test fixture). `return_sae_activations` on `/v1` chat and
+  text returns this request's SAE activations in a `millm` object (pre/post steering; `unsteered` in
+  scoring mode), isolated by an owner token so concurrent CBM forwards cannot feed it. Every
+  generation path now opens a probe context or records why not — batched chat, CBM chat/text and
+  the three llama.cpp paths were silent — proved by an AST DISCOVERY guard whose scenario table is
+  asserted EQUAL to discovery; `/v1/completions` now sends `X-miLLM-Probe-Verdicts`; concurrent CBM
+  requests no longer collide on the runtime's single context. `>=` stays the one comparison
+  (guarded). `text` input is REFUSED until T-49's AUROC check passes on hardware. MCP contract
+  **v1.10** (no tools). Backend `tests/unit` **4474+ passed / 3 skipped**; mirror view 4467 / 10
+  skipped / 0 failed; admin-ui 471 passed. **60 mutation controls re-run at acceptance, 0 survived
+  first time at implementation.** Records: `0xcc/reviews/027_implementation_controls_2026-10-06.md`,
+  `0xcc/reviews/review_feature027_2026-10-06.md`. **Open: 0.1, 0.2, 8.5–8.9 need the GPU node.**
 - **⏳ FEATURE 29 MODEL LEASE, BACKPRESSURE AND GPU VISIBILITY: TASKS 1–10 SHIPPED ON
   `feat/029-model-lease` (2026-10-06), NOT MERGED, NOT ✅.** A caller pins the resident model with
   a lease (`/api/models/{id}/lease`, holder + reason + TTL ≤ 7200 s, lease ID returned once and
@@ -225,7 +243,7 @@ refactor(services): extract HuggingFace logic
 
 ### Project Level Documents
 - ⏳ 0xcc/prds/BRD-04-miLLM-Dataworks-Support.md (miLLM additions for miDataworks: chat scoring, structured output, seed, batch API, per-request SAE activations, stateless probe scoring, inline steering, embedding options, model lease, backpressure, GPU visibility, probe-path fixes; 47 requirements R-04.1–47; needed by miDataworks BRD-03 and miStudio BRD-MIS-DATAWORKS-001; 2026-10-06)
-- ⏳ PPRD v1.5 (Features 25–30, FR-25.x–FR-30.x, BRD-04 coverage 47/47) · PADR v1.5 (§1 "(v1.5)" rows, §10 Dataworks Support trade-offs) — ✅ feature chains 025–030 complete 2026-10-06 — FPRD v1.1 (operator decisions applied, FR IDs unchanged), FTDD, FTID, FTASKS each: 025 Chat_Scoring_Structured_Output_And_Seed (10/83, xgrammar measured), 026 Batch_API (10/63), 027 Probe_Scoring_And_Per_Request_Activations (9/66), 028 Inline_Steering_And_Steering_Header (9/58, hash test vectors TV-1..4), 029 Model_Lease_Backpressure_And_GPU_Visibility (12/71; ⏳ implemented 2026-10-06 through task 10, hardware 0.2/11.3–11.5 open), 030 Embedding_Options (9/44) — parent/sub-task counts; BRD-04 coverage 47/47 — Stage 3 consistency review 2026-10-06 (`0xcc/reviews/stage3_dataworks_consistency_2026-10-06.md`): PADR amendments applied (xgrammar, jsonschema, http-sfv dev-only; GGUF structured output refused; `_score_prompts` shared; lease debts; first-SAE profile debt), 026↔029 lease API names aligned, hash vectors TV-1..4 reproduced
+- ⏳ PPRD v1.5 (Features 25–30, FR-25.x–FR-30.x, BRD-04 coverage 47/47) · PADR v1.5 (§1 "(v1.5)" rows, §10 Dataworks Support trade-offs) — ✅ feature chains 025–030 complete 2026-10-06 — FPRD v1.1 (operator decisions applied, FR IDs unchanged), FTDD, FTID, FTASKS each: 025 Chat_Scoring_Structured_Output_And_Seed (10/83, xgrammar measured), 026 Batch_API (10/63), 027 Probe_Scoring_And_Per_Request_Activations (9/66; ⏳ implemented 2026-10-06 on `feat/027-probe-scoring` through task 7 + non-hardware acceptance, hardware 0.1/0.2/8.5–8.9 open), 028 Inline_Steering_And_Steering_Header (9/58, hash test vectors TV-1..4), 029 Model_Lease_Backpressure_And_GPU_Visibility (12/71; ⏳ implemented 2026-10-06 through task 10, hardware 0.2/11.3–11.5 open), 030 Embedding_Options (9/44) — parent/sub-task counts; BRD-04 coverage 47/47 — Stage 3 consistency review 2026-10-06 (`0xcc/reviews/stage3_dataworks_consistency_2026-10-06.md`): PADR amendments applied (xgrammar, jsonschema, http-sfv dev-only; GGUF structured output refused; `_score_prompts` shared; lease debts; first-SAE profile debt), 026↔029 lease API names aligned, hash vectors TV-1..4 reproduced
 - ⏳ 0xcc/prds/BRD-MILLM-PROBES-001.md (Probe Monitor Runtime; consumes miStudio's `mistudio.probe-definition/v1`; sibling BRD-MIS-PROBES-001; handed off 2026-09-25)
 - ⏳ PPRD v1.4 (Feature 24, FR-24.1–24.15) · PADR v1.4 (§1 probe rows, §10 Probe Monitor Runtime trade-offs)
 

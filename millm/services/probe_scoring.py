@@ -27,6 +27,7 @@ import torch
 from millm.core.config import settings
 from millm.core.errors import (
     ModelBusyError,
+    ProbeNoModelLoadedError,
     ProbeNotFoundError,
     ProbeScoreRequestError,
 )
@@ -137,7 +138,7 @@ class ProbeInputPreparer:
     is the sequence a live chat request would have read (FR-27.5).
     """
 
-    def __init__(self, tokenizer: Any, render: Callable[[list[dict], bool], str]) -> None:
+    def __init__(self, tokenizer: Any, render: Callable[[list[dict[str, str]], bool], str]) -> None:
         self.tokenizer = tokenizer
         self.render = render
 
@@ -239,7 +240,9 @@ class ProbeScoringService:
         self.repository = repository
         self.inference = inference
 
-    async def _resolve(self, request: Any, loaded: Any) -> tuple[list, list, list]:
+    async def _resolve(
+        self, request: Any, loaded: Any
+    ) -> tuple[list[Any], list[Any], list[dict[str, Any]]]:
         """`(rows, encoders, skipped)`. Given ids refuse on any mismatch; omitted ids skip."""
         from millm.services.probe_arm_bridge import build_probe_encoder
         from millm.services.probe_arming import identity_refusal, scope_refusal
@@ -305,6 +308,8 @@ class ProbeScoringService:
             raise ProbeScoreRequestError(str(exc), details={"param": "windows"}) from exc
 
         current = LoadedModelState().current
+        if current is None:
+            raise ProbeNoModelLoadedError("The model was unloaded before scoring began")
         pin = (current.model_id, current.loaded_at)
 
         # Prepared OUTSIDE any slot: tokenisation needs none, and the slot is held only for the
@@ -370,7 +375,9 @@ class ProbeScoringService:
             "results": results,
         }
 
-    def _score_one(self, p: PreparedInput, probes: list, forward: Any, pin: tuple) -> list:
+    def _score_one(
+        self, p: PreparedInput, probes: list[Any], forward: Any, pin: tuple[Any, Any]
+    ) -> list[Any]:
         """One input's forward, inside the slot. Never opens the runtime's request context: the
         context is THIS function's own, so an armed hook on the same layer sees no request and
         records nothing (FR-27.4f, FR-27.7)."""
@@ -387,19 +394,19 @@ class ProbeScoringService:
         forward(torch.tensor([p.ids], dtype=torch.long), context)
         return context.finish()
 
-    def _renderer(self, tokenizer: Any) -> Callable[[list[dict], bool], str]:
+    def _renderer(self, tokenizer: Any) -> Callable[[list[dict[str, str]], bool], str]:
         """Live serving's renderer for the generation-prompt case; the template itself without
         it (the assistant-ended case has no live counterpart to share)."""
         from millm.api.schemas.openai import ChatMessage
 
-        def render(messages: list[dict], generation_prompt: bool) -> str:
+        def render(messages: list[dict[str, str]], generation_prompt: bool) -> str:
             if generation_prompt:
-                return self.inference._format_chat_messages(
-                    [ChatMessage(role=m["role"], content=m["content"]) for m in messages]
-                )
-            return tokenizer.apply_chat_template(
+                return str(self.inference._format_chat_messages(
+                    [ChatMessage.model_validate(m) for m in messages]
+                ))
+            return str(tokenizer.apply_chat_template(
                 messages, tokenize=False, add_generation_prompt=False
-            )
+            ))
 
         return render
 

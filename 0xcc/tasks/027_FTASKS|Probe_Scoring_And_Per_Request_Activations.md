@@ -85,34 +85,34 @@
   - [x] 1.7 Rework `tests/unit/services/test_probe_wiring.py:49-53`: parametrise
         `TestEveryServingPathIsWired` over the discovered entry points; delete the literal list.
 
-- [ ] 2.0 Probe-path fixes (covers FR-27.8a–h)
-  - [ ] 2.1 `_probe_begin_detached(request_id, reason)` and `_probe_record(..., detached=True)` (skips
+- [x] 2.0 Probe-path fixes (covers FR-27.8a–h)
+  - [x] 2.1 `_probe_begin_detached(request_id, reason)` and `_probe_record(..., detached=True)` (skips
         `end_request()`), beside the existing seams (`inference_service.py:2498-2640`). Unit-test: a
         detached context is never registered with `ProbeRuntimeState`, and recording it leaves another
         open context untouched (FR-27.8h).
-  - [ ] 2.2 `_create_batched_chat_completion` (`inference_service.py:3393`): detached context with
+  - [x] 2.2 `_create_batched_chat_completion` (`inference_service.py:3393`): detached context with
         `batched_request` inside the slot (3459); `_probe_finish` before the return (3511);
         `_probe_record` in the `finally` (3505). Test: the verdict header on a batched response says
         `not_scored; reason="batched_request"` (BRD-04 acceptance 17; FPRD US-7).
-  - [ ] 2.3 `_cbm_chat_completion` (5230) and `_cbm_text_completion` (5418): detached context with
+  - [x] 2.3 `_cbm_chat_completion` (5230) and `_cbm_text_completion` (5418): detached context with
         `continuous_batching`; finish before return; record in `finally`. Test with
         `PROBE_FORCE_SERIAL=False`.
-  - [ ] 2.4 Migrate `_cbm_stream_chat_completion` (5296) to the detached context. Test: two concurrent
+  - [x] 2.4 Migrate `_cbm_stream_chat_completion` (5296) to the detached context. Test: two concurrent
         CBM requests with a probe armed **both** record `continuous_batching` (the latent collision,
         FR-27.8h).
-  - [ ] 2.5 The three llama.cpp paths (3960, 4012, 4221): detached context with `engine_unsupported`.
+  - [x] 2.5 The three llama.cpp paths (3960, 4012, 4221): detached context with `engine_unsupported`.
         Test each.
-  - [ ] 2.6 Error paths: a generation failure on each fixed path still records an event (record in
+  - [x] 2.6 Error paths: a generation failure on each fixed path still records an event (record in
         `finally`). Test by making the fake primitive raise.
-  - [ ] 2.7 `/v1/completions` sets `X-miLLM-Probe-Verdicts` after `create_text_completion`
+  - [x] 2.7 `/v1/completions` sets `X-miLLM-Probe-Verdicts` after `create_text_completion`
         (`completions.py:147-148`), as `chat.py:295-297` (FR-27.8g). Test the header is present with a
         probe armed and absent with none.
-  - [ ] 2.8 The hung-thread guard (`inference_service.py:4750-4755`) also closes any open activation
+  - [x] 2.8 The hung-thread guard (`inference_service.py:4750-4755`) also closes any open activation
         capture. Test with a capture open.
-  - [ ] 2.9 Admin UI: confirm the Probe Monitors page shows `batched_request`, `continuous_batching`
+  - [x] 2.9 Admin UI: confirm the Probe Monitors page shows `batched_request`, `continuous_batching`
         and `engine_unsupported` as text (no code change expected; add a vitest case if it renders
         unknown reasons blank).
-  - [ ] 2.10 Discovery guard (1.x) now green. **Negative controls M1–M10:** delete each of the ten
+  - [x] 2.10 Discovery guard (1.x) now green. **Negative controls M1–M10:** delete each of the ten
         paths' begin call, one at a time — create_chat (3645), stream_chat (4380), text (4838), CBM
         stream, batched, CBM chat, CBM text, three llama.cpp — each must turn the guard red. **M11:** add
         a method calling `self._generate_sync` with no scenario → red. Record all eleven.

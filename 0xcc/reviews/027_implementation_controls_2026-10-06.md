@@ -20,3 +20,42 @@ open"*: `_generate_batch_chunk` (batched chat), `_cbm_chat_completion`, `_cbm_te
 The four already-wired sites pass. The six are committed as `xfail(strict=True)` so the red is
 recorded mechanically and each fix must remove its entry.
 
+## Task 2 — probe-path fixes (M1–M11, M21, latent-defect controls L1–L5)
+
+Runner: `scratchpad/impl-027/mutate.py` (absolute paths, one replacement scoped to one method,
+landed-check, sha256 + re-grep restore check). Guard = `test_probe_paths_discovered.py`.
+Pre-mutation sha of `inference_service.py`: `eccfa5820b1d…`; every restore matched it.
+
+| # | Mutation | Tests | Result | Restore |
+|---|---|---|---|---|
+| M1 | `create_chat_completion`: `_probe_ctx = self._probe_begin(…)` → `None` | guard | RED (1 failed) | sha ✔ grep ✔ |
+| M2 | `stream_chat_completion`: same | guard | RED | ✔ ✔ |
+| M3 | `create_text_completion`: same | guard | RED | ✔ ✔ |
+| M4 | `_cbm_stream_chat_completion`: detached begin → `None` | guard | RED | ✔ ✔ |
+| M5 | `_create_batched_chat_completion`: detached begin → `None` | guard | RED | ✔ ✔ |
+| M6 | `_cbm_chat_completion`: detached begin → `None` | guard | RED | ✔ ✔ |
+| M7 | `_cbm_text_completion`: detached begin → `None` | guard | RED | ✔ ✔ |
+| M8 | `_llamacpp_chat_completion`: detached begin → `None` | guard | RED | ✔ ✔ |
+| M9 | `_llamacpp_stream_chat_completion`: detached begin → `None` | guard | RED | ✔ ✔ |
+| M10 | `_llamacpp_text_completion`: detached begin → `None` | guard | RED | ✔ ✔ |
+| M11 | new method `_m11_new_site` calling `self._generate_sync({})`, no scenario | guard | RED (`test_the_scenario_table_equals_discovery`) | ✔ ✔ |
+| M21 | completions route: drop `response.headers["X-miLLM-Probe-Verdicts"] = …` | `TestCompletionsVerdictHeader` | RED | sha ✔ (`d44fab4a8826…`) grep ✔ |
+| L1 | CBM stream back to the REGISTERED `_probe_begin` (the latent collision, FR-27.8h) | `TestConcurrentContinuousBatching` | RED | ✔ ✔ |
+| L2 | `_probe_record`: `end_request()` unconditional again (closes another request's context) | `test_probe_path_fixes.py` | RED | ✔ ✔ |
+| L3 | hung-thread guard: drop `_close_request_captures(…)` | `TestHungThreadClosesCapture` | RED | ✔ ✔ |
+| L4 | batched: `_probe_finish` → `None` (header/ContextVar empty) | `test_probe_path_fixes.py` | RED | ✔ ✔ |
+| L5 | CBM chat: drop the `finally` record | `test_probe_path_fixes.py` | RED | ✔ ✔ |
+
+**17 controls, 0 survived first time.**
+
+**Code-vs-doc discrepancies found in task 2:**
+- FTID §3/§10.1 lists the batched path's generation site as `_create_batched_chat_completion`; the
+  primitive is actually called from `_generate_batch_chunk`, which discovery (correctly) reports.
+  The scenario table is keyed by the discovered site.
+- FTASKS 2.10 names ten "begin calls"; three of them (serial chat, stream, text) are the registered
+  `_probe_begin`, seven are the new `_probe_begin_detached`.
+- `test_probe_scope_is_honoured.py` asserted ≥4 registered `_probe_begin` sites; the CBM stream path
+  moved to the detached seam (as FR-27.8h requires), so it is now ≥3, with the reason recorded.
+- 2.9: the Probe Monitors page renders `not_scored_reason` verbatim (`ProbeMonitorsPage.tsx:591`),
+  so no code change; an `it.each` over the three new reasons pins it.
+

@@ -193,8 +193,15 @@ class TestEveryGenerationPathStatesIt:
         return begins, notes
 
     def test_the_scan_sees_the_begin_sites(self):
+        """Three REGISTERED begins: the serial chat, streaming chat and text paths, which score.
+
+        Was four until Feature 27: the CBM streaming path moved to `_probe_begin_detached`
+        (FR-27.8h), which marks the request `continuous_batching` and needs no boundary — a
+        detached context never scores. Every generation path's wiring is proved behaviourally by
+        `test_probe_paths_discovered.py`; this keeps the boundary-report check honest.
+        """
         begins, _ = self._counts()
-        assert begins >= 4, f"expected at least 4 _probe_begin call sites, found {begins}"
+        assert begins >= 3, f"expected at least 3 _probe_begin call sites, found {begins}"
 
     def test_every_begin_is_matched_by_a_boundary_report(self):
         begins, notes = self._counts()

@@ -204,6 +204,18 @@ describe('ProbeMonitorsPage', () => {
     expect(screen.getByTestId('not-scored')).toHaveTextContent('continuous_batching');
   });
 
+  // Feature 27 (FR-27.8, task 2.9): the reasons the newly wired paths record render as text.
+  // The page prints the reason verbatim, so no mapping table can drop an unknown one.
+  it.each(['batched_request', 'continuous_batching', 'engine_unsupported'])(
+    'the %s reason renders as text',
+    (reason) => {
+      state.probes = [probe()];
+      state.events = [event({ scored: false, not_scored_reason: reason, score: null, verdict: null })];
+      renderPage();
+      expect(screen.getByTestId('not-scored')).toHaveTextContent(`not scored — ${reason}`);
+    },
+  );
+
   it('a scored verdict with a null decision does not render as "fires"', () => {
     state.probes = [probe({ threshold: null })];
     state.events = [event({ verdict: null, threshold: null })];

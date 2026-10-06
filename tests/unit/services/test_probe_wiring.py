@@ -69,7 +69,8 @@ class TestEveryServingPathIsWired:
         would simply be absent: no header, no chunk, no event, no reason.
         """
         code = source_of("_cbm_stream_chat_completion")
-        assert 'mark_not_scored("continuous_batching")' in code
+        # Detached since Feature 27 (FR-27.8h); the behavioural proof is the path guard.
+        assert '_probe_begin_detached(completion_id, "continuous_batching")' in code
 
 
 class TestFinishRunsBeforeTheResponseIsCommitted:

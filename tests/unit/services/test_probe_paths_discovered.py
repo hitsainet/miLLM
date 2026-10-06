@@ -29,7 +29,6 @@ Mutations this catches (FTID §8): deleting any path's `_probe_begin`/`_probe_be
 from __future__ import annotations
 
 import ast
-import asyncio
 import functools
 import inspect
 import threading
@@ -408,14 +407,14 @@ async def _drive(svc: InferenceService, scenario: dict) -> None:
         await svc.create_text_completion(_text(**extra))
 
 
-#: ⚠ THE EXPECTED RED, RECORDED MECHANICALLY (task 1.6). These six sites reach generation with a
-#: probe armed and open no context on the code this guard was written against. `strict=True`: the
+#: ⚠ THE EXPECTED RED, RECORDED MECHANICALLY (task 1.6). Six sites (batched chat, CBM chat and
+#: text, three llama.cpp paths) reached generation with a probe armed and opened no context on the
+#: code this guard was written against (`08c1c53`). `strict=True`: the
 #: moment one is fixed its xfail turns into a failure, so this set must shrink to empty as FR-27.8
 #: lands — a guard that is green before the fix is not guarding the fix.
-PENDING_FR_27_8 = {
-    "_generate_batch_chunk", "_cbm_chat_completion", "_cbm_text_completion",
-    "_llamacpp_chat_completion", "_llamacpp_stream_chat_completion", "_llamacpp_text_completion",
-}
+#: All six were wired by FR-27.8 (task 2); the set is kept, empty, so a regression has somewhere
+#: obvious to be recorded rather than silently re-listed.
+PENDING_FR_27_8: set[str] = set()
 
 
 @pytest.mark.parametrize("site", [

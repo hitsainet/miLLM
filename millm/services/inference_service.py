@@ -1435,6 +1435,26 @@ class InferenceService:
         except Exception:
             return None
 
+    def _close_request_captures(self, reason: str) -> int:
+        """Close any open per-request activation capture on every attached SAE. Never raises.
+
+        Returns how many were open. Used by the hung-generation guard: a thread that outlives its
+        request must not feed the next request's capture (FTID §12).
+        """
+        closed = 0
+        try:
+            from millm.services.sae_service import AttachedSAEState
+
+            for entry in AttachedSAEState().entries():
+                end = getattr(entry.sae, "end_request_capture", None)
+                if callable(end) and end() is not None:
+                    closed += 1
+        except Exception as exc:  # noqa: BLE001 - a guard must not raise
+            logger.warning("request_capture_close_failed", error=str(exc))
+        if closed:
+            logger.warning("request_captures_closed", reason=reason, count=closed)
+        return closed
+
     @contextlib.contextmanager
     def _unsteered(self) -> Iterator[None]:
         """Every attached SAE inert for forward passes run IN THIS THREAD while the context is open.
@@ -2788,6 +2808,32 @@ class InferenceService:
             logger.warning("probe_begin_failed", error=str(exc))
             return None
 
+    def _probe_begin_detached(self, request_id: str, reason: str):
+        """A probe context for a path that never scores, marked with `reason`. Never raises.
+
+        ⚠ DETACHED: built over the armed probes and NEVER registered with `ProbeRuntimeState`
+        (FR-27.8h). The runtime holds one request context, and `begin_request` refuses a second
+        ("already open"), which `_probe_begin` turns into `None` — so with `PROBE_FORCE_SERIAL`
+        off, the second of two concurrent continuous-batching requests recorded nothing at all,
+        and `_probe_record`'s `end_request()` could close the OTHER request's context. A path that
+        cannot score has no use for the shared slot: the hook has nothing to observe for it, and
+        the event only has to say why.
+
+        Returns None when nothing is armed, so an unarmed server is unchanged.
+        """
+        try:
+            from millm.services.probe_runtime import ProbeRequestContext, ProbeRuntimeState
+
+            state = ProbeRuntimeState()
+            if not state.has_armed():
+                return None
+            context = ProbeRequestContext(request_id, state.armed())
+            context.mark_not_scored(reason)
+            return context
+        except Exception as exc:
+            logger.warning("probe_begin_detached_failed", error=str(exc))
+            return None
+
     def _probe_note_prompt_length(self, context, n_prompt_tokens: int) -> None:
         """Tell the open probe context where the prompt ends. Safe when nothing is armed.
 
@@ -2892,18 +2938,25 @@ class InferenceService:
             # A monitor must not truncate a stream. The header and the event still carry it.
             logger.warning("probe_stream_chunk_failed", error=str(exc))
 
-    async def _probe_record(self, context, verdicts=None, full_ids=None) -> None:
+    async def _probe_record(
+        self, context, verdicts=None, full_ids=None, *, detached: bool = False
+    ) -> None:
         """Persist one event per armed probe, and emit them. Never raises.
 
         `full_ids` is the request's token ids, used to build each verdict's decoded context
         window. Every caller passes it; see `probe_context` for why it was missing.
+
+        `detached=True` for a context from `_probe_begin_detached`: it was never registered, so
+        the runtime's slot is not this request's to close — `end_request()` would close whatever
+        context ANOTHER request has open (FR-27.8h).
         """
         if context is None:
             return
         try:
             from millm.services.probe_runtime import ProbeRuntimeState
 
-            ProbeRuntimeState().end_request()
+            if not detached:
+                ProbeRuntimeState().end_request()
             if verdicts is None:
                 verdicts = context.finish()
 
@@ -3743,61 +3796,77 @@ class InferenceService:
         total_completion_tokens = 0
 
         async with self._admit():
-            _saved_steering = None
-            if request.profile or request.steering_intensity is not None:
-                _saved_steering = await self._apply_request_steering(
-                    request.profile, request.steering_intensity,
-                    request_id=completion_id,
-                )
-
-            # Sensing is refused for a batch: hit positions are absolute within
-            # a row, and there is no way to attribute them back to a
-            # conversation once the rows are padded to a common width. It goes
-            # UNSENSED rather than mis-attributed — and it says so, because a
-            # sensing path that goes quietly dark while /api/sensing/status
-            # still reports armed is the failure this project has shipped
-            # before.
+            # Probes (FR-27.8a–c). A batch has no single row to score, so the request says so —
+            # `not_scored: batched_request`, as the `n > 1` path does — instead of reaching
+            # generation with nothing open, which left the header, the chunk and the event all
+            # absent while a probe was armed. Detached: a path that never scores does not use the
+            # runtime's shared slot (FR-27.8h). Recorded in the `finally`, so a failed generation
+            # still leaves an event (FR-27.8c).
+            _probe_ctx = self._probe_begin_detached(completion_id, "batched_request")
+            _probe_verdicts = None
             try:
-                from millm.services.sae_service import AttachedSAEState as _S
-
-                _armed = _S().attached_sae
-                if _armed is not None and _armed.is_sensing_armed:
-                    logger.info(
-                        "sensing_skipped", reason="batched_request",
-                        batch_size=len(prompts), request_id=completion_id,
+                _saved_steering = None
+                if request.profile or request.steering_intensity is not None:
+                    _saved_steering = await self._apply_request_steering(
+                        request.profile, request.steering_intensity,
+                        request_id=completion_id,
                     )
-            except Exception:  # pragma: no cover - never fail a request on this
-                logger.warning("sensing_skip_log_failed", exc_info=True)
 
-            try:
-                for chunk_start, chunk in self._chunk_batch_for_memory(
-                    prompts, gen_config.max_new_tokens
-                ):
-                    rows = await self._generate_batch_chunk(
-                        chunk, gen_config, completion_id, chunk_start
-                    )
-                    for offset, row in enumerate(rows):
-                        choices.append(
-                            ChatCompletionChoice(
-                                index=chunk_start + offset,
-                                message=(
-                                    ChatMessage(role="assistant", content=row["text"])
-                                    if constraint is not None
-                                    else self._assistant_message(row["text"], chunk[offset])
-                                ),
-                                finish_reason=row["finish_reason"],
-                            )
+                # Sensing is refused for a batch: hit positions are absolute within
+                # a row, and there is no way to attribute them back to a
+                # conversation once the rows are padded to a common width. It goes
+                # UNSENSED rather than mis-attributed — and it says so, because a
+                # sensing path that goes quietly dark while /api/sensing/status
+                # still reports armed is the failure this project has shipped
+                # before.
+                try:
+                    from millm.services.sae_service import AttachedSAEState as _S
+
+                    _armed = _S().attached_sae
+                    if _armed is not None and _armed.is_sensing_armed:
+                        logger.info(
+                            "sensing_skipped", reason="batched_request",
+                            batch_size=len(prompts), request_id=completion_id,
                         )
-                        total_prompt_tokens += row["prompt_tokens"]
-                        total_completion_tokens += row["completion_tokens"]
+                except Exception:  # pragma: no cover - never fail a request on this
+                    logger.warning("sensing_skip_log_failed", exc_info=True)
+
+                try:
+                    for chunk_start, chunk in self._chunk_batch_for_memory(
+                        prompts, gen_config.max_new_tokens
+                    ):
+                        rows = await self._generate_batch_chunk(
+                            chunk, gen_config, completion_id, chunk_start
+                        )
+                        for offset, row in enumerate(rows):
+                            choices.append(
+                                ChatCompletionChoice(
+                                    index=chunk_start + offset,
+                                    message=(
+                                        ChatMessage(role="assistant", content=row["text"])
+                                        if constraint is not None
+                                        else self._assistant_message(row["text"], chunk[offset])
+                                    ),
+                                    finish_reason=row["finish_reason"],
+                                )
+                            )
+                            total_prompt_tokens += row["prompt_tokens"]
+                            total_completion_tokens += row["completion_tokens"]
+                finally:
+                    self._restore_request_profile(_saved_steering)
+                if constraint is not None:
+                    note_request_outcome(constrained=constraint.header)
+                if gen_config.seed is not None:
+                    # Batched rows are deterministic per batch SHAPE only (FR-25.14.1): the batched
+                    # GEMM's reduction order depends on the shape, and padding on the other rows.
+                    note_request_outcome(seed_scope=self._seed_scope(SEED_SCOPE_BATCH_SHAPE))
+                # ⚠ BEFORE the method returns: the chat route reads the ContextVar for
+                # `X-miLLM-Probe-Verdicts` straight after it does (FR-27.8b).
+                _probe_verdicts = self._probe_finish(_probe_ctx)
             finally:
-                self._restore_request_profile(_saved_steering)
-            if constraint is not None:
-                note_request_outcome(constrained=constraint.header)
-            if gen_config.seed is not None:
-                # Batched rows are deterministic per batch SHAPE only (FR-25.14.1): the batched
-                # GEMM's reduction order depends on the shape, and padding on the other rows.
-                note_request_outcome(seed_scope=self._seed_scope(SEED_SCOPE_BATCH_SHAPE))
+                await self._probe_record(
+                    _probe_ctx, _probe_verdicts, full_ids=None, detached=True
+                )
 
         model_info = self.get_loaded_model_info()
         model_name = model_info.name if model_info else "unknown"
@@ -4312,10 +4381,23 @@ class InferenceService:
         messages = self._llamacpp_messages(request)
 
         async with self._admit():
+            # FR-27.8f: llama.cpp exposes no hook, so a probe cannot score here — and says so
+            # rather than reaching generation silently. Arming refuses on this engine, so in
+            # production nothing is armed and this is None; it lets the path guard hold on every
+            # path with no exemption (FR-27.9).
+            _probe_ctx = self._probe_begin_detached(completion_id, "engine_unsupported")
+            _probe_verdicts = None
             try:
-                raw = await asyncio.to_thread(self._llamacpp_sync, messages, params)
-            except Exception as exc:  # noqa: BLE001
-                raise self._translate_llamacpp_error(exc) from exc
+                try:
+                    raw = await asyncio.to_thread(self._llamacpp_sync, messages, params)
+                except Exception as exc:  # noqa: BLE001
+                    raise self._translate_llamacpp_error(exc) from exc
+                _probe_verdicts = self._probe_finish(_probe_ctx)
+            finally:
+                # llama.cpp tokenizes internally; there are no served ids to give a context window.
+                await self._probe_record(
+                    _probe_ctx, _probe_verdicts, full_ids=None, detached=True
+                )
 
         choice_raw = (raw.get("choices") or [{}])[0]
         text = (choice_raw.get("message") or {}).get("content") or ""
@@ -4412,6 +4494,9 @@ class InferenceService:
             stream = None
             token_count = 0
             finish_reason = "stop"
+            # FR-27.8f, as in `_llamacpp_chat_completion`. Recorded in the `finally` below.
+            _probe_ctx = self._probe_begin_detached(completion_id, "engine_unsupported")
+            _probe_verdicts = None
             try:
                 try:
                     stream = await asyncio.to_thread(_open_stream)
@@ -4501,6 +4586,11 @@ class InferenceService:
                         ),
                     )
                 )
+                _probe_verdicts = self._probe_finish(_probe_ctx)
+                async for _probe_extra in self._probe_stream_chunk(
+                    _probe_verdicts, completion_id, created, model_name
+                ):
+                    yield _probe_extra
                 yield "data: [DONE]\n\n"
 
             except Exception as e:  # noqa: BLE001
@@ -4529,6 +4619,10 @@ class InferenceService:
                             close()
                         except Exception:  # noqa: BLE001
                             logger.warning("llamacpp_stream_close_failed")
+                # llama.cpp tokenizes internally; there are no served ids to give a context window.
+                await self._probe_record(
+                    _probe_ctx, _probe_verdicts, full_ids=None, detached=True
+                )
 
     def _llamacpp_prompt_tokens(self, messages: list[dict]) -> int:
         """Best-effort prompt token count for the final chunk's usage.
@@ -4578,19 +4672,30 @@ class InferenceService:
             return self._model.create_completion(prompt=text, **params)
 
         async with self._admit():
-            for index, prompt_text in enumerate(prompts):
-                raw = await asyncio.to_thread(_complete, prompt_text)
-                choice_raw = (raw.get("choices") or [{}])[0]
-                usage_raw = raw.get("usage") or {}
-                total_prompt_tokens += int(usage_raw.get("prompt_tokens", 0))
-                total_completion_tokens += int(usage_raw.get("completion_tokens", 0))
-                choices.append(
-                    TextCompletionChoice(
-                        index=index,
-                        text=choice_raw.get("text") or "",
-                        # llama.cpp's own reason, not a default we did not observe.
-                        finish_reason=choice_raw.get("finish_reason") or "stop",
+            # FR-27.8f, as in `_llamacpp_chat_completion`.
+            _probe_ctx = self._probe_begin_detached(completion_id, "engine_unsupported")
+            _probe_verdicts = None
+            try:
+                for index, prompt_text in enumerate(prompts):
+                    raw = await asyncio.to_thread(_complete, prompt_text)
+                    choice_raw = (raw.get("choices") or [{}])[0]
+                    usage_raw = raw.get("usage") or {}
+                    total_prompt_tokens += int(usage_raw.get("prompt_tokens", 0))
+                    total_completion_tokens += int(usage_raw.get("completion_tokens", 0))
+                    choices.append(
+                        TextCompletionChoice(
+                            index=index,
+                            text=choice_raw.get("text") or "",
+                            # llama.cpp's own reason, not a default we did not observe.
+                            finish_reason=choice_raw.get("finish_reason") or "stop",
+                        )
                     )
+
+                _probe_verdicts = self._probe_finish(_probe_ctx)
+            finally:
+                # llama.cpp tokenizes internally; there are no served ids to give a context window.
+                await self._probe_record(
+                    _probe_ctx, _probe_verdicts, full_ids=None, detached=True
                 )
 
         return TextCompletionResponse(
@@ -5104,6 +5209,11 @@ class InferenceService:
                     except Exception:
                         logger.warning("probe_disarm_after_hang_failed")
                         _circuit_sensing = None
+                    # F27 (FTID §12): the same hazard for a per-request activation capture. A
+                    # woken hung thread's forward pass would feed this request's capture — or,
+                    # once the next request opens one, THAT request's — so every attached SAE's
+                    # capture is closed here, beside the probe disarm.
+                    self._close_request_captures("generation_thread_hung")
                 # Restore steering to its pre-request state (Fix #1: steering race)
                 self._restore_request_profile(_saved_steering)
                 # Flush sensing hits: captured ids when any step ran, else
@@ -5721,48 +5831,59 @@ class InferenceService:
         completion_id = f"chatcmpl-{uuid.uuid4().hex[:24]}"
         created = int(datetime.now().timestamp())
 
-        prompt = self._format_chat_messages(
-            request.messages, request.chat_template_kwargs
-        )
-        input_ids = self._tokenizer.encode(prompt, return_tensors="pt")[0].tolist()
-        gen_config = GenerationConfig.from_request(request)
-        # The serial path's check; this delegation had none (hardware acceptance,
-        # 2026-09-14, item 7).
-        self._check_context_length(len(input_ids), gen_config.max_new_tokens)
+        # FR-27.8d: the continuous-batching manager scores nothing per request, so the request
+        # says `not_scored: continuous_batching`, as the streaming CBM path already did. Detached
+        # (FR-27.8h): concurrent CBM requests cannot share the runtime's single context.
+        probe_ctx = self._probe_begin_detached(completion_id, "continuous_batching")
+        probe_verdicts = None
+        input_ids: list[int] = []
+        try:
+            prompt = self._format_chat_messages(
+                request.messages, request.chat_template_kwargs
+            )
+            input_ids = self._tokenizer.encode(prompt, return_tensors="pt")[0].tolist()
+            gen_config = GenerationConfig.from_request(request)
+            # The serial path's check; this delegation had none (hardware acceptance,
+            # 2026-09-14, item 7).
+            self._check_context_length(len(input_ids), gen_config.max_new_tokens)
 
-        generated_ids, finish_reason = await self._cbm_backend.generate(
-            input_ids=input_ids,
-            max_new_tokens=gen_config.max_new_tokens,
-            request_id=completion_id,
-        )
+            generated_ids, finish_reason = await self._cbm_backend.generate(
+                input_ids=input_ids,
+                max_new_tokens=gen_config.max_new_tokens,
+                request_id=completion_id,
+            )
 
-        self._notify_monitoring(request_id=completion_id)
+            self._notify_monitoring(request_id=completion_id)
 
-        text = self._tokenizer.decode(generated_ids, skip_special_tokens=True)
-        text, stopped = self._apply_stop_sequences(text, gen_config.stop_sequences)
-        if stopped:
-            finish_reason = "stop"
+            text = self._tokenizer.decode(generated_ids, skip_special_tokens=True)
+            text, stopped = self._apply_stop_sequences(text, gen_config.stop_sequences)
+            if stopped:
+                finish_reason = "stop"
 
-        model_info = self.get_loaded_model_info()
-        model_name = model_info.name if model_info else "unknown"
+            model_info = self.get_loaded_model_info()
+            model_name = model_info.name if model_info else "unknown"
+            # Before the return: the chat route reads the verdicts straight afterwards.
+            probe_verdicts = self._probe_finish(probe_ctx)
 
-        return ChatCompletionResponse(
-            id=completion_id,
-            created=created,
-            model=model_name,
-            choices=[
-                ChatCompletionChoice(
-                    index=0,
-                    message=self._assistant_message(text, prompt),
-                    finish_reason=finish_reason,
-                )
-            ],
-            usage=Usage(
-                prompt_tokens=len(input_ids),
-                completion_tokens=len(generated_ids),
-                total_tokens=len(input_ids) + len(generated_ids),
-            ),
-        )
+            return ChatCompletionResponse(
+                id=completion_id,
+                created=created,
+                model=model_name,
+                choices=[
+                    ChatCompletionChoice(
+                        index=0,
+                        message=self._assistant_message(text, prompt),
+                        finish_reason=finish_reason,
+                    )
+                ],
+                usage=Usage(
+                    prompt_tokens=len(input_ids),
+                    completion_tokens=len(generated_ids),
+                    total_tokens=len(input_ids) + len(generated_ids),
+                ),
+            )
+        finally:
+            await self._probe_record(probe_ctx, probe_verdicts, full_ids=input_ids, detached=True)
 
     async def _cbm_stream_chat_completion(
         self, request: ChatCompletionRequest
@@ -5780,127 +5901,136 @@ class InferenceService:
         # invariant. With the flag off and a probe armed, a verdict would simply be ABSENT — no
         # header, no chunk, no event, no reason — which is the failure the feature exists to
         # prevent, wearing the costume of a normal response.
-        probe_ctx = self._probe_begin(completion_id)
-        if probe_ctx is not None:
-            probe_ctx.mark_not_scored("continuous_batching")
+        #
+        # ⚠ DETACHED (FR-27.8h). This used `_probe_begin`, which REGISTERS the context with the
+        # runtime's single slot — so a second concurrent CBM request found it occupied, got None,
+        # and recorded nothing, and the first request's `_probe_record` could close the second's.
+        probe_ctx = self._probe_begin_detached(completion_id, "continuous_batching")
+        probe_verdicts = None
+        input_ids: list[int] = []
 
-        model_info = self.get_loaded_model_info()
-        model_name = model_info.name if model_info else "unknown"
-
-        prompt = self._format_chat_messages(
-            request.messages, request.chat_template_kwargs
-        )
-        input_ids = self._tokenizer.encode(prompt, return_tensors="pt")[0].tolist()
-        self._probe_note_prompt_length(probe_ctx, len(input_ids))
-        gen_config = GenerationConfig.from_request(request)
         try:
-            # The route's check_stream_admission refuses this first; after the
-            # 200 a refusal is an error event and [DONE], never a cut-off stream.
-            self._check_context_length(len(input_ids), gen_config.max_new_tokens)
-        except ContextLengthExceededError as refusal:
-            yield _stream_error_event(refusal)
-            yield "data: [DONE]\n\n"
-            return
-        _splitter = StreamingReasoningSplitter(
-            self._prompt_opened_think(prompt)
-        )
+            model_info = self.get_loaded_model_info()
+            model_name = model_info.name if model_info else "unknown"
 
-        # First chunk: role
-        first_chunk = ChatCompletionChunk(
-            id=completion_id,
-            created=created,
-            model=model_name,
-            choices=[
-                ChatCompletionChunkChoice(
-                    index=0,
-                    delta=ChatCompletionChunkDelta(role="assistant"),
-                    finish_reason=None,
-                )
-            ],
-        )
-        yield f"data: {first_chunk.model_dump_json(exclude_none=True)}\n\n"
-
-        # Stream tokens from CBM
-        token_count = 0
-        async for new_token_ids in self._cbm_backend.generate_stream(
-            input_ids=input_ids,
-            max_new_tokens=gen_config.max_new_tokens,
-            request_id=completion_id,
-        ):
-            text = self._tokenizer.decode(new_token_ids, skip_special_tokens=True)
-            if text:
-                token_count += len(new_token_ids)
-                _r, _c = _splitter.feed(text)
-                if _r is None and _c is None:
-                    continue        # withheld: a closing tag may be splitting
-                chunk = ChatCompletionChunk(
-                    id=completion_id,
-                    created=created,
-                    model=model_name,
-                    choices=[
-                        ChatCompletionChunkChoice(
-                            index=0,
-                            delta=ChatCompletionChunkDelta(
-                                content=_c, reasoning_content=_r
-                            ),
-                            finish_reason=None,
-                        )
-                    ],
-                )
-                yield f"data: {chunk.model_dump_json(exclude_none=True)}\n\n"
-
-        _fr, _fc = _splitter.flush()
-        if _fr is not None or _fc is not None:
-            yield (
-                "data: "
-                + ChatCompletionChunk(
-                    id=completion_id,
-                    created=created,
-                    model=model_name,
-                    choices=[
-                        ChatCompletionChunkChoice(
-                            index=0,
-                            delta=ChatCompletionChunkDelta(
-                                content=_fc, reasoning_content=_fr
-                            ),
-                            finish_reason=None,
-                        )
-                    ],
-                ).model_dump_json(exclude_none=True)
-                + "\n\n"
+            prompt = self._format_chat_messages(
+                request.messages, request.chat_template_kwargs
+            )
+            input_ids = self._tokenizer.encode(prompt, return_tensors="pt")[0].tolist()
+            self._probe_note_prompt_length(probe_ctx, len(input_ids))
+            gen_config = GenerationConfig.from_request(request)
+            try:
+                # The route's check_stream_admission refuses this first; after the
+                # 200 a refusal is an error event and [DONE], never a cut-off stream.
+                self._check_context_length(len(input_ids), gen_config.max_new_tokens)
+            except ContextLengthExceededError as refusal:
+                yield _stream_error_event(refusal)
+                yield "data: [DONE]\n\n"
+                return
+            _splitter = StreamingReasoningSplitter(
+                self._prompt_opened_think(prompt)
             )
 
-        self._notify_monitoring(request_id=completion_id)
+            # First chunk: role
+            first_chunk = ChatCompletionChunk(
+                id=completion_id,
+                created=created,
+                model=model_name,
+                choices=[
+                    ChatCompletionChunkChoice(
+                        index=0,
+                        delta=ChatCompletionChunkDelta(role="assistant"),
+                        finish_reason=None,
+                    )
+                ],
+            )
+            yield f"data: {first_chunk.model_dump_json(exclude_none=True)}\n\n"
 
-        # Final chunk with finish_reason
-        finish_reason = self._determine_finish_reason(
-            token_count, gen_config.max_new_tokens
-        )
-        final_chunk = ChatCompletionChunk(
-            id=completion_id,
-            created=created,
-            model=model_name,
-            choices=[
-                ChatCompletionChunkChoice(
-                    index=0,
-                    delta=ChatCompletionChunkDelta(),
-                    finish_reason=finish_reason,
+            # Stream tokens from CBM
+            token_count = 0
+            async for new_token_ids in self._cbm_backend.generate_stream(
+                input_ids=input_ids,
+                max_new_tokens=gen_config.max_new_tokens,
+                request_id=completion_id,
+            ):
+                text = self._tokenizer.decode(new_token_ids, skip_special_tokens=True)
+                if text:
+                    token_count += len(new_token_ids)
+                    _r, _c = _splitter.feed(text)
+                    if _r is None and _c is None:
+                        continue        # withheld: a closing tag may be splitting
+                    chunk = ChatCompletionChunk(
+                        id=completion_id,
+                        created=created,
+                        model=model_name,
+                        choices=[
+                            ChatCompletionChunkChoice(
+                                index=0,
+                                delta=ChatCompletionChunkDelta(
+                                    content=_c, reasoning_content=_r
+                                ),
+                                finish_reason=None,
+                            )
+                        ],
+                    )
+                    yield f"data: {chunk.model_dump_json(exclude_none=True)}\n\n"
+
+            _fr, _fc = _splitter.flush()
+            if _fr is not None or _fc is not None:
+                yield (
+                    "data: "
+                    + ChatCompletionChunk(
+                        id=completion_id,
+                        created=created,
+                        model=model_name,
+                        choices=[
+                            ChatCompletionChunkChoice(
+                                index=0,
+                                delta=ChatCompletionChunkDelta(
+                                    content=_fc, reasoning_content=_fr
+                                ),
+                                finish_reason=None,
+                            )
+                        ],
+                    ).model_dump_json(exclude_none=True)
+                    + "\n\n"
                 )
-            ],
-        )
-        yield f"data: {final_chunk.model_dump_json(exclude_none=True)}\n\n"
-        # The verdict says `not_scored: continuous_batching` rather than nothing at all.
-        probe_verdicts = self._probe_finish(probe_ctx)
-        async for extra in self._probe_stream_chunk(
-            probe_verdicts, completion_id, created, model_name
-        ):
-            yield extra
-        yield "data: [DONE]\n\n"
-        # `input_ids` is a plain list here; `context_window` accepts either shape. Verdicts on
-        # this path are `not_scored: continuous_batching` and so carry no top position, but the
-        # ids are passed rather than dropped so this site does not become the one that silently
-        # stops producing context if that ever changes.
-        await self._probe_record(probe_ctx, probe_verdicts, full_ids=input_ids)
+
+            self._notify_monitoring(request_id=completion_id)
+
+            # Final chunk with finish_reason
+            finish_reason = self._determine_finish_reason(
+                token_count, gen_config.max_new_tokens
+            )
+            final_chunk = ChatCompletionChunk(
+                id=completion_id,
+                created=created,
+                model=model_name,
+                choices=[
+                    ChatCompletionChunkChoice(
+                        index=0,
+                        delta=ChatCompletionChunkDelta(),
+                        finish_reason=finish_reason,
+                    )
+                ],
+            )
+            yield f"data: {final_chunk.model_dump_json(exclude_none=True)}\n\n"
+            # The verdict says `not_scored: continuous_batching` rather than nothing at all.
+            probe_verdicts = self._probe_finish(probe_ctx)
+            async for extra in self._probe_stream_chunk(
+                probe_verdicts, completion_id, created, model_name
+            ):
+                yield extra
+            yield "data: [DONE]\n\n"
+        finally:
+            # In the `finally`, so a failed or abandoned stream still records (FR-27.8c).
+            # `input_ids` is a plain list here; `context_window` accepts either shape. Verdicts on
+            # this path are `not_scored: continuous_batching` and so carry no top position, but
+            # the ids are passed rather than dropped so this site does not become the one that
+            # silently stops producing context if that ever changes.
+            await self._probe_record(
+                probe_ctx, probe_verdicts, full_ids=input_ids, detached=True
+            )
 
     async def _cbm_text_completion(
         self, request: TextCompletionRequest
@@ -5920,57 +6050,66 @@ class InferenceService:
         total_completion_tokens = 0
         gen_config = GenerationConfig.from_request(request)
 
-        for i, prompt_text in enumerate(prompts):
-            input_ids = self._tokenizer.encode(
-                prompt_text, return_tensors="pt"
-            )[0].tolist()
-            prompt_tokens = len(input_ids)
-            self._check_context_length(prompt_tokens, gen_config.max_new_tokens)
+        # FR-27.8d, as in `_cbm_chat_completion`. Detached (FR-27.8h).
+        probe_ctx = self._probe_begin_detached(completion_id, "continuous_batching")
+        probe_verdicts = None
+        input_ids: list[int] = []
+        try:
+            for i, prompt_text in enumerate(prompts):
+                input_ids = self._tokenizer.encode(
+                    prompt_text, return_tensors="pt"
+                )[0].tolist()
+                prompt_tokens = len(input_ids)
+                self._check_context_length(prompt_tokens, gen_config.max_new_tokens)
 
-            generated_ids, finish_reason = await self._cbm_backend.generate(
-                input_ids=input_ids,
-                max_new_tokens=gen_config.max_new_tokens,
-                request_id=f"{completion_id}-{i}",
-            )
-
-            self._notify_monitoring(request_id=completion_id)
-
-            completion_text = self._tokenizer.decode(
-                generated_ids, skip_special_tokens=True
-            )
-            completion_tokens = len(generated_ids)
-
-            completion_text, stopped = self._apply_stop_sequences(
-                completion_text, gen_config.stop_sequences
-            )
-            if stopped:
-                finish_reason = "stop"
-
-            choices.append(
-                TextCompletionChoice(
-                    index=i,
-                    text=completion_text,
-                    finish_reason=finish_reason,
+                generated_ids, finish_reason = await self._cbm_backend.generate(
+                    input_ids=input_ids,
+                    max_new_tokens=gen_config.max_new_tokens,
+                    request_id=f"{completion_id}-{i}",
                 )
+
+                self._notify_monitoring(request_id=completion_id)
+
+                completion_text = self._tokenizer.decode(
+                    generated_ids, skip_special_tokens=True
+                )
+                completion_tokens = len(generated_ids)
+
+                completion_text, stopped = self._apply_stop_sequences(
+                    completion_text, gen_config.stop_sequences
+                )
+                if stopped:
+                    finish_reason = "stop"
+
+                choices.append(
+                    TextCompletionChoice(
+                        index=i,
+                        text=completion_text,
+                        finish_reason=finish_reason,
+                    )
+                )
+
+                total_prompt_tokens += prompt_tokens
+                total_completion_tokens += completion_tokens
+
+            model_info = self.get_loaded_model_info()
+            model_name = model_info.name if model_info else "unknown"
+            # Before the return: the completions route reads the verdicts straight afterwards.
+            probe_verdicts = self._probe_finish(probe_ctx)
+
+            return TextCompletionResponse(
+                id=completion_id,
+                created=created,
+                model=model_name,
+                choices=choices,
+                usage=Usage(
+                    prompt_tokens=total_prompt_tokens,
+                    completion_tokens=total_completion_tokens,
+                    total_tokens=total_prompt_tokens + total_completion_tokens,
+                ),
             )
-
-            total_prompt_tokens += prompt_tokens
-            total_completion_tokens += completion_tokens
-
-        model_info = self.get_loaded_model_info()
-        model_name = model_info.name if model_info else "unknown"
-
-        return TextCompletionResponse(
-            id=completion_id,
-            created=created,
-            model=model_name,
-            choices=choices,
-            usage=Usage(
-                prompt_tokens=total_prompt_tokens,
-                completion_tokens=total_completion_tokens,
-                total_tokens=total_prompt_tokens + total_completion_tokens,
-            ),
-        )
+        finally:
+            await self._probe_record(probe_ctx, probe_verdicts, full_ids=input_ids, detached=True)
 
     # =========================================================================
     # Private Methods

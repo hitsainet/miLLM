@@ -14,7 +14,7 @@ import logging
 import threading
 from contextlib import contextmanager
 from dataclasses import dataclass
-from typing import Iterator, Optional
+from typing import Any, Iterator, Optional
 
 import torch
 from torch import Tensor
@@ -245,6 +245,13 @@ class LoadedSAE:
         self._edge_saturation_warned: bool = False
         self._edge_member_fires: int = 0
         self._edge_overhead_ms: float = 0.0
+
+        # Per-request activation capture (Feature 27, FR-27.1). ONE open capture at a time, opened
+        # inside the request's admission slot and closed in its `finally`; the forward hook feeds
+        # it before and after `apply_steering`, whether or not this SAE is suppressed. Kept apart
+        # from monitoring, which compacts columns, keeps only the last pass and switches off under
+        # suppression — none of which a per-request answer can tolerate (FR-27.1f, FR-27.3b).
+        self._request_capture: Optional[Any] = None
 
         # Monitoring state
         self._monitoring_enabled: bool = False
@@ -1285,6 +1292,32 @@ class LoadedSAE:
         self._edge_truncated = True
         self._edge_done = True
         self._note_circuit_truncation()
+
+    # ── per-request activation capture (Feature 27) ──────────────────────────
+
+    def begin_request_capture(self, capture: Any) -> None:
+        """Open this request's activation capture.
+
+        ⚠ A SECOND OPEN CAPTURE IS REFUSED, not replaced — the same rule as
+        `ProbeRuntimeState.begin_request`. Replacing would hand one request's activations to
+        another request's response, which is the exact failure BRD-04 acceptance 10 tests for.
+        """
+        if self._request_capture is not None:
+            raise RuntimeError(
+                "a request activation capture is already open on this SAE; serial execution is "
+                "supposed to guarantee this cannot happen, and replacing it would attribute one "
+                "request's activations to another"
+            )
+        self._request_capture = capture
+
+    def end_request_capture(self) -> Optional[Any]:
+        """Close the open capture (if any) and return it."""
+        capture, self._request_capture = self._request_capture, None
+        return capture
+
+    @property
+    def request_capture(self) -> Optional[Any]:
+        return self._request_capture
 
     @property
     def _suppressed(self) -> bool:

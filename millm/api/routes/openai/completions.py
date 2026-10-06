@@ -43,9 +43,10 @@ from millm.core.errors import (
     ModelLockedError,
 )
 from millm.core.logging import get_logger
-from millm.api.routes.openai.chat import seed_header
+from millm.api.routes.openai.chat import build_probe_verdicts_header, seed_header
 from millm.services.inference_service import (
     InferenceService,
+    get_probe_verdicts,
     get_request_outcome,
     reset_request_outcome,
 )
@@ -181,4 +182,12 @@ async def create_completion(
             get_request_outcome().get("seed_scope") or inference.seed_scope_for(request),
         )
     result.system_fingerprint = build_system_fingerprint(model, inference.loaded_model())
+    # Probe verdicts (FR-24.7, FR-27.8g). ⚠ THIS ROUTE NEVER SENT THEM: only the chat route read
+    # the verdicts, so FR-24.7's promise of the header "on both" was false here, and FR-27.8d's
+    # `continuous_batching` reason on a text completion was invisible to every caller. Read AFTER
+    # generation, as the chat route does — the verdict does not exist before. "" (nothing armed)
+    # sets no header, so an unarmed server's response is unchanged.
+    probe_header = build_probe_verdicts_header(get_probe_verdicts())
+    if probe_header:
+        response.headers["X-miLLM-Probe-Verdicts"] = probe_header
     return result

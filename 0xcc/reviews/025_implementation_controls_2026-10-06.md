@@ -22,6 +22,7 @@ is re-run as a negative control (rows suffixed `-rerun`).
 | After 5.0 (chat scoring) | 3932 passed / 3 skipped / 0 failed |
 | After 6.0 (seed + fingerprint) | 3964 passed / 3 skipped / 0 failed |
 | After 7.0 (structured output) | 4050 passed / 3 skipped / 0 failed |
+| After 8.0 (hand-offs, docs) | 4052 passed / 3 skipped / 0 failed |
 
 ## Discrepancies between the documents and the code (the code won)
 
@@ -106,6 +107,25 @@ is re-run as a negative control (rows suffixed `-rerun`).
   emits long whitespace runs inside a valid document (observed on the tiny model). A trained model
   rarely does, but a budget can be spent on whitespace; worth measuring in 9.5.
 
+## Integration hand-offs (8.x)
+
+- **8.3, header agreement with miStudio 034:** confirmed by reading
+  `~/app/miStudio/0xcc/tdds/034_FTDD|Dataworks_Support.md` — line 194 sends `X-miLLM-Strict: true` on
+  every FR-16/FR-17 request (TD5, line 463, T-100); line 197 reads `X-miLLM-Seed`,
+  `X-miLLM-Constrained` and `X-miLLM-Ignored-Fields`. The names match the implementation exactly
+  (`millm/api/request_policy.py` `STRICT_HEADER`, `IGNORED_FIELDS_HEADER`; the routes' literals).
+- **8.4, the route-level GGUF scoring check in `completions.py` was deleted** only after
+  `test_the_table_answers_gguf_completion_scoring_as_the_route_check_did` proved the table returns
+  400, `invalid_request_error`, `param` naming the field, a message naming GGUF, and no load. One
+  deliberate difference: the old check named `logprobs` even when only `allowed_token_ids` was sent,
+  and its code was `invalid_parameter`; the table names the field sent, with code
+  `field_not_honoured`. Control `C8-gguf-scoring` shows the unchanged
+  `test_scoring_completions.py` GGUF test now depends on the table.
+- **8.5, manual:** `manual/docs/api/openai-compatible.md` gains Request validation (headers, the
+  outcome table, neutral values), Chat scoring, Structured output (the subset), Seeds and
+  `system_fingerprint`, and five error rows. It also said scoring refusals were `422`; on `/v1` they
+  are `400` (the validation handler), corrected.
+
 ## Mutation controls
 
 | # | Control | File | Mutation | Landed | Result | Red | Restore (sha256 + re-grep) |
@@ -182,4 +202,5 @@ is re-run as a negative control (rows suffixed `-rerun`).
 | 70 | C7-json-object | `millm/ml/constrained_decoding.py` | json_object compiled with xgrammar's builtin JSON grammar (any value) | yes | 1 failed, 5 passed in 5.18s | **red** | ok |
 | 71 | C7-table-scoring | `millm/api/request_policy.py` | table: response_format honoured on a scoring request — SURVIVED: the schema validator refuses first over HTTP, so no test reached the cell a direct caller relies on | yes | 140 passed in 15.78s | **SURVIVED** | ok |
 | 72 | C7-table-scoring-rerun | `millm/api/request_policy.py` | same mutation, negative control after `test_the_table_refuses_response_format_on_scoring_for_a_direct_caller` | yes | 1 failed, 63 passed in 2.29s | **red** | ok |
+| 73 | C8-gguf-scoring | `millm/api/request_policy.py` | table: `logprobs` honoured on GGUF completions (after the route check was deleted) | yes | 1 failed, 32 passed in 5.55s | **red** | ok |
 

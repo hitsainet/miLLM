@@ -320,6 +320,14 @@ per-token constraint cost, seed repeatability, T-61's llama.cpp seed check.
 - **Feature 26 (batch):** constructs request objects per line; it must call `request_policy.evaluate`
   with `strict=True` (FR-26.1.6) and copy the seed and constrained values into each output line
   (FR-26.10.1). The service-level streaming guard (§7.5) protects its direct calls.
+  *Implementation note (2026-10-06, branch `feat/025-chat-scoring`):* the reusable entry points are
+  `millm.api.request_policy.evaluate(request, endpoint, engine, strict=True)` and
+  `encode_field_list`, `millm.services.system_fingerprint.build_system_fingerprint(row, loaded)`,
+  `millm.ml.constrained_decoding.validate_output(text, response_format)`, and the request-scoped
+  outcome `millm.services.inference_service.get_request_outcome()` (`seed_scope`, `constrained`).
+  A batch line built with `model_copy` bypasses the schema validators, so it must rely on the table
+  and on the service guards (`stream_chat_completion` refuses `n`/`extra_messages`/`response_format`;
+  `_build_generate_kwargs` refuses an uncompiled constraint) — both are pinned by tests.
 - **Feature 27:** `_score_prompts` is where `return_sae_activations` attaches in scoring mode
   (R-04.26); `return_sae_activations` must be added to the schema so it is never reported
   (027 FPRD).

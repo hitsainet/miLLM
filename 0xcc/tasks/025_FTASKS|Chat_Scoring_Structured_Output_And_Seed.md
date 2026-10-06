@@ -246,18 +246,18 @@ miStudio 034 to send `X-miLLM-Strict: true` safely.
   - [x] 7.13 Tests: speculative draft dropped for a constrained request (spy, log); grammar cache
         hit on the second identical schema; cache dropped on unload.
 
-- [ ] 8.0 Integration hand-offs and documentation (covers FR-25.1.1, FR-25.3.7; FPRD §7, §10)
-  - [ ] 8.1 Feature 26 note in code and FTID: batch lines call `evaluate(strict=True)` and reuse
+- [x] 8.0 Integration hand-offs and documentation (covers FR-25.1.1, FR-25.3.7; FPRD §7, §10)
+  - [x] 8.1 Feature 26 note in code and FTID: batch lines call `evaluate(strict=True)` and reuse
         `encode_field_list`, `build_system_fingerprint`, `validate_output` (FR-25.1.1; 026 FR-26.1.6,
         FR-26.10.1). No Feature 26 code here.
-  - [ ] 8.2 Feature 27/28/30 hooks: table cells for `steering` and `dimensions` read *refused* with
+  - [x] 8.2 Feature 27/28/30 hooks: table cells for `steering` and `dimensions` read *refused* with
         a reason naming the owning feature (FR-25.3.7); `_score_prompts` docstring names the Feature 27
         capture seam (R-04.26).
-  - [ ] 8.3 Confirm with miStudio 034's FTDD that `X-miLLM-Strict: true` (TD5) and
+  - [x] 8.3 Confirm with miStudio 034's FTDD that `X-miLLM-Strict: true` (TD5) and
         `X-miLLM-Ignored-Fields` are the names it reads; record agreement in the review file.
-  - [ ] 8.4 Delete the route-level GGUF scoring check in `completions.py:86-94` **only** after a test
+  - [x] 8.4 Delete the route-level GGUF scoring check in `completions.py:86-94` **only** after a test
         proves the table produces the identical response (status, type, `param`) (FTID I9).
-  - [ ] 8.5 Manual API reference: headers (`X-miLLM-Ignored-Fields`, `X-miLLM-Strict`,
+  - [x] 8.5 Manual API reference: headers (`X-miLLM-Ignored-Fields`, `X-miLLM-Strict`,
         `X-miLLM-Constrained`, `X-miLLM-Seed`), the outcome table, the JSON Schema subset, seed
         scopes, chat logprobs shape, `system_fingerprint` format.
 

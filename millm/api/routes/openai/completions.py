@@ -100,15 +100,9 @@ async def create_completion(
             param="stream",
         )
 
-    # Scoring mode needs a per-token distribution, which the llama.cpp engine does not expose here.
-    # Decided by the request and the row, so refused BEFORE the auto-load below would evict the
-    # resident model and its SAEs to reach the same 400 (review round 1, M2).
-    if request.wants_scores() and getattr(model, "gguf_files", None):
-        return validation_error(
-            "Scoring mode (logprobs / allowed_token_ids) needs the transformers engine; "
-            f"'{request.model}' is a GGUF model served by llama.cpp.",
-            param="logprobs",
-        )
+    # Scoring on a GGUF row is refused by the request policy above (the `logprobs` /
+    # `allowed_token_ids` cells for llama.cpp), before the auto-load. The route kept its own copy
+    # of that check until a test proved the table gives the same answer (Feature 25, FTID I9).
 
     # Load the requested model on demand.
     #

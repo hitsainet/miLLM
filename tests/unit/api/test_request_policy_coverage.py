@@ -115,3 +115,22 @@ def test_the_table_is_enforced_over_http(field, path, engine, strict):
     elif not isinstance(outcome, Honoured):
         assert refused_here, (field, path, engine, response.status_code, response.text)
         assert svc.load_model_and_wait.call_count == 0, "refused only after an auto-load"
+
+
+@pytest.mark.parametrize("field, body", [
+    ("logprobs", {"logprobs": 2}),
+    ("allowed_token_ids", {"allowed_token_ids": [3]}),
+])
+def test_the_table_answers_gguf_completion_scoring_as_the_route_check_did(field, body):
+    """8.4 / FTID I9: the route-level GGUF scoring refusal in completions.py was deleted once the
+    table produced the same answer — status 400, type invalid_request_error, param naming the
+    field, the reason naming GGUF, and no load. (Deliberate difference: the old check named
+    `logprobs` even when only `allowed_token_ids` was sent; the table names the field sent.)"""
+    client, svc = make_client(unloaded_inference(), model_row(gguf_files=["m.gguf"]))
+    r = client.post("/v1/completions",
+                    json={"model": "tiny", "prompt": "x", "max_tokens": 1, **body})
+    assert r.status_code == 400
+    error = r.json()["error"]
+    assert error["type"] == "invalid_request_error" and error["param"] == field
+    assert "GGUF" in error["message"]
+    assert svc.load_model_and_wait.call_count == 0

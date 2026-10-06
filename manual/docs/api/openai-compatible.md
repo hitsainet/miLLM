@@ -28,7 +28,11 @@ miLLM exposes an OpenAI-compatible API at `/v1`, making it a drop-in replacement
 | `stream` | bool | `false` | SSE streaming |
 | `temperature` | float | `1.0` | `0` = greedy/deterministic. Range 0–2 |
 | `top_p` | float | `1.0` | Nucleus sampling, 0–1 |
-| `n` | int | `1` | Number of choices (serial backend only) |
+| `n` | int | `1` | Number of choices. Refused with `stream: true` |
+| `max_completion_tokens` | int | — | OpenAI's newer name for `max_tokens`; honoured as it. Sent with a different `max_tokens`, refused naming both |
+| `seed` | int | — | 0 to 2³²−1. Applied and echoed in `X-miLLM-Seed` — see [Seeds](#seeds-and-system_fingerprint) |
+| `response_format` | object | — | `text`, `json_object` or `json_schema` — see [Structured output](#structured-output) |
+| `logprobs`, `top_logprobs`, `allowed_token_ids`, `return_tokens_as_token_ids` | — | — | Chat scoring — see [Chat scoring](#chat-scoring) |
 | `max_tokens` | int | server default | Validated against the model's context window |
 | `stop` | string \| string[] | — | Stop sequences, enforced in both streaming and non-streaming |
 | `frequency_penalty` | float | `0.0` | −2 to 2; mapped to repetition penalty internally |
@@ -163,7 +167,7 @@ Classification models in the Jev style (for example `autotrust/JEV-9B`) don't ge
 | `add_special_tokens` | bool | `true` | Set `false` when the prompt must be tokenised exactly as written (no BOS) |
 | `return_tokens_as_token_ids` | bool | `false` | Key `top_logprobs` by `"token_id:<id>"` instead of the decoded token text, which can be ambiguous |
 
-Scoring mode needs `max_tokens: 1` and `n: 1`; any other value is refused with a 422. One forward pass runs per prompt and nothing is generated.
+Scoring mode needs `max_tokens: 1` (or `max_completion_tokens: 1`) and `n: 1`; any other value is refused with a 400. One forward pass runs per prompt and nothing is generated.
 - The returned `text` is the most probable allowed token.
 - `temperature` divides the logits before normalising; `0` means no scaling. `top_p`, `stop` and the penalties don't apply in scoring mode.
 - Each choice carries an OpenAI-shaped `logprobs` object: `tokens`, `token_logprobs`, `top_logprobs`, and `text_offset` (the character offset of the token within prompt plus completion, which is OpenAI's convention). With `allowed_token_ids` but no `logprobs`, the token is constrained and `logprobs` is `null`, as in vLLM.
@@ -174,11 +178,12 @@ These requests are refused instead:
 - A prompt that tokenises to nothing: 400.
 - A GGUF (llama.cpp) model: 400, before the model is loaded, because llama.cpp exposes no per-token distribution here.
 - NaN or +inf logits where they reach the answer (on an allowed token, or anywhere when the vocabulary is unrestricted), or a reported token whose logit is −inf: 500 `non_finite_logits`. A −inf on a token outside the allowed set is fine; some heads mask padded vocabulary that way.
-- A temperature between 0 and 0.001, which would overflow the logits: 422.
+- A temperature between 0 and 0.001, which would overflow the logits: 400.
+- `profile`, `steering_intensity`, `steering` or `response_format` on a scoring request: 400 naming the field (scoring is always unsteered).
 - Running out of GPU memory: the same typed error as generation.
 
 :::caution Behaviour change
-Before scoring mode existed, `logprobs` was silently ignored, so `logprobs: 5, max_tokens: 100` returned 100 tokens of text with no probabilities. That request is now refused with a 422 rather than answered without what it asked for.
+Before scoring mode existed, `logprobs` was silently ignored, so `logprobs: 5, max_tokens: 100` returned 100 tokens of text with no probabilities. That request is now refused with a 400 rather than answered without what it asked for.
 :::
 
 ```bash
@@ -226,6 +231,127 @@ Clients that offer a **Continue** action resend the conversation with the trunca
 
 miLLM detects a trailing assistant message and completes it instead: everything before the partial is rendered with a generation prompt, the partial is appended raw, and generation continues from there. Nothing is required of the client; **Continue** in Open WebUI now resumes mid-sentence.
 
+## Request validation
+
+**Every field is honoured, reported or refused — never dropped silently.**
+
+- A field the request path does not use is named in the **`X-miLLM-Ignored-Fields`** response
+  header: an RFC 8941 list of strings giving each field's location — `"foo", "messages[2].name",
+  "extra_messages[0][1].weight"`. It is absent when nothing was ignored, is sent on streaming
+  responses too, and never changes the body. The server logs one `request_fields_unused` warning
+  carrying the locations, never the values. The header is capped at 1,024 bytes
+  (`IGNORED_FIELDS_HEADER_MAX_BYTES`); past that its last entry is `"+N more"`. Characters outside
+  printable ASCII in a field name are percent-encoded.
+- Send **`X-miLLM-Strict: true`** (or `1`) to have the same request refused with `400
+  unused_fields_refused` naming every unused location. `false`, `0` or no header keeps reporting.
+  Any other value (`yes`, say) is refused with `400`, naming the header.
+- `user` is not read by miLLM, so it is reported, and strict mode refuses it.
+- On a GGUF model, `chat_template_kwargs` is reported: llama.cpp applies the template baked into the
+  file and takes no variables.
+
+**Output-changing fields are refused with `400 field_not_honoured` wherever they cannot be
+honoured, with or without strict mode**, before the requested model is loaded:
+
+| Field | Chat (transformers) | Chat (GGUF) | Completions | Embeddings |
+|---|---|---|---|---|
+| `logprobs`, `allowed_token_ids` | honoured (chat scoring) | refused | honoured on transformers, refused on GGUF | refused |
+| `top_logprobs` | honoured (chat scoring) | refused | refused (use `logprobs`) | refused |
+| `response_format` | honoured | refused | refused | refused |
+| `seed` | honoured | refused (not yet measured to reproduce) | honoured on transformers, refused on GGUF | refused |
+| `n` | honoured, not streaming | refused above 1 | refused above 1 | refused above 1 |
+| `max_completion_tokens` | honoured as `max_tokens` | honoured | honoured | refused |
+| `profile`, `steering_intensity` | honoured, refused on scoring requests | refused | refused | refused |
+| `steering` | refused (not yet implemented) | refused | refused | refused |
+| `dimensions` | refused | refused | refused | refused (not yet implemented) |
+| `tools`, `tool_choice`, `logit_bias` | refused | refused | refused | refused |
+
+The values `n: 1`, `logprobs: false`, `response_format: {"type": "text"}`, `tools: []`,
+`logit_bias: {}` and an explicit `null` mean "no change" and are accepted everywhere.
+
+## Chat scoring
+
+`/v1/chat/completions` scores the next token like `/v1/completions` does. Send `logprobs: true`
+(and optionally `top_logprobs`, 0–20) and/or `allowed_token_ids`; scoring mode needs
+`max_tokens: 1`, `n: 1`, no streaming, and a temperature of 0 or at least 0.001. `top_logprobs`
+without `logprobs: true` is refused.
+
+The chat template is rendered with the generation prompt and scored through the same function
+`/v1/completions` uses, **without adding special tokens again** (a rendered template already has
+its BOS). So chat scoring of `messages` equals completion scoring of the rendered prompt with
+`add_special_tokens: false`. A model with no chat template is refused with `400
+no_chat_template` — generation keeps its generic fallback; scoring would score a prompt the model
+was never trained on.
+
+```json
+"choices": [{"index": 0, "finish_reason": "length",
+  "message": {"role": "assistant", "content": " true"},
+  "logprobs": {"content": [{"token": "token_id:1802", "logprob": -0.21, "bytes": [32, 116, 114, 117, 101],
+    "top_logprobs": [{"token": "token_id:1802", "logprob": -0.21, "bytes": [32, 116, 114, 117, 101]},
+                     {"token": "token_id:3721", "logprob": -1.66, "bytes": [32, 102, 97, 108, 115, 101]}]}]}}]
+```
+
+`content` holds one entry, the scored token. `bytes` is always the UTF-8 of the decoded token;
+`return_tokens_as_token_ids` changes `token` only. `top_logprobs` has `min(top_logprobs,
+candidates)` entries, empty for 0 or absent. `allowed_token_ids` without `logprobs: true` constrains
+the token and returns `logprobs: null`. With `extra_messages`, each conversation is scored one at a
+time and returns its own choice, `index` in input order; a failing conversation fails the request,
+naming its index. Chat scoring is unsteered and unmonitored, as completion scoring is, and is
+refused on GGUF models before loading.
+
+## Structured output
+
+`response_format` constrains generation on the transformers engine so the output parses (and, for
+`json_schema`, validates):
+
+```json
+"response_format": {"type": "json_schema",
+  "json_schema": {"name": "judge_v1", "strict": true,
+    "schema": {"type": "object", "properties": {"label": {"enum": ["humor", "not_humor"]}},
+               "required": ["label"], "additionalProperties": false}}}
+```
+
+- `{"type": "json_object"}` constrains to one JSON object. `strict: false` is accepted, and the
+  schema is still enforced.
+- The response carries **`X-miLLM-Constrained`**: `json_object` or `json_schema;name="judge_v1"`.
+- `finish_reason: "stop"` means the model ended the document itself and miLLM validated it.
+  `"length"` means `max_tokens` ended it, so the text is incomplete, even if it happens to parse.
+  A complete document that fails validation is a `500 constrained_output_invalid`, never a 200.
+- Refused with `400` naming `response_format`, before loading: a GGUF model, `/v1/completions`,
+  `/v1/embeddings`, streaming, `stop` (a stop string could cut a document and report it complete),
+  scoring fields, and a server with continuous batching enabled.
+- `n > 1` and `extra_messages` are constrained too, one constraint per choice or row.
+
+**Supported JSON Schema subset.** `type` (all seven), `properties`, `required`,
+`additionalProperties` (boolean or schema), `items`, `minItems`, `maxItems`, `enum`, `const`,
+`minimum`, `maximum`, `minLength`, `maxLength`, `pattern`, `anyOf`, and local `$ref` into `$defs`;
+the annotations `title`, `description`, `default` and `examples` are accepted and ignored.
+Anything else is refused with `400 response_format_unsupported`, naming each keyword and its JSON
+pointer — including `multipleOf`, `not`, `uniqueItems`, `allOf`, `oneOf`, `if`/`then`/`else`,
+`format`, `patternProperties`, `dependentRequired`, `$schema` and remote `$ref`. Some of these are
+compiled by the constraint library without being enforced, which is why the subset is miLLM's own
+list. A schema is limited to 64 KB, nesting depth 32 and 256 properties per object.
+
+## Seeds and `system_fingerprint`
+
+`seed` (an integer from 0 to 2³²−1; anything else, including `true`, is refused) is applied inside
+the request's slot and echoed in **`X-miLLM-Seed`** with the scope of the promise:
+
+| Header | Meaning |
+|---|---|
+| `7;scope="request"` | The same seed, body and loaded model give byte-identical text and `finish_reason` |
+| `7;scope="batch-shape"` | `extra_messages` rows: identical only for the same batch composition |
+| `7;scope="best-effort"` | Continuous batching runs in this process and draws from the same random generator |
+
+The header is absent when no seed was sent; miLLM never picks one. The seed is accepted and
+echoed on greedy (`temperature: 0`) and scoring requests, where it changes nothing. A seeded request
+is never served by the batching manager. On a text completion with several prompts, each prompt is
+seeded separately. Seeds are refused on GGUF models until llama.cpp's repeatability is measured.
+
+Every chat and text completion response (not streamed chunks) carries
+**`system_fingerprint`**: `millm:<model>@<revision>:<dtype>/<quantization>:<engine>`, for example
+`millm:LFM2.5-1.2B-Instruct@0f604ada:bfloat16/FP16:transformers`. A part miLLM does not know is
+written `unrecorded`, never guessed.
+
 ## Errors & backpressure
 
 `/v1` errors use OpenAI's format so SDK exception handling works unchanged. Notable cases:
@@ -237,6 +363,12 @@ miLLM detects a trailing assistant message and completes it instead: everything 
 | Prompt + `max_tokens` exceeds the model's context window, on any engine and any route (an embeddings input past it too). The message gives the limit and what was asked for. A streamed request is refused with this 400 before the stream starts; if the stream has already started, it ends with this error event and `[DONE]` | 400 | `context_length_exceeded` |
 | Steering error on an in-flight stream (mismatched cluster, bad index) | SSE `error` event, then `[DONE]` | `invalid_feature_index` |
 | Request queue full (backpressure) | 503 | `queue_full` |
+| An output-changing field this endpoint or engine cannot honour | 400 | `field_not_honoured` |
+| `X-miLLM-Strict: true` and an unused field | 400 | `unused_fields_refused` |
+| `response_format` that cannot be honoured (schema keyword, engine, combination) | 400 | `response_format_unsupported` |
+| Chat scoring on a model with no chat template | 400 | `no_chat_template` |
+| A complete constrained output that fails validation | 500 | `constrained_output_invalid` |
+| A scoring token id outside the vocabulary; an empty prompt | 400 | `invalid_scoring_request` |
 | Unknown `profile` | 404 | `profile_not_found` |
 | Invalid `steering_intensity` (outside 0–2 / unknown symbol) | 400 | `invalid_parameter` |
 | The named model has to be loaded and its quantization cannot be (a Q2 transformers checkpoint) | 400 | `unsupported_quantization` |
@@ -251,7 +383,7 @@ A request that names a model other than the one loaded loads it first. When that
 
 ## Behavior under continuous batching
 
-If the opt-in [CBM backend](/concepts/architecture#continuous-batching-opt-in) is enabled, requests matching the server's fixed sampling parameters are batched for throughput; requests with different `temperature`/`top_p`, a `profile` or `steering_intensity` parameter, or (optionally) active monitoring fall back to the serial path automatically. `GET /api/health/inference` shows which backend is active.
+If the opt-in [CBM backend](/concepts/architecture#continuous-batching-opt-in) is enabled, requests matching the server's fixed sampling parameters are batched for throughput; requests with different `temperature`/`top_p`, a frequency or presence penalty, `n > 1`, a `seed`, a `profile` or `steering_intensity` parameter, or (optionally) active monitoring fall back to the serial path automatically. `response_format` is refused while it is enabled. `GET /api/health/inference` shows which backend is active.
 
 :::tip Integration with Other Tools
 - **Open WebUI:** set the OpenAI API base URL to `http://<host>:8000/v1` — [tutorial](/tutorials/open-webui)

@@ -150,3 +150,21 @@ class TestLogFormatConstraint:
     def test_invalid_format_rejected(self):
         with pytest.raises(Exception):
             Settings(LOG_FORMAT="invalid")
+
+
+class TestFeature25Settings:
+    """Feature 25: the grammar cache size and the ignored-fields header bound (FTDD §11)."""
+
+    def test_defaults(self):
+        s = Settings()
+        assert s.STRUCTURED_OUTPUT_GRAMMAR_CACHE == 64
+        assert s.IGNORED_FIELDS_HEADER_MAX_BYTES == 1024
+
+    def test_environment_overrides(self):
+        with patch.dict(
+            os.environ,
+            {"STRUCTURED_OUTPUT_GRAMMAR_CACHE": "8", "IGNORED_FIELDS_HEADER_MAX_BYTES": "256"},
+        ):
+            s = Settings()
+        assert s.STRUCTURED_OUTPUT_GRAMMAR_CACHE == 8
+        assert s.IGNORED_FIELDS_HEADER_MAX_BYTES == 256

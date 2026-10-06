@@ -59,6 +59,16 @@ dependencies = [
     # transformers 5.15 requires >=0.8.0; below that the resolver picks a
     # version it cannot load safetensors checkpoints with.
     "safetensors>=0.8.0",
+    # Structured output (Feature 25, 025_FTDD §3.1). xgrammar compiles a JSON
+    # Schema into a token mask applied by miLLM's OWN logits processor
+    # (millm/ml/constrained_decoding.py), not xgrammar.contrib.hf, which checks
+    # acceptance with an `assert`. Capped like every ML dependency here: 0.2.8
+    # compiles `multipleOf`, `not` and `uniqueItems` WITHOUT enforcing them, and
+    # a later minor can change that list in either direction — so the allowlist
+    # in millm/api/json_schema_subset.py is pinned by a test that probes the
+    # installed library, and jsonschema validates every output.
+    "xgrammar>=0.2.8,<0.3",
+    "jsonschema>=4.23,<5",
 
     # SSE for streaming
     "sse-starlette>=2.2.0",

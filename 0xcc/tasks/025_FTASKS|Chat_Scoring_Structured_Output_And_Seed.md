@@ -71,12 +71,12 @@ miStudio 034 to send `X-miLLM-Strict: true` safely.
         reference GGUF model, run the same sampled request twice, compare bytes. Record the
         result; 6.6 implements the matching outcome. Until it passes the outcome stays *refused*.
 
-- [ ] 1.0 Dependencies and configuration (covers FR-25.10.8; FTDD §11)
-  - [ ] 1.1 `pyproject.toml`: add `xgrammar>=0.2.8,<0.3` and `jsonschema>=4.23,<5` with a comment
+- [x] 1.0 Dependencies and configuration (covers FR-25.10.8; FTDD §11)
+  - [x] 1.1 `pyproject.toml`: add `xgrammar>=0.2.8,<0.3` and `jsonschema>=4.23,<5` with a comment
         citing FTDD §3.1. Confirm the resolver keeps `transformers>=5.15.1,<6` and `torch>=2.10`.
-  - [ ] 1.2 `millm/core/config.py`: `STRUCTURED_OUTPUT_GRAMMAR_CACHE=64`,
+  - [x] 1.2 `millm/core/config.py`: `STRUCTURED_OUTPUT_GRAMMAR_CACHE=64`,
         `IGNORED_FIELDS_HEADER_MAX_BYTES=1024`; `.env.example` entries.
-  - [ ] 1.3 Test: settings load with defaults and env overrides.
+  - [x] 1.3 Test: settings load with defaults and env overrides.
 
 - [ ] 2.0 Request policy: unused fields, strict mode, output-changing table (covers FR-25.1, FR-25.2, FR-25.3)
   - [ ] 2.1 Schemas: `extra="allow"` at `openai.py:39,198,249,296`; update the docstring note

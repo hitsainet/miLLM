@@ -255,6 +255,16 @@ class Settings(BaseSettings):
     MAX_CONCURRENT_REQUESTS: int = 1
     MAX_PENDING_REQUESTS: int = 10
 
+    # Feature 25 (request validation and structured output).
+    # Compiled JSON-Schema grammars kept per loaded model (LRU). A compile costs
+    # 0.1-0.7 s on the served tokenizers and runs outside the request slot; the
+    # cache is dropped on unload, because a grammar belongs to one tokenizer.
+    STRUCTURED_OUTPUT_GRAMMAR_CACHE: int = 64
+    # Upper bound, in bytes, on the X-miLLM-Ignored-Fields response header. Field
+    # names are client-chosen JSON keys; past the bound the header ends with
+    # "+N more" rather than growing without limit.
+    IGNORED_FIELDS_HEADER_MAX_BYTES: int = 1024
+
     # Performance: torch.compile
     # None  → auto-detect: enabled for CUDA models that don't use bitsandbytes
     # True  → always attempt compilation (loader still skips for bitsandbytes)

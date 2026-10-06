@@ -238,6 +238,23 @@ class Settings(BaseSettings):
     # "something is wrong", not "this was a long answer". The regression this guards against is
     # real — copying the whole residual to the CPU once measured 25-37 ms for two probes.
     PROBE_MAX_OVERHEAD_MS: float = 500.0      # absolute per-request backstop
+
+    # --- Feature 27: stateless probe scoring and per-request activations ---
+    #: Inputs per `POST /api/probes/score` call. Bounds the work one request can queue; each input
+    #: takes its own admission slot, so this bounds how long a call runs, not how long another
+    #: request waits (one input's forward). 64 = miStudio's `millm_score_probes` cap (034 FTDD §9).
+    PROBE_SCORE_MAX_INPUTS: int = 64
+    #: Probes per scoring call. Every probe is read in the same forward, so this bounds the
+    #: per-input scoring work; matches PROBE_MAX_ARMED, the live runtime's own bound.
+    PROBE_SCORE_MAX_PROBES: int = 8
+    #: Largest `top_k` a `return_sae_activations` request may ask for, per position.
+    SAE_ACTIVATIONS_MAX_TOP_K: int = 64
+    #: Worst-case (positions x top_k) entries one activation request may return, counted BEFORE
+    #: generation (FR-27.2f) so a request is never refused after it has generated.
+    SAE_ACTIVATIONS_MAX_ENTRIES: int = 65536
+    #: Positions encoded per chunk when capturing activations: bounds the transient
+    #: (positions x d_sae) encode on a long prefill against a wide SAE.
+    SAE_ACTIVATIONS_ENCODE_CHUNK: int = 512
     PROBE_MAX_EVENTS_PER_PROBE: int = 5000
     PROBE_MAX_AGE_DAYS: int = 30
     PROBE_EVENT_CONTEXT_TOKENS: int = 24      # +-K decoded tokens around the top firing position

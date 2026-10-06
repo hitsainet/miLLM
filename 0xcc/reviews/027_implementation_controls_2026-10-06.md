@@ -82,3 +82,50 @@ seam); through `run_model_work` they equal the unsteered scores exactly.
 failed on `main` (asserted one verdict; the windows feature made it three). Now arms with
 `windows=[]`. The integration tier is not in `tests/unit`, which is why it went unnoticed.
 
+## Task 4 — stateless probe scoring (M13, M14, M20, S1–S13)
+
+Tests: `test_probe_scoring.py`, `test_probe_score_writes_nothing.py`, `test_probe_score_route.py`,
+`test_probe_input_preparer.py`.
+
+| # | Mutation | Result | Restore |
+|---|---|---|---|
+| M13 | `_score_one` opens the runtime's `begin_request` | RED (no-event guard: `begins == []`) | sha ✔ grep ✔ |
+| M14 | score route writes a `ProbeEvent` row before returning | RED (no-event guard: event count) | ✔ ✔ |
+| M20 | delete `@router.post("/score")` | RED (reachability) | ✔ ✔ |
+| S1 | `TEXT_INPUT_VERIFIED = True` (lifts the T-49 gate) | RED | ✔ ✔ |
+| S2 | pin check reduced to `current is None` | RED (pinning test) | ✔ ✔ |
+| S3 | score loop calls `_score_one` directly (no slot per input) | RED (admission count) | ✔ ✔ |
+| S4 | `"verdict": bool(v.fires)` (null coerced to false) | RED | ✔ ✔ |
+| S5 | given ids skip instead of refusing | RED | ✔ ✔ |
+| S6 | vocabulary range check disabled | RED | ✔ ✔ |
+| S7 | `windows=None` instead of the request's windows | RED | ✔ ✔ |
+| S8 | `token_ids` echo never returned | RED | ✔ ✔ |
+| S9 | `set_prompt_length` dropped | RED | ✔ ✔ |
+| S10 | prefix check dropped from the assistant-ended boundary | RED | ✔ ✔ |
+| S11 | `text` rendered as a system turn | RED (preparer `text == one user turn`) | ✔ ✔ |
+| S12 | shared `identity_refusal` never refuses a model mismatch | RED | ✔ ✔ |
+| S13 | omitted-id skip not recorded in `skipped` | RED | ✔ ✔ |
+
+**16 controls, 0 survived first time.**
+
+**Discrepancies / deviations (task 4):**
+- FTDD §5.1 puts shape refusals (two kinds, `prompt_tokens` past the input, zero inputs) at
+  `INVALID_PROBE_SCORE_REQUEST` 400, while FTASKS 4.1 says "schemas … all `extra="forbid"`".
+  Both honoured: unknown fields and unknown windows are pydantic 422s; the semantic shape checks
+  live in `probe_scoring.check_shape` so they answer 400 as the refusal table says.
+- Arming's identity and scope gates were extracted into `probe_arming.identity_refusal` /
+  `scope_refusal` (reuse, not copy) — `arm` raises what they return, unchanged in behaviour.
+- `scope_refusal` can no longer fire in practice: `RUNTIME_SCORABLE_SCOPES = frozenset(SCOPES)` at
+  `probe_scope.py:169` admits every scope, so the arming docstring describing `scope='all'` only is
+  stale. Recorded, not changed (out of 027's scope).
+- `text` is refused until FTASKS 0.2 passes (T-49): `TEXT_INPUT_VERIFIED = False`.
+- With `probe_ids` omitted and more than `PROBE_SCORE_MAX_PROBES` matching probes, the request is
+  refused naming the cap (the FTDD does not say what happens; refusing beats silently truncating).
+
+**Test-harness defect found and fixed (task 4):** the first privacy test used
+`structlog.testing.capture_logs`; structlog caches each logger on first use, and the full suite went
+5 red in unrelated files (`test_model_lease.py`, `test_structured_output.py`). Separately, entering
+`TestClient(app)` as a context manager runs the lifespan, which reconfigures logging, and blinded
+the same tests. Both removed (recorder on the module logger + caplog; plain `TestClient(app)`);
+M13/M14/M20 re-run afterwards, all RED.
+

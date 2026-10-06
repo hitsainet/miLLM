@@ -275,6 +275,63 @@ def armed_probe_from_row(
     )
 
 
+def identity_refusal(probe: Any, loaded: LoadedIdentity) -> Optional[Exception]:
+    """The identity gate's refusal for `probe` against the loaded model, or None.
+
+    ONE definition, shared by arming and by stateless scoring (FR-27.5f): a probe fitted on
+    another model, or at another precision, is refused by both with the same error naming every
+    mismatched field. Extracted from `ProbeArmingService.arm` rather than copied (Feature 27).
+    """
+    report = check_identity(probe.definition.get("model") or {}, loaded)
+    if not report.ok and {m["field"] for m in report.mismatches} <= {"load_dtype", "quantization"}:
+        # Same model, different activations: a precision or quantization difference. Its own
+        # sentence, because "fitted on a different model" points at the wrong fix.
+        said = "; ".join(
+            f"{m['field']}: fitted at {m['expected']}, loaded at {m['actual']}"
+            for m in report.mismatches
+        )
+        fields = {m["field"] for m in report.mismatches}
+        if "quantization" in fields:
+            remedy = ("Load the model at the quantization the probe was trained under, or "
+                      "rebuild the probe in miStudio.")
+        else:
+            # Same quantization, different precision: one side did not follow the shared rule
+            # (docs/schemas/native-dtype-cases.json) — reloading cannot fix that.
+            remedy = ("The quantization matches, so one side did not load by the shared "
+                      "precision rule: rebuild the probe in miStudio.")
+        return ProbeDtypeMismatchError(
+            f"This probe reads the right model at the wrong precision ({said}). {remedy}",
+            details=report.as_details(),
+        )
+    if not report.ok:
+        return ProbeModelMismatchError(
+            "This probe was fitted on a different model than the one loaded",
+            details=report.as_details(),
+        )
+    return None
+
+
+def scope_refusal(probe: Any) -> Optional[Exception]:
+    """Arming's refusal of a scope this runtime cannot score, or None. Shared with scoring
+    (FR-27.5g)."""
+    if not scope_is_runtime_scorable(probe.scope):
+        return ProbeScopeUnverifiableError(
+            f"This probe's scope is {probe.scope!r}, and this runtime can only score "
+            f"scope 'all' probes. Two separate things are missing and neither is a problem "
+            f"with your build: nothing here restricts scoring to a scope's positions yet, so "
+            f"the probe would score the whole request; and a narrower scope's recorded "
+            f"scores cannot be reproduced for comparison, because the definition records "
+            f"which tokens miStudio scored but not which of them its role mask selected. "
+            f"Re-export the probe with scope 'all' to arm it here.",
+            details={
+                "scope": probe.scope,
+                "runtime_scorable_scopes": sorted(RUNTIME_SCORABLE_SCOPES),
+                "reason": "scope_not_runtime_scorable",
+            },
+        )
+    return None
+
+
 class ProbeArmingService:
     """Runs the gates and, if they all pass, arms the probe."""
 
@@ -305,32 +362,9 @@ class ProbeArmingService:
             )
 
         # ── 2. identity ─────────────────────────────────────────────────────────────
-        report = check_identity(probe.definition.get("model") or {}, loaded)
-        if not report.ok and {m["field"] for m in report.mismatches} <= {"load_dtype", "quantization"}:
-            # Same model, different activations: a precision or quantization difference. Its own
-            # sentence, because "fitted on a different model" points at the wrong fix.
-            said = "; ".join(
-                f"{m['field']}: fitted at {m['expected']}, loaded at {m['actual']}"
-                for m in report.mismatches
-            )
-            fields = {m["field"] for m in report.mismatches}
-            if "quantization" in fields:
-                remedy = ("Load the model at the quantization the probe was trained under, or "
-                          "rebuild the probe in miStudio.")
-            else:
-                # Same quantization, different precision: one side did not follow the shared rule
-                # (docs/schemas/native-dtype-cases.json) — reloading cannot fix that.
-                remedy = ("The quantization matches, so one side did not load by the shared "
-                          "precision rule: rebuild the probe in miStudio.")
-            raise ProbeDtypeMismatchError(
-                f"This probe reads the right model at the wrong precision ({said}). {remedy}",
-                details=report.as_details(),
-            )
-        if not report.ok:
-            raise ProbeModelMismatchError(
-                "This probe was fitted on a different model than the one loaded",
-                details=report.as_details(),
-            )
+        refusal = identity_refusal(probe, loaded)
+        if refusal is not None:
+            raise refusal
 
         # ── 3. the evidence rung ────────────────────────────────────────────────────
         if needs_arm_acknowledgement(probe.rung) and not acknowledge_below_rung2:
@@ -355,21 +389,9 @@ class ProbeArmingService:
         # replay them. Resting a safety property on another gate's side effect is how a later
         # "fix parity for prompt scope" would have quietly opened this one. Costs no forward pass,
         # so it belongs above parity regardless.
-        if not scope_is_runtime_scorable(probe.scope):
-            raise ProbeScopeUnverifiableError(
-                f"This probe's scope is {probe.scope!r}, and this runtime can only score "
-                f"scope 'all' probes. Two separate things are missing and neither is a problem "
-                f"with your build: nothing here restricts scoring to a scope's positions yet, so "
-                f"the probe would score the whole request; and a narrower scope's recorded "
-                f"scores cannot be reproduced for comparison, because the definition records "
-                f"which tokens miStudio scored but not which of them its role mask selected. "
-                f"Re-export the probe with scope 'all' to arm it here.",
-                details={
-                    "scope": probe.scope,
-                    "runtime_scorable_scopes": sorted(RUNTIME_SCORABLE_SCOPES),
-                    "reason": "scope_not_runtime_scorable",
-                },
-            )
+        refusal = scope_refusal(probe)
+        if refusal is not None:
+            raise refusal
 
         armed = armed_probe_from_row(probe, encoder=encoder, windows=windows)
 

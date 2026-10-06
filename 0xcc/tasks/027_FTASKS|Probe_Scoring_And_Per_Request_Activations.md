@@ -60,7 +60,7 @@
         the probe's model; compute AUROC; it must lie inside miStudio's reported interval. If it does
         not, `text` stays refused and the finding goes to the operator — do not change the render rule
         silently.
-  - [ ] 0.3 Until 0.2 passes, `text` inputs are refused with `INVALID_PROBE_SCORE_REQUEST` naming the
+  - [x] 0.3 Until 0.2 passes, `text` inputs are refused with `INVALID_PROBE_SCORE_REQUEST` naming the
         pending verification (FTID §9); test that refusal; remove the gate in the same commit that
         records 0.2's pass.
 
@@ -136,42 +136,42 @@
   - [x] 3.6 Controls: **M15** (drop `_admit` from `run_model_work`), **M16** (drop `executor=` from the
         arm route), **M17** (enter `_unsteered` outside the worker) — each red. Record.
 
-- [ ] 4.0 Stateless probe scoring (covers FR-27.4, FR-27.5, FR-27.6a–d, FR-27.7)
-  - [ ] 4.1 Schemas in `millm/api/schemas/probe_scoring.py`, all `extra="forbid"`: one input kind per
+- [x] 4.0 Stateless probe scoring (covers FR-27.4, FR-27.5, FR-27.6a–d, FR-27.7)
+  - [x] 4.1 Schemas in `millm/api/schemas/probe_scoring.py`, all `extra="forbid"`: one input kind per
         input; `prompt_tokens` only with `token_ids`; caps. Tests for each refusal.
-  - [ ] 4.2 `ProbeInputPreparer` (FTID §3): `token_ids` as given; assistant-ended `messages` with the
+  - [x] 4.2 `ProbeInputPreparer` (FTID §3): `token_ids` as given; assistant-ended `messages` with the
         prefix check; user-ended `messages` (whole input is prompt); `text` as one user turn;
         `last_user` span via `probe_turns.py:153` (T-72, T-49). Tests per rule, including a failed prefix
         check → `prompt_boundary_unknown`, and `last_user` on `token_ids` → `token_ids_have_no_turns`.
-  - [ ] 4.3 Probe resolution: given ids refuse on mismatch with the existing errors (identity, scope,
+  - [x] 4.3 Probe resolution: given ids refuse on mismatch with the existing errors (identity, scope,
         SAE); omitted ids → all matching probes, mismatches in `skipped` with code and reason (T-75);
         all skipped → `400`. Tests for each (FPRD US-3).
-  - [ ] 4.4 Scoring loop: build with `armed_probe_from_row`; one `run_model_work` per input; one forward
+  - [x] 4.4 Scoring loop: build with `armed_probe_from_row`; one `run_model_work` per input; one forward
         per input across all layers; `context.finish()`. Tests assert by **call** (spies with
         `wraps=`) that `armed_probe_from_row`, `_verdict_for` and `threshold_for_length` run, and that
         `_admit` is entered once per input (FR-27.6a).
-  - [ ] 4.5 Response mapping via `verdict_payload` (FTID §11): `verdict` keeps `null`; `rung_language`
+  - [x] 4.5 Response mapping via `verdict_payload` (FTID §11): `verdict` keeps `null`; `rung_language`
         verbatim; `provisional` and `threshold_revision` carried (P-20); `input_kind`, `n_tokens`,
         `prompt_tokens`; `token_ids` only when asked. Test each field; test a provisional window keeps
         its flag.
-  - [ ] 4.6 Pinning: `(model_id, loaded_at)` at the first input; a change fails the remaining inputs
+  - [x] 4.6 Pinning: `(model_id, loaded_at)` at the first input; a change fails the remaining inputs
         with `MODEL_CHANGED` and keeps the earlier results. Test with a simulated reload between inputs.
-  - [ ] 4.7 Whole-request refusals: no model, GGUF (existing errors), shape errors
+  - [x] 4.7 Whole-request refusals: no model, GGUF (existing errors), shape errors
         (`ProbeScoreRequestError`), over-context input. Tests for each edge case in FPRD §2.
-  - [ ] 4.8 Route `POST /api/probes/score` (`probes.py`, prefix line 43). Reachability: the path is in
+  - [x] 4.8 Route `POST /api/probes/score` (`probes.py`, prefix line 43). Reachability: the path is in
         `app.openapi()["paths"]`; it reaches the score handler, not a `{probe_id}` handler. **M20:** remove
         the route → red.
-  - [ ] 4.9 Caps and id range: `PROBE_SCORE_MAX_INPUTS`, `PROBE_SCORE_MAX_PROBES`, token ids within the
+  - [x] 4.9 Caps and id range: `PROBE_SCORE_MAX_INPUTS`, `PROBE_SCORE_MAX_PROBES`, token ids within the
         vocabulary. Tests for each.
-  - [ ] 4.10 Privacy: a scoring call's log records contain no input text or token list above debug.
+  - [x] 4.10 Privacy: a scoring call's log records contain no input text or token list above debug.
         Test with `caplog`.
-  - [ ] 4.11 **No event write, no arming change** (`test_probe_score_writes_nothing.py`): real SQLite
+  - [x] 4.11 **No event write, no arming change** (`test_probe_score_writes_nothing.py`): real SQLite
         session; `probe_events` count unchanged; `begin_request` call count 0; `has_armed()` unchanged;
         armed probe on the same layer records nothing; stored parity report unchanged. **M13** (call
         `begin_request` in `_score_one`) and **M14** (write an event row from the route) → red. Record.
-  - [ ] 4.12 Parity status per probe (T-74): `never_run`, `passed`, `failed`, `checked_against`
+  - [x] 4.12 Parity status per probe (T-74): `never_run`, `passed`, `failed`, `checked_against`
         (`unknown` for old reports). Test each.
-  - [ ] 4.13 No routing change (FR-27.7): after a scoring call, `_use_cbm_for_request` answers as before.
+  - [x] 4.13 No routing change (FR-27.7): after a scoring call, `_use_cbm_for_request` answers as before.
 
 - [ ] 5.0 The verdict boundary (covers FR-27.10; P-03, X-03, P-20)
   - [ ] 5.1 Stateless boundary test: an exactly representable fixture (as

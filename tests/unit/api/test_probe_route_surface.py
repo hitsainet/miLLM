@@ -54,6 +54,15 @@ EXPECTED_PATHS = {
     "/api/probes/{probe_id}/parity",
     "/api/probes/{probe_id}/disarm",
     "/api/probes/{probe_id}/recalibrate",
+    # Feature 27 (FR-27.4g): stateless scoring. Promised by 027's FPRD, not 024's — see
+    # LATER_FEATURE_PATHS below.
+    "/api/probes/score",
+}
+
+#: Paths a LATER feature added to this router, each with the requirement that promises it. The
+#: 024 FPRD is the authority for the paths it specifies; these are the documented exceptions.
+LATER_FEATURE_PATHS = {
+    "/api/probes/score": "027_FPRD FR-27.4 (POST /api/probes/score)",
 }
 
 
@@ -132,6 +141,7 @@ class TestTheWholeSurfaceIsServed:
         """
         promised = _fprd_paths()
         assert promised, "parsed no endpoints out of the FPRD — the parser, not the app, is broken"
+        promised |= set(LATER_FEATURE_PATHS)
         served = _served_probe_paths()
         assert promised == served, (
             f"promised and not served: {sorted(promised - served)}; "

@@ -29,6 +29,7 @@ from millm.api.dependencies import (
 )
 from millm.api.schemas.common import ApiResponse
 from millm.api.schemas.probe import Decision
+from millm.api.schemas.probe_scoring import ProbeScoreRequest
 from millm.services.probe_event_service import event_summary
 from millm.core.errors import ProbeNotFoundError
 from millm.core.probe_evidence import probe_rung_language, probe_rung_next_step
@@ -316,6 +317,30 @@ async def clear_events(
 ) -> ApiResponse:
     removed = await events.clear(probe_id)
     return ApiResponse.ok({"removed": removed})
+
+
+@router.post("/score", response_model=ApiResponse)
+async def score_probes(
+    request: ProbeScoreRequest,
+    session: DbSession,
+    repository: ProbeRepo,
+    inference: InferenceServiceDep,
+) -> ApiResponse:
+    """Score stored inputs with imported probes — armed or not — and persist NOTHING.
+
+    Feature 27 (FR-27.4 – FR-27.7). No `probe_events` row, no runtime request context, no change
+    to the armed set or to any stored parity report. Each input runs in its own admission slot,
+    unsteered (`InferenceService.run_model_work`). The probe is built, scored and decided by the
+    same code live serving uses, so offline equals live.
+
+    ⚠ NOT a generation endpoint: it carries no `X-miLLM-Steering` header (X-09). Its forward
+    always runs with every SAE suppressed (T-73).
+    """
+    from millm.services.probe_scoring import ProbeScoringService
+
+    return ApiResponse.ok(
+        await ProbeScoringService(repository, inference).score(request, session)
+    )
 
 
 @router.get("/{probe_id}", response_model=ApiResponse)

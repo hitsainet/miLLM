@@ -77,6 +77,10 @@ ERROR_STATUS_MAP: dict[str, tuple[int, str]] = {
     "PROBE_NO_MODEL_LOADED": (409, "invalid_request_error"),
     "PROBE_HOOK_UNSUPPORTED": (409, "invalid_request_error"),
     "PROBE_SCOPE_UNVERIFIABLE": (409, "invalid_request_error"),
+    # Feature 27. The activation refusal reaches /v1 callers; the scoring one is management-plane
+    # but is listed so every MiLLMError code has a row.
+    "SAE_ACTIVATIONS_REFUSED": (400, "invalid_request_error"),
+    "INVALID_PROBE_SCORE_REQUEST": (400, "invalid_request_error"),
     # Model errors
     "MODEL_NOT_LOADED": (503, "server_error"),
     "MODEL_NOT_FOUND": (404, "invalid_request_error"),

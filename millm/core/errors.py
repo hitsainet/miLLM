@@ -875,3 +875,23 @@ class ProbeHookUnsupportedError(MiLLMError):
 
     code = "PROBE_HOOK_UNSUPPORTED"
     status_code = 409
+
+
+class ProbeScoreRequestError(MiLLMError):
+    """A `POST /api/probes/score` request this server refuses as a whole, before any forward:
+    no inputs, too many inputs or probes, an input with two kinds, `prompt_tokens` past the input,
+    a token id outside the vocabulary, every probe skipped, or `text` before its render is
+    verified (Feature 27, FR-27.4, T-49). A fault of the request, so 400."""
+
+    code = "INVALID_PROBE_SCORE_REQUEST"
+    status_code = 400
+
+
+class SaeActivationsRefusedError(MiLLMError):
+    """A `return_sae_activations` request refused before generation (Feature 27, FR-27.1i,
+    FR-27.2): a shape with no single position axis (`n > 1`, `extra_messages`, several prompts),
+    an ambiguous SAE, a feature index past the SAE's width, `top_k` over the cap, or a worst-case
+    entry count over the cap. Refused rather than answered partly — 400, never after generating."""
+
+    code = "SAE_ACTIVATIONS_REFUSED"
+    status_code = 400

@@ -12,6 +12,7 @@ Implementation notes:
 """
 
 import asyncio
+import dataclasses
 import contextlib
 import contextvars
 import gc
@@ -350,6 +351,66 @@ def _constraint_type(response_format: Any) -> Optional[str]:
     return kind if kind in ("json_object", "json_schema") else None
 
 
+#: Feature 25: what this request's generation actually did, for the route's headers — the seed
+#: scope that was promised (X-miLLM-Seed) and the constraint that was applied
+#: (X-miLLM-Constrained). Request-scoped like the probe verdicts above; reset with them.
+_REQUEST_OUTCOME: "contextvars.ContextVar[dict]" = contextvars.ContextVar(
+    "millm_request_outcome", default={}
+)
+
+
+def reset_request_outcome() -> None:
+    _REQUEST_OUTCOME.set({})
+
+
+def note_request_outcome(**values: Any) -> None:
+    """Record part of this request's outcome. A new dict each time: the default is shared."""
+    _REQUEST_OUTCOME.set({**_REQUEST_OUTCOME.get(), **values})
+
+
+def get_request_outcome() -> dict:
+    return dict(_REQUEST_OUTCOME.get())
+
+
+#: Seed scopes (FR-25.13.6, FR-25.14). A response never claims a wider scope than measured.
+SEED_SCOPE_REQUEST = "request"
+SEED_SCOPE_BATCH_SHAPE = "batch-shape"
+SEED_SCOPE_BEST_EFFORT = "best-effort"
+
+
+def _rng_devices() -> list[int]:
+    """Every CUDA device whose generator `torch.manual_seed` reseeds — all of them, once CUDA is
+    initialised. Forking only the model's own cards would leave the others permanently reseeded
+    (manual_seed seeds every device), so every initialised device is saved and restored."""
+    if torch.cuda.is_available() and torch.cuda.is_initialized():
+        return list(range(torch.cuda.device_count()))
+    return []
+
+
+@contextlib.contextmanager
+def seeded_rng(seed: Optional[int]) -> Iterator[None]:
+    """Sampling inside this block draws from a stream seeded with `seed`; outside it the global
+    generators are exactly as they were (FR-25.13.2). A no-op when `seed` is None.
+
+    ⚠ BOTH LINES ARE LOAD-BEARING. Without `fork_rng` an unseeded request after a seeded one
+    replays the seeded stream (the state is left at the seed); without `manual_seed` the seed is
+    echoed and never applied. Each has a mutation control.
+    """
+    if seed is None:
+        yield
+        return
+    with torch.random.fork_rng(devices=_rng_devices()):
+        torch.manual_seed(seed)
+        yield
+
+
+def _seed_kwargs(gen_config: Any) -> dict:
+    """`{"seed": n}` for a seeded request, else `{}` — so an unseeded call is exactly the call it
+    was before Feature 25 (stand-ins that take one positional argument keep working)."""
+    seed = getattr(gen_config, "seed", None)
+    return {"seed": seed} if seed is not None else {}
+
+
 def reset_probe_verdicts() -> None:
     """Drop any probe verdicts left over from an earlier request in this context."""
     _PROBE_VERDICTS.set([])
@@ -381,6 +442,7 @@ def reset_steering_memo() -> None:
     # Probe verdicts reset here too, deliberately: a route that has to remember TWO resets is a
     # route that will one day remember one. Same context, same lifetime, same hazard.
     _PROBE_VERDICTS.set([])
+    _REQUEST_OUTCOME.set({})
 
 
 def note_circuit_apply_failed() -> None:
@@ -865,6 +927,24 @@ class InferenceService:
     def _use_cbm(self) -> bool:
         """Whether to use continuous batching for generation."""
         return self._cbm_backend is not None and self._cbm_backend.is_running
+
+    def _seed_scope(self, base: str) -> str:
+        """The scope a seed can promise on this path: `base`, unless the continuous batching
+        manager runs in this process — its thread draws from the same global generator, so the
+        promise is only best-effort (FR-25.14.4: never claim wider than measured)."""
+        return SEED_SCOPE_BEST_EFFORT if self._use_cbm() else base
+
+    def seed_scope_for(self, request: Any) -> str:
+        """The scope a request's seed will get, decided before it runs — for a streaming
+        response, whose headers are sent before the generator body."""
+        batched = bool(_request_extra_messages(request)) and not (
+            isinstance(request, ChatCompletionRequest) and request.wants_scores()
+        )
+        return self._seed_scope(SEED_SCOPE_BATCH_SHAPE if batched else SEED_SCOPE_REQUEST)
+
+    def loaded_model(self) -> Any:
+        """The resident LoadedModel (engine, dtype, ...), or None. Read by the fingerprint."""
+        return self._model_state.current if self._model_state.is_loaded else None
 
     @property
     def backend_name(self) -> str:
@@ -2444,16 +2524,8 @@ class InferenceService:
         """
         # Inject cache mode from server config if not already set
         if gen_config.cache_implementation is None and self._kv_cache_mode == "static":
-            gen_config = GenerationConfig(
-                max_new_tokens=gen_config.max_new_tokens,
-                temperature=gen_config.temperature,
-                top_p=gen_config.top_p,
-                do_sample=gen_config.do_sample,
-                stop_sequences=gen_config.stop_sequences,
-                frequency_penalty=gen_config.frequency_penalty,
-                presence_penalty=gen_config.presence_penalty,
-                cache_implementation="static",
-            )
+            # `replace`, not a field-by-field copy, so the seed and the constraint survive.
+            gen_config = dataclasses.replace(gen_config, cache_implementation="static")
         kwargs = gen_config.to_generate_kwargs()
 
         # Newer transformers pre-allocates the KV cache before _prefill via _init_cache.
@@ -3279,7 +3351,9 @@ class InferenceService:
                 request_id=completion_id,
             )
 
-        outputs = await asyncio.to_thread(self._generate_sync, generate_kwargs)
+        outputs = await asyncio.to_thread(
+            self._generate_sync, generate_kwargs, **_seed_kwargs(gen_config)
+        )
 
         self._notify_monitoring(request_id=f"{completion_id}:batch_{chunk_start}")
 
@@ -3570,6 +3644,10 @@ class InferenceService:
                         total_completion_tokens += row["completion_tokens"]
             finally:
                 self._restore_request_profile(_saved_steering)
+            if gen_config.seed is not None:
+                # Batched rows are deterministic per batch SHAPE only (FR-25.14.1): the batched
+                # GEMM's reduction order depends on the shape, and padding on the other rows.
+                note_request_outcome(seed_scope=self._seed_scope(SEED_SCOPE_BATCH_SHAPE))
 
         model_info = self.get_loaded_model_info()
         model_name = model_info.name if model_info else "unknown"
@@ -3740,58 +3818,65 @@ class InferenceService:
                 gen_config = GenerationConfig.from_request(request)
                 self._check_context_length(prompt_tokens, gen_config.max_new_tokens)
 
-                for i in range(n):
-                    # Generate - offload to thread to avoid blocking the event loop
-                    generate_kwargs = self._build_generate_kwargs(gen_config, inputs)
+                # The seed covers the WHOLE n-loop: per-call seeding would make the n choices
+                # identical. RNG state is process-global, so the fork made here (inside the slot)
+                # spans every generate() of this request and nothing else's.
+                with seeded_rng(gen_config.seed):
+                    for i in range(n):
+                        # Generate - offload to thread to avoid blocking the event loop
+                        generate_kwargs = self._build_generate_kwargs(gen_config, inputs)
 
-                    outputs = await asyncio.to_thread(
-                        self._generate_sync, generate_kwargs
-                    )
-                    _sensing_full_ids = outputs[0]
-
-                    # Notify monitoring after generation
-                    self._notify_monitoring(request_id=completion_id)
-
-                    # Decode output
-                    generated_ids = self._slice_generated(outputs[0], prompt_tokens)
-                    completion_text = self._tokenizer.decode(
-                        generated_ids, skip_special_tokens=True
-                    )
-                    completion_tokens = len(generated_ids)
-
-                    # Apply stop sequences
-                    completion_text, stopped_by_sequence = self._apply_stop_sequences(
-                        completion_text, gen_config.stop_sequences
-                    )
-
-                    # Determine finish reason.
-                    # Pass last_token_id for EOS detection — available only in
-                    # the non-streaming path where we have the full output IDs.
-                    if stopped_by_sequence:
-                        logger.debug("finish_reason_stop_sequence")
-                        finish_reason = "stop"
-                    else:
-                        last_token_id = (
-                            int(generated_ids[-1]) if len(generated_ids) > 0 else None
+                        outputs = await asyncio.to_thread(
+                            self._generate_sync, generate_kwargs
                         )
-                        finish_reason = self._determine_finish_reason(
-                            completion_tokens,
-                            gen_config.max_new_tokens,
-                            last_token_id=last_token_id,
+                        _sensing_full_ids = outputs[0]
+
+                        # Notify monitoring after generation
+                        self._notify_monitoring(request_id=completion_id)
+
+                        # Decode output
+                        generated_ids = self._slice_generated(outputs[0], prompt_tokens)
+                        completion_text = self._tokenizer.decode(
+                            generated_ids, skip_special_tokens=True
+                        )
+                        completion_tokens = len(generated_ids)
+
+                        # Apply stop sequences
+                        completion_text, stopped_by_sequence = self._apply_stop_sequences(
+                            completion_text, gen_config.stop_sequences
                         )
 
-                    choices.append(
-                        ChatCompletionChoice(
-                            index=i,
-                            message=self._assistant_message(
-                                completion_text, prompt
-                            ),
-                            finish_reason=finish_reason,
-                        )
-                    )
+                        # Determine finish reason.
+                        # Pass last_token_id for EOS detection — available only in
+                        # the non-streaming path where we have the full output IDs.
+                        if stopped_by_sequence:
+                            logger.debug("finish_reason_stop_sequence")
+                            finish_reason = "stop"
+                        else:
+                            last_token_id = (
+                                int(generated_ids[-1]) if len(generated_ids) > 0 else None
+                            )
+                            finish_reason = self._determine_finish_reason(
+                                completion_tokens,
+                                gen_config.max_new_tokens,
+                                last_token_id=last_token_id,
+                            )
 
-                    total_prompt_tokens += prompt_tokens
-                    total_completion_tokens += completion_tokens
+                        choices.append(
+                            ChatCompletionChoice(
+                                index=i,
+                                message=self._assistant_message(
+                                    completion_text, prompt
+                                ),
+                                finish_reason=finish_reason,
+                            )
+                        )
+
+                        total_prompt_tokens += prompt_tokens
+                        total_completion_tokens += completion_tokens
+
+                if gen_config.seed is not None:
+                    note_request_outcome(seed_scope=self._seed_scope(SEED_SCOPE_REQUEST))
 
                 # ⚠ BEFORE the `finally`, and before the route reads the ContextVar to write
                 # `X-miLLM-Probe-Verdicts`. A verdict computed in the `finally` would exist only
@@ -3985,6 +4070,20 @@ class InferenceService:
                     "llama.cpp applies the template baked into the GGUF file "
                     "and exposes no way to pass variables into it"
                 ),
+            )
+        # Feature 25 defence in depth: the request policy refuses these from the model ROW before
+        # any load; a direct caller (Feature 26) or a row/engine mismatch must not reach here and
+        # be served with the field dropped.
+        if _request_seed(request) is not None:
+            raise FieldNotHonouredError(
+                "seed on the llama.cpp engine is not yet measured to reproduce (T-61); it is "
+                "refused rather than echoed unapplied.",
+                details={"param": "seed"},
+            )
+        if _constraint_type(getattr(request, "response_format", None)) is not None:
+            raise ResponseFormatUnsupportedError(
+                "Structured output on a GGUF model is refused in this release.",
+                details={"param": "response_format"},
             )
         if (getattr(request, "n", 1) or 1) > 1:
             # The transformers path documents and honours n > 1. This one builds
@@ -4302,6 +4401,11 @@ class InferenceService:
 
         prompts = request.prompt if isinstance(request.prompt, list) else [request.prompt]
         gen_config = GenerationConfig.from_request(request)
+        if gen_config.seed is not None:  # defence in depth; the policy refuses it before load
+            raise FieldNotHonouredError(
+                "seed on the llama.cpp engine is not yet measured to reproduce (T-61).",
+                details={"param": "seed"},
+            )
         params = self._llamacpp_params(gen_config, request)
 
         completion_id = f"cmpl-{uuid.uuid4().hex[:24]}"
@@ -4520,6 +4624,7 @@ class InferenceService:
                 thread = Thread(
                     target=self._generate_in_thread,
                     args=(generation_kwargs, thread_error),
+                    kwargs=_seed_kwargs(gen_config),
                 )
                 thread.start()
             except BaseException as setup_error:
@@ -4931,8 +5036,10 @@ class InferenceService:
                     generate_kwargs = self._build_generate_kwargs(
                         gen_config, inputs
                     )
+                    # Seeded per prompt (FTID I7): each prompt is its own generate(), so prompt
+                    # i's output does not depend on prompt i-1's length.
                     outputs = await asyncio.to_thread(
-                        self._generate_sync, generate_kwargs
+                        self._generate_sync, generate_kwargs, **_seed_kwargs(gen_config)
                     )
                     _sensing_full_ids = outputs[0]
 
@@ -4978,6 +5085,8 @@ class InferenceService:
                     total_prompt_tokens += prompt_tokens
                     total_completion_tokens += completion_tokens
 
+                if gen_config.seed is not None:
+                    note_request_outcome(seed_scope=self._seed_scope(SEED_SCOPE_REQUEST))
                 _probe_verdicts = self._probe_finish(_probe_ctx)
             finally:
                 await self._notify_sensing(_sensing_ctx, _sensing_full_ids)
@@ -5055,6 +5164,8 @@ class InferenceService:
                 )
                 prompt_total += prompt_tokens
 
+        if request.seed is not None:
+            note_request_outcome(seed_scope=SEED_SCOPE_REQUEST)  # scoring is deterministic
         model_info = self.get_loaded_model_info()
         return TextCompletionResponse(
             id=completion_id,
@@ -5147,6 +5258,8 @@ class InferenceService:
                 ))
                 prompt_total += prompt_tokens
 
+        if request.seed is not None:
+            note_request_outcome(seed_scope=SEED_SCOPE_REQUEST)  # scoring is deterministic
         model_info = self.get_loaded_model_info()
         return ChatCompletionResponse(
             id=completion_id,
@@ -5698,7 +5811,7 @@ class InferenceService:
     # Private Methods
     # =========================================================================
 
-    def _generate_sync(self, generation_kwargs: dict) -> Any:
+    def _generate_sync(self, generation_kwargs: dict, seed: Optional[int] = None) -> Any:
         """
         Run model.generate() synchronously (for use with asyncio.to_thread).
 
@@ -5712,7 +5825,9 @@ class InferenceService:
         until the error handler had finished with it.
         """
         try:
-            with torch.no_grad():
+            # The seed is applied HERE, in the worker thread, inside the request's admission slot
+            # (FR-25.13.2): no other request's sampling can consume the seeded stream.
+            with seeded_rng(seed), torch.no_grad():
                 return self._model.generate(**generation_kwargs)
         except torch.cuda.OutOfMemoryError as exc:
             refusal = _generation_oom_error(exc, generation_kwargs)
@@ -5723,7 +5838,7 @@ class InferenceService:
         raise refusal
 
     def _generate_in_thread(
-        self, generation_kwargs: dict, errors: Optional[list] = None
+        self, generation_kwargs: dict, errors: Optional[list] = None, seed: Optional[int] = None
     ) -> None:
         """
         Run generation in thread for streaming.
@@ -5742,7 +5857,7 @@ class InferenceService:
         """
         failure: Optional[Exception] = None
         try:
-            with torch.no_grad():
+            with seeded_rng(seed), torch.no_grad():
                 self._model.generate(**generation_kwargs)
         except torch.cuda.OutOfMemoryError as exc:
             failure = _generation_oom_error(exc, generation_kwargs)

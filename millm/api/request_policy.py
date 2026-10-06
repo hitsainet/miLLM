@@ -158,7 +158,7 @@ OUTPUT_CHANGING: dict[str, dict[tuple[Endpoint, Engine], Outcome]] = {
         refused("embeddings return vectors, not text"),
     ),
     "seed": _cells(
-        _PENDING, _T61, _PENDING, _T61,
+        HONOURED, _T61, HONOURED, _T61,
         refused("embeddings are deterministic; there is no sampling for a seed to fix"),
         refused("embeddings are deterministic; there is no sampling for a seed to fix"),
     ),

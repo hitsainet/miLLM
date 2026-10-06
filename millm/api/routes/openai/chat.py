@@ -45,8 +45,16 @@ from millm.services.inference_service import (
     InferenceService,
     circuit_apply_failed,
     get_probe_verdicts,
+    get_request_outcome,
     reset_steering_memo,
 )
+from millm.services.system_fingerprint import build_system_fingerprint
+
+
+def seed_header(seed: int, scope: str) -> str:
+    """`X-miLLM-Seed: 7;scope="request"` (FR-25.13.6, FR-25.14). Sent only when the request
+    carried a seed — miLLM never chooses one of its own (T-60)."""
+    return f'{seed};scope="{scope}"'
 
 
 def build_probe_verdicts_header(verdicts: list) -> str:
@@ -263,6 +271,12 @@ async def create_chat_completion(
         if ignored_header:
             # Detection finished before the first byte (FR-25.1.7).
             stream_headers[IGNORED_FIELDS_HEADER] = ignored_header
+        if request.seed is not None:
+            # Streaming headers precede the generator body, so the scope is decided here, from
+            # the same rule the service applies (a stream is one conversation, never batched).
+            stream_headers["X-miLLM-Seed"] = seed_header(
+                request.seed, inference.seed_scope_for(request)
+            )
         if echo_intensity is not None:
             stream_headers["X-miLLM-Steering-Intensity"] = echo_intensity
         if echo_circuit_rung is not None:
@@ -301,6 +315,13 @@ async def create_chat_completion(
         result = await inference.create_chat_completion(request)
         if ignored_header:
             response.headers[IGNORED_FIELDS_HEADER] = ignored_header
+        outcome = get_request_outcome()
+        if request.seed is not None:
+            # The scope the path that RAN recorded; the up-front rule only if it recorded none.
+            response.headers["X-miLLM-Seed"] = seed_header(
+                request.seed, outcome.get("seed_scope") or inference.seed_scope_for(request)
+            )
+        result.system_fingerprint = build_system_fingerprint(model, inference.loaded_model())
         if echo_circuit_rung is not None and not circuit_apply_failed():
             response.headers["X-miLLM-Circuit-Rung"] = echo_circuit_rung
 

@@ -19,7 +19,7 @@ Known approximations:
   from the OpenAI default of 16 tokens — see TextCompletionRequest.
 """
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any, Optional, Union
 
 from millm.api.schemas.openai import ChatCompletionRequest, TextCompletionRequest
@@ -51,6 +51,12 @@ class GenerationConfig:
     frequency_penalty: float = 0.0
     presence_penalty: float = 0.0
     cache_implementation: Optional[str] = None  # "static" or None for dynamic
+    #: Feature 25: the request's seed (FR-25.13). Applied by InferenceService inside the
+    #: admission slot under torch.random.fork_rng; never emitted into generate() kwargs.
+    seed: Optional[int] = None
+    #: Feature 25: the `response_format` constraint ("json_object"/"json_schema" and its schema),
+    #: or None. InferenceService compiles it and appends a logits processor per generate().
+    constraint: Any = None
 
     @classmethod
     def from_request(
@@ -83,6 +89,12 @@ class GenerationConfig:
         # Temperature=0 means greedy decoding
         do_sample = request.temperature > 0
 
+        seed = getattr(request, "seed", None)
+        response_format = getattr(request, "response_format", None)
+        constraint = None
+        if response_format is not None and getattr(response_format, "type", "text") != "text":
+            constraint = response_format
+
         return cls(
             max_new_tokens=request.max_tokens or 512,
             temperature=request.temperature,
@@ -91,6 +103,8 @@ class GenerationConfig:
             stop_sequences=stop_sequences,
             frequency_penalty=request.frequency_penalty,
             presence_penalty=request.presence_penalty,
+            seed=seed if isinstance(seed, int) and not isinstance(seed, bool) else None,
+            constraint=constraint,
         )
 
     def to_generate_kwargs(self) -> dict[str, Any]:
@@ -149,29 +163,16 @@ class GenerationConfig:
         return kwargs
 
     def with_max_tokens(self, max_tokens: int) -> "GenerationConfig":
-        """Return a new config with updated max_tokens."""
-        return GenerationConfig(
-            max_new_tokens=max_tokens,
-            temperature=self.temperature,
-            top_p=self.top_p,
-            do_sample=self.do_sample,
-            stop_sequences=self.stop_sequences,
-            frequency_penalty=self.frequency_penalty,
-            presence_penalty=self.presence_penalty,
-            cache_implementation=self.cache_implementation,
-        )
+        """Return a new config with updated max_tokens.
+
+        `dataclasses.replace`, not a hand-written constructor call: the hand-written copy listed
+        every field by name and would have silently dropped any field added later — the seed and
+        the constraint, in Feature 25.
+        """
+        return replace(self, max_new_tokens=max_tokens)
 
     def with_stop_sequences(
         self, stop_sequences: Optional[list[str]]
     ) -> "GenerationConfig":
-        """Return a new config with updated stop sequences."""
-        return GenerationConfig(
-            max_new_tokens=self.max_new_tokens,
-            temperature=self.temperature,
-            top_p=self.top_p,
-            do_sample=self.do_sample,
-            stop_sequences=stop_sequences,
-            frequency_penalty=self.frequency_penalty,
-            presence_penalty=self.presence_penalty,
-            cache_implementation=self.cache_implementation,
-        )
+        """Return a new config with updated stop sequences (see `with_max_tokens`)."""
+        return replace(self, stop_sequences=stop_sequences)

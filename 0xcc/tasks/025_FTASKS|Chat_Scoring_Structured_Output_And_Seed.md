@@ -188,25 +188,26 @@ miStudio 034 to send `X-miLLM-Strict: true` safely.
   - [x] 5.15 Tests — shape: `token_id:<id>` form with correct `bytes`; `top_logprobs: 0` → `[]`;
         `allowed_token_ids` alone → `logprobs: null` and a constrained `content`.
 
-- [ ] 6.0 Seed and system fingerprint (covers FR-25.13, FR-25.14)
-  - [ ] 6.1 Schemas: `seed` on chat and completions, range 0–2³²−1 (FR-25.13.1); table: refused on
+- [x] 6.0 Seed and system fingerprint (covers FR-25.13, FR-25.14)
+  - [x] 6.1 Schemas: `seed` on chat and completions, range 0–2³²−1 (FR-25.13.1); table: refused on
         embeddings.
-  - [ ] 6.2 `GenerationConfig.seed`; `_generate_sync` (`:5492`) under `fork_rng` + `manual_seed` in
+  - [x] 6.2 `GenerationConfig.seed`; `_generate_sync` (`:5492`) under `fork_rng` + `manual_seed` in
         the worker thread (FR-25.13.2; FTID §7.4).
-  - [ ] 6.3 Thread the seed through every transformers generation path: serial chat (incl. the `n`
+  - [x] 6.3 Thread the seed through every transformers generation path: serial chat (incl. the `n`
         loop at `:3675`), streaming chat, batched chat, text completion.
-  - [ ] 6.4 CBM gate (`:958-982`): seeded requests never use the CBM (FR-25.13.7).
-  - [ ] 6.5 Scope reporting: `request` / `batch-shape` / `best-effort`; route sets `X-miLLM-Seed`
+  - [x] 6.4 CBM gate (`:958-982`): seeded requests never use the CBM (FR-25.13.7).
+  - [x] 6.5 Scope reporting: `request` / `batch-shape` / `best-effort`; route sets `X-miLLM-Seed`
         only when a seed was sent (FR-25.13.6, FR-25.14.1–14.2, FR-25.14.4; T-60).
-  - [ ] 6.6 llama.cpp: implement the outcome 0.3 measured — forward `seed` in `_llamacpp_params`
-        (`:3933-3954`) and flip the table cell, or keep *refused* (FR-25.14.3; T-61).
-  - [ ] 6.7 `system_fingerprint.py` and the route assignment on chat and text completion responses
+  - [x] 6.6 llama.cpp: implement the outcome 0.3 measured — forward `seed` in `_llamacpp_params`
+        (`:3933-3954`) and flip the table cell, or keep *refused* (FR-25.14.3; T-61). *Done as "keep refused": 0.3 is unmeasured, so the table cell and a
+        service guard refuse; flipping it is part of 0.3 (hardware).*
+  - [x] 6.7 `system_fingerprint.py` and the route assignment on chat and text completion responses
         (FR-25.13.8–13.10).
-  - [ ] 6.8 Tests: same sampled request with `seed: 7` twice → byte-identical text and
+  - [x] 6.8 Tests: same sampled request with `seed: 7` twice → byte-identical text and
         `finish_reason` (SC-7; M13); seed 8 differs; an unseeded request after a seeded one is not
         reproducible from the seed (M12); greedy and scoring echo the seed; batched chat reports
         `batch-shape`; out-of-range seed → `400`; GGUF seed refused before load (until 6.6 flips).
-  - [ ] 6.9 Tests: fingerprint contains model, revision, precision and engine; NULL revision →
+  - [x] 6.9 Tests: fingerprint contains model, revision, precision and engine; NULL revision →
         `unrecorded`; `"unknown"` dtype → `unrecorded`; changes when the loaded dtype changes; present
         on unseeded responses.
 

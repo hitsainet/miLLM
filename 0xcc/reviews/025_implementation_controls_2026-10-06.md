@@ -20,6 +20,7 @@ is re-run as a negative control (rows suffixed `-rerun`).
 | After 2.0 (request policy) | 3872 passed / 3 skipped / 0 failed |
 | After 4.0 (small refusals) | 3898 passed / 3 skipped / 0 failed |
 | After 5.0 (chat scoring) | 3932 passed / 3 skipped / 0 failed |
+| After 6.0 (seed + fingerprint) | 3964 passed / 3 skipped / 0 failed |
 
 ## Discrepancies between the documents and the code (the code won)
 
@@ -71,6 +72,25 @@ is re-run as a negative control (rows suffixed `-rerun`).
   have serialised `"logprobs": null` into every generation response; it is declared with
   `exclude_if=None` (pydantic 2.12) so a client sending no new field gets the body it got before
   (FPRD §8). Pinned by `test_a_generation_response_carries_no_logprobs_key`.
+- **Seed devices.** FTID §7.4 forks the RNG of "the CUDA devices the model occupies". But
+  `torch.manual_seed` reseeds EVERY CUDA device, so forking only the model's cards would leave the
+  others permanently reseeded. `seeded_rng` forks every initialised device (`_rng_devices`).
+- **Seed over the serial `n` loop.** FTID §7.4 seeds inside `_generate_sync`, i.e. per
+  `generate()` call. On the serial path with `n > 1` that makes all n choices identical. The serial
+  chat path enters `seeded_rng` once around the whole n-loop (inside the slot; RNG state is
+  process-global, so the worker threads draw from it). Text completions keep per-prompt seeding
+  (FTID I7), as do the batched and streaming paths. Pinned by
+  `test_n_choices_are_reproducible_and_not_all_identical` and control `C6-serial-loop`.
+- **`GenerationConfig` copies dropped new fields.** `with_max_tokens`, `with_stop_sequences` and the
+  static-cache branch of `_build_generate_kwargs` rebuilt the config field by field, so a seed or a
+  constraint would have vanished on those paths. All three now use `dataclasses.replace`.
+- **`system_fingerprint` on streams.** FTDD §5.2 assigns it on non-streaming responses only and sends
+  only headers on a stream; FR-25.13.8 reads "every chat and text completion response". Followed the
+  FTDD; a streamed chunk carries no fingerprint. Recorded as a follow-up.
+- **Interrupted control.** The session was killed while control `C6-best-effort` held its mutation
+  in `inference_service.py`. On resume the tree still carried `return base`; the file was restored
+  from the control's pre-mutation backup (sha256 `52d4643c…` matched), every earlier mutated line
+  was re-grepped present, the diff was scanned for mutation artifacts, and the control was re-run.
 
 ## Mutation controls
 
@@ -114,4 +134,23 @@ is re-run as a negative control (rows suffixed `-rerun`).
 | 36 | C5-schema-stream | `millm/api/schemas/openai.py` | chat scoring `stream=false` limit disabled | yes | 1 failed, 11 passed in 5.17s | **red** | ok |
 | 37 | C5-top-needs-logprobs | `millm/api/schemas/openai.py` | `top_logprobs` without `logprobs: true` accepted | yes | 1 failed, 13 passed in 5.04s | **red** | ok |
 | 38 | C5-table-profile | `millm/api/request_policy.py` | table: `profile` honoured on a scoring request (refuse_if removed) | yes | 1 failed, 17 passed in 5.29s | **red** | ok |
+| 39 | M12 | `millm/services/inference_service.py` | `seeded_rng`: `torch.random.fork_rng(...)` removed (seed applied, global state not restored) | yes | 1 failed, 6 passed in 5.18s | **red** | ok |
+| 40 | M13 | `millm/services/inference_service.py` | `seeded_rng`: `torch.manual_seed(seed)` removed | yes | 1 failed in 4.89s | **red** | ok |
+| 41 | C6-generate-sync | `millm/services/inference_service.py` | `_generate_sync`: `seeded_rng(seed)` dropped (batched + text completion unseeded) | yes | 1 failed, 3 passed in 5.12s | **red** | ok |
+| 42 | C6-stream-thread | `millm/services/inference_service.py` | streaming: seed kwargs no longer passed to the generation thread | yes | 1 failed, 5 passed in 5.14s | **red** | ok |
+| 43 | C6-in-thread | `millm/services/inference_service.py` | `_generate_in_thread`: `seeded_rng(seed)` dropped | yes | 1 failed, 5 passed in 5.15s | **red** | ok |
+| 44 | C6-serial-loop | `millm/services/inference_service.py` | serial chat: `with seeded_rng(gen_config.seed)` around the n-loop -> nullcontext | yes | 1 failed in 4.95s | **red** | ok |
+| 45 | C6-batched | `millm/services/inference_service.py` | batched chunk: seed kwargs not passed to `_generate_sync` | yes | 1 failed, 4 passed in 5.07s | **red** | ok |
+| 46 | C6-text | `millm/services/inference_service.py` | text completion: seed kwargs not passed to `_generate_sync` | yes | 1 failed, 3 passed in 5.04s | **red** | ok |
+| 47 | C6-cbm-seeded | `millm/services/inference_service.py` | CBM gate: seeded requests no longer route serial | yes | 1 failed, 10 passed in 5.36s | **red** | ok |
+| 48 | C6-scope-batch | `millm/services/inference_service.py` | batched path records scope `request` instead of `batch-shape` | yes | 1 failed, 9 passed in 5.25s | **red** | ok |
+| 49 | C6-best-effort | `millm/services/inference_service.py` | `_seed_scope` never downgrades to `best-effort` while the CBM runs (first run interrupted mid-control; see note below; re-run here) | yes | 1 failed, 10 passed in 5.29s | **red** | ok |
+| 50 | C6-route-chat-seed | `millm/api/routes/openai/chat.py` | chat route: non-streaming `X-miLLM-Seed` assignment removed | yes | 1 failed, 12 passed in 7.65s | **red** | ok |
+| 51 | C6-route-stream-seed | `millm/api/routes/openai/chat.py` | chat route: streaming `X-miLLM-Seed` assignment removed | yes | 1 failed, 14 passed in 10.29s | **red** | ok |
+| 52 | C6-route-comp-seed | `millm/api/routes/openai/completions.py` | completions route: `X-miLLM-Seed` assignment removed | yes | 1 failed, 15 passed in 10.00s | **red** | ok |
+| 53 | C6-fp-chat | `millm/api/routes/openai/chat.py` | chat route: `system_fingerprint` assignment removed | yes | 1 failed, 24 passed in 15.04s | **red** | ok |
+| 54 | C6-fp-comp | `millm/api/routes/openai/completions.py` | completions route: `system_fingerprint` assignment removed | yes | 1 failed, 24 passed in 15.11s | **red** | ok |
+| 55 | C6-llamacpp-chat-seed | `millm/services/inference_service.py` | service defence in depth: llama.cpp chat seed refusal disabled | yes | 1 failed, 25 passed in 15.39s | **red** | ok |
+| 56 | C6-table-seed | `millm/api/request_policy.py` | table: seed honoured on llama.cpp (T-61 refusal removed) | yes | 1 failed, 22 passed in 13.81s | **red** | ok |
+| 57 | C6-bool-seed | `millm/api/schemas/openai.py` | `seed: true` accepted as seed 1 | yes | 1 failed, 19 passed in 13.47s | **red** | ok |
 

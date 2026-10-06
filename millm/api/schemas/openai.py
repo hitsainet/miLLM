@@ -55,6 +55,18 @@ MIN_SCORING_TEMPERATURE = 1e-3
 # it, so it lands in `model_extra` and is reported as unused — and refused under X-miLLM-Strict.
 
 
+#: The seed range (FR-25.13.1, 025_FTDD U7): 0 to 2**32-1 — fits torch and llama.cpp. Outside it
+#: the request is refused, never wrapped or clamped.
+SEED_MAX = 2**32 - 1
+
+
+def _reject_bool_seed(v: Any) -> Any:
+    # bool is an int subclass: without this, `"seed": true` silently becomes seed 1.
+    if isinstance(v, bool):
+        raise ValueError("seed must be an integer")
+    return v
+
+
 def _fold_max_completion_tokens(data: Any) -> Any:
     """`max_completion_tokens` is honoured AS `max_tokens` (T-58, FR-25.3.3a).
 
@@ -167,6 +179,11 @@ class ChatCompletionRequest(BaseModel):
     #: Key tokens as "token_id:<id>" (vLLM's switch). `bytes` stays the decoded text's UTF-8.
     return_tokens_as_token_ids: bool = False
 
+    #: Reproducible sampling (FR-25.13): applied inside the admission slot under a forked RNG,
+    #: echoed in X-miLLM-Seed with the scope of the promise. Accepted and echoed under greedy
+    #: decoding and scoring, where it changes nothing.
+    seed: Optional[int] = Field(default=None, ge=0, le=SEED_MAX)
+
     # miLLM extension - steering profile override
     profile: Optional[str] = None
 
@@ -233,6 +250,11 @@ class ChatCompletionRequest(BaseModel):
     @classmethod
     def _max_completion_tokens(cls, data: Any) -> Any:
         return _fold_max_completion_tokens(data)
+
+    @field_validator("seed", mode="before")
+    @classmethod
+    def _seed_not_bool(cls, v):
+        return _reject_bool_seed(v)
 
     @field_validator("n")
     @classmethod
@@ -346,8 +368,16 @@ class TextCompletionRequest(BaseModel):
     #: Key `top_logprobs` by "token_id:<id>" instead of the decoded token, which is ambiguous
     #: (vLLM's name for the same switch).
     return_tokens_as_token_ids: bool = False
+    #: Reproducible sampling (FR-25.13). Applied per prompt — each prompt is its own generate(),
+    #: so prompt i's output does not depend on prompt i-1's length (FTID I7).
+    seed: Optional[int] = Field(default=None, ge=0, le=SEED_MAX)
 
     model_config = {"extra": "allow"}
+
+    @field_validator("seed", mode="before")
+    @classmethod
+    def _seed_not_bool(cls, v):
+        return _reject_bool_seed(v)
 
     @model_validator(mode="before")
     @classmethod
@@ -484,6 +514,8 @@ class ChatCompletionResponse(BaseModel):
     model: str
     choices: list[ChatCompletionChoice]
     usage: Usage
+    #: model, revision, precision and engine (FR-25.13.8-13.10); set by the route.
+    system_fingerprint: Optional[str] = Field(default=None, exclude_if=lambda v: v is None)
 
 
 # =============================================================================
@@ -571,6 +603,8 @@ class TextCompletionResponse(BaseModel):
     model: str
     choices: list[TextCompletionChoice]
     usage: Usage
+    #: model, revision, precision and engine (FR-25.13.8-13.10); set by the route.
+    system_fingerprint: Optional[str] = Field(default=None, exclude_if=lambda v: v is None)
 
 
 # =============================================================================

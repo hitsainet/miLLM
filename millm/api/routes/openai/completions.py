@@ -40,7 +40,13 @@ from millm.core.errors import (
     ModelLockedError,
 )
 from millm.core.logging import get_logger
-from millm.services.inference_service import InferenceService
+from millm.api.routes.openai.chat import seed_header
+from millm.services.inference_service import (
+    InferenceService,
+    get_request_outcome,
+    reset_request_outcome,
+)
+from millm.services.system_fingerprint import build_system_fingerprint
 
 router = APIRouter()
 logger = get_logger(__name__)
@@ -156,7 +162,14 @@ async def create_completion(
     )
 
     response.headers["X-miLLM-Backend"] = inference.backend_name
+    reset_request_outcome()
     result = await inference.create_text_completion(request)
     if ignored_header:
         response.headers[IGNORED_FIELDS_HEADER] = ignored_header
+    if request.seed is not None:
+        response.headers["X-miLLM-Seed"] = seed_header(
+            request.seed,
+            get_request_outcome().get("seed_scope") or inference.seed_scope_for(request),
+        )
+    result.system_fingerprint = build_system_fingerprint(model, inference.loaded_model())
     return result

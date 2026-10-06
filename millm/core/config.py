@@ -7,7 +7,7 @@ with support for .env files.
 
 from typing import Literal, Optional
 
-from pydantic import field_validator
+from pydantic import field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -255,6 +255,30 @@ class Settings(BaseSettings):
     MAX_CONCURRENT_REQUESTS: int = 1
     MAX_PENDING_REQUESTS: int = 10
 
+    # Feature 29: model lease (process memory only; a restart ends every lease, X-01).
+    # The default TTL is also the maximum (2 hours); a TTL outside 1..LEASE_MAX_TTL_SECONDS
+    # is refused with 400 INVALID_LEASE_REQUEST, never clamped.
+    LEASE_DEFAULT_TTL_SECONDS: int = 7200
+    LEASE_MAX_TTL_SECONDS: int = 7200
+    LEASE_HOLDER_MAX_CHARS: int = 128
+    LEASE_REASON_MAX_CHARS: int = 512
+    # Ended leases remembered (by digest) so renew/release of a seen ID answers 409 with
+    # its end reason rather than 404. Lost on restart, deliberately.
+    LEASE_ENDED_MEMORY: int = 64
+    # Feature 29: slot-holding durations kept for /api/health/detailed's estimated wait.
+    QUEUE_DURATION_WINDOW: int = 50
+    # Feature 29: Retry-After seconds per 503 code (029 FTDD §5.3). The fallback is
+    # DISTINCT on purpose: it is set only by RetryAfterMiddleware, for a 503 whose
+    # builder forgot the header, and that path also logs `retry_after_defaulted`.
+    RETRY_AFTER_QUEUE_DEFAULT_S: int = 5
+    RETRY_AFTER_MAX_S: int = 60
+    RETRY_AFTER_LOAD_S: int = 15
+    RETRY_AFTER_UNLOAD_S: int = 5
+    RETRY_AFTER_NOT_LOADED_S: int = 30
+    RETRY_AFTER_MEMORY_S: int = 30
+    RETRY_AFTER_READINESS_S: int = 5
+    RETRY_AFTER_FALLBACK_S: int = 10
+
     # Feature 25 (request validation and structured output).
     # Compiled JSON-Schema grammars kept per loaded model (LRU). A compile costs
     # 0.1-0.7 s on the served tokenizers and runs outside the request slot; the
@@ -447,6 +471,20 @@ class Settings(BaseSettings):
         if value < 0:
             raise ValueError(f"TRANSFORMERS_CUDA_CONTEXT_MB must be 0 or more, got {value}")
         return value
+
+    @model_validator(mode="after")
+    def _validate_lease_ttls(self) -> "Settings":
+        """A default TTL above the maximum would make every TTL-less grant a refusal."""
+        if self.LEASE_MAX_TTL_SECONDS < 1:
+            raise ValueError(
+                f"LEASE_MAX_TTL_SECONDS must be at least 1, got {self.LEASE_MAX_TTL_SECONDS}"
+            )
+        if not 1 <= self.LEASE_DEFAULT_TTL_SECONDS <= self.LEASE_MAX_TTL_SECONDS:
+            raise ValueError(
+                "LEASE_DEFAULT_TTL_SECONDS must be between 1 and LEASE_MAX_TTL_SECONDS "
+                f"({self.LEASE_MAX_TTL_SECONDS}), got {self.LEASE_DEFAULT_TTL_SECONDS}"
+            )
+        return self
 
     @property
     def cors_origins_list(self) -> list[str]:

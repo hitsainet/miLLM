@@ -66,29 +66,29 @@ T-84 – T-90
 ## Tasks
 
 - [ ] 0.0 Spikes and preconditions (covers FR-29.8, T-89; all FRs for 0.1)
-  - [ ] 0.1 Re-verify every `path:line` cited in the FTDD and FTID at the current HEAD. Record moved
+  - [x] 0.1 Re-verify every `path:line` cited in the FTDD and FTID at the current HEAD. Record moved
         lines in the review record before editing anything.
-  - [ ] 0.2 **T-89 spike, on the node.** (a) Inside the miLLM pod, run
+  - [?] 0.2 **T-89 spike, on the node.** _needs hardware — operator session._ (a) Inside the miLLM pod, run
         `nvidia-smi --query-compute-apps=gpu_uuid,pid,used_memory --format=csv,noheader,nounits`
         with a model loaded; record whether miLLM's process appears and with which PID. (b) Measure
         the CUDA context size: after an unload, record `torch.cuda.memory_reserved(i)` and the
         process's `used_memory` from the node's `nvidia-smi`; the difference is `cuda_context_mb`.
         Record both in the review; acceptance 16 (11.4) uses them.
-  - [ ] 0.3 Confirm with the 026 FTDD (§2, §7) that the names in FTID §10 are the ones its runner
+  - [x] 0.3 Confirm with the 026 FTDD (§2, §7) that the names in FTID §10 are the ones its runner
         calls: `acquire_lease`, `renew_lease`, `release_lease`, `resolve_lease`, `holding_count`,
         `register_backlog_provider`. Record any drift as a task here, not in 026's files.
 
-- [ ] 1.0 Errors, settings and the value policy (covers FR-29.1.2, FR-29.2.3, FR-29.6.3)
-  - [ ] 1.1 Add the 14 settings (FTID §9) with the startup validator
+- [x] 1.0 Errors, settings and the value policy (covers FR-29.1.2, FR-29.2.3, FR-29.6.3)
+  - [x] 1.1 Add the 14 settings (FTID §9) with the startup validator
         `LEASE_DEFAULT_TTL_SECONDS <= LEASE_MAX_TTL_SECONDS`; document each in `.env.example`.
-  - [ ] 1.2 Add `ModelLeasedError`, `ModelNotResidentError`, `LeaseNotFoundError`,
+  - [x] 1.2 Add `ModelLeasedError`, `ModelNotResidentError`, `LeaseNotFoundError`,
         `LeaseExpiredError`, `InvalidLeaseRequestError` (FTID §5). `ModelLeasedError` does **not**
         subclass `ModelLockedError`.
-  - [ ] 1.3 Add `MODEL_LEASED` and `MODEL_NOT_RESIDENT` to `ERROR_STATUS_MAP`; add
+  - [x] 1.3 Add `MODEL_LEASED` and `MODEL_NOT_RESIDENT` to `ERROR_STATUS_MAP`; add
         `model_not_resident_error`.
-  - [ ] 1.4 Write `backpressure.retry_after_for` with the T-88 table (FTDD §5.3), including the
+  - [x] 1.4 Write `backpressure.retry_after_for` with the T-88 table (FTDD §5.3), including the
         unload-vs-load distinction on `MODEL_BUSY` and the breaker remainder for `HUB_UNAVAILABLE`.
-  - [ ] 1.5 Tests: one value per code; integer ≥ 1; `QUEUE_FULL` clamp at 60 and default without an
+  - [x] 1.5 Tests: one value per code; integer ≥ 1; `QUEUE_FULL` clamp at 60 and default without an
         estimate; breaker remainder with an injected clock; a `ModelBusyError` with and without
         `unloading_model_id` gives 5 and 15; `ModelLeasedError` maps to `model_leased`, never
         `model_locked`.

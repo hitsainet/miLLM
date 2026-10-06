@@ -132,6 +132,14 @@ ERROR_STATUS_MAP: dict[str, tuple[int, str]] = {
     "MODEL_ALREADY_EXISTS": (409, "invalid_request_error"),
     "MODEL_LOAD_FAILED": (500, "server_error"),
     "MODEL_LOCKED": (409, "invalid_request_error"),
+    # Feature 29: the model lease. MODEL_LEASED and MODEL_NOT_RESIDENT reach /v1 (an
+    # auto-load under a foreign lease; the refuse-load policy). The three lease-route
+    # codes are management-plane, present so the map stays complete.
+    "MODEL_LEASED": (409, "invalid_request_error"),
+    "MODEL_NOT_RESIDENT": (409, "invalid_request_error"),
+    "LEASE_NOT_FOUND": (404, "invalid_request_error"),
+    "LEASE_EXPIRED": (409, "invalid_request_error"),
+    "INVALID_LEASE_REQUEST": (400, "invalid_request_error"),
     "INVALID_GGUF_TENSOR_SPLIT": (500, "server_error"),
     "SPLIT_NOT_HONOURED": (409, "invalid_request_error"),
     "DOWNLOAD_CANCELLED": (499, "invalid_request_error"),
@@ -288,6 +296,33 @@ def model_locked_error(model_id: str, locked_model: str) -> JSONResponse:
         f"Model '{locked_model}' is currently locked for steering.",
         error_type="invalid_request_error",
         code="model_locked",
+        param="model",
+        status_code=409,
+    )
+
+
+def model_not_resident_error(
+    requested: str, resident: Optional[str], lease: Optional[dict] = None
+) -> JSONResponse:
+    """`X-miLLM-Load-Policy: refuse` and the model is not resident: 409, and nothing loads.
+
+    Names the requested and the resident model ("none" when nothing is loaded). When the
+    resident model is leased the message says by whom and until when, so the caller sees why
+    the model may not change soon (FR-29.4.2, FR-29.4.4). The lease ID is never in it.
+    """
+    message = (
+        f"The model '{requested}' is not resident and this request asked not to load it "
+        f"(X-miLLM-Load-Policy: refuse). Resident model: '{resident or 'none'}'."
+    )
+    if lease:
+        message += (
+            f" It is leased by '{lease['holder']}' until {lease['expires_at']} "
+            f"({lease['reason']})."
+        )
+    return create_openai_error(
+        message=message,
+        error_type="invalid_request_error",
+        code="model_not_resident",
         param="model",
         status_code=409,
     )

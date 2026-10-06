@@ -1218,7 +1218,9 @@ class ModelService:
         if self.loader.is_unloading is True:
             raise ModelBusyError(
                 f"Model {model_id} is already being unloaded",
-                details={"model_id": model_id},
+                # `unloading` marks an UNLOAD in progress, so Retry-After is the shorter
+                # unload value (Feature 29, backpressure.retry_after_for).
+                details={"model_id": model_id, "unloading": True},
             )
 
         logger.info("unload_started", model_id=model_id, timeout=timeout)
@@ -1490,7 +1492,7 @@ class ModelService:
             # 2026-09-14.
             raise ModelBusyError(
                 f"Model {model_id} is still being unloaded; retry once it finishes",
-                details={"model_id": model_id},
+                details={"model_id": model_id, "unloading": True},
             ) from exc
 
         # Poll until loaded or error

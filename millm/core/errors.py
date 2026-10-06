@@ -253,6 +253,85 @@ class ModelLockedError(MiLLMError):
 
 
 # =============================================================================
+# Model lease (Feature 29)
+#
+# A lease pins the resident model for a named holder until its TTL. It sits BESIDE
+# `locked` (checkpoint decision C8): ModelLeasedError must never subclass
+# ModelLockedError, because the /v1 routes catch ModelLockedError first and would
+# answer `model_locked` — a code that names no holder and no expiry.
+# =============================================================================
+
+
+class ModelLeasedError(MiLLMError):
+    """A load, unload or swap refused because another holder leases the resident model.
+
+    `details` names holder, reason, `expires_at` and the leased model so the caller knows
+    who to wait for and until when. It never carries the lease ID, its digest or its ref.
+    """
+
+    code = "MODEL_LEASED"
+    status_code = 409
+
+    @classmethod
+    def for_lease(
+        cls,
+        *,
+        model_id: int,
+        model_name: str,
+        holder: str,
+        reason: str,
+        expires_at: str,
+        operation: str,
+        target_model_id: Optional[int],
+    ) -> "ModelLeasedError":
+        """The refusal for `operation` on `target_model_id` under the given live lease."""
+        message = (
+            f"Model '{model_name}' is leased by '{holder}' until {expires_at} ({reason}); "
+            f"{operation} of model {target_model_id} refused."
+        )
+        return cls(
+            message,
+            details={
+                "holder": holder,
+                "reason": reason,
+                "expires_at": expires_at,
+                "leased_model_id": model_id,
+                "leased_model_name": model_name,
+                "operation": operation,
+                "target_model_id": target_model_id,
+            },
+        )
+
+
+class ModelNotResidentError(MiLLMError):
+    """A lease asked for a model that is not the resident, LOADED one (T-85)."""
+
+    code = "MODEL_NOT_RESIDENT"
+    status_code = 409
+
+
+class LeaseNotFoundError(MiLLMError):
+    """An unknown lease ID, or one that belongs to a different model than the route names."""
+
+    code = "LEASE_NOT_FOUND"
+    status_code = 404
+
+
+class LeaseExpiredError(MiLLMError):
+    """A lease ID this process has seen, which has ended (`details.end_reason`)."""
+
+    code = "LEASE_EXPIRED"
+    status_code = 409
+
+
+class InvalidLeaseRequestError(MiLLMError):
+    """A lease request field outside its bounds; `details.param` names it and the limit."""
+
+    code = "INVALID_LEASE_REQUEST"
+    status_code = 400
+
+
+# =============================================================================
 # Resource Errors
 # =============================================================================
 

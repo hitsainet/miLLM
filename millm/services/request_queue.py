@@ -12,6 +12,9 @@ Implementation notes:
 """
 
 import asyncio
+import statistics
+import time
+from collections import deque
 from contextlib import asynccontextmanager
 from typing import AsyncGenerator, Optional
 
@@ -72,6 +75,16 @@ class RequestQueue:
         #: Set while no request holds or waits for a slot (wait_idle).
         self._idle = asyncio.Event()
         self._idle.set()
+        #: Interactive requests HOLDING a slot now (Feature 29). `_pending` counts waiting
+        #: plus holding, so `pending_count - holding_count` is the number waiting.
+        self._holding = 0
+        #: Feature 26's batch chunks holding the slot. Nothing in this feature changes it;
+        #: it exists so `in_flight` reads one attribute rather than guessing (026 FTDD §7).
+        self._background_holding = 0
+        #: Recent slot-holding durations in seconds, for the estimated wait (FR-29.7.4).
+        from millm.core.config import settings
+
+        self._durations: deque[float] = deque(maxlen=max(settings.QUEUE_DURATION_WINDOW, 1))
 
     @asynccontextmanager
     async def acquire(
@@ -152,12 +165,16 @@ class RequestQueue:
             else:
                 await self._semaphore.acquire()
             acquired = True
+            self._holding += 1
+            started = time.monotonic()
 
             logger.debug("request_slot_acquired", pending=self._pending)
             yield
 
         finally:
             if acquired:
+                self._holding -= 1
+                self._durations.append(time.monotonic() - started)
                 self._semaphore.release()
             async with self._lock:
                 self._pending -= 1
@@ -186,6 +203,22 @@ class RequestQueue:
     def pending_count(self) -> int:
         """Current number of pending requests."""
         return self._pending
+
+    @property
+    def holding_count(self) -> int:
+        """Interactive requests holding a slot now — the idle cache release included (T-90)."""
+        return self._holding
+
+    @property
+    def background_holding_count(self) -> int:
+        """Batch chunks holding a slot now (Feature 26); 0 until that feature counts them."""
+        return self._background_holding
+
+    def median_hold_seconds(self) -> Optional[float]:
+        """Median of the recent slot-holding durations; None with fewer than three samples."""
+        if len(self._durations) < 3:
+            return None
+        return float(statistics.median(self._durations))
 
     @property
     def is_available(self) -> bool:

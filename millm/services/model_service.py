@@ -32,6 +32,9 @@ from millm.core.errors import (
     ModelLockedError,
     ModelNotFoundError,
     ModelNotLoadedError,
+    ModelLeasedError,
+    ModelNotResidentError,
+    InvalidLeaseRequestError,
 )
 from millm.core.errors import GgufTensorSplitError
 from millm.db.models.model import Model, ModelSource, ModelStatus, QuantizationType
@@ -53,6 +56,14 @@ from millm.ml.model_loader import (
     plan_gguf_placement,
     plan_transformers_load,
     preflight_split,
+)
+from millm.services.model_lease import (
+    END_MODEL_UNLOADED,
+    EndedLease,
+    LeaseGrant,
+    LeaseRecord,
+    LeaseRegistry,
+    get_lease_registry,
 )
 from millm.sockets.progress import ProgressEmitter
 
@@ -170,6 +181,179 @@ class ModelService:
         """Release the slot only if `model_id` still holds it."""
         if _LOAD_SLOT["model_id"] == model_id:
             _LOAD_SLOT["model_id"] = None
+
+    # =========================================================================
+    # Model lease (Feature 29)
+    #
+    # The registry is process-wide (`get_lease_registry`), for the reason `_LOAD_SLOT` is:
+    # every request builds a new ModelService. The RULES are here — residency, a load in
+    # progress, the lift — so a route cannot forget a check it never makes (FR-29.2.2).
+    # =========================================================================
+
+    @property
+    def _leases(self) -> LeaseRegistry:
+        return get_lease_registry()
+
+    @staticmethod
+    def _validate_lease_ttl(ttl_seconds: Any) -> int:
+        """`ttl_seconds` omitted → the default; else an integer in 1..max, never clamped."""
+        from millm.core.config import settings
+
+        maximum = settings.LEASE_MAX_TTL_SECONDS
+        if ttl_seconds is None:
+            return settings.LEASE_DEFAULT_TTL_SECONDS
+        # bool is an int subclass: `true` is not a TTL.
+        if isinstance(ttl_seconds, bool) or not isinstance(ttl_seconds, int):
+            raise InvalidLeaseRequestError(
+                f"ttl_seconds must be an integer from 1 to {maximum} seconds, "
+                f"got {ttl_seconds!r}.",
+                details={"param": "ttl_seconds", "min": 1, "max": maximum},
+            )
+        if not 1 <= ttl_seconds <= maximum:
+            raise InvalidLeaseRequestError(
+                f"ttl_seconds must be from 1 to {maximum} seconds, got {ttl_seconds}; "
+                "it is refused, never clamped.",
+                details={"param": "ttl_seconds", "min": 1, "max": maximum},
+            )
+        return ttl_seconds
+
+    @staticmethod
+    def _validate_lease_text(name: str, value: Any, limit: int) -> str:
+        """A required, stripped, non-empty string of at most `limit` characters."""
+        if not isinstance(value, str) or not value.strip():
+            raise InvalidLeaseRequestError(
+                f"{name} is required: a non-empty string of at most {limit} characters.",
+                details={"param": name, "max_chars": limit},
+            )
+        stripped = value.strip()
+        if len(stripped) > limit:
+            raise InvalidLeaseRequestError(
+                f"{name} is {len(stripped)} characters; the limit is {limit}.",
+                details={"param": name, "max_chars": limit},
+            )
+        return stripped
+
+    async def acquire_lease(
+        self, model_id: int, holder: Any, reason: Any, ttl_seconds: Any = None
+    ) -> LeaseGrant:
+        """Lease the resident model for `holder` (FR-29.1). No approval step (P-05).
+
+        Order: inputs (400) → the model exists (404) → no load or unload running (busy) →
+        the model is the resident, LOADED one (409 MODEL_NOT_RESIDENT, T-85) → no other live
+        lease (409 MODEL_LEASED, X-08). `get_model` is the only await and it comes FIRST:
+        nothing awaits between the residency checks and the grant, so a load cannot claim the
+        slot in between.
+        """
+        from millm.core.config import settings
+
+        holder_s = self._validate_lease_text("holder", holder, settings.LEASE_HOLDER_MAX_CHARS)
+        reason_s = self._validate_lease_text("reason", reason, settings.LEASE_REASON_MAX_CHARS)
+        ttl = self._validate_lease_ttl(ttl_seconds)
+        model = await self.get_model(model_id)
+
+        if self._loading_model_id is not None:
+            raise ModelBusyError(
+                f"Model {self._loading_model_id} is being loaded; take the lease once it is "
+                "resident.",
+                details={"loading_model_id": self._loading_model_id},
+            )
+        if self.loader.is_unloading is True:
+            raise ModelBusyError(
+                f"Model {self.loader.loaded_model_id} is being unloaded; no lease can be taken "
+                "on it.",
+                details={"unloading_model_id": self.loader.loaded_model_id, "unloading": True},
+            )
+        resident_id = self.loader.loaded_model_id
+        if resident_id != model_id or model.status != ModelStatus.LOADED:
+            resident_name = self.loader.model_name if resident_id is not None else None
+            raise ModelNotResidentError(
+                f"Model {model_id} is not resident; only the resident model can be leased. "
+                f"Resident model: {resident_name or 'none'}.",
+                details={
+                    "model_id": model_id,
+                    "resident_model_id": resident_id,
+                    "resident_model_name": resident_name,
+                },
+            )
+        return self._leases.grant(model_id, model.name, holder_s, reason_s, ttl)
+
+    async def renew_lease(
+        self, model_id: int, lease_id: Optional[str], ttl_seconds: Any = None
+    ) -> LeaseRecord:
+        """Renew by ID; the new expiry is now plus the TTL (FR-29.1.7)."""
+        ttl = self._validate_lease_ttl(ttl_seconds)
+        self._require_lease_header(lease_id)
+        return self._leases.renew(model_id, lease_id, ttl)
+
+    async def release_lease(self, model_id: int, lease_id: Optional[str]) -> EndedLease:
+        """Release by ID; the lease ends at once."""
+        self._require_lease_header(lease_id)
+        return self._leases.release(model_id, lease_id)
+
+    async def get_lease(
+        self, model_id: int
+    ) -> tuple[Optional[LeaseRecord], Optional[EndedLease]]:
+        """The live lease on the model (or None) and the last one that ended. 404 if no model."""
+        await self.get_model(model_id)
+        return self._leases.current(model_id), self._leases.last_ended(model_id)
+
+    def resolve_lease(self, lease_id: Optional[str]) -> Optional[LeaseRecord]:
+        """The live lease this ID proves, on any model (Feature 26: T-64, FR-26.7.7)."""
+        return self._leases.resolve(lease_id)
+
+    @staticmethod
+    def _require_lease_header(lease_id: Optional[str]) -> None:
+        if not lease_id or not lease_id.strip():
+            raise InvalidLeaseRequestError(
+                "The lease ID is required in the X-miLLM-Lease header.",
+                details={"param": "X-miLLM-Lease"},
+            )
+
+    def _refuse_if_leased(
+        self, operation: str, target_model_id: int, lease_id: Optional[str]
+    ) -> None:
+        """Refuse a load, unload or swap while ANOTHER holder leases the resident model.
+
+        THE one enforcement function (029 FTDD §7.2), called from `load_model`,
+        `unload_model` and `load_model_and_wait`. It reads the RESIDENT model's lease, not
+        the target's: the lease protects whatever is resident, whatever the request asks to
+        load. Synchronous on purpose — a caller places it with no `await` before the claim it
+        guards. A matching lease ID lifts only this refusal; `locked`, the load slot and
+        placement still apply (FR-29.3.2).
+        """
+        resident_id = self.loader.loaded_model_id
+        record = self._leases.current(resident_id)
+        if record is None:
+            if lease_id:
+                # A wrong (or stale) ID on a request that needed no lift is ignored, with a
+                # warning (FR-29.3.3). The ID itself is never logged.
+                logger.warning(
+                    "lease_header_unmatched",
+                    operation=operation,
+                    target_model_id=target_model_id,
+                    resident_model_id=resident_id,
+                )
+            return
+        if self._leases.matches(record, lease_id):
+            return
+        logger.warning(
+            "lease_refused",
+            lease_ref=record.lease_ref,
+            holder=record.holder,
+            model_id=record.model_id,
+            reason=record.reason,
+            operation=operation,
+            target_model_id=target_model_id,
+        )
+        raise ModelLeasedError.for_lease(
+            model_id=record.model_id,
+            model_name=record.model_name,
+            holder=record.holder,
+            reason=record.reason,
+            expires_at=record.expires_at.isoformat(),
+            operation=operation,
+            target_model_id=target_model_id,
+        )
 
     def _run_async_from_thread(self, coro: Any) -> Any:
         """
@@ -779,7 +963,9 @@ class ModelService:
     # Load/Unload Operations
     # =========================================================================
 
-    async def load_model(self, model_id: int, gpu: GpuRequest = None) -> Model:
+    async def load_model(
+        self, model_id: int, gpu: GpuRequest = None, *, lease_id: Optional[str] = None
+    ) -> Model:
         """
         Load a model into GPU memory.
 
@@ -829,6 +1015,10 @@ class ModelService:
         # models — passed this same check. Both were submitted to the
         # two-worker executor, ran at once, and the second replaced the first
         # in LoadedModelState without unloading it.
+        # Feature 29: a foreign lease on the resident model refuses the swap BEFORE the slot
+        # is claimed, with no await between this check and the claim below, so a refused
+        # load claims nothing and moves no row (FR-29.2.6).
+        self._refuse_if_leased("load", model_id, lease_id)
         if self._loading_model_id is not None:
             raise ModelBusyError(
                 f"Another model ({self._loading_model_id}) is currently being loaded",
@@ -889,7 +1079,8 @@ class ModelService:
                     current_model_id=current_model_id,
                     new_model_id=model_id,
                 )
-                await self.unload_model(current_model_id)
+                # The same lease ID: the holder's own swap must not be refused by its lease.
+                await self.unload_model(current_model_id, lease_id=lease_id)
 
             # Update status to LOADING
             model = await self.repository.update_status(model_id, status=ModelStatus.LOADING)
@@ -1191,7 +1382,13 @@ class ModelService:
                 error_message=error_message,
             )
 
-    async def unload_model(self, model_id: int, timeout: float = UNLOAD_TIMEOUT) -> Model:
+    async def unload_model(
+        self,
+        model_id: int,
+        timeout: float = UNLOAD_TIMEOUT,
+        *,
+        lease_id: Optional[str] = None,
+    ) -> Model:
         """
         Unload a model from GPU memory with graceful timeout.
 
@@ -1214,6 +1411,9 @@ class ModelService:
                 f"Model {model_id} is not currently loaded",
                 details={"model_id": model_id},
             )
+
+        # Feature 29: a foreign lease refuses the unload before anything is marked.
+        self._refuse_if_leased("unload", model_id, lease_id)
 
         if self.loader.is_unloading is True:
             raise ModelBusyError(
@@ -1295,6 +1495,10 @@ class ModelService:
             if not moving and self.loader.loaded_model_id == model_id:
                 self.loader.cancel_unload()
             raise
+
+        # The model is no longer resident, so neither is its lease (FR-29.1.9, FR-29.3.4).
+        # First, before any database write below that could fail.
+        self._leases.end_for_model(model_id, END_MODEL_UNLOADED)
 
         # The loader cleared the probe hooks with the model; the rows must say so, or status
         # reports probes armed that nothing will ever score again.
@@ -1445,6 +1649,8 @@ class ModelService:
         self,
         model_id: int,
         timeout: float = 180.0,
+        *,
+        lease_id: Optional[str] = None,
     ) -> Model:
         """
         Load a model and wait for it to complete loading.
@@ -1471,6 +1677,10 @@ class ModelService:
         if model.status == ModelStatus.LOADED and self.loader.loaded_model_id == model_id:
             return model
 
+        # Feature 29: the lease answer comes BEFORE `locked` (FPRD D9), because it names a
+        # holder and an expiry; `locked` names neither.
+        self._refuse_if_leased("auto_load", model_id, lease_id)
+
         # Check if locked model prevents loading this one
         locked = await self.repository.get_locked_model()
         if locked and locked.id != model_id:
@@ -1482,7 +1692,7 @@ class ModelService:
 
         # Start loading (this returns immediately with status=LOADING)
         try:
-            await self.load_model(model_id)
+            await self.load_model(model_id, lease_id=lease_id)
         except ModelAlreadyLoadedError as exc:
             # The row says LOADED and the loader does not hold it (checked
             # above): an unload has cleared the loader and not yet written the

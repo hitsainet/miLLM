@@ -12,6 +12,7 @@ One pytest process at a time throughout.
 |---|---|
 | Baseline (`39c6f8e`, before any edit) | 4052 passed / 3 skipped / 0 failed (155 s) |
 | After 1.0 (errors, settings, value policy) | 4103 passed / 3 skipped / 0 failed |
+| After 2.0 + 3.0 (registry, service API, enforcement) | 4179 passed / 3 skipped / 0 failed |
 
 ## 2. Task 0.1 — cited lines re-verified at HEAD (`39c6f8e`)
 
@@ -47,6 +48,8 @@ section reference only, recorded, not a name drift.
 | D-1 | FTID §5 adds only `MODEL_LEASED` and `MODEL_NOT_RESIDENT` to `ERROR_STATUS_MAP` | `tests/unit/api/test_error_map_complete.py` (Feature 25) requires a row for EVERY `MiLLMError` code. `LEASE_NOT_FOUND` (404), `LEASE_EXPIRED` (409) and `INVALID_LEASE_REQUEST` (400) were added too, all `invalid_request_error`. |
 | D-2 | FPRD FR-29.4.5 / FTID §3.4: the GGUF refusals sit in the routes (`completions.py:76-94`, `embeddings.py:60-73`) | Feature 25 moved them into the request policy (`apply_request_policy`), which already runs before the auto-load. `apply_load_policy` runs after it, so the GGUF and embedding-only refusals still come first. |
 | D-3 | FTDD §5.3: `HUB_UNAVAILABLE` uses "the breaker's remaining recovery time" citing `resilience.py` | The code that raises `HUB_UNAVAILABLE` uses its own breaker, `cluster_hub_service.cluster_hub_circuit`, not `huggingface_circuit`. The remainder is read from that breaker; with it closed (one network failure), the value is 1. |
+| D-5 | FTID §3.3: the unload-success `end_for_model` goes "before the auto-unlock update" | Placed immediately after the unload completes, BEFORE the probe-row database write, so a failing write cannot leave a lease on an unloaded model. Same meaning, earlier. |
+| D-6 | FTID §5: `LeaseCreateRequest` declares `holder: str`, `reason: str` | Declared `Any` so a missing or non-string holder/reason reaches the service and is `400 INVALID_LEASE_REQUEST` naming the field, like every other bound (a pydantic type error would be a bare 422). |
 | D-4 | FTID §3.6 adds `_holding` only; `in_flight = holding_count + background_holding_count` with the second "Feature 26's" | `RequestQueue.background_holding_count` was added here, fixed at 0, so the estimate reads one real attribute instead of a `getattr` default. Feature 26 increments it. |
 
 ## 5. Pre-existing defects found and fixed
@@ -54,3 +57,11 @@ section reference only, recorded, not a name drift.
 | # | Defect | Fix |
 |---|---|---|
 | P-1 | `ModelService.unload_model`'s "already being unloaded" and `load_model_and_wait`'s "still being unloaded" `ModelBusyError`s carried no unload mark, so the new policy would have answered them with the 15 s LOAD value | Both now carry `details["unloading"] = True` → 5 s. |
+| P-2 | Five existing assertions in `test_load_refusal_keeps_resident_model.py` pinned `unload_model` to be awaited with exactly `(9)` | Now `(9, lease_id=None)`: the internal unload carries the load's lease ID (FTID §3.3). The assertions' purpose (unloaded once, the right model) is unchanged. |
+
+## 6. Notes
+
+- `_refuse_if_leased` logs `lease_header_unmatched` once per guarded operation, so a swap with a
+  stale header logs two (the load and its internal unload), each naming its operation.
+- Tasks 2.0 and 3.0 were committed together: both live in `ModelService` and the enforcement tests
+  exercise the API the registry tests build on.

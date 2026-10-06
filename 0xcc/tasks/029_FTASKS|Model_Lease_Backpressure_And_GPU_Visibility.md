@@ -93,47 +93,47 @@ T-84 – T-90
         `unloading_model_id` gives 5 and 15; `ModelLeasedError` maps to `model_leased`, never
         `model_locked`.
 
-- [ ] 2.0 Lease registry and service API (covers FR-29.1, FR-29.1.1 – FR-29.1.11)
-  - [ ] 2.1 Implement `LeaseRegistry` (FTID §3.1): digest storage, injectable clocks, a lock, ended
+- [x] 2.0 Lease registry and service API (covers FR-29.1, FR-29.1.1 – FR-29.1.11)
+  - [x] 2.1 Implement `LeaseRegistry` (FTID §3.1): digest storage, injectable clocks, a lock, ended
         memory of 64, `grant`, `renew`, `release`, `resolve`, `current`, `matches`, `end_for_model`,
         `last_ended`, `clear`.
-  - [ ] 2.2 Implement `ModelService.acquire_lease`, `renew_lease`, `release_lease`, `get_lease`,
+  - [x] 2.2 Implement `ModelService.acquire_lease`, `renew_lease`, `release_lease`, `get_lease`,
         `resolve_lease` with the precondition order of FTID §3.2 (P-05: no approval step).
-  - [ ] 2.3 Default TTL 7200 when omitted; refuse 0, negative, above 7200 and non-integers with
+  - [x] 2.3 Default TTL 7200 when omitted; refuse 0, negative, above 7200 and non-integers with
         `400 INVALID_LEASE_REQUEST` naming field and limit (FR-29.1.2). Strip and bound `holder`
         (128) and `reason` (512).
-  - [ ] 2.4 Lease ID = `token_urlsafe(24)`, returned only in the grant; store its SHA-256; log
+  - [x] 2.4 Lease ID = `token_urlsafe(24)`, returned only in the grant; store its SHA-256; log
         `lease_ref` only (FR-29.1.6, FR-29.1.11).
-  - [ ] 2.5 Grant refuses: non-resident model (`409 MODEL_NOT_RESIDENT`, T-85), load or unload in
+  - [x] 2.5 Grant refuses: non-resident model (`409 MODEL_NOT_RESIDENT`, T-85), load or unload in
         progress (`503 MODEL_BUSY`), a live lease on the model (`409 MODEL_LEASED`, X-08).
-  - [ ] 2.6 Lazy expiry with `<=` and once-only `lease_expired` log (FR-29.1.10); renew sets expiry
+  - [x] 2.6 Lazy expiry with `<=` and once-only `lease_expired` log (FR-29.1.10); renew sets expiry
         from now (FR-29.1.7); unknown ID `404` with the restart sentence; ended ID `409` with
         `end_reason`.
-  - [ ] 2.7 Tests (registry): grant/conflict/renew/release/expiry by clock; ended reasons;
+  - [x] 2.7 Tests (registry): grant/conflict/renew/release/expiry by clock; ended reasons;
         `resolve` returns live only; two holders with the same string are two callers.
-  - [ ] 2.8 Tests (service): each grant refusal, with fixtures where the requested model differs
+  - [x] 2.8 Tests (service): each grant refusal, with fixtures where the requested model differs
         from the resident one; grant during a load (`_loading_model_id` set) refused (control M18);
         capture logs and assert no event contains the lease ID.
 
-- [ ] 3.0 Enforcement on every load path (covers FR-29.2, FR-29.2.1 – FR-29.2.6, FR-29.3,
+- [x] 3.0 Enforcement on every load path (covers FR-29.2, FR-29.2.1 – FR-29.2.6, FR-29.3,
       FR-29.3.1 – FR-29.3.4)
-  - [ ] 3.1 Implement `_refuse_if_leased` (FTDD §7.2) reading the resident model's lease;
+  - [x] 3.1 Implement `_refuse_if_leased` (FTDD §7.2) reading the resident model's lease;
         constant-time match; `lease_header_unmatched` warning for a wrong ID that needed no lift.
-  - [ ] 3.2 Call it in `load_model` immediately before the slot check (FTID §3.3), no `await`
+  - [x] 3.2 Call it in `load_model` immediately before the slot check (FTID §3.3), no `await`
         between; add keyword `lease_id`.
-  - [ ] 3.3 Pass `lease_id` to the internal unload a load performs.
-  - [ ] 3.4 Call it in `unload_model` after the not-loaded check and before the unloading check;
+  - [x] 3.3 Pass `lease_id` to the internal unload a load performs.
+  - [x] 3.4 Call it in `unload_model` after the not-loaded check and before the unloading check;
         add `lease_id`.
-  - [ ] 3.5 Call it in `load_model_and_wait` after the early return and before the `locked` check;
+  - [x] 3.5 Call it in `load_model_and_wait` after the early return and before the `locked` check;
         pass `lease_id` to `load_model` (FPRD D9: lease first).
-  - [ ] 3.6 End the lease on unload success, beside the auto-unlock (FR-29.1.9, FR-29.3.4).
-  - [ ] 3.7 Tests through the real service: foreign lease refuses management load, management unload
+  - [x] 3.6 End the lease on unload success, beside the auto-unlock (FR-29.1.9, FR-29.3.4).
+  - [x] 3.7 Tests through the real service: foreign lease refuses management load, management unload
         and auto-load with holder, reason and `expires_at` in the payload, and `_load_worker` call
         count 0; the right header proceeds; the holder's swap succeeds and ends the lease; lease and
         `locked` together → `MODEL_LEASED`; a refused load claims no slot and moves no row
         (FR-29.2.6); a request naming the leased resident model proceeds without a header
         (FR-29.2.4).
-  - [ ] 3.8 AST call tests: `_refuse_if_leased` in each of the three method bodies.
+  - [x] 3.8 AST call tests: `_refuse_if_leased` in each of the three method bodies.
 
 - [ ] 4.0 Restart reconciliation and the self-healing read (covers FR-29.1.9; X-01; T-66)
   - [ ] 4.1 Implement `clear_leases_on_startup()` in `model_lease.py`: clears the registry with

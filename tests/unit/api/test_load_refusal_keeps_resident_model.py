@@ -191,7 +191,7 @@ class TestAValidSwitchStillHappens:
             response = _post(svc, {"gpu": 1})
 
         assert response.status_code == 202, response.text
-        svc.unload_model.assert_awaited_once_with(9)
+        svc.unload_model.assert_awaited_once_with(9, lease_id=None)
         [(_, args)] = svc._executor.calls
         assert args[-1] == 1
 
@@ -201,7 +201,7 @@ class TestAValidSwitchStillHappens:
             response = _post(svc, {})
 
         assert response.status_code == 202, response.text
-        svc.unload_model.assert_awaited_once_with(9)
+        svc.unload_model.assert_awaited_once_with(9, lease_id=None)
         assert svc._executor.calls[0][1][-1] is None
 
     def test_the_precheck_creates_no_cuda_context(self):
@@ -248,7 +248,7 @@ class TestThePrecheckReadsTheCheckpoint:
             response = _post(svc, {})
 
         assert response.status_code == 202, response.text
-        svc.unload_model.assert_awaited_once_with(9)
+        svc.unload_model.assert_awaited_once_with(9, lease_id=None)
 
     def test_the_same_row_on_a_plain_checkpoint_is_refused_before_the_unload(self, tmp_path):
         svc, _ = _service(self._q8(_checkpoint(tmp_path, None)))
@@ -338,7 +338,7 @@ class TestAGgufTensorSplitIsCheckedBeforeTheUnload:
         svc, response = self._post_with_split(tmp_path, "1,3")
 
         assert response.status_code == 202, response.text
-        svc.unload_model.assert_awaited_once_with(9)
+        svc.unload_model.assert_awaited_once_with(9, lease_id=None)
 
     def test_a_short_list_is_its_own_error_not_a_failed_load(self, tmp_path):
         """Review round 2: as MODEL_LOAD_FAILED, the Admin UI's toast replaced
@@ -390,7 +390,7 @@ class TestAGgufTensorSplitIsCheckedBeforeTheUnload:
             response = _post(svc, {})
 
         assert response.status_code == 202, response.text
-        svc.unload_model.assert_awaited_once_with(9)
+        svc.unload_model.assert_awaited_once_with(9, lease_id=None)
 
     def test_a_card_without_room_past_llamas_overhead_cannot_take_part(self, tmp_path):
         """Review round 3, 2026-09-14 (R3-X4 survived: counting every card, not

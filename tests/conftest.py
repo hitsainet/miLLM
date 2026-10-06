@@ -39,6 +39,17 @@ def _release_model_load_slot() -> Generator[None, None, None]:
     model_service._LOAD_SLOT["model_id"] = None
 
 
+@pytest.fixture(autouse=True)
+def _fresh_lease_registry() -> Generator[None, None, None]:
+    """The lease registry is process-wide (Feature 29). A lease one test takes must not
+    refuse the next test's load, so every test starts and ends with a fresh registry."""
+    from millm.services.model_lease import set_lease_registry
+
+    set_lease_registry(None)
+    yield
+    set_lease_registry(None)
+
+
 @pytest.fixture(scope="session")
 def event_loop() -> Generator[asyncio.AbstractEventLoop, None, None]:
     """Create an event loop for the test session."""

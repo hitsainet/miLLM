@@ -293,7 +293,9 @@ contract. (R-04.44)
 - **FR-29.7.3** New fields:
   - `in_flight`: requests holding a request-queue slot now. The idle cache release also takes a slot
     (`inference_service.py:756`) and counts, because a request arriving then waits for it (T-90).
-  - `queue_waiting`: `queue_pending` minus `in_flight`.
+  - `queue_waiting`: `queue_pending` minus the interactive requests holding a slot. A batch chunk
+    holding the slot counts in `in_flight` but not here, since `queue_pending` is interactive only
+    (026 FTDD §7). (Stage 3, 2026-10-06, requested by 026)
   - `batch_backlog_rows`: rows not yet run across in-progress batches. `null` until Feature 26 ships,
     meaning "no batch API", never `0`.
   - `estimated_wait_seconds`: an estimate of how long a request arriving now waits for a slot.
@@ -374,13 +376,14 @@ uses FR-29.1–FR-29.3.
 ## 5. Data Requirements
 
 - **Lease record:** `lease_id` (random, unguessable), `model_id`, `holder`, `reason`, `acquired_at`,
-  `expires_at`, `ttl_seconds`, `released_at`, `end_reason` (`released`, `expired`, `model_unloaded`,
+  `expires_at`, `ttl_seconds`, `ended_at` (named as in 029 FTDD §4; Stage 3, 2026-10-06), `end_reason` (`released`, `expired`, `model_unloaded`,
   `restart`). **Decided (v1.1): process memory, no table, no migration** (X-01: a restart ends every
   lease, so there is nothing to persist). A named startup function clears the registry, and a test
   fails when its call is removed from `lifespan` (FR-29.1.9).
 - **In-process API for Feature 26** (026 FTDD §7): acquire with holder, TTL and reason; renew by
   lease ID; release by lease ID; validate a caller's lease ID and read its model, holder and
-  `expires_at`. These serve T-64 (a batch renews its caller's lease and never releases it), X-01 and
+  `expires_at`. The 029 FTDD names them `acquire_lease`, `renew_lease`, `release_lease` and
+  `resolve_lease` on `ModelService` (Stage 3, 2026-10-06). These serve T-64 (a batch renews its caller's lease and never releases it), X-01 and
   T-66 (re-acquire after a restart, else wait) and FR-26.7.7 (attach a re-taken lease to a waiting
   batch).
 - **`models.locked`** is unchanged (C8). No column is added to it or reinterpreted.

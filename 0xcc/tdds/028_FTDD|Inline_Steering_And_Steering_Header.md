@@ -91,7 +91,7 @@ millm/api/routes/openai/completions.py MODIFIED  reset memo; pre-load refusals; 
 | Streaming chat | `stream_chat_completion` (`:4288`) | **before the final chunk** (`:4650-4653`), beside `_probe_finish`; the restore in `finally` (`:4762`) runs after the stream has closed, too late to report | yes |
 | Text completion | `create_text_completion` (`:4780`) | new block inside `_admit()` (`:4828`) | yes |
 | Text scoring | `_score_text_completion` (`:4930`) | none; constant `none` (runs under `_unsteered`, `:1176`) | no |
-| Chat scoring (Feature 25) | Feature 25's chat scorer | none; constant `none` | no |
+| Chat scoring (Feature 25) | `_score_prompts`, the loop Feature 25 extracts from `_score_text_completion` and shares with text scoring (025 FTDD §1) | none; constant `none` | no |
 | CBM chat / text | `_cbm_chat_completion` (`:5230`), `_cbm_text_completion` (`:5418`) | after the CBM returns | no (inline never reaches CBM, FR-28.1.8) |
 | llama.cpp chat / text | `_llamacpp_chat_completion` (`:3960`), `_llamacpp_text_completion` (`:4221`) | after generation; entries are expected empty | no (steering refused, `:3885-3890`) |
 
@@ -467,4 +467,6 @@ Clarifying rounds were waived. Each question is answered from a cited source.
 **Open items** (none blocks implementation):
 1. FPRD Open Question 1 (first-SAE profile targeting) is for the operator.
 2. Whether `http-sfv` as a dev-only test dependency needs a PADR §5 entry. It adds nothing at runtime;
-   flag it to the PADR owner in review.
+   flag it to the PADR owner in review. **Resolved (Stage 3, 2026-10-06, requested by 028):** PADR §5
+   now lists `http-sfv==0.9.9` as a dev-only test dependency. Item 1 is recorded as tracked debt in
+   PADR §10.

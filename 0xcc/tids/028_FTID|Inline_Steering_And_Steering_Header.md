@@ -171,7 +171,7 @@ It also sets `_REQUEST_STEERING` with `epoch_at_admission`. It must be called *i
    `ValidationError` naming each `(sae_id, layer)`); or, with no `sae_id`, exactly one entry,
    otherwise the same refusals.
 3. Validate every index against `entry.sae.d_sae`, raising `InvalidFeatureIndexError`
-   (`errors.py:355-359`), before mutating anything.
+   (`millm/core/errors.py:355-359`), before mutating anything.
 4. `applied = applied_set(...)`; count the clamps with `would_clamp` (`steering_range.py:19-21`);
    log `inline_steering_values_clamped` when the count is positive.
 5. Save `{"sae_id", "layer", "values": e.sae.get_steering_values(), "enabled":
@@ -263,7 +263,7 @@ pre-load checks before the auto-load block (`:112`); and set the header after `a
 ### 5.3 Error patterns
 
 Reuse existing errors: `SAENotAttachedError` (`errors.py:327-331`), `InvalidFeatureIndexError`
-(`errors.py:355-359`), `EngineUnsupportedError` (`errors.py:42`), `ValidationError` for ambiguous
+(`millm/core/errors.py:355-359`), `EngineUnsupportedError` (`errors.py:42`), `ValidationError` for ambiguous
 selection. All are `MiLLMError` subclasses, so `openai_exception_handler` (`errors.py:121`) shapes
 them. Each message names the field and the value (an ID, an index), never only the rule.
 
@@ -407,4 +407,5 @@ Clarifying rounds were waived. Each question is answered from a cited source.
 
 **Open items:**
 1. FPRD Open Question 1 (first-SAE profile targeting) stays with the operator.
-2. Whether a dev-only `http-sfv` needs a PADR §5 note (FTDD §14).
+2. Whether a dev-only `http-sfv` needs a PADR §5 note (FTDD §14). **Resolved (Stage 3, 2026-10-06):**
+   PADR §5 lists it as dev-only.

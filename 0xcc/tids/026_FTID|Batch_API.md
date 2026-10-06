@@ -136,9 +136,9 @@ while True:
 - Two routers, `files.py` and `batches.py`, included in `openai_router` (`millm/api/routes/openai/__init__.py`). They inherit the `/v1` prefix from `register_routes` (`millm/api/routes/__init__.py`).
 - `POST /v1/files`: read `Content-Length`; over `BATCH_MAX_FILE_BYTES` plus a small multipart allowance → `400` before reading the body. Then `FileStore.write(upload.file)` copies in 1 MiB chunks, counting bytes, newlines and sha256; over a cap → delete the partial file, `400` naming limit and measured value. Starlette spools large uploads to a temporary file, not memory.
 - `GET /v1/files/{id}/content`: `StreamingResponse` over the stored file, `media_type="application/jsonl"`; `404` with code `file_expired` or `file_deleted` when the bytes are gone.
-- `POST /v1/batches`: synchronous checks only — input file exists, purpose `batch`, not expired; `endpoint in served_batch_endpoints(request.app)`; `completion_window` matches `^([1-9][0-9]*)h$` within the configured maximum; `output_expires_after` within 3,600–2,592,000 seconds; lease: if Feature 29 reports a live lease and the request's `X-miLLM-Lease` does not match it → `409 model_leased`. Then insert `validating`, start the validator task, return the batch object.
+- `POST /v1/batches`: synchronous checks only — input file exists, purpose `batch`, not expired; `endpoint in served_batch_endpoints(request.app)`; `completion_window` matches `^([1-9][0-9]*)h$` within the configured maximum; `output_expires_after` within 3,600–2,592,000 seconds; lease: if Feature 29 reports a live lease and the request's `X-miLLM-Lease` does not match it → `409 model_leased` (`MODEL_LEASED`). The match uses `resolve_lease(lease_id)` (029 FTDD §2). (Stage 3, 2026-10-06, requested by 029) Then insert `validating`, start the validator task, return the batch object.
 - `X-miLLM-Lease` on create, when valid, is stored in the runner's memory against the batch (`lease_mode='caller'`).
-- `POST /v1/batches/{id}/lease`: requires a live `X-miLLM-Lease` for the batch's model and a non-terminal batch; sets caller mode and wakes the runner.
+- `POST /v1/batches/{id}/lease`: requires a live `X-miLLM-Lease` for the batch's model and a non-terminal batch; sets caller mode and wakes the runner. `resolve_lease(lease_id)` returns the live `LeaseRecord` (`model_id`, holder, `expires_at`) or `None`. `None`, or a lease on another model, is `404 LEASE_NOT_FOUND`, as Feature 29's routes answer an ID that does not match (029 FTDD §5.1). (Stage 3, 2026-10-06, requested by 029)
 - Unknown request fields on these routes follow Feature 25's mechanism (FR-26.1.6).
 - Errors use the existing envelope helpers (`create_openai_error`, `validation_error`).
 
@@ -246,7 +246,7 @@ A boolean setting fails to its default, not to False (this suite's lesson for `d
 | `ProbeEventService` | origin plumbing | live events unchanged; default `origin='live'` |
 | routes chat/completions/embeddings | `validate_<endpoint>`, `provenance.py` | headers unchanged (snapshot test before/after) |
 | `lifespan` | reconcile → runner start → retention loop; runner stop on shutdown | after `disarm_probes_on_startup` (`main.py:379`) |
-| Feature 29 health | `batch_backlog_rows = runner.backlog_rows()` | `null` before this feature, per 029 FR-29.7.3 |
+| Feature 29 health | `register_backlog_provider(runner.backlog_rows)` at runner start; `in_flight` adds `background_holding_count` | `null` before this feature, per 029 FR-29.7.3 (Stage 3, 2026-10-06, requested by 029) |
 | `docs/mcp-contract.md` | new section for files and batches routes | additive minor version |
 | `tests/unit/test_mcp_tool_paths_are_real.py` | the batch routers join the served-router set that miStudio's tool paths are checked against | needed by miStudio BR-013 |
 

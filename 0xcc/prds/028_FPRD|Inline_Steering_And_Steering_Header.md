@@ -216,7 +216,9 @@ lines carry it in the body.
   `/v1/completions`, on every engine and path: serial, batched (`extra_messages`), streaming, CBM and
   llama.cpp. A scoring response carries it too, stating `none`, because scoring runs under
   `_unsteered` (`inference_service.py:1176-1199`); miStudio 034 FR-21 expects scoring tools to
-  return it. `/v1/embeddings` is not a generation endpoint and does not carry it.
+  return it. `/v1/embeddings` is not a generation endpoint and does not carry it. Nor does
+  `POST /api/probes/score` (Feature 27), whose forward is always unsteered (027 FTDD §5; Stage 3,
+  2026-10-06, requested by 027).
 - **FR-28.3.2 Derived from what ran.** The value is derived from the steering the forward hooks
   applied: each attached SAE's live, unsuppressed values at generation time
   (`sae_wrapper.py:313`). It is not an echo of the request. It names a profile or circuit only when

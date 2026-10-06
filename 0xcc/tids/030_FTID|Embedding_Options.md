@@ -172,8 +172,9 @@ Feature 25's every-entry test then asserts both rows on every endpoint automatic
 ### 5.3 Route
 
 `embeddings.py` gains, between the row lookup (`:60-62`) and auto-load (`:80`), the Feature 25 call
-`request_policy.evaluate(request, model, endpoint="embeddings")`. If Feature 25 already placed it
-there, verify the position and add nothing.
+`request_policy.evaluate(request, "embeddings", engine, strict=parse_strict(headers))`, the signature
+025 FTDD §2 fixes (`engine` is `transformers` or `llamacpp`, from the row). If Feature 25 already placed
+it there, verify the position and add nothing. (Stage 3, 2026-10-06, requested by 025)
 
 ### 5.4 Errors
 

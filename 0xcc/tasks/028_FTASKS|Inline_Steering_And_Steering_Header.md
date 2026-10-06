@@ -69,7 +69,8 @@ reads `X-miLLM-Steering` verbatim.
         question to the operator: fix both paths in a follow-up increment? Record the answer in the
         FPRD §14. Task 5.3's `profile_sae_mismatch` log ships either way.
   - [ ] 0.2 Ask the PADR owner whether a dev-only `http-sfv` needs a PADR §5 entry. Proceed with
-        1.7 meanwhile: it adds nothing at runtime.
+        1.7 meanwhile: it adds nothing at runtime. *Answered (Stage 3, 2026-10-06): PADR §5 lists `http-sfv==0.9.9`
+        as dev-only; this sub-task closes on implementation start.*
 
 - [ ] 1.0 Pure steering-state module and published vectors (covers FR-28.3.3, FR-28.3.4,
       FR-28.3.5). **Ship first; it unblocks miDataworks 007.**

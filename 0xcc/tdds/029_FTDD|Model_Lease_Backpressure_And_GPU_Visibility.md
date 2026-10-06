@@ -193,8 +193,8 @@ opaque string; the service decides.
 | `backend`, `cbm_enabled`, `cbm_running` | as today | unchanged |
 | `queue_pending` | `int` | interactive requests waiting **plus** holding a slot (unchanged meaning) |
 | `queue_max_concurrent`, `queue_max_pending` | `int` | unchanged |
-| `in_flight` | `int \| null` | slots held now, idle cache release included (T-90); `null` while `cbm_running` |
-| `queue_waiting` | `int \| null` | `queue_pending − in_flight` for interactive work; `null` while `cbm_running` |
+| `in_flight` | `int \| null` | slots held now, idle cache release included (T-90): `holding_count`, plus Feature 26's `background_holding_count` once it ships, so a batch chunk in the slot counts; `null` while `cbm_running` (Stage 3, 2026-10-06, requested by 026) |
+| `queue_waiting` | `int \| null` | interactive requests waiting: `queue_pending − holding_count`; `null` while `cbm_running` |
 | `batch_backlog_rows` | `int \| null` | from the registered backlog provider; `null` when none is registered (before Feature 26) |
 | `estimated_wait_seconds` | `float \| null` | §7.3; `null` with fewer than 3 samples or while `cbm_running` |
 | `error` | `str \| null` | set, and the other new fields `null`, when the block could not be read |
@@ -208,7 +208,7 @@ One policy function, `retry_after_for(code, details) -> int` in `millm/core/back
 | Code | Value |
 |---|---|
 | `QUEUE_FULL` | `ceil(estimated_wait_seconds)` clamped to `[1, RETRY_AFTER_MAX_S]` (60); `RETRY_AFTER_QUEUE_DEFAULT_S` (5) without an estimate |
-| `MODEL_BUSY`, `MODEL_LOADING` | `RETRY_AFTER_UNLOAD_S` (5) when `details` carries `unloading` or `unloading_model_id` (as `inference_service.py:634` and `model_service.py:850-853` do); else `RETRY_AFTER_LOAD_S` (15) |
+| `MODEL_BUSY`, `MODEL_LOADING` | `RETRY_AFTER_UNLOAD_S` (5) when `details` carries `unloading` or `unloading_model_id` (as `inference_service.py:635` and `model_service.py:850-853` do); else `RETRY_AFTER_LOAD_S` (15) |
 | `MODEL_NOT_LOADED` | `RETRY_AFTER_NOT_LOADED_S` (30); the message adds that retrying succeeds only after a model is loaded |
 | `INSUFFICIENT_MEMORY` | `RETRY_AFTER_MEMORY_S` (30) |
 | `HUB_UNAVAILABLE` | the breaker's remaining recovery time, `ceil(recovery_timeout − (now − last_failure_time))`, at least 1 (`millm/core/resilience.py:36`, `51`, `102`) |

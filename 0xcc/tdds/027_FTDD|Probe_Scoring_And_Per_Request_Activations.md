@@ -161,6 +161,12 @@ Request field on `ChatCompletionRequest` (`openai.py:47`) and `TextCompletionReq
 `positions` is `"last" | "prompt" | "completion" | "all" | {"start": int, "end": int}` (half-open,
 absolute). `read_point` is `"post_steering"` (default) or `"pre_steering"`.
 
+**Steering header on these responses (X-09; Stage 3, 2026-10-06, requested by 028).** Scoring is always
+unsteered. A `/v1` request in scoring mode that carries `return_sae_activations` reports
+`read_point: "unsteered"` in the body and `X-miLLM-Steering: none` in the header, as every scoring
+response does (028 FR-28.3.1, FR-28.4.6). `POST /api/probes/score` is not a generation endpoint: it
+carries no `X-miLLM-Steering` header, and its forward always runs with every SAE suppressed (T-73).
+
 Response: an optional `millm` object on `ChatCompletionResponse` and `TextCompletionResponse`,
 **omitted entirely when absent** so the OpenAI shape is unchanged:
 

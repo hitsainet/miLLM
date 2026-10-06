@@ -181,7 +181,7 @@ Requirement numbers are stable. Other repositories cite them. A requirement may 
 
 *Why:* `locked` has no owner and no expiry (`db/models/model.py:152`). A crashed holder leaves it set, and nobody can tell whose it is.
 
-**R-04.39** While a model is leased, a load, unload or swap by anyone else is refused with `409 MODEL_LEASED`, naming holder and expiry. This covers the auto-load in every `/v1` route (`chat.py:143-146`, `completions.py:110-113`, `embeddings.py:81-84`) and `POST /api/models/{id}/load` and `/unload` (`management/models.py:153, 178`).
+**R-04.39** While a model is leased, a load, unload or swap by anyone else is refused with `409 MODEL_LEASED`, naming holder and expiry. This covers the auto-load in every `/v1` route (`chat.py:143-146`, `completions.py:112-115`, `embeddings.py:81-84`) and `POST /api/models/{id}/load` and `/unload` (`management/models.py:153, 178`).
 
 **R-04.40** The holder sends `X-miLLM-Lease: <id>`. Its own requests and model operations proceed.
 
@@ -267,3 +267,5 @@ Each wiring item is accepted only by a test that fails when its registration or 
 4. Batch file retention: how long are input, output and error files kept on `/data`?
 5. Should `return_sae_activations` default to pre-steering or post-steering activations?
 6. Maximum lease TTL, and whether miStudio's GPU workers should take the lease too. That second part edges into co-residency, which is out of scope here.
+
+**Status (Stage 3, 2026-10-06):** all six are closed by the checkpoint decisions of 2026-10-06 (`~/app/miDataworks/0xcc/docs/brd-decisions-2026-10-05.md`) and the register's defaults. The answers are recorded in PPRD v1.5, "BRD-04 Coverage". Question 3 is answered "refuse": structured output on GGUF is refused in v1. The question text above is kept unchanged, as requirement numbers are.

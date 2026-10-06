@@ -987,7 +987,7 @@ miLLM as a dependable backend for offline labelling, steered generation and dete
 - `response_format` (`json_object`, `json_schema`) through constrained decoding on transformers; `400` with a reason elsewhere; `finish_reason: "length"` instead of truncated JSON
 - `seed` applied and echoed (`X-miLLM-Seed`), `system_fingerprint`, and an explicit statement where a seed cannot promise identical output
 
-**Dependencies:** none new. Reuses `_score_text_completion` / `next_token_scores` and `_unsteered`; F23 (GGUF refused before auto-load). Features 28 and 30 implement two entries on FR-25.3's list (`steering`, `dimensions`).
+**Dependencies:** none new. Reuses `_score_prompts` (the per-prompt loop extracted from `_score_text_completion`; Stage 3, 2026-10-06, requested by 025) / `next_token_scores` and `_unsteered`; F23 (GGUF refused before auto-load). Features 28 and 30 implement two entries on FR-25.3's list (`steering`, `dimensions`).
 
 ---
 
@@ -998,7 +998,7 @@ miLLM as a dependable backend for offline labelling, steered generation and dete
 
 **UI Tab:** none (OpenAI-shaped API; progress on Socket.IO)
 
-**Requirements Covered:** FR-26.1 through FR-26.8
+**Requirements Covered:** FR-26.1 through FR-26.10 (FR-26.9 retention and FR-26.10 provenance trace to checkpoint decisions, not to a BRD-04 requirement; Stage 3, 2026-10-06, requested by 026)
 
 **Key Capabilities:**
 - `POST /v1/files` + `POST /v1/batches` in OpenAI's shape, for chat, completions, embeddings and stateless probe scoring
@@ -1019,7 +1019,7 @@ miLLM as a dependable backend for offline labelling, steered generation and dete
 
 **UI Tab:** none (API); probe status reports the new not-scored reason
 
-**Requirements Covered:** FR-27.1 through FR-27.9
+**Requirements Covered:** FR-27.1 through FR-27.10 (FR-27.10, the `>=` verdict boundary, implements decision P-03, not a BRD-04 requirement; Stage 3, 2026-10-06, requested by 027)
 
 **Key Capabilities:**
 - `return_sae_activations` on chat and text completions, including scoring mode: this request's activations only, keyed by position, with a pre- or post-steering statement and a size cap
@@ -1118,6 +1118,10 @@ Totals: Feature 25 — 14; Feature 26 — 8; Feature 27 — 9; Feature 28 — 4;
 **Acceptance criteria by feature (BRD-04 §6):** 25 — 1, 2 (`n`), 3, 4, 5, 6; 26 — 7, 8, 9; 27 — 10, 11, 17; 28 — 12; 29 — 14, 15, 16; 30 — 2 (`dimensions`), 13. Each wiring item is accepted only by a test that fails when its registration or call line is removed, asserting payload and call count (FR-20.3).
 
 **Open questions the feature documents must resolve (BRD-04 §9):** whether the lease replaces `locked` or sits beside it (Feature 29); the acceptable packed-versus-single difference on JEV-9B-decision before packing defaults off (Feature 26); structured output on GGUF through llama.cpp grammars or refusal (Feature 25); batch file retention on `/data` (Feature 26); `return_sae_activations` default of pre- or post-steering (Feature 27); maximum lease TTL and whether miStudio's GPU workers take the lease (Feature 29).
+
+**Resolved (Stage 3, 2026-10-06):** all six are closed by the checkpoint decisions of 2026-10-06 and the register's defaults. (1) The lease sits beside `locked`; `locked` is retired later (C8). (2) Packing stays on until BRD-04 acceptance 7 measures a difference; a single differing label flips `BATCH_PACK_DEFAULT` to false (T-63). (3) Structured output on GGUF is refused in v1. (4) Batch files are kept 30 days (T-68). (5) Activations default to post-steering, with a pre-steering option. (6) The maximum TTL is 2 hours, renewable; miStudio's GPU workers do not take the lease (T-84).
+
+**Tracked debt from the feature documents (Stage 3, 2026-10-06):** saved profiles steer the first attached SAE, not their own (Feature 28; PADR §10 records it and the open question of fixing both paths together); the management load and unload routes ignore `locked`, and the lease registry assumes a single-process server (Feature 29; PADR §10).
 
 ---
 

@@ -41,7 +41,10 @@ POST /v1/embeddings
   │ 1. pydantic: EmbeddingRequest (pooling, normalize, dimensions, input count, empty input)
   │      → 400 invalid_parameter, param from loc          [exception_handlers.py:28-75]
   │ 2. row lookup                                          [embeddings.py:60-62]
-  │ 3. request_policy.evaluate(request, row, "embeddings") → 400 FIELD_NOT_HONOURED
+  │ 3. request_policy.evaluate(request, "embeddings", engine_of(row),
+  │        strict=parse_strict(headers))                   [025 FTDD §2, §5.2] (Stage 3, 2026-10-06, requested by 025)
+  │      → 400 FIELD_NOT_HONOURED | 400 UNUSED_FIELDS_REFUSED (strict);
+  │      an unrecognised X-miLLM-Strict value → 400 INVALID_PARAMETER
   │      dimensions: refused (both engines)  pooling≠mean on GGUF: refused
   │ 4. auto-load                                           [embeddings.py:80-103]
   │ 5. InferenceService.create_embeddings(request)
@@ -152,7 +155,7 @@ create a second table to work around it.
 - `EmbeddingVectorInvalidError` is a 500 because the request was valid; the model produced an
   unusable vector. A new `ERROR_STATUS_MAP` row is added; Feature 25's walk over `MiLLMError`
   subclasses (025 FTDD §5.5) then covers it.
-- **`openai_param` plumbing.** `MiLLMError.__init__` (`errors.py:17-24`) takes an optional
+- **`openai_param` plumbing.** `MiLLMError.__init__` (`millm/core/errors.py:17-24`) takes an optional
   `openai_param: Optional[str] = None`, stored on the instance. The handler passes it at
   `exception_handlers.py:118-123`. Existing errors are unaffected (default `None`).
 

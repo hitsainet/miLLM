@@ -180,10 +180,11 @@ millm/api/provenance.py   response_provenance(endpoint, request, response, servi
 **Unrun rows at the end.** Cancelled and expired batches write each unrun valid row to the error file with code `batch_cancelled` or `batch_expired`, as OpenAI does, so every `custom_id` appears exactly once across the two files.
 
 **Lease handling (FR-26.7, X-01, T-64):**
-1. Before each chunk, `ensure_lease()`: an `own` lease is renewed when a third of its TTL has passed; a `caller` lease is renewed the same way using the in-memory ID.
-2. No live lease → try `acquire(model_id, holder="millm-batch:<id>", ttl=BATCH_LEASE_TTL_S, reason="batch <id>")`. Fails because the model is not resident → `waiting_reason=model_not_resident`; because another lease is live → `lease_unavailable`. No row runs. Retry every `BATCH_WAIT_POLL_S`.
-3. `POST /v1/batches/{id}/lease` with a live `X-miLLM-Lease` whose model is the batch's model switches the batch to `caller` mode.
-4. On any terminal status: release an `own` lease (in `finally`); never release a `caller` lease (T-64).
+Names are Feature 29's in-process `ModelService` lease API (029 FTDD §2, §6). (Stage 3, 2026-10-06, requested by 029)
+1. Before each chunk, `ensure_lease()`: an `own` lease is renewed with `renew_lease(model_id, lease_id, ttl_seconds)` when a third of its TTL has passed; a `caller` lease is renewed the same way using the in-memory ID. `LeaseNotFoundError` or `LeaseExpiredError` on renew means the lease is gone: go to step 2.
+2. No live lease → try `acquire_lease(model_id, holder="millm-batch:<id>", ttl_seconds=BATCH_LEASE_TTL_S, reason="batch <id>")`. `ModelNotResidentError` (`409 MODEL_NOT_RESIDENT`) → `waiting_reason=model_not_resident`; `ModelLeasedError` (`409 MODEL_LEASED`) → `lease_unavailable`; `MODEL_BUSY` (a load or unload running) → `model_not_resident`. No row runs. Retry every `BATCH_WAIT_POLL_S`.
+3. `POST /v1/batches/{id}/lease` with a live `X-miLLM-Lease` switches the batch to `caller` mode. The route validates the header with `resolve_lease(lease_id)` and requires the lease's `model_id` to equal the batch's model.
+4. On any terminal status: release an `own` lease with `release_lease(model_id, lease_id)` (in `finally`); never release a `caller` lease (T-64).
 A restart forgets every lease, as Feature 29 does (029 FR-29.1.9), so a resumed batch always enters step 2.
 
 **Side effects.** Socket emission and probe-event writes are fire-and-forget and never block a chunk commit. File deletion happens after the database commit that marks a file deleted; a failed unlink is logged and retried by the retention loop (the row says `deleted`, the bytes are orphans the loop sweeps by scanning `BATCH_FILES_DIR` for paths no row owns).
@@ -197,6 +198,7 @@ A restart forgets every lease, as Feature 29 does (029 FR-29.1.9), so a resumed 
 - counts itself in `_background_waiting` / `_background_holding`;
 - before taking the semaphore, waits on an `asyncio.Condition` until no interactive request is waiting (`_pending - _holding == 0`). Interactive requests therefore always go first at a chunk boundary, whatever the interpreter's semaphore fairness. (Python 3.12's `Semaphore.locked()` already queues a newcomer behind waiters — measured here: `['chunk0', 'chat', 'chunk1', 'chunk2']` — but the image runs `python:3.11-slim`, `Dockerfile:7`, so the design does not rely on it.)
 - `_idle` is set only when interactive and background counts are both zero, so `wait_idle` drains a running chunk.
+- `_holding` (interactive slots held) is Feature 29's counter, exposed as `holding_count` (029 FTDD §7.3); this feature adds `background_holding_count`. Feature 29's `in_flight` is `holding_count + background_holding_count`, so a batch chunk in the slot counts; `queue_waiting` stays interactive (`pending_count − holding_count`). (Stage 3, 2026-10-06, requested by 029)
 - New property `occupied_count` = interactive pending + background waiting + background holding. The unload drain (`model_service.py:1258`) and the idle-cache release checks (`inference_service.py:725`, `:750`) switch to it. `pending_count` keeps its meaning, so the `QUEUE_FULL` check at `chat.py:244` and the health field stay interactive-only.
 
 `_admit(background=True)` is the only caller of `acquire_background`; the guard `test_every_request_queue_slot_is_taken_through_admission` (`tests/unit/services/test_unload_admission.py:451`) extends to the new method.
@@ -234,7 +236,7 @@ A restart forgets every lease, as Feature 29 does (029 FR-29.1.9), so a resumed 
 
 - **Configuration** (`millm/core/config.py`, `.env.example`): `BATCH_FILES_DIR` (`/app/batch_files`; k8s `/data/batch_files`), `BATCH_MAX_ROWS` 50,000, `BATCH_MAX_FILE_BYTES` 209,715,200, `BATCH_MAX_LINE_BYTES` 1,048,576, `BATCH_PACK_DEFAULT` true (T-63 may flip it), `BATCH_CHUNK_ROWS` 8, `BATCH_PACK_MAX_ROWS` 16, `BATCH_PACK_MAX_TOKENS` 16,384, `BATCH_MAX_COMPLETION_WINDOW_HOURS` 168, `BATCH_FILE_RETENTION_DAYS` 30, `BATCH_LEASE_TTL_S` 900, `BATCH_WAIT_POLL_S` 10, `BATCH_PROGRESS_MIN_INTERVAL_S` 1, `BATCH_ERRORS_SHOWN` 100, `PROBE_MAX_BATCH_EVENTS_PER_PROBE` 50,000.
 - **Kubernetes:** `k8s/base/backend.yaml` gains `BATCH_FILES_DIR=/data/batch_files`, and the init container's `mkdir -p` list gains it. **docker-compose:** a named volume `batch_files:/app/batch_files`.
-- **Monitoring:** structured log events `batch_created`, `batch_validated`, `batch_chunk_recorded` (rows, seconds, packed), `batch_waiting` (reason), `batch_terminal`, `batch_files_pruned`. Feature 29's `batch_backlog_rows` reads `BatchRunner.backlog_rows()`.
+- **Monitoring:** structured log events `batch_created`, `batch_validated`, `batch_chunk_recorded` (rows, seconds, packed), `batch_waiting` (reason), `batch_terminal`, `batch_files_pruned`. Feature 29's `batch_backlog_rows` reads `BatchRunner.backlog_rows()`, registered with `register_backlog_provider` (029 FTDD §5.2). (Stage 3, 2026-10-06, requested by 029)
 - **Rollout:** the migration is additive; batches started on the new image survive later rollouts by design. **A rollout still interrupts the chunk in flight** — expected, and the reason for row-level resume.
 - **Rollback:** an older image ignores the new tables. Batches left `in_progress` resume when the new image returns. Downgrading the migration deletes batch state; take the nightly-style manual dump first.
 
@@ -291,4 +293,4 @@ Rounds waived; answers from sources.
 
 **Open items (technical, not product):**
 1. **Sensing and circuit-edge sensing events from batch generation rows.** T-70 covers probe events only. As designed, batch generation rows flow through the synchronous path and record sensing events as live traffic. Phase 7 measures whether a 50,000-row generation batch evicts live sensing history (`SENSING_MAX_AGE_DAYS` and caps, `millm/core/config.py:156`) and, if so, applies the same `origin` marking. It needs no product decision unless the marking changes what an operator sees.
-2. **Sibling contracts.** Feature 27's scoring function, Feature 28's steering value and Feature 29's lease service are specified here by contract only; their FTDDs fix names. FTASKS gates each phase on them.
+2. **Sibling contracts.** Feature 27's scoring function and Feature 28's steering value are specified here by contract only; their FTDDs fix names. Feature 29's FTDD now fixes the lease names this design uses (`acquire_lease`, `renew_lease`, `release_lease`, `resolve_lease`, `holding_count`, `register_backlog_provider`). (Stage 3, 2026-10-06, requested by 029) FTASKS gates each phase on them.

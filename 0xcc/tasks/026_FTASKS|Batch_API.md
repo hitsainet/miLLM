@@ -47,7 +47,7 @@
 
 - [ ] 0.0 Gates and spikes (covers the FTDD §14 open items; no product question remains open — FPRD §14)
   - [ ] 0.1 **Gate: Feature 25 contract.** Confirm 025 shipped `request_policy.evaluate(request, endpoint, engine, strict=...)`, the JSON-schema subset check and `_score_prompts` as its FTDD (§1, §5) specifies. Blocks 4.x and 6.1.
-  - [ ] 0.2 **Gate: Feature 29 contract.** Confirm the lease service offers in-process `acquire`, `renew`, `release`, `current`, `matches(lease_id)` and that a restart ends every lease (029 FR-29.1.9). Blocks 5.4.
+  - [ ] 0.2 **Gate: Feature 29 contract.** Confirm `ModelService` offers in-process `acquire_lease`, `renew_lease`, `release_lease`, `resolve_lease` and `get_lease`, the errors `ModelLeasedError`, `ModelNotResidentError`, `LeaseNotFoundError` and `LeaseExpiredError`, plus `RequestQueue.holding_count` and `register_backlog_provider`, as 029 FTDD §2 and §6 fix them; and that a restart ends every lease (029 FR-29.1.9). (Stage 3, 2026-10-06, requested by 029) Blocks 5.4.
   - [ ] 0.3 **Gate: Feature 27 and 28 contracts.** Confirm 027's scoring service function and 028's steering-value function (FR-28.3.10). Blocks 7.x and 6.4.
   - [ ] 0.4 **Spike: sensing events from batch generation rows** (FTDD §14 item 1). Measure whether a 5,000-row generation batch with sensing armed evicts live sensing history. If it does, extend 7.2's `origin` marking to sensing and circuit-edge sensing events and record the decision; if not, record the measurement.
   - [ ] 0.5 **Spike: `logits_to_keep` index tensor on served architectures.** On LFM2, Gemma, Llama and Granite model classes in the installed transformers, confirm the forward accepts a tensor; list any that need the full-logits fallback (FTID §7).
@@ -95,7 +95,7 @@
   - [ ] 5.8 `ProgressEmitter.emit_batch_progress` (`batch:progress`, `{id, status, request_counts}`), throttled, on every chunk and transition.
   - [ ] 5.9 `reconcile_batches_on_startup`: `validating` re-validates; `in_progress` resumes; `finalizing` re-assembles; `cancelling` → `cancelled`; stray `.partial` removed; input sha256 checked.
   - [ ] 5.10 Lifespan (`millm/main.py:277`): reconcile → `BatchRunner.start()` → retention loop, after `disarm_probes_on_startup` (`main.py:379`); runner stopped on shutdown.
-  - [ ] 5.11 `BatchRunner.backlog_rows()` for Feature 29's `batch_backlog_rows` (FR-29.7.3).
+  - [ ] 5.11 `BatchRunner.backlog_rows()`, registered through Feature 29's `register_backlog_provider` at runner start, for `batch_backlog_rows` (FR-29.7.3); `background_holding_count` added to `in_flight`. (Stage 3, 2026-10-06, requested by 029)
   - [ ] 5.12 Tests: status transitions only along the FR-26.3.5 table; output-line and error-line shapes; counters per chunk; **exactly-once** across an injected crash mid-chunk and between chunks (fresh runner + reconcile); each reconciliation branch; cancel at a row boundary keeps completed rows; expiry path; own lease released on success, cancel, expiry, failure and exception; caller lease never released; after a simulated restart the batch waits with `lease_unavailable` until the lease frees, and runs under a handed-over caller lease; a batch never calls `load_model`/`unload_model` (spy, call count 0); interactive chat proceeds while the batch holds the lease; progress emitted with payload and count; **wiring:** removing the lifespan reconcile call, the runner start or the emit turns a test red (M11).
 
 - [ ] 6.0 Packing and provenance (covers FR-26.5, FR-26.10.1)

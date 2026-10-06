@@ -279,8 +279,10 @@ management `JSONResponse` (`exception_handlers.py:140-143`).
 - **`_refuse_if_leased` reads `self.loader.loaded_model_id`** for the lease to check, not the target:
   the lease protects the resident model, whatever the request asks to load.
 - **Estimate** (`backpressure.estimate_wait_seconds(queue, cbm_running)`):
-  `median * (waiting + holding) / max_concurrent`, where `waiting = pending_count − holding_count`,
-  clamped at 0; `None` below 3 samples or when `cbm_running`.
+  `median * (waiting + in_flight) / max_concurrent`, where `waiting = pending_count − holding_count`,
+  clamped at 0, and `in_flight = holding_count + background_holding_count` (the second is Feature 26's,
+  0 before it ships); `None` below 3 samples or when `cbm_running` (Stage 3, 2026-10-06, requested by
+  026).
 - **Backlog provider:** `register_backlog_provider(fn: Callable[[], int])` stores one callable;
   `backlog_rows()` returns `None` when none is registered and logs and returns `None` if it raises.
 - **GPU read** (`read_gpu_memory()`, synchronous, run with `asyncio.to_thread`): `query_gpus()`; if

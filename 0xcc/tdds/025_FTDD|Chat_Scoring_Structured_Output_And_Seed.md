@@ -422,3 +422,5 @@ gemma-4 tokenizer spike, GPU per-token cost. **PADR amendments recommended (not 
 still says GGUF is refused "unless BRD-04 open question 3 extends support" — the checkpoint closed it
 (refused in v1); (c) PADR §10 "One scoring path" names `_score_text_completion` as the shared
 function — the design shares its extracted loop, `_score_prompts`; the rationale is unchanged.
+**Applied (Stage 3, 2026-10-06, requested by 025):** all three amendments are now in the PADR (§2.2, §5,
+§10).

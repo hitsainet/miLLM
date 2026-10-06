@@ -3,7 +3,18 @@ import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { modelApi } from '@/services/api';
 import { useServerStore } from '@/stores/serverStore';
 import { useToast } from './useToast';
-import type { ModelDownloadRequest, ModelPreviewResponse } from '@/types';
+import type { ModelDownloadRequest, ModelInfo, ModelPreviewResponse } from '@/types';
+
+/**
+ * How often the model list refetches: every 2 s while a download or load runs (progress), every
+ * 10 s while any model is leased (Feature 29, FR-29.5.4 — an expired or released lease
+ * disappears without a reload), otherwise not at all.
+ */
+export function modelsRefetchInterval(models: ModelInfo[] | undefined): number | false {
+  if (models?.some((m) => m.status === 'downloading' || m.status === 'loading')) return 2000;
+  if (models?.some((m) => m.lease)) return 10_000;
+  return false;
+}
 
 export function useModels() {
   const queryClient = useQueryClient();
@@ -25,14 +36,8 @@ export function useModels() {
     },
     // Prevent unnecessary refetches that could cause state issues
     staleTime: 5000,
-    // Poll every 2 seconds when there's a downloading or loading model to show progress
-    refetchInterval: (query) => {
-      const models = query.state.data;
-      const hasActiveOperation = models?.some(
-        (m) => m.status === 'downloading' || m.status === 'loading'
-      );
-      return hasActiveOperation ? 2000 : false;
-    },
+    // 2 s during a download or load, 10 s while a model is leased (modelsRefetchInterval)
+    refetchInterval: (query) => modelsRefetchInterval(query.state.data),
   });
 
   const downloadMutation = useMutation({

@@ -214,14 +214,14 @@ T-84 – T-90
         null`; untouched card never calls `memory_reserved` (control M17); GGUF label; absent
         `nvidia-smi`; route reachable; read runs in a thread (patched `to_thread` call count 1).
 
-- [ ] 9.0 Admin UI lease visibility (covers FR-29.5.2 – FR-29.5.5)
-  - [ ] 9.1 `LeaseSummary` on `ModelInfo` in `types/api.ts`; no `lease_id` in any type.
-  - [ ] 9.2 `LeaseBadge` (FTID §6): amber, text label and `aria-label`, 1-second local countdown,
+- [x] 9.0 Admin UI lease visibility (covers FR-29.5.2 – FR-29.5.5)
+  - [x] 9.1 `LeaseSummary` on `ModelInfo` in `types/api.ts`; no `lease_id` in any type.
+  - [x] 9.2 `LeaseBadge` (FTID §6): amber, text label and `aria-label`, 1-second local countdown,
         hides past expiry.
-  - [ ] 9.3 Place it on `ModelsPage` beside the lock icon, in `ModelDetailsModal` and in
+  - [x] 9.3 Place it on `ModelsPage` beside the lock icon, in `ModelDetailsModal` and in
         `LoadedModelCard`.
-  - [ ] 9.4 `useModels` polls every 10 seconds while any model is leased.
-  - [ ] 9.5 Vitest: holder, reason and remaining time render; badge disappears after expiry with fake
+  - [x] 9.4 `useModels` polls every 10 seconds while any model is leased.
+  - [x] 9.5 Vitest: holder, reason and remaining time render; badge disappears after expiry with fake
         timers; lock tooltip still reads "Locked for steering"; no lease action rendered (T-86);
         `refetchInterval` returns 10,000 with a lease.
 

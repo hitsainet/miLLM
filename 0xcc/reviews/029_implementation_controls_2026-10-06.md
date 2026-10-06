@@ -19,6 +19,8 @@ One pytest process at a time throughout.
 | After 7.0 (queue state, health contract) | 4293 passed / 3 skipped / 0 failed |
 | After 8.0 (GPU memory endpoint) | 4311 passed / 3 skipped / 0 failed |
 
+Admin UI (`npx vitest run`): **457 passed / 41 files** before 9.0 (468 − the 11 new), **468 passed / 41 files** after; `tsc -b --noEmit` clean; `eslint` on the touched files reports the same 3 pre-existing errors as the base tree (GGUFQuantPicker ×2, ModelLoadForm), none in new code.
+
 ## 2. Task 0.1 — cited lines re-verified at HEAD (`39c6f8e`)
 
 `model_service.py` lines cited by the FTDD/FTID (782, 832–837, 850–853, 884–892, 1194, 1212–1218,

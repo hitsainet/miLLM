@@ -43,6 +43,25 @@ export interface ModelInfo {
   revision?: string | null;
   /** Card(s) the loaded model is on and what it used on each. Loaded model only. */
   placement?: ModelPlacement | null;
+  /**
+   * The live lease on this model (Feature 29): who pinned it, why, and until when.
+   * Display only — the Admin UI takes no lease action (T-86), and no frontend type carries
+   * the lease ID, which only the holder ever sees.
+   */
+  lease?: LeaseSummary | null;
+}
+
+/** A live model lease as every read reports it (`GET /api/models`, `/api/health/detailed`). */
+export interface LeaseSummary {
+  model_id: number;
+  model_name: string;
+  holder: string;
+  reason: string;
+  acquired_at: string;
+  renewed_at: string | null;
+  expires_at: string;
+  ttl_seconds: number;
+  seconds_remaining: number;
 }
 
 /**

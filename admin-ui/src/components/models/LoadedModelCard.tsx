@@ -2,6 +2,7 @@ import { useState } from 'react';
 import { Server, Square, HardDrive, Cpu, Layers, ExternalLink } from 'lucide-react';
 import { Card, CardHeader, Button, Modal, Badge } from '@components/common';
 import type { ModelInfo } from '@/types';
+import { LeaseBadge } from './LeaseBadge';
 
 interface LoadedModelCardProps {
   model: ModelInfo;
@@ -53,6 +54,7 @@ export function LoadedModelCard({
           <div className="flex items-center justify-between">
             <div>
               <h3 className="text-lg font-semibold text-slate-100">{model.name}</h3>
+              {model.lease && <LeaseBadge lease={model.lease} />}
               <a
                 href={`https://huggingface.co/${model.repo_id}`}
                 target="_blank"

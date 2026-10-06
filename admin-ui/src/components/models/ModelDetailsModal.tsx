@@ -23,6 +23,7 @@ import { useServerStore } from '@/stores/serverStore';
 import { GGUFQuantPicker } from './GGUFQuantPicker';
 import { displayQuantization } from './displayQuantization';
 import { gpuTotalsBytes } from './gpuOptions';
+import { LeaseBadge } from './LeaseBadge';
 
 export interface ModelDetailsModalProps {
   /** The downloaded model to show details for */
@@ -286,6 +287,17 @@ export function ModelDetailsModal({
             {model && getStatusBadge(model.status)}
           </div>
         </div>
+
+        {/* Lease (Feature 29): display only — no lease action exists in the Admin UI */}
+        {model?.lease && (
+          <div className="flex items-center justify-between p-3 bg-amber-500/10 border border-amber-500/30 rounded-lg">
+            <span className="text-sm font-medium text-slate-300">Lease</span>
+            <div className="text-right">
+              <LeaseBadge lease={model.lease} />
+              <p className="text-xs text-slate-400 mt-1">{model.lease.reason}</p>
+            </div>
+          </div>
+        )}
 
         {/* Error Message */}
         {model?.status === 'error' && (

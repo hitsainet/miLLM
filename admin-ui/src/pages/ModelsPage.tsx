@@ -3,7 +3,7 @@ import { modelApi } from '@services/api';
 import { Server, Info, Play, Lock } from 'lucide-react';
 import { useModels } from '@hooks/useModels';
 import { useServerStore } from '@stores/serverStore';
-import { ModelLoadForm, LoadedModelCard, ModelDetailsModal } from '@components/models';
+import { ModelLoadForm, LoadedModelCard, ModelDetailsModal, LeaseBadge } from '@components/models';
 import { displayQuantization } from '@components/models/displayQuantization';
 import type { ModelLoadFormData } from '@components/models';
 import { Card, CardHeader, Spinner, EmptyState, Badge, Select } from '@components/common';
@@ -288,6 +288,9 @@ export function ModelsPage() {
                       <span className="text-xs text-yellow-400">Loading...</span>
                     </div>
                   )}
+
+                  {/* Lease indicator (Feature 29): who pinned the model, and until when */}
+                  {model.lease && <LeaseBadge lease={model.lease} />}
 
                   {/* Lock indicator */}
                   {model.locked && (

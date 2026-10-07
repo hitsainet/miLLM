@@ -10,7 +10,21 @@ from __future__ import annotations
 import re
 from pathlib import Path
 
+import pytest
+
 CONTRACT = Path(__file__).resolve().parents[3] / "docs" / "mcp-contract.md"
+
+#: SOURCE-ONLY, and skipped LOUDLY where absent — the same split as
+#: `test_recalibration_doctrine_is_consistent.py`. `sync-to-clean` strips everything under
+#: `docs/` except `schemas/`, and the MIRROR is where the backend image is built: this file
+#: first shipped without the skip, failed the mirror's Backend Tests, and the image gate
+#: refused to build Feature 26 at all (2026-10-07). The contract cannot be checked where it is
+#: not present; "unverified here" is the honest result, not a pass and not a red build.
+pytestmark = pytest.mark.skipif(
+    not CONTRACT.exists(),
+    reason="docs/mcp-contract.md is not in this checkout — the public mirror strips docs/ "
+    "except schemas/, and images are built there. Checked in the source repo.",
+)
 
 
 def _section_rows() -> set[tuple[str, str]]:

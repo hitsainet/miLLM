@@ -256,3 +256,40 @@ async def test_validate_functions_are_what_the_routes_answer_with(harness):
         validate_completions(TextCompletionRequest(**body), model_row(), strict=False)
     assert sync.status_code == caught.value.status_code
     assert sync.json() == caught.value.body()
+
+
+def _embedding_line(custom_id: str, **body) -> dict:
+    return {"custom_id": custom_id, "method": "POST", "url": "/v1/embeddings",
+            "body": {"model": "tiny", "input": "w1 w2", **body}}
+
+
+async def test_an_embeddings_line_with_dimensions_is_refused_as_the_route_refuses_it(harness):
+    """Feature 30 refuses `dimensions` on every model before any load; a batch line gets the
+    SAME code and message (it runs through `validate_embeddings`, the route's own check)."""
+    body = _embedding_line("d", dimensions=8)["body"]
+    async with client_for(harness.app()) as client:
+        sync = (await client.post("/v1/embeddings", json=body)).json()["error"]
+    _, _, got = await _run_create(
+        harness, [_embedding_line("ok"), _embedding_line("d", dimensions=8)],
+        endpoint="/v1/embeddings",
+    )
+    error = got["errors"]["data"][0]
+    assert error["code"] == sync["code"] == "field_not_honoured"
+    assert error["message"] == f"Line 2: {sync['message']}"
+    assert "'tiny'" in error["message"], "Feature 30's refusal names the model"
+
+
+async def test_an_embeddings_line_is_strict_and_its_options_reach_the_body(harness):
+    """Strict per line on embeddings too; `pooling`/`normalize` are honoured and the line's body
+    equals the synchronous response."""
+    good = _embedding_line("p", pooling="last", normalize=True)
+    unused = _embedding_line("u", made_up=1)
+    async with client_for(harness.app()) as client:
+        sync = (await client.post("/v1/embeddings", json=good["body"])).json()
+    _, _, got = await _run_create(harness, [good, unused], endpoint="/v1/embeddings")
+    assert got["errors"]["data"][0]["code"] == "unused_fields_refused"
+    await harness.drain()
+    async with client_for(harness.app()) as client:
+        out = await harness.lines(client, (await harness.batch(got["id"])).output_file_id)
+    assert out[0]["response"]["millm"]["packed"] is False
+    assert out[0]["response"]["body"]["data"] == sync["data"]

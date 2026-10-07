@@ -7,7 +7,7 @@ Requires a model to already be loaded via the Management API.
 """
 
 import asyncio
-from typing import Annotated
+from typing import Annotated, Any
 
 from fastapi import APIRouter, Depends, Header, Request, Response
 from fastapi.responses import JSONResponse
@@ -15,12 +15,19 @@ from fastapi.responses import JSONResponse
 from millm.api.dependencies import ModelServiceDep, get_inference_service
 from millm.api.request_policy import (
     IGNORED_FIELDS_HEADER,
+    STRICT_HEADER,
     Endpoint,
-    apply_request_policy,
+    PolicyResult,
+    engine_of,
+    model_name_of,
+    evaluate,
     ignored_fields_header,
+    parse_strict,
+    report_unused,
 )
 from millm.api.routes.openai.load_policy import apply_load_policy, parse_load_policy
 from millm.api.routes.openai.errors import (
+    OpenAIRefusal,
     create_openai_error,
     embedding_model_error,
     is_embedding_only,
@@ -43,17 +50,42 @@ from millm.core.errors import (
     ModelLockedError,
 )
 from millm.core.logging import get_logger
-from millm.api.routes.openai.chat import build_probe_verdicts_header, seed_header
-from millm.services.inference_service import (
-    InferenceService,
-    get_probe_verdicts,
-    get_request_outcome,
-    reset_request_outcome,
-)
-from millm.services.system_fingerprint import build_system_fingerprint
+from millm.api.provenance import finish_body, post_generation, pre_generation
+from millm.services.inference_service import InferenceService
 
 router = APIRouter()
 logger = get_logger(__name__)
+
+
+def validate_completions(
+    request: TextCompletionRequest, model_row: Any, *, strict: bool
+) -> PolicyResult:
+    """Every text-completion refusal decidable from the request and the ROW (no load, no slot).
+
+    Called by the route and by the Batch API validator (026 FTDD §5).
+    """
+    # An embedding model cannot generate text. Refuse before loading it —
+    # loading costs time and VRAM to reach an answer guaranteed to be nonsense.
+    if is_embedding_only(getattr(model_row, "architecture", None)):
+        raise OpenAIRefusal(embedding_model_error(request.model, model_row.architecture))
+
+    # Feature 25 request policy, before anything that could load a model (see chat.py).
+    policy = evaluate(request, Endpoint.COMPLETIONS, engine_of(model_row), strict=strict,
+        model_name=model_name_of(model_row),
+    )
+
+    # Streaming has never been implemented on /v1/completions at all, on any
+    # engine. Refused here rather than after the auto-load below: the answer
+    # depends only on `request.stream`, so loading a model first spends a full
+    # swap — evicting whatever is resident and any SAEs attached to it — to
+    # reach a 400 that was decided by the request body.
+    if request.stream:
+        raise OpenAIRefusal(validation_error(
+            "Streaming is not supported for the /v1/completions endpoint. "
+            "Use /v1/chat/completions with stream=true instead.",
+            param="stream",
+        ))
+    return policy
 
 
 @router.post(
@@ -85,26 +117,16 @@ async def create_completion(
     if not model:
         return model_not_found_error(request.model)
 
-    # An embedding model cannot generate text. Refuse before loading it —
-    # loading costs time and VRAM to reach an answer guaranteed to be nonsense.
-    if is_embedding_only(getattr(model, "architecture", None)):
-        return embedding_model_error(request.model, model.architecture)
-
-    # Feature 25 request policy, before anything that could load a model (see chat.py).
-    policy = apply_request_policy(request, Endpoint.COMPLETIONS, model, http_request.headers)
-    ignored_header = ignored_fields_header(policy)
-
-    # Streaming has never been implemented on /v1/completions at all, on any
-    # engine. Refused here rather than after the auto-load below: the answer
-    # depends only on `request.stream`, so loading a model first spends a full
-    # swap — evicting whatever is resident and any SAEs attached to it — to
-    # reach a 400 that was decided by the request body.
-    if request.stream:
-        return validation_error(
-            "Streaming is not supported for the /v1/completions endpoint. "
-            "Use /v1/chat/completions with stream=true instead.",
-            param="stream",
+    # Every refusal decidable from the request and the ROW (one copy, two callers: this route
+    # and the batch validator — Feature 26, FR-26.2.4).
+    try:
+        policy = validate_completions(
+            request, model, strict=parse_strict(http_request.headers.get(STRICT_HEADER))
         )
+    except OpenAIRefusal as refusal:
+        return refusal.response
+    report_unused(policy, Endpoint.COMPLETIONS, http_request.headers)
+    ignored_header = ignored_fields_header(policy)
 
     # Scoring on a GGUF row is refused by the request policy above (the `logprobs` /
     # `allowed_token_ids` cells for llama.cpp), before the auto-load. The route kept its own copy
@@ -177,28 +199,15 @@ async def create_completion(
         stream=request.stream,
     )
 
-    response.headers["X-miLLM-Backend"] = inference.backend_name
-    reset_request_outcome()
+    # Every `X-miLLM-*` value from `millm.api.provenance`, the function a batch output line
+    # reads too (FR-26.10.1). Probe verdicts (FR-24.7, FR-27.8g) included: this route once never
+    # sent them. Decided AFTER generation — the verdict and seed scope do not exist before.
+    pre = await pre_generation(request, inference, chat=False)
     result = await inference.create_text_completion(request)
-    if ignored_header:
-        response.headers[IGNORED_FIELDS_HEADER] = ignored_header
-    if request.seed is not None:
-        response.headers["X-miLLM-Seed"] = seed_header(
-            request.seed,
-            get_request_outcome().get("seed_scope") or inference.seed_scope_for(request),
+    response.headers.update(
+        post_generation(
+            request, inference, endpoint="completions", pre=pre, ignored_header=ignored_header
         )
-    result.system_fingerprint = build_system_fingerprint(model, inference.loaded_model())
-    # Probe verdicts (FR-24.7, FR-27.8g). ⚠ THIS ROUTE NEVER SENT THEM: only the chat route read
-    # the verdicts, so FR-24.7's promise of the header "on both" was false here, and FR-27.8d's
-    # `continuous_batching` reason on a text completion was invisible to every caller. Read AFTER
-    # generation, as the chat route does — the verdict does not exist before. "" (nothing armed)
-    # sets no header, so an unarmed server's response is unchanged.
-    probe_header = build_probe_verdicts_header(get_probe_verdicts())
-    if probe_header:
-        response.headers["X-miLLM-Probe-Verdicts"] = probe_header
-    if request.wants_scores() and request.return_sae_activations is not None:
-        # X-09: scoring is always unsteered, and a scoring response carrying activations says so
-        # in the header as well as in `read_point: "unsteered"` (FTDD §5.3; 028 owns the header
-        # on every other response).
-        response.headers["X-miLLM-Steering"] = "none"
+    )
+    finish_body(result, model, inference)
     return result

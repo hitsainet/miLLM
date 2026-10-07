@@ -501,15 +501,24 @@ def apply_request_policy(
     Called after the row lookup and before the auto-load, so every refusal here costs no load.
     """
     strict = parse_strict(headers.get(STRICT_HEADER))
-    name = getattr(row, "name", None)
     result = evaluate(
-        request, endpoint, engine_of(row), strict=strict,
-        model_name=name if isinstance(name, str) else None,
+        request, endpoint, engine_of(row), strict=strict, model_name=model_name_of(row),
     )
+    report_unused(result, endpoint, headers)
+    return result
+
+
+def model_name_of(row: Any) -> str | None:
+    """The row's name for refusal messages (Feature 30), or None when it has none."""
+    name = getattr(row, "name", None)
+    return name if isinstance(name, str) else None
+
+
+def report_unused(result: PolicyResult, endpoint: Endpoint, headers: Mapping[str, str]) -> None:
+    """The one `request_fields_unused` log line for a request with unused fields."""
     if result.unused:
         request_id = headers.get("X-Request-ID") or uuid.uuid4().hex[:16]
         log_unused(endpoint, request_id, result.unused)
-    return result
 
 
 def ignored_fields_header(result: PolicyResult) -> str | None:

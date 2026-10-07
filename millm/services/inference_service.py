@@ -409,15 +409,15 @@ def _constraint_type(response_format: Any) -> Optional[str]:
     return kind if kind in ("json_object", "json_schema") else None
 
 
-#: Feature 25: what this request's generation actually did, for the route's headers — the seed
-#: scope that was promised (X-miLLM-Seed) and the constraint that was applied
-#: (X-miLLM-Constrained). Request-scoped like the probe verdicts above; reset with them.
 #: The asyncio TASK holding the request-queue slot, set by `_admit` while the slot is held
 #: (Feature 26, FTDD §7 constraint 1). `_admit` re-enters ONLY when this is the current task.
 _SLOT_OWNER: "contextvars.ContextVar[Optional[asyncio.Task]]" = contextvars.ContextVar(
     "millm_slot_owner", default=None
 )
 
+#: Feature 25: what this request's generation actually did, for the route's headers — the seed
+#: scope that was promised (X-miLLM-Seed) and the constraint that was applied
+#: (X-miLLM-Constrained). Request-scoped like the probe verdicts above; reset with them.
 _REQUEST_OUTCOME: "contextvars.ContextVar[Optional[dict[str, Any]]]" = contextvars.ContextVar(
     "millm_request_outcome", default=None
 )

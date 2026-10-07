@@ -8,7 +8,7 @@ Requires a model to already be loaded via the Management API.
 """
 
 import asyncio
-from typing import Annotated, Union
+from typing import Annotated, Any, Union
 
 from fastapi import APIRouter, Depends, Header, Request, Response
 from fastapi.responses import JSONResponse, StreamingResponse
@@ -17,12 +17,19 @@ from millm.api import json_schema_subset
 from millm.api.dependencies import ModelServiceDep, get_inference_service
 from millm.api.request_policy import (
     IGNORED_FIELDS_HEADER,
+    STRICT_HEADER,
     Endpoint,
-    apply_request_policy,
+    PolicyResult,
+    engine_of,
+    model_name_of,
+    evaluate,
     ignored_fields_header,
+    parse_strict,
+    report_unused,
 )
 from millm.api.routes.openai.load_policy import apply_load_policy, parse_load_policy
 from millm.api.routes.openai.errors import (
+    OpenAIRefusal,
     embedding_model_error,
     is_embedding_only,
     load_refused_error,
@@ -47,18 +54,7 @@ from millm.core.logging import get_logger
 from millm.ml.constrained_decoding import constraint_kind, schema_of
 from millm.services.inference_service import (
     InferenceService,
-    circuit_apply_failed,
-    get_probe_verdicts,
-    get_request_outcome,
-    reset_steering_memo,
 )
-from millm.services.system_fingerprint import build_system_fingerprint
-
-
-def seed_header(seed: int, scope: str) -> str:
-    """`X-miLLM-Seed: 7;scope="request"` (FR-25.13.6, FR-25.14). Sent only when the request
-    carried a seed — miLLM never chooses one of its own (T-60)."""
-    return f'{seed};scope="{scope}"'
 
 
 def build_probe_verdicts_header(verdicts: list) -> str:
@@ -108,6 +104,52 @@ def build_probe_verdicts_header(verdicts: list) -> str:
 router = APIRouter()
 logger = get_logger(__name__)
 
+# Imported after `build_probe_verdicts_header` is defined: provenance reads it from this module.
+from millm.api.provenance import (  # noqa: E402
+    finish_body,
+    post_generation,
+    pre_generation,
+    seed_header,
+)
+
+
+def validate_chat(
+    request: ChatCompletionRequest, model_row: Any, *, strict: bool, cbm_enabled: bool
+) -> PolicyResult:
+    """Every chat refusal decidable from the request and the model ROW (no load, no slot).
+
+    Called by the route and by the Batch API validator (026 FTDD §5): a batch line is refused
+    with the same code and message as the synchronous request. Raises `OpenAIRefusal` for a
+    response-shaped refusal and a `MiLLMError` for a policy one.
+    """
+    # An embedding model cannot generate text. Refuse before loading it —
+    # loading takes time and VRAM to reach an answer that is guaranteed to be
+    # nonsense. Nemotron-3-Embed-8B-BF16 answered a chat prompt with hundreds of
+    # tokens of multilingual fragments rather than failing, which is worse than
+    # an error because it looks like output.
+    if is_embedding_only(getattr(model_row, "architecture", None)):
+        raise OpenAIRefusal(embedding_model_error(request.model, model_row.architecture))
+
+    # Feature 25 request policy: every output-changing field honoured or refused, every
+    # unused field reported (or refused under X-miLLM-Strict).
+    policy = evaluate(request, Endpoint.CHAT, engine_of(model_row), strict=strict,
+        model_name=model_name_of(model_row),
+    )
+
+    # Structured output refusals decidable without a load (FR-25.11): a schema keyword outside
+    # the enforced subset, and the continuous batching manager. (GGUF rows were refused by the
+    # policy table above.)
+    if constraint_kind(request.response_format) is not None:
+        if constraint_kind(request.response_format) == "json_schema":
+            json_schema_subset.check(schema_of(request.response_format))
+        if cbm_enabled:
+            raise ResponseFormatUnsupportedError(
+                "Structured output is refused while continuous batching is enabled on this "
+                "server: the batching manager applies no per-request constraint.",
+                details={"param": "response_format"},
+            )
+    return policy
+
 
 @router.post(
     "/chat/completions",
@@ -137,32 +179,19 @@ async def create_chat_completion(
     if not model:
         return model_not_found_error(request.model)
 
-    # An embedding model cannot generate text. Refuse before loading it —
-    # loading takes time and VRAM to reach an answer that is guaranteed to be
-    # nonsense. Nemotron-3-Embed-8B-BF16 answered a chat prompt with hundreds of
-    # tokens of multilingual fragments rather than failing, which is worse than
-    # an error because it looks like output.
-    if is_embedding_only(getattr(model, "architecture", None)):
-        return embedding_model_error(request.model, model.architecture)
-
-    # Feature 25 request policy: every output-changing field honoured or refused, every
-    # unused field reported (or refused under X-miLLM-Strict). Decided from the request and
-    # the ROW, so it runs before the auto-load below would evict the resident model.
-    policy = apply_request_policy(request, Endpoint.CHAT, model, http_request.headers)
+    # Every refusal decidable from the request and the ROW, before the auto-load below would
+    # evict the resident model. One copy, two callers: this route and the batch validator
+    # (Feature 26, FR-26.2.4).
+    try:
+        policy = validate_chat(
+            request, model,
+            strict=parse_strict(http_request.headers.get(STRICT_HEADER)),
+            cbm_enabled=inference.cbm_enabled() is True,
+        )
+    except OpenAIRefusal as refusal:
+        return refusal.response
+    report_unused(policy, Endpoint.CHAT, http_request.headers)
     ignored_header = ignored_fields_header(policy)
-
-    # Structured output refusals decidable without a load (FR-25.11): a schema keyword outside
-    # the enforced subset, and the continuous batching manager. (GGUF rows were refused by the
-    # policy table above.)
-    if constraint_kind(request.response_format) is not None:
-        if constraint_kind(request.response_format) == "json_schema":
-            json_schema_subset.check(schema_of(request.response_format))
-        if inference.cbm_enabled() is True:
-            raise ResponseFormatUnsupportedError(
-                "Structured output is refused while continuous batching is enabled on this "
-                "server: the batching manager applies no per-request constraint.",
-                details={"param": "response_format"},
-            )
 
     # Load the requested model on demand.
     #
@@ -251,31 +280,12 @@ async def create_chat_completion(
     # X-miLLM-Circuit-Rung tells a dial client WHAT it is steering with
     # (Feature 14). The phrase comes from the evidence ladder, never composed
     # here, so the header can never describe a rung<2 circuit as causal.
-    # Drop any memoised steering verdict from a previous request sharing this
-    # context — the memo must never outlive the request that set it.
-    reset_steering_memo()
-
-    echo_circuit_rung = None
-    try:
-        rung_info = await inference.active_circuit_rung()
-        if rung_info is not None:
-            # Structured (RFC 8941): the rung stays trivially parseable as an
-            # int and the phrase is a quoted-string, so punctuation in the
-            # ladder vocabulary can never break a naive parser.
-            echo_circuit_rung = f'{rung_info[0]}; language="{rung_info[1]}"'
-
-    except Exception:  # observability must never fail a chat request
-        echo_circuit_rung = None
-
-    echo_intensity = None
-    if request.steering_intensity is not None:
-        # For streaming, the echo resolution doubles as the pre-commit 404
-        # check for a named profile (one profile read, not two).
-        effective = await inference.resolve_request_intensity(
-            request, ensure_named_profile=bool(request.stream)
-        )
-        if effective is not None:
-            echo_intensity = f"{effective:g}"
+    # Drop any memoised steering verdict from a previous request sharing this context, and
+    # resolve the two echoes that must be known before the first byte (streaming commits its
+    # headers then). One function for the route and the Batch API (`millm.api.provenance`).
+    pre = await pre_generation(request, inference, chat=True)
+    echo_intensity = pre.echo_intensity
+    echo_circuit_rung = pre.echo_circuit_rung
 
     # Handle streaming vs non-streaming
     if request.stream:
@@ -322,58 +332,19 @@ async def create_chat_completion(
             headers=stream_headers,
         )
     else:
-        # FastAPI's injected Response lets us set custom headers on the
-        # auto-serialised Pydantic response without wrapping it manually.
-        response.headers["X-miLLM-Backend"] = backend
-
-        # X-miLLM-Batch advertises the batched-generation extension. Both
-        # request schemas are extra="ignore", so a server predating
-        # `extra_messages` ACCEPTS the field and silently returns a single
-        # choice — a client cannot tell that from a batch of one. This header
-        # is the capability probe that makes the difference observable; a
-        # client that does not see it must fall back to serial requests.
-        response.headers["X-miLLM-Batch"] = str(
-            len(request.extra_messages) + 1 if request.extra_messages else 1
-        )
-        if echo_intensity is not None:
-            response.headers["X-miLLM-Steering-Intensity"] = echo_intensity
-        # F18 R3-01: generate FIRST, then decide whether the rung header is
-        # still true. The dial applies inside generation and can fail; setting
-        # the header beforehand made the response advertise causal-validated
-        # evidence for an intervention that did not run. `circuit_apply_failed`
-        # is the request-scoped record of that outcome.
+        # FastAPI's injected Response lets us set custom headers on the auto-serialised
+        # Pydantic response without wrapping it manually. Every `X-miLLM-*` value comes from
+        # `millm.api.provenance` — the same function a batch output line reads (FR-26.10.1) —
+        # and is decided AFTER generation: the dial applies inside generation and can fail, the
+        # seed scope is what the path that ran recorded, and the verdicts do not exist before.
         #
-        # Only the non-streaming branch can do this. The streaming branch must
-        # commit its headers before the first byte, so its header is a
-        # best-effort statement of intent — recorded as known debt in the F18
-        # review notes rather than papered over.
+        # ⚠ The STREAMING branch above cannot do this — it commits headers before the first
+        # byte, which is why streaming carries the verdict in a terminal chunk instead.
         result = await inference.create_chat_completion(request)
-        if ignored_header:
-            response.headers[IGNORED_FIELDS_HEADER] = ignored_header
-        outcome = get_request_outcome()
-        if request.seed is not None:
-            # The scope the path that RAN recorded; the up-front rule only if it recorded none.
-            response.headers["X-miLLM-Seed"] = seed_header(
-                request.seed, outcome.get("seed_scope") or inference.seed_scope_for(request)
+        response.headers.update(
+            post_generation(
+                request, inference, endpoint="chat", pre=pre, ignored_header=ignored_header
             )
-        if outcome.get("constrained"):
-            response.headers["X-miLLM-Constrained"] = outcome["constrained"]
-        result.system_fingerprint = build_system_fingerprint(model, inference.loaded_model())
-        if echo_circuit_rung is not None and not circuit_apply_failed():
-            response.headers["X-miLLM-Circuit-Rung"] = echo_circuit_rung
-
-        # Probe verdicts (Feature 24, FR-24.7). Read AFTER generation for the same reason the
-        # rung header is: the verdict does not exist until the request has been scored.
-        #
-        # ⚠ The STREAMING branch above cannot do this — it commits headers before the first byte,
-        # and the verdict is not known then. That is why streaming carries the verdict in a
-        # terminal chunk instead, and why the two are not simply the same mechanism twice.
-        probe_header = build_probe_verdicts_header(get_probe_verdicts())
-        if probe_header:
-            response.headers["X-miLLM-Probe-Verdicts"] = probe_header
-        if request.wants_scores() and request.return_sae_activations is not None:
-            # X-09: scoring is always unsteered, and a scoring response carrying activations
-            # says so in the header as well as in `read_point: "unsteered"` (FTDD §5.3; 028 owns
-            # the header on every other response).
-            response.headers["X-miLLM-Steering"] = "none"
+        )
+        finish_body(result, model, inference)
         return result

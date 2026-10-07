@@ -579,6 +579,25 @@ class ProgressEmitter:
         except Exception as e:
             logger.warning("probe_emit_failed", error=str(e))
 
+    def emit_batch_progress(self, payload: dict) -> None:
+        """`batch:progress` (Feature 26, FR-26.6.2): `{id, status, request_counts}`.
+
+        Fire-and-forget, never blocking a chunk commit (FTDD §7 "Side effects"). The payload is
+        built by the runner from the batch row and carries NO row text — counts and status only.
+        """
+        if self._sio is None:
+            return
+
+        import asyncio
+
+        try:
+            asyncio.get_running_loop()
+            asyncio.create_task(self._sio.emit("batch:progress", payload))
+        except RuntimeError:
+            logger.warning("batch_progress_emit_no_loop")
+        except Exception as e:  # noqa: BLE001 - a socket failure must never fail a batch
+            logger.warning("batch_progress_emit_failed", error=str(e))
+
     def emit_sensing_event(self, payload: dict) -> None:
         """
         Emit a persisted co-activation event (Feature 11).

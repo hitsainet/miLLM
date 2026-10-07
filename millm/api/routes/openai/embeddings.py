@@ -8,7 +8,7 @@ decided from the request and the model row — so a refused request never evicts
 """
 
 import asyncio
-from typing import Annotated
+from typing import Annotated, Any
 
 from fastapi import APIRouter, Depends, Header, Request, Response
 from fastapi.responses import JSONResponse
@@ -16,9 +16,15 @@ from fastapi.responses import JSONResponse
 from millm.api.dependencies import ModelServiceDep, get_inference_service
 from millm.api.request_policy import (
     IGNORED_FIELDS_HEADER,
+    STRICT_HEADER,
     Endpoint,
-    apply_request_policy,
+    PolicyResult,
+    engine_of,
+    model_name_of,
+    evaluate,
     ignored_fields_header,
+    parse_strict,
+    report_unused,
 )
 from millm.api.routes.openai.load_policy import apply_load_policy, parse_load_policy
 from millm.api.routes.openai.errors import (
@@ -41,10 +47,22 @@ from millm.core.errors import (
     ModelLockedError,
 )
 from millm.core.logging import get_logger
+from millm.api.provenance import PreGeneration, post_generation
 from millm.services.inference_service import InferenceService
 
 router = APIRouter()
 logger = get_logger(__name__)
+
+
+def validate_embeddings(request: EmbeddingRequest, model_row: Any, *, strict: bool) -> PolicyResult:
+    """Every embeddings refusal decidable from the request and the ROW (026 FTDD §5).
+
+    Feature 25's policy, which since Feature 30 also refuses `dimensions` and a GGUF row's
+    non-mean `pooling`; schema validation has already applied the input caps.
+    """
+    return evaluate(request, Endpoint.EMBEDDINGS, engine_of(model_row), strict=strict,
+        model_name=model_name_of(model_row),
+    )
 
 
 @router.post(
@@ -83,7 +101,11 @@ async def create_embeddings(
     # other than `mean`, since llama.cpp fixes pooling at load. A GGUF model otherwise embeds
     # (llama.cpp loaded with embedding=True and MEAN pooling). Inputs over the model's length
     # limit are refused by the service, which must tokenise them with the loaded tokenizer.
-    policy = apply_request_policy(request, Endpoint.EMBEDDINGS, model, http_request.headers)
+    # One copy, two callers: this route and the batch validator (Feature 26).
+    policy = validate_embeddings(
+        request, model, strict=parse_strict(http_request.headers.get(STRICT_HEADER))
+    )
+    report_unused(policy, Endpoint.EMBEDDINGS, http_request.headers)
     ignored_header = ignored_fields_header(policy)
 
     # Load on demand, same as chat and completions. Open WebUI calls this for
@@ -132,8 +154,11 @@ async def create_embeddings(
         input_count=input_count,
     )
 
-    response.headers["X-miLLM-Backend"] = inference.backend_name
     result = await inference.create_embeddings(request)
-    if ignored_header:
-        response.headers[IGNORED_FIELDS_HEADER] = ignored_header
+    response.headers.update(
+        post_generation(
+            request, inference, endpoint="embeddings", pre=PreGeneration(),
+            ignored_header=ignored_header,
+        )
+    )
     return result

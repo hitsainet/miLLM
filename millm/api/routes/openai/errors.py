@@ -62,6 +62,28 @@ def create_openai_error(
     )
 
 
+class OpenAIRefusal(Exception):
+    """A pre-service refusal carrying the EXACT response the synchronous route returns.
+
+    Raised by the route modules' `validate_<endpoint>()` (Feature 26, FTDD §5): the route returns
+    `response` unchanged; the batch validator reads the same status and body off it, so a batch
+    line is refused with the code and message the synchronous endpoint gives (FR-26.2.4).
+    """
+
+    def __init__(self, response: JSONResponse) -> None:
+        super().__init__(response.body.decode("utf-8", "replace"))
+        self.response = response
+
+    @property
+    def status_code(self) -> int:
+        return int(self.response.status_code)
+
+    def body(self) -> dict:
+        import json
+
+        return json.loads(self.response.body)
+
+
 # Error code to (HTTP status, OpenAI error type) mapping
 ERROR_STATUS_MAP: dict[str, tuple[int, str]] = {
     # Probe monitors (Feature 24). Present so a probe refusal reaching a `/v1` route renders as

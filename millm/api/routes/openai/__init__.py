@@ -12,6 +12,7 @@ Provides endpoints compatible with the OpenAI API specification:
 
 from fastapi import APIRouter
 
+from millm.api.routes.openai.batches import router as batches_router
 from millm.api.routes.openai.chat import router as chat_router
 from millm.api.routes.openai.completions import router as completions_router
 from millm.api.routes.openai.embeddings import router as embeddings_router
@@ -27,5 +28,6 @@ openai_router.include_router(completions_router)
 openai_router.include_router(embeddings_router)
 openai_router.include_router(models_router)
 openai_router.include_router(files_router)
+openai_router.include_router(batches_router)
 
 __all__ = ["openai_router"]

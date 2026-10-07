@@ -17,6 +17,7 @@ import contextlib
 import contextvars
 import gc
 import math
+from dataclasses import dataclass
 import re
 import uuid
 from contextlib import asynccontextmanager
@@ -523,6 +524,23 @@ def circuit_apply_failed() -> bool:
     describes evidence for an intervention, and no intervention ran.
     """
     return _CIRCUIT_APPLY_FAILED.get()
+
+
+@dataclass(frozen=True)
+class ScoreSpec:
+    """One prompt to score and its options (Feature 26's packed path; one per batch row)."""
+
+    text: str
+    add_special_tokens: bool
+    allowed: Optional[list[int]]
+    temperature: float
+    top_k: int
+
+
+@dataclass(frozen=True)
+class PackedScore:
+    scores: Any
+    prompt_tokens: int
 
 
 class LoadedModelInfo:
@@ -5636,19 +5654,9 @@ class InferenceService:
                 "Scoring mode (logprobs / allowed_token_ids) needs the transformers engine; the "
                 "loaded model runs on llama.cpp, which exposes no per-token distribution here."
             )
-        completion_id = f"cmpl-{uuid.uuid4().hex[:24]}"
-        created = int(datetime.now().timestamp())
         prompts = request.prompt if isinstance(request.prompt, list) else [request.prompt]
-        choices: list[TextCompletionChoice] = []
-        prompt_total = 0
 
         async with self._admit():
-
-            def key(token_id: int) -> str:
-                if request.return_tokens_as_token_ids:
-                    return f"token_id:{token_id}"
-                return self._tokenizer.decode([token_id])
-
             scored = await self._score_prompts(
                 prompts,
                 add_special_tokens=request.add_special_tokens,
@@ -5657,29 +5665,50 @@ class InferenceService:
                 top_k=request.logprobs or 0,
                 activations_request=request,
                 millm_out=(_millm_out := []),
+                pack_size=1,
             )
-            for index, (prompt_text, (scores, prompt_tokens)) in enumerate(zip(prompts, scored, strict=True)):
-                choices.append(
-                    TextCompletionChoice(
-                        index=index,
-                        text=self._tokenizer.decode([scores.chosen_id]),
-                        finish_reason="length",
-                        # `allowed_token_ids` alone constrains the token without asking for
-                        # scores; vLLM then returns `logprobs: null`, and so does this.
-                        logprobs=None if request.logprobs is None else CompletionLogprobs(
-                            tokens=[key(scores.chosen_id)],
-                            token_logprobs=[scores.chosen_logprob],
-                            top_logprobs=[{key(t): lp for t, lp in scores.top}],
-                            text_offset=[len(prompt_text)],
-                        ),
-                    )
+            response = self._text_scoring_response(request, prompts, scored, _millm_out)
+        return response
+
+    def _text_scoring_response(
+        self, request: TextCompletionRequest, prompts: list[str], scored: list[tuple[Any, int]],
+        millm_out: list,
+    ) -> TextCompletionResponse:
+        """The `/v1/completions` scoring body for `scored` — ONE builder for the synchronous path
+        and a packed batch row (Feature 26), so the two cannot drift. Called inside the slot (it
+        decodes with the tokenizer an unload deletes)."""
+        completion_id = f"cmpl-{uuid.uuid4().hex[:24]}"
+        created = int(datetime.now().timestamp())
+        choices: list[TextCompletionChoice] = []
+        prompt_total = 0
+
+        def key(token_id: int) -> str:
+            if request.return_tokens_as_token_ids:
+                return f"token_id:{token_id}"
+            return self._tokenizer.decode([token_id])
+
+        for index, (prompt_text, (scores, prompt_tokens)) in enumerate(zip(prompts, scored, strict=True)):
+            choices.append(
+                TextCompletionChoice(
+                    index=index,
+                    text=self._tokenizer.decode([scores.chosen_id]),
+                    finish_reason="length",
+                    # `allowed_token_ids` alone constrains the token without asking for
+                    # scores; vLLM then returns `logprobs: null`, and so does this.
+                    logprobs=None if request.logprobs is None else CompletionLogprobs(
+                        tokens=[key(scores.chosen_id)],
+                        token_logprobs=[scores.chosen_logprob],
+                        top_logprobs=[{key(t): lp for t, lp in scores.top}],
+                        text_offset=[len(prompt_text)],
+                    ),
                 )
-                prompt_total += prompt_tokens
+            )
+            prompt_total += prompt_tokens
 
         if request.seed is not None:
             note_request_outcome(seed_scope=SEED_SCOPE_REQUEST)  # scoring is deterministic
         model_info = self.get_loaded_model_info()
-        _millm = next((m for m in _millm_out if m is not None), None)
+        _millm = next((m for m in millm_out if m is not None), None)
         return TextCompletionResponse(
             millm=_millm,
             id=completion_id,
@@ -5713,28 +5742,11 @@ class InferenceService:
                 "Chat scoring (logprobs / allowed_token_ids) needs the transformers engine; the "
                 "loaded model runs on llama.cpp, which exposes no per-token distribution here."
             )
-        completion_id = f"chatcmpl-{uuid.uuid4().hex[:24]}"
-        created = int(datetime.now().timestamp())
         conversations = [request.messages] + list(request.extra_messages or [])
         top_n = request.top_logprobs or 0
-        choices: list[ChatCompletionChoice] = []
-        prompt_total = 0
 
         async with self._admit():
-            # Inside the slot: an unload deletes the tokenizer (check_stream_admission's note).
-            if not getattr(self._tokenizer, "chat_template", None):
-                model_info = self.get_loaded_model_info()
-                name = model_info.name if model_info else "the loaded model"
-                raise NoChatTemplateError(
-                    f"'{name}' has no chat template, so chat scoring would score a generic "
-                    "format the model was never trained on. Score the rendered prompt on "
-                    "/v1/completions instead (T-55).",
-                    details={"param": "model"},
-                )
-            texts = [
-                self._format_chat_messages(conversation, request.chat_template_kwargs)
-                for conversation in conversations
-            ]
+            texts = self._chat_scoring_texts(request, conversations)
             scored = await self._score_prompts(
                 texts,
                 add_special_tokens=False,
@@ -5744,40 +5756,71 @@ class InferenceService:
                 label="conversation",
                 activations_request=request,
                 millm_out=(_millm_out := []),
+                pack_size=1,
             )
+            response = self._chat_scoring_response(request, scored, _millm_out)
+        return response
 
-            def key(token_id: int, decoded: str) -> str:
-                return f"token_id:{token_id}" if request.return_tokens_as_token_ids else decoded
+    def _chat_scoring_texts(self, request: ChatCompletionRequest, conversations: list) -> list[str]:
+        """Render each conversation's chat template with the generation prompt. Inside the slot:
+        an unload deletes the tokenizer (check_stream_admission's note)."""
+        if not getattr(self._tokenizer, "chat_template", None):
+            model_info = self.get_loaded_model_info()
+            name = model_info.name if model_info else "the loaded model"
+            raise NoChatTemplateError(
+                f"'{name}' has no chat template, so chat scoring would score a generic "
+                "format the model was never trained on. Score the rendered prompt on "
+                "/v1/completions instead (T-55).",
+                details={"param": "model"},
+            )
+        return [
+            self._format_chat_messages(conversation, request.chat_template_kwargs)
+            for conversation in conversations
+        ]
 
-            for index, (scores, prompt_tokens) in enumerate(scored):
-                decoded = self._tokenizer.decode([scores.chosen_id])
-                logprobs = None
-                if request.logprobs is True:
-                    alternatives = []
-                    for token_id, lp in scores.top[:top_n]:
-                        text = self._tokenizer.decode([token_id])
-                        alternatives.append(ChatLogprobAlternative(
-                            token=key(token_id, text), logprob=lp,
-                            bytes=list(text.encode("utf-8")),
-                        ))
-                    logprobs = ChatLogprobs(content=[ChatLogprobToken(
-                        token=key(scores.chosen_id, decoded),
-                        logprob=scores.chosen_logprob,
-                        bytes=list(decoded.encode("utf-8")),
-                        top_logprobs=alternatives,
-                    )])
-                choices.append(ChatCompletionChoice(
-                    index=index,
-                    message=ChatMessage(role="assistant", content=decoded),
-                    finish_reason="length",
-                    logprobs=logprobs,
-                ))
-                prompt_total += prompt_tokens
+    def _chat_scoring_response(
+        self, request: ChatCompletionRequest, scored: list[tuple[Any, int]], millm_out: list
+    ) -> ChatCompletionResponse:
+        """The chat scoring body for `scored` — one builder for the synchronous path and a packed
+        batch row (Feature 26)."""
+        completion_id = f"chatcmpl-{uuid.uuid4().hex[:24]}"
+        created = int(datetime.now().timestamp())
+        top_n = request.top_logprobs or 0
+        choices: list[ChatCompletionChoice] = []
+        prompt_total = 0
+
+        def key(token_id: int, decoded: str) -> str:
+            return f"token_id:{token_id}" if request.return_tokens_as_token_ids else decoded
+
+        for index, (scores, prompt_tokens) in enumerate(scored):
+            decoded = self._tokenizer.decode([scores.chosen_id])
+            logprobs = None
+            if request.logprobs is True:
+                alternatives = []
+                for token_id, lp in scores.top[:top_n]:
+                    text = self._tokenizer.decode([token_id])
+                    alternatives.append(ChatLogprobAlternative(
+                        token=key(token_id, text), logprob=lp,
+                        bytes=list(text.encode("utf-8")),
+                    ))
+                logprobs = ChatLogprobs(content=[ChatLogprobToken(
+                    token=key(scores.chosen_id, decoded),
+                    logprob=scores.chosen_logprob,
+                    bytes=list(decoded.encode("utf-8")),
+                    top_logprobs=alternatives,
+                )])
+            choices.append(ChatCompletionChoice(
+                index=index,
+                message=ChatMessage(role="assistant", content=decoded),
+                finish_reason="length",
+                logprobs=logprobs,
+            ))
+            prompt_total += prompt_tokens
 
         if request.seed is not None:
             note_request_outcome(seed_scope=SEED_SCOPE_REQUEST)  # scoring is deterministic
         model_info = self.get_loaded_model_info()
-        _millm = next((m for m in _millm_out if m is not None), None)
+        _millm = next((m for m in millm_out if m is not None), None)
         return ChatCompletionResponse(
             millm=_millm,
             id=completion_id,
@@ -5802,6 +5845,7 @@ class InferenceService:
         label: str = "prompt",
         activations_request: Any = None,
         millm_out: Optional[list] = None,
+        pack_size: int = 1,
     ) -> list[tuple[Any, int]]:
         """THE scorer: one unsteered forward pass per text, in order; `(NextTokenScores,
         prompt_tokens)` for each. Chat and completion scoring BOTH call this, so the arithmetic
@@ -5818,8 +5862,25 @@ class InferenceService:
 
         A failure names its index (`details["index"]`, and the message), and no partial result
         is returned (FR-25.9.4).
+
+        Feature 26 (FTASKS 6.1): `pack_size` > 1 scores the texts in right-padded packs through
+        `_score_specs_packed` — the Batch API's packed path. Every synchronous caller passes
+        `pack_size=1`, which is this loop, unchanged and bit-identical. Packing is refused with
+        activation capture (one request's positions cannot be attributed inside a pack).
         """
         from millm.services.next_token_scores import next_token_scores
+
+        if pack_size > 1 and activations_request is None:
+            specs = [
+                ScoreSpec(text, add_special_tokens, allowed, temperature, top_k) for text in texts
+            ]
+            outcomes = await self._score_specs_packed(specs, max_rows=pack_size)
+            for index, outcome in enumerate(outcomes):
+                if isinstance(outcome, MiLLMError):
+                    if isinstance(outcome.details, dict):
+                        outcome.details.setdefault("index", index)
+                    raise outcome
+            return [(o.scores, o.prompt_tokens) for o in outcomes]  # type: ignore[union-attr]
 
         results: list[tuple[Any, int]] = []
         for index, text in enumerate(texts):
@@ -5888,6 +5949,149 @@ class InferenceService:
                 raise
             results.append((scores, prompt_tokens))
         return results
+
+    async def _score_specs_packed(
+        self, specs: list["ScoreSpec"], *, max_rows: int, max_tokens: Optional[int] = None
+    ) -> list[Any]:
+        """Score many prompts in right-padded packs; one outcome per spec, in order (Feature 26).
+
+        Each outcome is a `PackedScore` or the `MiLLMError` that spec alone earned — a too-long
+        prompt fails ITS row, not its neighbours. Must be called inside `_admit()`.
+
+        ⚠ RIGHT padding, gathered at each row's own last real token (FTDD TD5). Padding after a
+        causal row cannot change any earlier position, for attention, convolution and recurrent
+        mixers alike; left padding would shift position ids and is unsafe for a convolution mixer
+        (LFM2). The tokenizer's own `padding_side` is never touched (the reason is at the batched
+        generation path). Unsteered, like the single path.
+
+        Bounds: at most `max_rows` rows and `max_tokens` padded tokens per forward. A CUDA
+        out-of-memory error halves the pack and retries; at one row it becomes that row's error
+        (`_chunk_batch_for_memory` already prefers a slow answer to a 500).
+        """
+        from millm.core.config import settings
+        from millm.services.next_token_scores import next_token_scores
+
+        budget = int(max_tokens if max_tokens is not None else settings.BATCH_PACK_MAX_TOKENS)
+        outcomes: list[Any] = [None] * len(specs)
+        ready: list[tuple[int, list[int]]] = []
+        for index, spec in enumerate(specs):
+            try:
+                ids = list(self._tokenizer(
+                    spec.text, add_special_tokens=spec.add_special_tokens
+                )["input_ids"])
+                if not ids:
+                    raise InvalidScoringRequestError(
+                        "the prompt tokenises to nothing, so there is no position to score"
+                    )
+                self._check_context_length(len(ids), 1)
+                ready.append((index, ids))
+            except MiLLMError as exc:
+                outcomes[index] = exc
+
+        packs: list[list[tuple[int, list[int]]]] = []
+        current: list[tuple[int, list[int]]] = []
+        for item in ready:
+            longest = max([len(item[1])] + [len(i[1]) for i in current])
+            if current and (len(current) >= max_rows or longest * (len(current) + 1) > budget):
+                packs.append(current)
+                current = []
+            current.append(item)
+        if current:
+            packs.append(current)
+
+        async def run(pack: list[tuple[int, list[int]]]) -> None:
+            try:
+                rows = await asyncio.to_thread(
+                    self._unsteered_call, lambda: self._packed_next_token_logits(
+                        [ids for _, ids in pack]
+                    )
+                )
+            except GenerationOutOfMemoryError as exc:
+                if len(pack) == 1:
+                    outcomes[pack[0][0]] = exc
+                    return
+                half = len(pack) // 2
+                await run(pack[:half])
+                await run(pack[half:])
+                return
+            for (index, ids), logits in zip(pack, rows, strict=True):
+                spec = specs[index]
+                try:
+                    outcomes[index] = PackedScore(
+                        self._scores_from_logits(logits, spec, next_token_scores), len(ids)
+                    )
+                except MiLLMError as exc:
+                    outcomes[index] = exc
+
+        for pack in packs:
+            await run(pack)
+        return outcomes
+
+    def _scores_from_logits(self, logits: torch.Tensor, spec: "ScoreSpec", scorer: Any) -> Any:
+        """The single path's checks and arithmetic over one row's logits (unchanged rules)."""
+        vocab = int(logits.shape[-1])
+        allowed = spec.allowed
+        if allowed and max(allowed) >= vocab:
+            raise InvalidScoringRequestError(
+                f"allowed_token_ids contains {max(allowed)}, outside the loaded model's "
+                f"vocabulary of {vocab}"
+            )
+        checked = logits if allowed is None else logits[torch.tensor(allowed, dtype=torch.long)]
+        if bool(torch.isnan(checked).any()) or bool(torch.isposinf(checked).any()):
+            raise ScoringNumericalError(
+                "The model produced NaN or infinite logits for this prompt, so no probability "
+                "can be reported for it."
+            )
+        scores = scorer(logits, allowed=allowed, temperature=spec.temperature, top_k=spec.top_k)
+        if not all(math.isfinite(lp) for _, lp in scores.top):
+            raise ScoringNumericalError(
+                "A reported log-probability is not finite: a requested token's logit is -inf "
+                "under this model, so it has no probability to report."
+            )
+        return scores
+
+    def _packed_next_token_logits(self, rows: list[list[int]]) -> list[torch.Tensor]:
+        """ONE forward over right-padded rows; each row's logits at ITS last real token.
+
+        `logits_to_keep` is passed as the index tensor of the distinct last positions (0.5: the
+        served architectures accept a tensor); a class that rejects it falls back to full
+        logits, bounded by the pack token budget.
+        """
+        device = self._get_input_device()
+        lengths = torch.tensor([len(r) for r in rows], dtype=torch.long)
+        width = int(lengths.max())
+        pad = self._tokenizer.pad_token_id
+        if pad is None:
+            pad = self._tokenizer.eos_token_id if self._tokenizer.eos_token_id is not None else 0
+        input_ids = torch.full((len(rows), width), int(pad), dtype=torch.long)
+        mask = torch.zeros((len(rows), width), dtype=torch.long)
+        for i, r in enumerate(rows):
+            input_ids[i, : len(r)] = torch.tensor(r, dtype=torch.long)
+            mask[i, : len(r)] = 1
+        last = lengths - 1
+        keep = torch.unique(last)  # sorted
+        inputs = {"input_ids": input_ids.to(device), "attention_mask": mask.to(device)}
+        failure: Optional[GenerationOutOfMemoryError] = None
+        try:
+            with torch.no_grad():
+                try:
+                    outputs = self._model(**inputs, use_cache=False, logits_to_keep=keep.to(device))
+                    # ⚠ Row i's scored position is the index of last[i] WITHIN `keep` — never -1,
+                    # which is a padding position for every row shorter than the longest
+                    # (mutation control M13).
+                    where = torch.searchsorted(keep, last)
+                except TypeError as exc:
+                    if "logits_to_keep" not in str(exc):
+                        raise
+                    outputs = self._model(**inputs, use_cache=False)
+                    where = last
+            logits = outputs.logits
+            return [logits[i, int(where[i])].float().cpu() for i in range(len(rows))]
+        except torch.cuda.OutOfMemoryError as exc:
+            failure = _scoring_oom_error(exc, {"input_ids": input_ids})
+        _release_generation_memory()
+        logger.error("scoring_out_of_memory", packed_rows=len(rows), **failure.details)
+        raise failure
 
     def _unsteered_next_token_logits(self, inputs: Any) -> torch.Tensor:
         """`_next_token_logits` with every attached SAE suppressed — in the worker thread itself,

@@ -106,6 +106,8 @@ class RowExecutor:
         """Run `rows` in order. Between rows of an unpacked chunk the cancel flag is checked, and
         a cancelled batch starts no further row (FR-26.6.4) — the rows already run are returned
         and recorded."""
+        if cancelled():
+            return []
         if pack and len(rows) > 1 and rows[0].kind == RowKind.SCORING.value:
             packed = await self._run_packed(rows)
             if packed is not None:

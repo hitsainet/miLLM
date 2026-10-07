@@ -38,7 +38,8 @@ miLLM exposes an OpenAI-compatible API at `/v1`, making it a drop-in replacement
 | `frequency_penalty` | float | `0.0` | −2 to 2; mapped to repetition penalty internally |
 | `presence_penalty` | float | `0.0` | −2 to 2; mapped to repetition penalty internally |
 | `profile` | string | — | **miLLM extension**: apply a saved [steering profile](/features/profiles) for this request only |
-| `steering_intensity` | float \| string | — | **miLLM extension** (chat completions only): per-request steering dial — a λ in `0`–`2`, or `"off"` / `"min"` / `"max"` |
+| `steering_intensity` | float \| string | — | **miLLM extension**: per-request steering dial — a λ in `0`–`2`, or `"off"` / `"min"` / `"max"`. Also accepted on `/v1/completions` |
+| `steering` | object | — | **miLLM extension**: an inline feature set for this request only — see [Inline steering](#inline-steering-with-steering). Mutually exclusive with `profile` and `steering_intensity` |
 
 :::note Intensity coupling
 When the steering base is an imported **cluster**, its stored strengths are scaled by an intensity dial (λ) before applying. Without `steering_intensity`, the cluster's persistent dial (set on the Clusters page) applies; with it, the request's λ **overrides** the stored one for that request only. Symbolic `"min"`/`"max"` resolve to the cluster's declared `intensity_range` bounds (intersected with the `[0, 2]` dial envelope), and numeric λ is capped at the range's **maximum** (or the server's configured maximum for clusters without a declared range) — dialing *down* below the declared floor (toward off) is always honored, matching the management API's bounds of `[0, max]`. The base is the named `profile` if given, else the active profile, else the live steering values. `0`/`"off"` disables steering for the request without validating the base (a profile that would 400 at λ=0.01 still turns steering off at λ=0).
@@ -151,6 +152,119 @@ response = client.chat.completions.create(
 ```
 
 The named profile's steering replaces the global configuration for this one request, then the previous state is restored. Unknown profile → `404`; profile invalid for the attached SAE → `400`; no SAE attached → the request runs unsteered. Requests with `profile` always use the serial backend. Details: [Profiles](/features/profiles#per-request-profiles-api).
+
+### Inline steering with `steering`
+
+A request can carry its own feature set, applied to that request only. No profile is stored, the global steering state is restored afterwards, and the steering epoch never moves.
+
+```json
+"steering": {"sae_id": "LiquidAI--LFM2.5-1.2B-Instruct-sae--layer_11",
+             "features": [{"index": 1234, "strength": 8.0}]}
+```
+
+| Field | Rule |
+|-------|------|
+| `sae_id` | Optional. Names an **attached** SAE. Omitted, the only attached SAE is used; with two or more attached (or one SAE attached at two layers) the request is refused naming each `(sae_id, layer)` |
+| `features[].index` | Integer `0 ≤ index < d_sae` of the selected SAE, else `400 INVALID_FEATURE_INDEX`. Listed twice → `400` naming it |
+| `features[].strength` | Finite number (booleans refused). Clamped to ±200 at apply time; the clamp is reported, never silent (`clamped=` below) |
+| `features: []` | **Explicitly unsteered**: steering is disabled on every attached SAE for this request, whatever profile, circuit or manual steering is live. Sensing and monitoring still record. `sae_id` beside an empty list is refused |
+
+The selected SAE carries exactly this set; every other attached SAE is disabled (not suppressed) for the request. Also refused, with `400`: `steering` with `profile` or with `steering_intensity` (named both); an unattached `sae_id`, or a non-empty set with no SAE attached (`SAE_NOT_ATTACHED`); a non-empty set naming a model that is not resident (`SAE_NOT_ATTACHED`, **before** any auto-load — an SAE only ever attaches to the resident model); `steering` on a GGUF model (before any auto-load); `steering` on a scoring request (scoring is always unsteered). Requests carrying `steering` always use the serial backend.
+
+`/v1/completions` accepts `profile`, `steering_intensity` and `steering` with the same rules, applied around every prompt of a multi-prompt request (one request, one steering state, one header).
+
+## The `X-miLLM-Steering` header
+
+Every chat and text completion says how it was steered — what the forward hooks **actually applied**, read after generation, never an echo of the request. A request that asked for one setting while an operator changed global steering mid-request reports what ran, flagged `changed`. `X-miLLM-Steering` is the authoritative statement; `X-miLLM-Steering-Intensity` is a pre-generation echo of the dial and `X-miLLM-Circuit-Rung` an evidence phrase, both unchanged.
+
+- **Non-streaming:** a response header, set after generation, on chat (serial and batched `extra_messages`), text completions (single and multi-prompt), the continuous-batching and llama.cpp paths, and scoring responses (always `none`).
+- **Streaming:** no header before the body. The stream ends with one extension chunk, after the final content chunk and the probe-verdict chunk and before `[DONE]`, always emitted (even for `none` — its absence means an older server):
+
+  ```
+  data: {"id": "...", "object": "chat.completion.chunk", "created": 0, "model": "...", "choices": [], "millm_steering": "<the exact header value>"}
+  ```
+- **Batch API:** each output line carries the same value under `response.millm.headers`.
+- `/v1/embeddings` and `POST /api/probes/score` carry no steering header: they never generate.
+
+### Grammar
+
+The value is an [RFC 8941](https://www.rfc-editor.org/rfc/rfc8941) **List**. Each member's bare item is a **Token** naming the kind, followed by parameters in this order (`?` = only when it applies):
+
+| Kind | Parameters | Notes |
+|------|------------|-------|
+| `none` | `changed`? | Only member when present |
+| `unknown` | `reason`?, `changed`? | Only member when present. The state could not be determined — never omitted, never guessed |
+| `profile` | `name`, `source`, `intensity`, `sae`, `layer`, `features`, `hash`, `clamped`?, `changed`? | |
+| `inline` | `sae`, `layer`, `features`, `hash`, `clamped`?, `changed`? | |
+| `manual` | `sae`, `layer`, `features`, `hash`, `changed`? | Live values set directly, claimed by no profile, circuit or request |
+| `circuit` | `id`, `intensity`, `composed`?, `changed`? | One member per circuit, not per layer |
+
+| Parameter | Type | Value |
+|-----------|------|-------|
+| `sae` | String | the attached SAE's ID — the SAE the values were **actually** applied to |
+| `layer` | Integer | the entry's layer |
+| `features` | Integer | count of non-zero applied features |
+| `hash` | String | `sha256:` + 64 lowercase hex digits (below) |
+| `clamped` | Integer ≥ 1 | features whose value the ±200 clamp changed; omitted when 0 |
+| `name` | String | the profile name, percent-encoded: each UTF-8 byte outside `%x20-7E`, and each of `%`, `"`, `\`, as `%XX` (uppercase hex) |
+| `source` | Token | `request` (the request's `profile`) or `active` (the globally active profile) |
+| `intensity` | String | the effective λ as the shortest decimal that round-trips to its binary64 value (Python `repr(float)`). A String because an RFC 8941 Decimal keeps only three fractional digits — compare by parsing to a float |
+| `id` | String | the circuit ID |
+| `composed` | Boolean (bare) | a served layer carries more than one circuit |
+| `changed` | Boolean (bare) | the steering epoch moved during the request; on every member when set. Items describe the state at the end |
+| `reason` | Token | `claims_unreadable`, `profile_unreadable`, `llamacpp_entries` or `read_failed` |
+
+Member order: circuits first by `id`, then SAE items by `layer`, then `sae`. Booleans are serialised bare (`changed`, never `changed=?1`).
+
+```
+X-miLLM-Steering: none
+X-miLLM-Steering: inline;sae="LiquidAI--LFM2.5-1.2B-Instruct-sae--layer_11";layer=11;features=1;hash="sha256:a4eae730e5105f422b93abeece7e03bda3c29b096c07aa9cee6f247e12844105"
+X-miLLM-Steering: profile;name="humor";source=active;intensity="1.0";sae="LiquidAI--LFM2.5-1.2B-Instruct-sae--layer_11";layer=11;features=12;hash="sha256:…"
+X-miLLM-Steering: circuit;id="crc_124fd83d1f2a";intensity="0.5";changed
+X-miLLM-Steering: unknown;reason=claims_unreadable
+```
+
+A response steered by a globally active profile with no steering field in the request now says so (`source=active`); before this header it said nothing.
+
+### The steering-set hash
+
+The hash lets a client verify, from the set it sent, that the answer ran under that set. It is canonical across the miLLM suite (miDataworks pins the vectors below). It covers the SAE and the features only; `layer` travels beside it.
+
+**Applied set.** `index → strength` as the hook reads it, every zero removed (`-0.0` is a zero). For inline steering each strength is `clamp(strength, -200, 200)`; for a profile it is `clamp(stored × λ, -200, 200)` in binary64.
+
+**Canonical form.** UTF-8 lines, each ended by one LF (`0x0A`), the last included, no spaces, no BOM:
+
+```
+millm.steering-set/v1
+sae=<sae_id>
+<index>:<bits>        one line per applied feature, ascending index
+```
+
+`<index>` is base-10 with no sign or leading zeros; `<bits>` is the strength's IEEE-754 binary64 value, big-endian, as 16 lowercase hex digits (Python `struct.pack(">d", s).hex()`; JavaScript `DataView.setFloat64(0, s)`). A bit pattern rather than decimal text, because shortest-decimal formatting differs between languages (`1e-05` against `1e-5`).
+
+**Hash.** `"sha256:" + lowercase_hex(SHA-256(canonical_form_bytes))`.
+
+**Test vectors** (`\n` = LF; pinned by `tests/unit/core/test_steering_state.py`):
+
+| ID | SAE ID | Input features | Canonical form | Hash |
+|----|--------|----------------|----------------|------|
+| TV-1 | `LiquidAI--LFM2.5-1.2B-Instruct-sae--layer_11` | `[{1234, 8.0}]` | `millm.steering-set/v1\nsae=LiquidAI--LFM2.5-1.2B-Instruct-sae--layer_11\n1234:4020000000000000\n` | `sha256:a4eae730e5105f422b93abeece7e03bda3c29b096c07aa9cee6f247e12844105` |
+| TV-2 | same | `[{1234, -8.0}]` | `millm.steering-set/v1\nsae=LiquidAI--LFM2.5-1.2B-Instruct-sae--layer_11\n1234:c020000000000000\n` | `sha256:cc6c48faa720096e5c65fc1b2afab1b9b87659fb4465f20db421a2ed7fed78a7` |
+| TV-3 | `jbloom--gemma-2-2b-res-jb--layer_20--width_16k--average_l0_71` | `[{77, -2.5}, {5, 0.1}, {900, 0.0}, {12, -0.0}]` | `millm.steering-set/v1\nsae=jbloom--gemma-2-2b-res-jb--layer_20--width_16k--average_l0_71\n5:3fb999999999999a\n77:c004000000000000\n` | `sha256:b843912201c5c18f872976e35af288e5f484d81e31a03a1dc16c3b9dbd82e710` |
+| TV-4 | same as TV-3 | `[{3, 500.0}]` (clamped to 200.0) | `millm.steering-set/v1\nsae=jbloom--gemma-2-2b-res-jb--layer_20--width_16k--average_l0_71\n3:4069000000000000\n` | `sha256:3f51779e6e33ee248acf6f520cb9475b4ef62f68275060bb69d2e228033b78df` |
+
+TV-1 and TV-2 are a steered pair: one SAE feature index, opposite strengths. TV-3 exercises ordering, a fraction and dropped zeros. TV-4 shows the hash describes the **applied** value: a client hashing the 500.0 it sent gets a different hash, and the header's `clamped=1` says why.
+
+```python
+import hashlib, struct
+
+def steering_hash(sae_id, features):
+    applied = {i: max(-200.0, min(200.0, float(s))) for i, s in features}
+    applied = {i: s for i, s in applied.items() if s != 0.0}
+    lines = ["millm.steering-set/v1", f"sae={sae_id}"]
+    lines += [f"{i}:{struct.pack('>d', applied[i]).hex()}" for i in sorted(applied)]
+    return "sha256:" + hashlib.sha256("".join(l + "\n" for l in lines).encode()).hexdigest()
+```
 
 ## Text completions
 

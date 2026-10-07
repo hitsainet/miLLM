@@ -126,6 +126,12 @@ dev = [
     # tool modules at all.
     "mcp>=1.9.0,<2",
 
+    # Feature 28 (FTDD §3, PADR §5 dev-only): the CONSUMER's RFC 8941 parser, pinned as
+    # miDataworks 007 pins it, so `tests/unit/core/test_steering_state.py` checks the
+    # `X-miLLM-Steering` grammar against an independent implementation rather than a round trip
+    # through miLLM's own serialiser (which would agree with its own slip). Never a runtime dep.
+    "http-sfv==0.9.9",
+
     # Linting and formatting
     "ruff>=0.9.0",
     "mypy>=1.14.0",

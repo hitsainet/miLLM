@@ -68,27 +68,32 @@ reads `X-miLLM-Steering` verbatim.
         (`profile_service.py:302`, `:461`). 028 does not change targeting (FPRD D27). Put the
         question to the operator: fix both paths in a follow-up increment? Record the answer in the
         FPRD §14. Task 5.3's `profile_sae_mismatch` log ships either way.
-  - [ ] 0.2 Ask the PADR owner whether a dev-only `http-sfv` needs a PADR §5 entry. Proceed with
+  - [x] 0.2 Ask the PADR owner whether a dev-only `http-sfv` needs a PADR §5 entry. Proceed with
         1.7 meanwhile: it adds nothing at runtime. *Answered (Stage 3, 2026-10-06): PADR §5 lists `http-sfv==0.9.9`
         as dev-only; this sub-task closes on implementation start.*
 
-- [ ] 1.0 Pure steering-state module and published vectors (covers FR-28.3.3, FR-28.3.4,
+- [x] 1.0 Pure steering-state module and published vectors (covers FR-28.3.3, FR-28.3.4,
       FR-28.3.5). **Ship first; it unblocks miDataworks 007.**
-  - [ ] 1.1 Create `millm/core/steering_state.py`: `applied_set` (clamp through `clamp_steering`,
+  - [x] 1.1 Create `millm/core/steering_state.py`: `applied_set` (clamp through `clamp_steering`,
         `steering_range.py:14-16`, then drop zeros including `-0.0`), `canonical_set_form`,
         `steering_set_hash` exactly as FTDD §5.3. Refuse an `sae_id` containing LF.
-  - [ ] 1.2 Test: TV-1 – TV-4 byte-for-byte (canonical form) and string-for-string (hash), from
+  - [x] 1.2 Test: TV-1 – TV-4 byte-for-byte (canonical form) and string-for-string (hash), from
         literals copied out of FTDD §5.3, not recomputed by the code under test.
-  - [ ] 1.3 Add `SteeringItem` and `serialize_steering_header` with the FTDD §5.2 parameter order,
+        *2026-10-07: all four reproduced independently before pinning — a stand-alone Python
+        one-liner (`struct` + `hashlib`, no miLLM import) and Node (`DataView.setFloat64` +
+        `crypto`) — both byte-identical to the FTDD.*
+  - [x] 1.3 Add `SteeringItem` and `serialize_steering_header` with the FTDD §5.2 parameter order,
         bare true booleans, member ordering, and a `ValueError` when `none`/`unknown` is combined.
-  - [ ] 1.4 Add `encode_name` (percent-encoding) and `format_intensity` (`repr(float)`). Test a
+  - [x] 1.4 Add `encode_name` (percent-encoding) and `format_intensity` (`repr(float)`). Test a
         non-ASCII name, a name containing `"` and `\`, and λ = 0.4375 surviving exactly.
-  - [ ] 1.5 Test: hash independent of input order; zeros excluded from `features` and hash; clamp
+  - [x] 1.5 Test: hash independent of input order; zeros excluded from `features` and hash; clamp
         changes the hash (TV-4).
-  - [ ] 1.6 Test: every kind's serialised header parses with `http-sfv` into the expected kinds and
-        parameters (skip loudly if not installed).
-  - [ ] 1.7 Add `http-sfv==0.9.9` to the dev/test extras in `pyproject.toml` only.
-  - [ ] 1.8 Publish the vectors and grammar in the API reference now (draft section), so consumers
+  - [x] 1.6 Test: every kind's serialised header parses with `http-sfv` into the expected kinds and
+        parameters (skip loudly if not installed). *The shared dev venv lacks it; verified with
+        `http-sfv==0.9.9` installed to a scratch `--target` dir on PYTHONPATH (7 cases green);
+        CI installs it through the `dev` extra.*
+  - [x] 1.7 Add `http-sfv==0.9.9` to the dev/test extras in `pyproject.toml` only.
+  - [x] 1.8 Publish the vectors and grammar in the API reference now (draft section), so consumers
         can pin them before the rest lands.
 
 - [ ] 2.0 Request schemas (covers FR-28.1.1, FR-28.1.6 (shape), FR-28.2.1, FR-28.2.2 (shape),

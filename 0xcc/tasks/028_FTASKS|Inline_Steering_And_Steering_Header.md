@@ -206,17 +206,17 @@ reads `X-miLLM-Steering` verbatim.
         completions (single, multi-prompt) each carry exactly one correct report; existing
         `X-miLLM-Steering-Intensity` and `X-miLLM-Circuit-Rung` unchanged (FR-28.3.11).
 
-- [ ] 7.0 Integration with other features and documentation (covers FR-28.4.5, FR-28.3.10; FPRD
+- [x] 7.0 Integration with other features and documentation (covers FR-28.4.5, FR-28.3.10; FPRD
       §10)
-  - [ ] 7.1 Feature 25: flip the `steering` outcome to honoured for transformers chat and
+  - [x] 7.1 *(Done in 2.0's commit; noted in 025 FTASKS for its owner — the 025 FPRD table is not edited.)* Feature 25: flip the `steering` outcome to honoured for transformers chat and
         completions in Feature 25's code and tests (FR-25.3.7); scoring and embeddings keep refusing.
         The FPRD of Feature 25 is not edited here; note the flip in its FTASKS owner's queue.
-  - [ ] 7.2 Feature 26: confirm with its owner that FR-26.10.1 calls `steering_report_for_row`.
-  - [ ] 7.3 Feature 27: share the discovery helper (5.8).
-  - [ ] 7.4 API reference: the `steering` object and its errors, every header kind with examples,
+  - [x] 7.2 *(Confirmed in code rather than by message: Feature 26's lines read `provenance.post_generation`, which now sets the header from the published report; 026 FTASKS F-3 ticked and FR-26.10.1 marked complete, pinned by `test_runner.py::test_a_batch_line_carries_the_synchronous_steering_header`.)* Feature 26: confirm with its owner that FR-26.10.1 calls `steering_report_for_row`.
+  - [x] 7.3 Feature 27: share the discovery helper (5.8).
+  - [x] 7.4 API reference: the `steering` object and its errors, every header kind with examples,
         the grammar (FTDD §5.2), the canonical form and TV-1 – TV-4 (FTDD §5.3), the stream chunk, and
         "`X-miLLM-Steering` is authoritative; `X-miLLM-Steering-Intensity` is a pre-generation echo".
-  - [ ] 7.5 Manual: extend the OpenAI-API feature page with inline steering and the header; keep the
+  - [x] 7.5 *(There is no OpenAI-API page under `manual/docs/features/`; the section went into `features/feature-steering.md`, linking to the API reference — recorded discrepancy.)* Manual: extend the OpenAI-API feature page with inline steering and the header; keep the
         manual-reachability test green (`tests/unit/test_manual_pages_are_reachable.py`).
 
 - [ ] 8.0 Feature Acceptance

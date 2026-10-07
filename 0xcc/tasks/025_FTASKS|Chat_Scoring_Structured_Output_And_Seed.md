@@ -330,3 +330,10 @@ miStudio 034 to send `X-miLLM-Strict: true` safely.
 | 9.7 acceptance 1 & 2 over HTTP | PASS — `foo: 1` → 200 with `X-miLLM-Ignored-Fields: "foo"`; strict → 400; 15 refused (endpoint, field) pairs × strict on/off = 30 requests, all 400 |
 
 **Observation (not a 025 defect, filed for follow-up):** enabling steering through `/api/saes/steering/enable` left the model row `locked = true`; disabling steering and detaching the SAE did not clear it, so the next request naming another model was refused `model_locked` until `POST /api/models/{id}/unlock`.
+
+### Note from Feature 28 (2026-10-07, FR-25.3.7 / FR-28.4.5)
+- The `steering` row of `OUTPUT_CHANGING` is flipped to *honoured* on transformers chat and
+  completions (refused on scoring, X-09; llama.cpp and embeddings unchanged), and `profile` /
+  `steering_intensity` are honoured on `/v1/completions` too. Tests updated in
+  `test_request_policy.py`, `test_request_policy_coverage.py`, `test_chat_scoring.py`. The 025 FPRD
+  outcome table still reads "refused until Feature 28" — for the 025 owner to amend.

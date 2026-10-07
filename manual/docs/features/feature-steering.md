@@ -74,6 +74,23 @@ Steering state is global: when enabled, it applies to every completion request f
 
 `GET /api/saes/attachment` returns `steering_apply_count` — the number of forward passes where the delta was actually applied. Generate some tokens with steering enabled and confirm the counter advanced; if it didn't, the hook isn't firing ([troubleshooting](/troubleshooting#steering-has-no-effect)). For rigorous experiments, A/B the same prompt at `temperature: 0` with steering on and off.
 
+## Steering one request only (inline steering)
+
+A client of the OpenAI-compatible API can steer a single chat or text completion with its own
+feature set, without saving a profile or touching the global steering shown on this page:
+
+```json
+"steering": {"sae_id": "<attached SAE id>", "features": [{"index": 1234, "strength": 8.0}]}
+```
+
+`"steering": {"features": []}` asks for an explicitly unsteered answer while a profile or circuit
+stays active for everyone else. The global steering on this page is restored after the request.
+Every completion now says how it was steered in the `X-miLLM-Steering` response header (or a final
+stream chunk) — computed from what the hooks actually applied, so an answer steered by the values
+set here is reported as `manual`, and one steered by an active profile names the profile and its
+intensity. Full rules, the header grammar and the hash a client can recompute:
+[OpenAI-Compatible API → Inline steering](/api/openai-compatible#inline-steering-with-steering).
+
 ## Save as Profile
 
 Click **Save as Profile** to store the current feature configuration for later use — including per-request application via the API. See [Profiles](/features/profiles).

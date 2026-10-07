@@ -295,3 +295,19 @@ def test_module_is_pure():
     millm_imports = {m for m in imported if m.startswith("millm")}
     assert millm_imports == {"millm.core.steering_range"}
     assert not {m for m in imported if m.split(".")[0] in {"torch", "sqlalchemy", "fastapi"}}
+
+
+def test_the_api_reference_publishes_exactly_these_vectors():
+    """FTASKS 8.5 / X-07: the vectors consumers pin from the API reference are the ones pinned
+    here. Skips LOUDLY where the manual is not shipped (the public mirror strips doc trees)."""
+    from pathlib import Path
+
+    page = Path(__file__).resolve().parents[3] / "manual/docs/api/openai-compatible.md"
+    if not page.is_file():
+        pytest.skip(f"LOUD SKIP: {page} is absent in this checkout (mirror view), so the published "
+                    "vectors are NOT cross-checked against the pinned literals in this run")
+    text = page.read_text()
+    for vid, _sae, _pairs, form, digest in VECTORS:
+        row = next(line for line in text.splitlines() if line.startswith(f"| {vid} |"))
+        assert digest in row, f"{vid}: the published hash differs from the pinned one"
+        assert form.decode().replace("\n", "\\n") in row, f"{vid}: published canonical form"

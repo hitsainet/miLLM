@@ -991,7 +991,11 @@ class TestR2EveryPlanConsumerIsAccountedFor:
             for ln in out.splitlines()
             if ln.strip() and "def plan_for" not in ln
         )
-        assert len(sites) == 3, (
+        # Feature 28 added the fourth: `SteeringStateReader._circuits` reads `plan.intensity`
+        # and guards it (UNSET by identity, then `math.isfinite`), falling back to the circuit
+        # row's intensity — pinned by test_steering_report.py::TestCircuitLabel::
+        # test_an_unset_plan_intensity_falls_back_to_the_row.
+        assert len(sites) == 4, (
             f"a new plan consumer appeared: {sites}. Check whether it reads "
             "`plan.intensity`, and if so whether it checks `has_intensity` — "
             "an unset plan carries NaN, which resolves through the clamp to "

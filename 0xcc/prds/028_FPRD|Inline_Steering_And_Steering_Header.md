@@ -478,7 +478,12 @@ The six questions of v1.0 are answered (operator, 2026-10-06, accepting the tech
 | 5 | Refuse inline steering before an auto-load | Resolved in the FTDD: refuse (FR-28.1.11) | T-82 |
 | 6 | Added header kinds `manual`, `unknown` | Add both | T-83 |
 
-Still open, for the operator:
+**Answered (operator, Stage 3 decision S3-09, recorded 2026-10-07 at implementation):** question 1
+below is OUT OF SCOPE for 028; a separate follow-up increment fixes both profile paths together
+(028 FTASKS FU-1). 028 ships the visibility only (`profile` item names the SAE steered;
+`profile_sae_mismatch` log).
+
+Still open, for the operator (now answered above):
 
 1. **Profiles steer the first attached SAE, not their own.** Both the per-request and the global
    activation path apply a profile to `AttachedSAEState().attached_sae`, the first entry

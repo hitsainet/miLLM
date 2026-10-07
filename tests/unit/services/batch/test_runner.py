@@ -150,6 +150,20 @@ async def test_a_batch_line_carries_the_synchronous_steering_header(harness, mon
         AttachedSAEState().reset_for_tests()
 
 
+async def test_a_packed_scoring_line_says_none(harness):
+    """Control n2: packed scoring builds its body without the service's scoring entry point, so
+    the header comes from provenance's X-09 rule (scoring is always unsteered) — `none`, never the
+    `unknown` an absent report would give."""
+    client, batch_id = await _start(harness, _lines(3), pack=True)
+    async with client:
+        await harness.drain()
+        out = await harness.lines(client, (await harness.batch(batch_id)).output_file_id)
+    assert len(out) == 3
+    for line in out:
+        headers = {k.lower(): v for k, v in line["response"]["millm"]["headers"].items()}
+        assert headers["x-millm-steering"] == "none"
+
+
 async def test_a_row_failing_on_its_own_merits_goes_to_the_error_file_and_the_batch_goes_on(
     harness, monkeypatch
 ):

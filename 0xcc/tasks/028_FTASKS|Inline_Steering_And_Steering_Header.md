@@ -61,8 +61,8 @@ reads `X-miLLM-Steering` verbatim.
 
 ## Tasks
 
-- [ ] 0.0 Decisions carried from the FPRD (covers FPRD Open Question 1; FTDD open item 2)
-  - [ ] 0.1 **Operator decision, not a blocker:** profiles steer the first attached SAE
+- [x] 0.0 Decisions carried from the FPRD (covers FPRD Open Question 1; FTDD open item 2)
+  - [x] 0.1 *(Answered by operator decision S3-09: out of scope for 028, a separate follow-up fixes both paths — recorded in FPRD §14 and as FU-1 below.)* **Operator decision, not a blocker:** profiles steer the first attached SAE
         (`sae_service.py:509-512`), not their recorded `sae_id`/`layer` (`profile.py:58-67`), on
         both the per-request path (`inference_service.py:1990`) and activation
         (`profile_service.py:302`, `:461`). 028 does not change targeting (FPRD D27). Put the
@@ -220,9 +220,9 @@ reads `X-miLLM-Steering` verbatim.
         manual-reachability test green (`tests/unit/test_manual_pages_are_reachable.py`).
 
 - [ ] 8.0 Feature Acceptance
-  - [ ] 8.1 Verify each FPRD success criterion and user story one by one (§11 items 1–5; US-1 –
+  - [x] 8.1 *(Evidence table in `0xcc/reviews/028_implementation_controls_2026-10-07.md`; CPU halves pass, hardware halves are 8.6.)* Verify each FPRD success criterion and user story one by one (§11 items 1–5; US-1 –
         US-7) and record the evidence.
-  - [ ] 8.2 **Mutation controls**, each run against the full suite, required red, reverted, and the
+  - [x] 8.2 *(41 controls + 1 added, recorded in `0xcc/reviews/028_implementation_controls_2026-10-07.md`; 4 survived first time — 3 real gaps now tested and re-run RED, 1 measured equivalent (d2). Run against the 16 affected files, full suite green before and after.)* **Mutation controls**, each run against the full suite, required red, reverted, and the
         restore verified by `git diff` before moving on: (a) skip `clamp_steering` on the inline path;
         (b) skip the restore in `_finish_request_steering`; (c) restore without the epoch guard;
         (d) report from the request record instead of the snapshot; (e) hard-code the item kind to
@@ -230,20 +230,35 @@ reads `X-miLLM-Steering` verbatim.
         each route; (h) remove the stream chunk; (i) drop the dispatcher call in
         `create_text_completion`; (j) revert the restore branch to `saved.get("circuit")`. A survivor
         is a test finding: write the test, then re-run the mutation as a negative control.
-  - [ ] 8.3 Run the full backend suite (no `--ignore`), `ruff`, `mypy millm/`.
-  - [ ] 8.4 Benchmark the changed path: 200 serial requests with and without the report; record the
+  - [x] 8.3 *(`tests/unit` green; integration/schema green after one guard update; ruff/mypy from a scratch install — no mypy error on any added line.)* Run the full backend suite (no `--ignore`), `ruff`, `mypy millm/`.
+  - [x] 8.4 *(p95 delta 0.053 ms record-labelled, 1.589 ms worst case with two SQLite reads; Postgres measurement on the node belongs to 8.6.)* Benchmark the changed path: 200 serial requests with and without the report; record the
         p95 delta (target under 5 ms).
-  - [ ] 8.5 Confirm that the published vectors in the API reference match
+  - [x] 8.5 *(Pinned by `test_the_api_reference_publishes_exactly_these_vectors`. Notifying miDataworks 007 is the coordinator's: no cross-repo contact from this session.)* Confirm that the published vectors in the API reference match
         `tests/unit/core/test_steering_state.py` byte for byte, and notify miDataworks 007 (X-07).
-  - [ ] 8.6 **Hardware acceptance, BRD-04 acceptance 12**, on LFM2.5-1.2B-Instruct (FP16) with an
+  - [?] 8.6 **needs hardware — operator session** (BRD-04 acceptance 12; also measure 8.4's read on Postgres). **Hardware acceptance, BRD-04 acceptance 12**, on LFM2.5-1.2B-Instruct (FP16) with an
         SAE attached on the k8s node: (a) inline steering and a saved profile with the same features
         give identical greedy output; (b) `X-miLLM-Steering` is correct for none, profile, inline and
         circuit, streaming and not; (c) a P-22 steered pair (one feature index, opposite strengths)
         gives two headers whose hashes match hashes recomputed from the requests (TV-1/TV-2 method);
         (d) `features: []` under an active profile reports `none` and matches the unsteered output.
         Record the results in the review notes.
-  - [ ] 8.7 Update AGENT.md's Document Inventory (mark 028's four documents ✅) and file follow-up
+  - [x] 8.7 *(No AGENT.md in this repo; the inventory lives in CLAUDE.md, updated. Follow-ups FU-1 – FU-3 filed below.)* Update AGENT.md's Document Inventory (mark 028's four documents ✅) and file follow-up
         work: the operator's answer to 0.1, if it is "fix".
+
+## Follow-ups filed by the implementation (2026-10-07)
+- [ ] FU-1 **First-SAE profile targeting (S3-09, FPRD Open Question 1).** Operator decision: out of
+      scope for 028; a separate follow-up fixes BOTH paths (per-request `_apply_request_steering`
+      and global activation in `profile_service`) to select the entry by the profile's own
+      `sae_id`/`layer` and refuse when it is not attached. 028 makes it visible: the header's
+      `profile` item names the SAE and layer actually steered, and a mismatch logs
+      `profile_sae_mismatch` (`steering_report._note_profile_mismatch`, pinned by
+      `test_steering_report.py::TestLabels::test_active_profile_by_equal_values`).
+- [ ] FU-2 **Attaching an SAE leaves the model `locked = true`, and detaching does not clear it**
+      (observed on hardware 2026-10-06/07, also recorded in 027 FTASKS). The next swap is refused
+      `model_locked` until `POST /api/models/{id}/unlock`. Not fixed in 028 (the FTDD does not
+      cover it); FR-28.1.11's pre-load refusal deliberately does not rely on the lock.
+- [ ] FU-3 The 025 FPRD outcome table still says `steering` is "refused until Feature 28"; noted in
+      025 FTASKS for its owner (FR-25.3.7 flipped in code by 028).
 
 ## Coverage Audit
 - **FRs:** 28.1.1 → 2.1 · 28.1.2 → 3.1, 3.7 · 28.1.3 → 3.2, 3.4 · 28.1.4 → 3.3 · 28.1.5 → 3.2, 3.8 ·

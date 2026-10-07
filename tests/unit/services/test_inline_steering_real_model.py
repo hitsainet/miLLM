@@ -147,3 +147,44 @@ async def test_a_multi_prompt_completion_has_one_steering_state(world, db):  # n
     assert [c.text for c in out.choices] == singles
     assert get_steering_report().header.startswith("inline;")
     assert AttachedSAEState().entries()[0].sae.get_steering_values() == {}
+
+
+async def test_a_dial_over_the_active_profile_is_labelled_source_active(world, db):  # noqa: F811
+    """Control dd: a dial with no `profile` scales the ACTIVE profile — `source=active` at the
+    dialled λ, with the hash of stored × λ (computed independently)."""
+    svc, model, handles = world
+    served = attach(model, [(SAE_A, 0, 11)])
+    handles.extend(served.handles)
+    await add_profile(db, "active", {1: 30.0, 4: -25.0}, active=True)
+    sae = served.sae(SAE_A, 0)
+    sae.set_steering_batch({1: 30.0, 4: -25.0})
+    sae.enable_steering(True)
+    await _chat_text(svc, steering_intensity=0.5)
+    assert get_steering_report().header == (
+        f'profile;name="active";source=active;intensity="0.5";sae="{SAE_A}";layer=0;features=2;'
+        f'hash="{independent_hash(SAE_A, {1: 15.0, 4: -12.5})}"'
+    )
+
+
+async def test_llamacpp_text_completion_refuses_steering_for_a_direct_caller(clean_state):  # noqa: F811
+    """Control w: the request policy refuses steering on a GGUF ROW before any load; this is the
+    defence in depth for a direct caller (Feature 26) — refused, never served unsteered."""
+    from datetime import datetime
+
+    from millm.core.errors import EngineUnsupportedError
+    from millm.ml.model_loader import ENGINE_LLAMACPP, LoadedModel, LoadedModelState
+    from tests.support.generation_entry_points import EventLog, FakeLlama
+
+    svc = make_service(word_model(), word_tokenizer())
+    log = EventLog()
+    LoadedModelState().set(LoadedModel(
+        model_id=1, model_name="tiny", model=FakeLlama(log), tokenizer=None,
+        loaded_at=datetime(2026, 10, 7), engine=ENGINE_LLAMACPP,
+    ))
+    for extra, param in (({"steering": INLINE}, "steering"), ({"profile": "p"}, "profile"),
+                         ({"steering_intensity": 0.5}, "steering_intensity"),
+                         ({"steering": {"features": []}}, "steering")):
+        with pytest.raises(EngineUnsupportedError) as exc:
+            await svc.create_text_completion(text(**extra))
+        assert exc.value.details["param"] == param
+    assert log.events == [], "nothing may be generated for a refused request"

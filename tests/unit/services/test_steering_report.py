@@ -207,6 +207,18 @@ class TestCircuitLabel:
         r = await SteeringStateReader().describe(snap((SAE_A, 0, True, {1: 1.0})), record)
         assert r.header == 'circuit;id="crc_x";intensity="1.25"'
 
+    async def test_an_unset_plan_intensity_falls_back_to_the_row(self, circuit, monkeypatch):
+        """An unset plan carries NaN (`UNSET_INTENSITY`), which must never reach the header."""
+        from millm.ml.circuit_steering import UNSET_INTENSITY
+
+        monkeypatch.setattr(
+            "millm.ml.circuit_steering.CircuitSteeringEngine.plan_for",
+            lambda self, d, c=None, intensity=None: SimpleNamespace(
+                claimed_entries=(SimpleNamespace(sae_id=SAE_A, layer=0),),
+                intensity=UNSET_INTENSITY))
+        r = await SteeringStateReader().describe(snap((SAE_A, 0, True, {1: 1.0})), None)
+        assert r.header == 'circuit;id="crc_x";intensity="0.9"'
+
     async def test_composed(self, circuit):
         circuit["composed"] = True
         r = await SteeringStateReader().describe(snap((SAE_A, 0, True, {1: 1.0})), None)

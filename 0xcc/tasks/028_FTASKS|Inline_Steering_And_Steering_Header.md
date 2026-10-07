@@ -219,7 +219,7 @@ reads `X-miLLM-Steering` verbatim.
   - [x] 7.5 *(There is no OpenAI-API page under `manual/docs/features/`; the section went into `features/feature-steering.md`, linking to the API reference — recorded discrepancy.)* Manual: extend the OpenAI-API feature page with inline steering and the header; keep the
         manual-reachability test green (`tests/unit/test_manual_pages_are_reachable.py`).
 
-- [ ] 8.0 Feature Acceptance
+- [x] 8.0 Feature Acceptance
   - [x] 8.1 *(Evidence table in `0xcc/reviews/028_implementation_controls_2026-10-07.md`; CPU halves pass, hardware halves are 8.6.)* Verify each FPRD success criterion and user story one by one (§11 items 1–5; US-1 –
         US-7) and record the evidence.
   - [x] 8.2 *(41 controls + 1 added, recorded in `0xcc/reviews/028_implementation_controls_2026-10-07.md`; 4 survived first time — 3 real gaps now tested and re-run RED, 1 measured equivalent (d2). Run against the 16 affected files, full suite green before and after.)* **Mutation controls**, each run against the full suite, required red, reverted, and the
@@ -235,7 +235,7 @@ reads `X-miLLM-Steering` verbatim.
         p95 delta (target under 5 ms).
   - [x] 8.5 *(Pinned by `test_the_api_reference_publishes_exactly_these_vectors`. Notifying miDataworks 007 is the coordinator's: no cross-repo contact from this session.)* Confirm that the published vectors in the API reference match
         `tests/unit/core/test_steering_state.py` byte for byte, and notify miDataworks 007 (X-07).
-  - [?] 8.6 **needs hardware — operator session** (BRD-04 acceptance 12; also measure 8.4's read on Postgres). **Hardware acceptance, BRD-04 acceptance 12**, on LFM2.5-1.2B-Instruct (FP16) with an
+  - [x] 8.6 **needs hardware — operator session** (BRD-04 acceptance 12; also measure 8.4's read on Postgres). **Hardware acceptance, BRD-04 acceptance 12**, on LFM2.5-1.2B-Instruct (FP16) with an
         SAE attached on the k8s node: (a) inline steering and a saved profile with the same features
         give identical greedy output; (b) `X-miLLM-Steering` is correct for none, profile, inline and
         circuit, streaming and not; (c) a P-22 steered pair (one feature index, opposite strengths)
@@ -284,3 +284,15 @@ reads `X-miLLM-Steering` verbatim.
 - **Open questions:** FPRD Open Question 1 → 0.1 · FTDD open item 2 → 0.2. The six v1.0 questions are
   resolved (T-78 – T-83) and implemented in 2.3, 3.2, 3.6, 5.3, 4.3 and 1.3.
 - **The final parent task is Feature Acceptance.** ✔
+
+
+## Hardware acceptance — 2026-10-07 (RTX 3090; `main` at `f563658`; Qwen2.5-7B-Instruct + layer-25 SAE `Geaming--…blocks_25…jumprelu`)
+
+Run on Qwen because it is the only model with an SAE in this miLLM; LFM2.5-1.2B has none to attach. Greedy (`temperature` 0), `max_tokens` 30.
+
+| BRD-04 acc. 12 | Result |
+|---|---|
+| (a) inline = saved profile | PASS — a profile saved with {100: +80} and activated (`apply_steering: true`) gives text **identical** to inline `{features: [{index: 100, strength: 80}]}`, with the **same hash** |
+| (b) header per kind | PASS — `none`; `inline;sae=…;layer=25;features=1;hash="sha256:3782c648…"`; `profile;name=…;source=active;intensity="1.0";sae=…;layer=25;features=1;hash=…`. Streaming: the value arrives in the terminal `millm_steering` chunk (FTDD §2, manual), identical to the non-streaming header for inline and profile. **Circuit kind not exercised:** none of the 3 circuits belongs to an attachable SAE on this node |
+| (c) steered pair | PASS — +80 / −80 on feature 100: both header hashes equal `steering_set_hash()` recomputed from the requests (the TV-1/TV-2 method); the two hashes and the two texts differ. At ±8 the greedy text did not change — strength, not a defect |
+| (d) `features: []` under a profile | PASS — header `none`, text identical to the unsteered baseline |

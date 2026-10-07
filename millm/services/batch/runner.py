@@ -127,6 +127,8 @@ class BatchRunner:
         self._wake = asyncio.Event()
         self._task: Optional[asyncio.Task] = None
         self._validations: set[asyncio.Task] = set()
+        #: The retention loop, started by `start_batch_api` beside the runner.
+        self._retention: Optional[asyncio.Task] = None
 
     # ------------------------------------------------------------------ lifecycle
 

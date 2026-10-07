@@ -409,6 +409,8 @@ def _constraint_type(response_format: Any) -> Optional[str]:
     return kind if kind in ("json_object", "json_schema") else None
 
 
+from millm.services.batch.state import BATCH_ROW  # noqa: E402  (light: enums + a ContextVar)
+
 #: The asyncio TASK holding the request-queue slot, set by `_admit` while the slot is held
 #: (Feature 26, FTDD §7 constraint 1). `_admit` re-enters ONLY when this is the current task.
 _SLOT_OWNER: "contextvars.ContextVar[Optional[asyncio.Task]]" = contextvars.ContextVar(
@@ -1339,6 +1341,12 @@ class InferenceService:
         request ID in CBM, so monitoring data would be inexact otherwise).
         """
         if not self._use_cbm():
+            return False
+        if BATCH_ROW.get() is not None:
+            # Feature 26 (FTASKS 5.3): a batch row runs INSIDE its chunk's admission slot, and the
+            # manager generates with no slot at all — so a row routed there would run outside the
+            # slot, beside whatever the next chunk or an interactive request does.
+            logger.info("cbm_routing_fallback_to_serial", reason="batch_row")
             return False
         if self._unloading_refusal() is not None:
             # The manager holds no queue slot, so nothing there refuses a model

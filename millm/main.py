@@ -19,6 +19,7 @@ from millm.api.routes import register_routes
 from millm.core.config import settings
 from millm.core.errors import MiLLMError
 from millm.core.logging import get_logger, setup_logging
+from millm.services.batch.reconcile import start_batch_api, stop_batch_api
 from millm.services.model_lease import clear_leases_on_startup
 
 logger = get_logger(__name__)
@@ -385,6 +386,11 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     # shape and reason of `disarm_probes_on_startup` above. Never raises.
     clear_leases_on_startup()
 
+    # Feature 26: reconcile every non-terminal batch, THEN start the runner and the retention
+    # loop (FR-26.3.3, FR-26.9.4). After the lease clear: a resumed batch must find no lease and
+    # re-acquire one or wait (X-01). Never raises.
+    await start_batch_api(async_session_factory)
+
     # F19 R3-15: `reconcile()` is NOT called here, deliberately.
     #
     # R1-01 wired it at startup because nothing called it. R2-09 then made the
@@ -429,6 +435,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
 
     # Shutdown
     logger.info("application_shutting_down")
+    await stop_batch_api()
 
     # Cleanup any loaded model
     try:

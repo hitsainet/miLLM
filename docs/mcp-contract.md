@@ -767,11 +767,9 @@ route accepts `X-miLLM-Load-Policy` and `X-miLLM-Lease` and is not broken by the
   `millm.headers` holds every `X-miLLM-*` value the synchronous route would set. A row failing on
   its own merits is an error-file line carrying the synchronous status and body.
 - **Packing:** scoring rows (chat/text completions in scoring mode) run in right-padded packs
-  unless `pack: false` (default from `BATCH_PACK_DEFAULT`, true). Generation and probe-score rows
-  always run singly; embedding rows run singly until Feature 30. **Packed-versus-single
-  measurement on JEV-9B-decision (bfloat16): pending the hardware session (026 FTASKS 9.4)** —
-  until it is published here, use `pack: false` where scores must equal the synchronous endpoint
-  bit for bit.
+  only when `pack: true` (default from `BATCH_PACK_DEFAULT`, **false**). Generation and probe-score
+  rows always run singly; embedding rows run singly. **Measured 2026-10-07 on JEV-9B-decision (bfloat16), RTX 3090, 10,000 scoring rows: single 23.2 rows/s, packed 63.7 rows/s (2.7x); 57 of 10,000 rows (0.57%) changed their top token, max |logprob diff| 0.349** — so packing is off unless a batch
+  asks for it, and an unpacked row equals the synchronous endpoint.
 - **Leases:** a batch takes its own lease (`holder: "millm-batch:<id>"`), renews it and releases it
   at any terminal status. A batch created with a valid `X-miLLM-Lease` — or handed one through
   `/lease` — runs under the caller's lease, renews it and never releases it. A restart ends every

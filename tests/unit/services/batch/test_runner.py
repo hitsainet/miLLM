@@ -86,8 +86,9 @@ async def test_a_batch_runs_to_completion_with_openai_shaped_lines(harness):
     assert set(line) == {"id", "custom_id", "response", "error"} and line["error"] is None
     assert line["response"]["status_code"] == 200
     assert line["response"]["body"]["object"] == "text_completion"
-    # T-63: pack defaults to true, so these scoring rows went through the packed path.
-    assert line["response"]["millm"]["packed"] is True
+    # T-63 / 9.4: pack defaults to FALSE (measured: 0.57% of packed JEV rows changed their top
+    # token), so with `pack` omitted these scoring rows ran singly, equal to the synchronous route.
+    assert line["response"]["millm"]["packed"] is False
     assert line["response"]["millm"]["headers"]["X-miLLM-Backend"] == harness.inference.backend_name
     for stamp in ("in_progress_at", "finalizing_at", "completed_at"):
         assert got[stamp] is not None

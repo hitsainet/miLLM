@@ -233,13 +233,16 @@ async def test_unknown_create_fields_are_reported_or_refused_under_strict(harnes
 
 async def test_pack_defaults_from_the_setting(harness, monkeypatch):
     async with client_for(harness.app()) as client:
+        shipped = (await harness.create(client, [completion_line("a")])).json()
+        monkeypatch.setattr(settings, "BATCH_PACK_DEFAULT", True)
         default_on = (await harness.create(client, [completion_line("a")])).json()
+        explicit_off = (await harness.create(client, [completion_line("a")], pack=False)).json()
         monkeypatch.setattr(settings, "BATCH_PACK_DEFAULT", False)
-        default_off = (await harness.create(client, [completion_line("a")])).json()
-        explicit = (await harness.create(client, [completion_line("a")], pack=True)).json()
-    assert default_on["millm"]["pack"] is True
-    assert default_off["millm"]["pack"] is False
-    assert explicit["millm"]["pack"] is True
+        explicit_on = (await harness.create(client, [completion_line("a")], pack=True)).json()
+    assert shipped["millm"]["pack"] is False  # the shipped default (026 FTASKS 9.4)
+    assert default_on["millm"]["pack"] is True  # the setting is what decides an omitted `pack`
+    assert explicit_off["millm"]["pack"] is False
+    assert explicit_on["millm"]["pack"] is True
 
 
 async def test_validate_functions_are_what_the_routes_answer_with(harness):

@@ -94,15 +94,13 @@ status code and body the synchronous endpoint would have returned, and the batch
 
 ## Packing
 
-Scoring rows (chat or text completions in scoring mode) are scored in right-padded packs by
-default (`pack` omitted → `BATCH_PACK_DEFAULT`, true). Each row is gathered at its own last real
+Scoring rows (chat or text completions in scoring mode) are scored one at a time by default
+(`pack` omitted → `BATCH_PACK_DEFAULT`, false). Send `pack: true` to score them in right-padded packs. Each row is gathered at its own last real
 token. Send `pack: false` when scores must equal the synchronous endpoint bit for bit: bfloat16 is
 not batch-invariant. Generation and probe-score rows always run one at a time; embedding rows do
 too until mask-aware pooling (Feature 30) lands. Every output line says whether it was packed.
 
-**Measured packed-versus-single difference on JEV-9B-decision:** pending the hardware acceptance
-session. If any packed row's top token differs from its single-row answer, the default becomes
-`false`.
+**Measured packed-versus-single difference on JEV-9B-decision (bfloat16, RTX 3090, 10,000 rows, 2026-10-07):** single 23.2 rows/s, packed 63.7 rows/s (2.7x); **57 of 10,000 rows (0.57%) changed their top token**, largest logprob difference 0.349. By the rule the feature shipped with, packing therefore defaults to off. Use `pack: true` only where a small fraction of changed labels is acceptable for the speed.
 
 ## Leases, resume and waiting
 

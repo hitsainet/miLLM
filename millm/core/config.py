@@ -296,10 +296,11 @@ class Settings(BaseSettings):
     BATCH_MAX_FILE_BYTES: int = 209_715_200
     #: Per input line: a longer line is an invalid line (`line_too_large`), never parsed.
     BATCH_MAX_LINE_BYTES: int = 1_048_576
-    #: T-63: scoring and embedding rows are packed unless the acceptance-7 measurement finds a
-    #: packed row whose top token differs from its single-row answer; then this becomes false.
-    #: ⚠ An unparseable value FAILS TO THE DEFAULT (true), never to false (`_bool_to_default`).
-    BATCH_PACK_DEFAULT: bool = True
+    #: T-63 / 026 FTASKS 9.4: FALSE, by the rule "if any packed row's top token differs from its
+    #: single-row answer, packing defaults off". Measured 2026-10-07 on JEV-9B-decision (bfloat16), RTX 3090, 10,000 scoring rows: single 23.2 rows/s, packed 63.7 rows/s (2.7x); 57 of 10,000 rows (0.57%) changed their top token, max |logprob diff| 0.349.
+    #: bfloat16 is not batch-invariant. A batch may still send `pack: true` for the speed.
+    #: ⚠ An unparseable value FAILS TO THE DEFAULT (false here), never to true (`_bool_to_default`).
+    BATCH_PACK_DEFAULT: bool = False
     #: Single-row forwards per chunk (one admission slot each chunk). Acceptance 9 bounds it.
     BATCH_CHUNK_ROWS: int = 8
     BATCH_PACK_MAX_ROWS: int = 16
@@ -522,8 +523,9 @@ class Settings(BaseSettings):
     def _bool_to_default(cls, value: Any) -> Any:
         """A boolean setting fails to its DEFAULT, not to False (this suite's `dry_run` lesson).
 
-        `BATCH_PACK_DEFAULT=ture` must not quietly turn packing off — nor raise and stop the
-        server starting over a typo in a switch whose default is already safe.
+        `BATCH_PACK_DEFAULT=ture` must not quietly flip the switch away from its default — nor raise
+        and stop the server starting over a typo in a switch whose default is already safe. The
+        default is off (026 FTASKS 9.4), so a typo can never turn on score-changing packing.
         """
         if isinstance(value, bool):
             return value
@@ -533,10 +535,10 @@ class Settings(BaseSettings):
         if text in ("0", "false", "no", "off"):
             return False
         warnings.warn(
-            f"BATCH_PACK_DEFAULT={value!r} is not a boolean; using the default (true)",
+            f"BATCH_PACK_DEFAULT={value!r} is not a boolean; using the default (false)",
             stacklevel=2,
         )
-        return True
+        return False
 
     @field_validator("GGUF_TENSOR_SPLIT")
     @classmethod

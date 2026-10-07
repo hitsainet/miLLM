@@ -89,7 +89,7 @@ async def test_a_failing_reconcile_never_stops_the_server_starting():
 
 
 @pytest.mark.parametrize("value,expected", [("true", True), ("false", False), ("0", False),
-                                            ("ture", True), ("", True)])
+                                            ("ture", False), ("", False)])
 def test_batch_pack_default_fails_to_its_default(value, expected):
     from millm.core.config import Settings
 

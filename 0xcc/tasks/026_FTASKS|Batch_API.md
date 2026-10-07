@@ -151,7 +151,7 @@
 - [ ] F-1 Sensing and circuit-edge sensing events from a RE-RUN batch row are not deduplicated per line (T-70's unique index covers probe events only). Add the partial unique index + skip if an operator needs exact counts.
 - [ ] F-2 SAE detach drain: take a slot instead of polling counters, so a continuously running batch (or an arriving request) cannot run between the poll and the hook removal. Pre-existing race, widened by batches.
 - [ ] F-3 Feature 28: put the steering value into `millm/api/provenance.post_generation`; batch lines then carry it with no batch-side change. Re-run `test_a_batch_line_equals_the_synchronous_response` with profile/inline steering.
-- [ ] F-4 Feature 30: pack embedding rows once mask-aware pooling exists (6.6).
+- [ ] F-4 Embedding packing (6.6 / FR-26.5.1 embedding half). Feature 30 is now in the tree (rebased 2026-10-07) and its `pool_hidden` is mask-aware, but `_embed_inputs` still runs ONE forward per input; packing needs a new right-padded multi-row forward plus the hardware embedding-cosine measurement (9.4) before it may default on. Not small enough to ship unmeasured; embedding lines stay `packed: false`.
 - [ ] F-5 Run `test_mcp_tool_paths_are_real.py` with `MILLM_REQUIRE_CROSS_REPO_CHECKS=1` once miStudio 034 phase 6 ships `millm_batches.py`.
 - [ ] F-6 Install `ruff`/`mypy` in the dev venv and run them over the batch package (9.7 could not).
 

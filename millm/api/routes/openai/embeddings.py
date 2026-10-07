@@ -3,7 +3,8 @@ OpenAI-compatible embeddings endpoint.
 
 POST /v1/embeddings - Create embeddings
 
-Requires a model to already be loaded via the Management API.
+Loads the requested model on demand, like chat and completions, after every refusal that can be
+decided from the request and the model row — so a refused request never evicts the resident model.
 """
 
 import asyncio
@@ -65,29 +66,30 @@ async def create_embeddings(
     """
     Create embeddings for input text.
 
-    Returns vector embeddings using the model's last hidden layer
-    with mean pooling. Auto-loads the requested model if not already loaded.
+    Returns vectors pooled from the model's last hidden layer by `pooling` (`mean` default,
+    `last`, `cls`), L2-normalised when `normalize` is true. Auto-loads the requested model if not
+    already loaded. Never steered.
     """
     # Check if requested model exists in database
     model = await service.find_model_by_name(request.model)
     if not model:
         return model_not_found_error(request.model)
 
-    # A GGUF model embeds (llama.cpp loaded with embedding=True and MEAN pooling,
-    # measured on the RTX 3090 — test_gguf_refused_before_load.py), so there is no
-    # engine refusal here. A stale comment claiming one, with no code under it, was
-    # removed in Feature 25.
-
-    # Feature 25 request policy, before the auto-load (see chat.py). `dimensions` is refused
-    # here until Feature 30: it was declared and silently ignored, returning full-width vectors.
+    # Refusals decidable from the request and the row run BEFORE the auto-load below, so none
+    # of them evicts the resident model. Schema validation has already refused empty input and
+    # a list over EMBEDDINGS_MAX_INPUTS (both 400, param `input`) and a `pooling` outside
+    # mean/last/cls. The request policy (Feature 25's table) now refuses `dimensions` on every
+    # model — none declares truncated-embedding support (T-91) — and, on a GGUF row, `pooling`
+    # other than `mean`, since llama.cpp fixes pooling at load. A GGUF model otherwise embeds
+    # (llama.cpp loaded with embedding=True and MEAN pooling). Inputs over the model's length
+    # limit are refused by the service, which must tokenise them with the loaded tokenizer.
     policy = apply_request_policy(request, Endpoint.EMBEDDINGS, model, http_request.headers)
     ignored_header = ignored_fields_header(policy)
 
     # Load on demand, same as chat and completions. Open WebUI calls this for
     # RAG with its own embedding model selected, which is a DIFFERENT model from
     # the chat one — so refusing anything not already loaded broke retrieval
-    # even when the chat model was up. The docstring above has always claimed
-    # this behaviour; only the code disagreed.
+    # even when the chat model was up.
     # Feature 29: `X-miLLM-Load-Policy: refuse` promises this request never causes a swap.
     # After the pre-load refusals above, before the auto-load below (FR-29.4.5).
     load_policy = parse_load_policy(x_millm_load_policy)

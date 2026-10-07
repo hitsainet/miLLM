@@ -34,6 +34,7 @@ miLLM is configured entirely through environment variables (with `.env` file sup
 |----------|---------|-------------|
 | `MAX_CONCURRENT_REQUESTS` | `1` | **Must stay `1`.** This is a correctness constraint, not a throughput knob: values above `1` race on steering apply/restore and on the shared sensing buffer. Leave it at `1` |
 | `MAX_PENDING_REQUESTS` | `10` | Queue depth beyond the concurrent slots; overflow returns `503` (`QUEUE_FULL`, backpressure) |
+| `EMBEDDINGS_MAX_INPUTS` | `256` | Most strings one `/v1/embeddings` request may carry (1–2048); more is refused with `400` before any model load. A capped request holds the only request slot, so this bounds how long a chat waits behind it. **Provisional:** to be set from latency measured on the RTX 3090 — the largest power of two with cap × p95 seconds per input ≤ 30 s |
 | `MAX_DOWNLOAD_WORKERS` | `2` | Parallel model/SAE downloads |
 | `MAX_LOAD_WORKERS` | `1` | Parallel model loads (keep at 1) |
 | `GRACEFUL_UNLOAD_TIMEOUT` | `30.0` | Seconds an unload waits for the requests already running on the model before it moves any weight. Requests that arrive once the unload has begun are refused with `503 model_busy` rather than waited for. If the running requests outlast this, the unload goes ahead and they fail. (Until 2026-09-14 this setting was read by nothing and the wait was a fixed 5 s.) |

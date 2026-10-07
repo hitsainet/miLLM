@@ -237,7 +237,30 @@ refused before any load. These requests are served on the serial path, never con
 
 ## Embeddings
 
-`POST /v1/embeddings` with `input` (string or list) returns mean-pooled last-hidden-layer embeddings. `encoding_format` may be `"float"` (default) or `"base64"`.
+`POST /v1/embeddings` with `input` (a string or a list of strings) returns one vector per input, pooled from the model's last hidden layer. `encoding_format` may be `"float"` (default) or `"base64"` (little-endian float32).
+
+| Field | Values | Default | Meaning |
+|---|---|---|---|
+| `pooling` | `"mean"`, `"last"`, `"cls"` | `"mean"` | How the last hidden layer is reduced to one vector. Any other value is refused with `400 invalid_parameter`, `param: pooling`. |
+| `normalize` | `true`, `false` | `false` | L2-normalise each returned vector (norm 1 within 1e-5). |
+| `dimensions` | — | — | **Refused on every model** with `400 field_not_honoured`, `param: dimensions`, before any model load. Truncated embeddings are honoured only for a model that declares support for them, and miLLM records no such declaration, so no model can — the native width included. It is never accepted and ignored. |
+
+A request with neither `pooling` nor `normalize` returns exactly the vectors miLLM returned before these fields existed: the mean over every position of the last hidden layer.
+
+- **`mean`** averages the real tokens. **`last`** takes the last real token. **`cls`** takes the first.
+- **Special tokens count.** They are added at tokenisation as before and are real tokens, so `mean` includes a beginning-of-sequence token where the tokenizer adds one, and `cls` *is* that token.
+- **What `cls` means on a causal decoder.** Position 0 attends only to itself, so its vector depends on the first token alone. On a model whose tokenizer adds a fixed beginning-of-sequence token, **every input gets the same `cls` vector**. `cls` is served because some encoder-style embedding models are built around it; on a decoder-only chat model, use `last` or `mean`.
+
+**Inputs are never truncated.** Every input is tokenised and measured before anything is run. If any input is longer than the model's limit (its served context window on transformers; the smaller of the context window and the batch size on a GGUF model), the request is refused with `400 context_length_exceeded`. `param` is `input[i]` for the first over-limit input (`input` when `input` is a string), and the message names every over-limit index with its token count, and the limit — up to 16 of them, then how many more. Shorten or split the inputs. A model that states no limit is embedded untruncated and unchecked.
+
+**Limits on the request itself**, refused with `400 invalid_parameter`, `param: input`, before any model load:
+
+- empty input — `""`, `[]`, or an empty string at any index (the message names the index);
+- more than `EMBEDDINGS_MAX_INPUTS` strings (default **256**). The message gives the count and the cap. A capped request holds the server's only request slot, so the cap bounds how long a chat waits behind it; the default is provisional until it is measured on the deployment's GPU.
+
+**GGUF models** (llama.cpp) fix pooling when the model is loaded, and miLLM loads them with mean pooling. `pooling: "mean"` (or no `pooling`) is served; `"last"` and `"cls"` are refused with `400 field_not_honoured`, `param: pooling`, before any load — the resident model is not evicted. `normalize` is honoured, applied by miLLM after the engine. A GGUF model loaded with `GGUF_ENABLE_EMBEDDINGS=false` cannot embed; the refusal names the setting.
+
+A vector that comes out non-finite, or with a zero norm under `normalize`, is a `500 embedding_vector_invalid` naming the input's index; miLLM never returns `NaN` or infinity.
 
 :::info Embeddings are never steered
 The steering hook of **every** attached SAE is suppressed during embedding computation (each layer of a circuit, not just the first — fixed 2026-10-04), so embeddings always reflect the unmodified model — making them a neutral measuring stick for comparing steered vs. unsteered generations.
@@ -302,11 +325,14 @@ honoured, with or without strict mode**, before the requested model is loaded:
 | `max_completion_tokens` | honoured as `max_tokens` | honoured | honoured | refused |
 | `profile`, `steering_intensity` | honoured, refused on scoring requests | refused | refused | refused |
 | `steering` | refused (not yet implemented) | refused | refused | refused |
-| `dimensions` | refused | refused | refused | refused (not yet implemented) |
+| `dimensions` | refused | refused | refused | refused on every model (none declares truncated-embedding support) |
+| `pooling` | refused | refused | refused | honoured on transformers; on GGUF only `"mean"` |
+| `normalize` | refused | refused | refused | honoured |
 | `tools`, `tool_choice`, `logit_bias` | refused | refused | refused | refused |
 
 The values `n: 1`, `logprobs: false`, `response_format: {"type": "text"}`, `tools: []`,
-`logit_bias: {}` and an explicit `null` mean "no change" and are accepted everywhere.
+`logit_bias: {}`, `pooling: "mean"`, `normalize: false` and an explicit `null` mean "no change"
+and are accepted everywhere.
 
 ## Chat scoring
 
@@ -400,7 +426,7 @@ written `unrecorded`, never guessed.
 |-----------|--------|--------|
 | No model loaded | 503 | `model_not_loaded` |
 | Unknown model name in request | 404 | `model_not_found` |
-| Prompt + `max_tokens` exceeds the model's context window, on any engine and any route (an embeddings input past it too). The message gives the limit and what was asked for. A streamed request is refused with this 400 before the stream starts; if the stream has already started, it ends with this error event and `[DONE]` | 400 | `context_length_exceeded` |
+| Prompt + `max_tokens` exceeds the model's context window, on any engine and any route (an embeddings input past it too — the message then names every over-limit input index and `param` is `input[i]`; see [Embeddings](#embeddings)). The message gives the limit and what was asked for. A streamed request is refused with this 400 before the stream starts; if the stream has already started, it ends with this error event and `[DONE]` | 400 | `context_length_exceeded` |
 | Steering error on an in-flight stream (mismatched cluster, bad index) | SSE `error` event, then `[DONE]` | `invalid_feature_index` |
 | Request queue full (backpressure) | 503 | `queue_full` |
 | An output-changing field this endpoint or engine cannot honour | 400 | `field_not_honoured` |
@@ -408,6 +434,7 @@ written `unrecorded`, never guessed.
 | `response_format` that cannot be honoured (schema keyword, engine, combination) | 400 | `response_format_unsupported` |
 | Chat scoring on a model with no chat template | 400 | `no_chat_template` |
 | A complete constrained output that fails validation | 500 | `constrained_output_invalid` |
+| An embedding vector that is non-finite, or has a zero norm under `normalize` | 500 | `embedding_vector_invalid` |
 | A scoring token id outside the vocabulary; an empty prompt | 400 | `invalid_scoring_request` |
 | Unknown `profile` | 404 | `profile_not_found` |
 | Invalid `steering_intensity` (outside 0–2 / unknown symbol) | 400 | `invalid_parameter` |

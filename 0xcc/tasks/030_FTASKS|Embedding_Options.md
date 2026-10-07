@@ -170,17 +170,17 @@ executor calls `_embed_inputs`.
         list → 400 naming count and cap; none loads a model (edge case "empty input"; secondary
         scenario "10,000 inputs"). (FR-30.3.6, FR-30.3.8)
 
-- [ ] 6.0 Comments and documentation (covers FR-30.4.1, FR-30.4.2, FR-30.4.3, FR-30.2.4, FR-30.2.5)
-  - [ ] 6.1 Replace the stale comment at `embeddings.py:64-73` (and the whitespace line `:74`) with an
+- [x] 6.0 Comments and documentation (covers FR-30.4.1, FR-30.4.2, FR-30.4.3, FR-30.2.4, FR-30.2.5)
+  - [x] 6.1 Replace the stale comment at `embeddings.py:64-73` (and the whitespace line `:74`) with an
         accurate one naming the pre-load refusals; correct the module docstring (`:6`, "requires a
         model to already be loaded") and the route docstring (`:56-57`). Reviewer check: every
         statement in the file matches the code. (FR-30.4.1, FR-30.4.2)
-  - [ ] 6.2 Correct the service docstring (`inference_service.py:5073-5075`). (FR-30.4.2)
-  - [ ] 6.3 Manual `openai-compatible.md:193-199`: `pooling`, `normalize`, special tokens in pooling,
+  - [x] 6.2 Correct the service docstring (`inference_service.py:5073-5075`). (FR-30.4.2)
+  - [x] 6.3 Manual `openai-compatible.md:193-199`: `pooling`, `normalize`, special tokens in pooling,
         what `cls` means on a causal decoder (T-92), `dimensions` refused on every model (T-91), the
         input limit and refusal, the cap, empty input, GGUF restrictions. Keep the "never steered" note.
         (FR-30.4.3, FR-30.2.4, FR-30.2.5)
-  - [ ] 6.4 `manual/docs/reference/configuration.md`: `EMBEDDINGS_MAX_INPUTS` row beside `:85`, with the
+  - [x] 6.4 **[row added with the provisional 256, marked provisional; the measured value replaces it when 8.3 runs]** `manual/docs/reference/configuration.md`: `EMBEDDINGS_MAX_INPUTS` row beside `:85`, with the
         measured value once 8.3 records it. (FR-30.3.6)
 
 - [ ] 7.0 Mutation controls (covers FR-30.1.6, FR-30.1.7, FR-30.2.3, FR-30.2.8, FR-30.3.1, FR-30.3.3,

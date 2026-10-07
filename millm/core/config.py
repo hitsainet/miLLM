@@ -274,9 +274,11 @@ class Settings(BaseSettings):
     # Feature 30 (FR-30.3.6, T-93): maximum strings in one /v1/embeddings request. A capped
     # request holds the only admission slot (MAX_CONCURRENT_REQUESTS = 1), so this bounds how
     # long a chat waits behind it. To be set from measured latency: the largest power of two
-    # with cap x p95 seconds-per-input <= 30 s (S3-11), in [64, 2048]. 256 is PROVISIONAL
-    # until that measurement on the RTX 3090 is recorded (030_FTASKS 8.3).
-    EMBEDDINGS_MAX_INPUTS: int = Field(default=256, ge=1, le=2048)
+    # with cap x p95 seconds-per-input <= 30 s (S3-11), in [64, 2048]. MEASURED on the RTX 3090
+    # (030_FTASKS 8.3, 2026-10-07) at 512 tokens per input over 64 inputs: LFM2.5-1.2B-Instruct
+    # p95 0.0313 s -> 512; Llama-3.1-8B-Instruct p95 0.1636 s -> 128 (256 would be ~42 s). One
+    # global setting must hold for the largest model served, so 128.
+    EMBEDDINGS_MAX_INPUTS: int = Field(default=128, ge=1, le=2048)
 
     # Feature 29: model lease (process memory only; a restart ends every lease, X-01).
     # The default TTL is also the maximum (2 hours); a TTL outside 1..LEASE_MAX_TTL_SECONDS

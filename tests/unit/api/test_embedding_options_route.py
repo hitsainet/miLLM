@@ -159,12 +159,14 @@ class TestSchemaRefusals:
         # resident in this stand-in, so it then answers 503 model_not_loaded).
         assert at_cap_svc.load_model_and_wait.await_count == 1, at_cap.text
 
-    def test_the_default_cap_is_256(self):
+    def test_the_default_cap_is_the_measured_128(self):
+        """Set from the 3090 measurement (030_FTASKS 8.3): Llama-3.1-8B p95 0.164 s per 512-token
+        input, so 128 x p95 = 21 s fits the 30 s target and 256 (~42 s) does not."""
         from millm.core.config import Settings
 
-        assert Settings.model_fields["EMBEDDINGS_MAX_INPUTS"].default == 256
-        response, _ = self._post({"input": ["x"] * 257})
-        assert "input has 257 items; the limit is 256" in _error(response)["message"]
+        assert Settings.model_fields["EMBEDDINGS_MAX_INPUTS"].default == 128
+        response, _ = self._post({"input": ["x"] * 129})
+        assert "input has 129 items; the limit is 128" in _error(response)["message"]
 
 
 class TestAnOverLimitInputIsA400NamingItsIndex:

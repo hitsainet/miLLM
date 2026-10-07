@@ -61,14 +61,14 @@ executor calls `_embed_inputs`.
 
 ## Tasks
 
-- [ ] 0.0 Preconditions and verification spikes (covers FR-30.3.5, FR-30.3.2; precondition for FR-30.1,
+- [x] 0.0 Preconditions and verification spikes (covers FR-30.3.5, FR-30.3.2; precondition for FR-30.1,
       FR-30.2.11). **No product open questions remain**: FPRD v1.1 §14 resolves all five (T-91–T-95).
-  - [?] 0.1 **[needs hardware — operator session. Implemented from the library source as recalled, unverified here (llama-cpp-python is absent from the dev venv): `Llama.n_ctx()` is a method, `n_batch` an attribute, and `embed()` cuts each input to `n_batch` tokens by default (`truncate=True`, not exposed by `create_embedding`). `_embedding_limit` uses `min(n_ctx(), n_batch)`, which is safe either way: if `n_batch` does not bound an input it is merely conservative. Confirm on the backend image]** On the backend image (not the dev venv, where llama-cpp-python is absent), with one GGUF
+  - [x] 0.1 **[needs hardware — operator session. Implemented from the library source as recalled, unverified here (llama-cpp-python is absent from the dev venv): `Llama.n_ctx()` is a method, `n_batch` an attribute, and `embed()` cuts each input to `n_batch` tokens by default (`truncate=True`, not exposed by `create_embedding`). `_embedding_limit` uses `min(n_ctx(), n_batch)`, which is safe either way: if `n_batch` does not bound an input it is merely conservative. Confirm on the backend image]** On the backend image (not the dev venv, where llama-cpp-python is absent), with one GGUF
         model loaded with embeddings: confirm `Llama.n_ctx()`, `Llama.n_batch`, the defaults of
         `Llama.tokenize`, and what `create_embedding` does with an input longer than `n_batch` and
         than `n_ctx` (truncate, raise, or other). Record results; set `_embedding_limit` for GGUF to
         `min(n_ctx(), n_batch)` or `n_ctx()` accordingly (FTDD TD15). (FR-30.3.5)
-  - [?] 0.2 **[needs hardware — operator session (lists model rows on the node). Code-side: `_served_max_context(None-config)` → None means served untruncated and unchecked; pinned by `test_with_no_stated_limit_a_long_input_runs_whole`]** List every model row on the node and whether `_served_max_context` returns a value for it
+  - [x] 0.2 **[needs hardware — operator session (lists model rows on the node). Code-side: `_served_max_context(None-config)` → None means served untruncated and unchecked; pinned by `test_with_no_stated_limit_a_long_input_runs_whole`]** List every model row on the node and whether `_served_max_context` returns a value for it
         (FTDD risk R3). Any `None` is recorded with its consequence (served untruncated, unchecked). (FR-30.3.2)
   - [x] 0.3 **Route-existence precondition:** confirm `millm/api/request_policy.py` exists with
         `OUTPUT_CHANGING`, `NEUTRAL` and `evaluate`, and that `evaluate` is called in
@@ -198,18 +198,18 @@ executor calls `_embed_inputs`.
   - [x] 7.4 **[none survived (28 of 28 red, incl. 16 extra X-controls); M5 did not redden Feature 25's every-entry test, which cannot by construction — finding F1 in the controls record]** Any mutation that survives is a test finding: write the test, re-run the mutation as a
         negative control, and record both.
 
-- [ ] 8.0 Feature Acceptance
+- [x] 8.0 Feature Acceptance
   - [x] 8.1 **[unit half done; SC-1/SC-4/SC-7 hardware halves open — table in 0xcc/reviews/030_implementation_controls_2026-10-07.md]** Verify each FPRD success criterion (§11, 1–7) and each user story's acceptance (US-1–US-5),
         one by one, citing the test that proves it.
-  - [?] 8.2 **[needs hardware — operator session]** Hardware, on the node: a transformers model returns unit vectors for `pooling: last,
+  - [x] 8.2 **[needs hardware — operator session]** Hardware, on the node: a transformers model returns unit vectors for `pooling: last,
         normalize: true` (BRD-04 acceptance 13); an over-limit input is refused, naming its index;
         `dimensions` returns 400 before load (BRD-04 acceptance 2); a GGUF model refuses `pooling: last`
         without evicting the resident model; one real Open WebUI document upload still embeds.
-  - [?] 8.3 **[needs hardware — operator session]** **Cap measurement (T-93):** on the RTX 3090, p95 seconds per input at 512 tokens over 64
+  - [x] 8.3 **[needs hardware — operator session]** **Cap measurement (T-93):** on the RTX 3090, p95 seconds per input at 512 tokens over 64
         inputs for LFM2.5-1.2B-Instruct (bfloat16) and the largest transformers model served for
         embeddings; set `EMBEDDINGS_MAX_INPUTS` to the largest power of two with cap × p95 ≤ 30 s,
         within [64, 2048]; record the numbers in the review notes, the setting's comment and 6.4.
-  - [?] 8.4 **[needs hardware — operator session]** With a profile active and a circuit attached, embeddings equal those with no SAE attached
+  - [x] 8.4 **[needs hardware — operator session]** With a profile active and a circuit attached, embeddings equal those with no SAE attached
         (FPRD §11 criterion 4).
   - [x] 8.5 **[4593 passed / 3 skipped / 0 failed; ruff and mypy run from a scratch venv (absent from ~/app/miLLM/venv): no new findings, mypy 616 → 616]** Run the full backend suite, `ruff` and `mypy`.
   - [x] 8.6 Record the mutation-control table (7.x) in the review notes. Report the Document Inventory
@@ -269,3 +269,14 @@ Where the code and these documents disagreed, the code won; each is recorded her
   tasks 0.1 and 8.3.
 - **Mutation controls on the truncation refusal (7.1) and on `dimensions` handling (7.2):** present.
 - **The final parent task is Feature Acceptance.** ✔
+
+
+## Hardware acceptance — 2026-10-07 (RTX 3090; `main` at `a908aa1`)
+
+| Item | Result |
+|---|---|
+| 0.1 llama.cpp | On the backend image (LFM2.5-1.2B-Instruct Q4_K_M, `embedding=True`, defaults): `n_ctx()` **512**, `n_batch` **512**, `tokenize(text: bytes, add_bos=True, special=False)`. `create_embedding` **silently truncates**: a 714-token and a 1,014-token input both returned, `prompt_tokens` 512, no error. So the guard is load-bearing; served through miLLM the same model refuses a 20,002-token input — 400 `context_length_exceeded` "this model's limit is 512 tokens. Inputs are never truncated." |
+| 0.2 context limits | Every served transformers model declares one: JEV-9B-decision / autotrust-JEV-9B 262,144; LFM2.5-1.2B 128,000; Qwen2.5-7B 32,768; jevify-gemma4-e4b 131,072; Llama-3.1-8B 131,072. None is served unchecked |
+| 8.2 behaviour (acc. 2, 13) | PASS — LFM2.5 `pooling: last, normalize: true` → norms 1.0, 1.0 (dim 2048); `["short", <150,002 tokens>, "also short"]` → 400 "Input 1 has 150,002 tokens; this model's limit is 128,000"; `dimensions` on non-resident Qwen → 400, resident model and `loaded_at` unchanged; GGUF `pooling: last` → 400 `field_not_honoured`, resident unchanged; a default (mean) request like Open WebUI's → 200 |
+| 8.3 cap (T-93, S3-11) | 512-token inputs, 64 single requests + one 64-input batch: LFM2.5-1.2B p95 **0.0313 s** (batched 0.0275) → cap 512; Llama-3.1-8B p95 **0.1636 s** (batched 0.1608) → cap 128. `EMBEDDINGS_MAX_INPUTS` set to **128** |
+| 8.4 unsteered | PASS — Qwen2.5-7B, 3 inputs: no SAE vs layer-25 SAE attached with steering {100: +80, 500: −60} enabled → worst |Δ| **0.0**; control: generation in the same state was steered (`steering_apply_count` > 0). The SAE attach locked the model again (the 025/027 observation); unlocked after |

@@ -45,7 +45,13 @@ async def test_single_path_scores_equal_a_direct_forward():
             with torch.no_grad():
                 logits = svc._model(**ids, use_cache=False).logits[0, -1].float()
             direct = next_token_scores(logits, allowed=None, temperature=1.0, top_k=5)
-            assert scores.top == direct.top and n == ids.input_ids.shape[1]
+            # Same tokens in the same order, EXACTLY; logprobs within 1e-5 — 025's own parity bar
+            # (BRD-04 acceptance 3). Exact float equality failed on the mirror's CI runner by one
+            # float32 ulp (-3.4305873 vs -3.4305875, 2026-10-07): two CPU forwards on a multi-core
+            # runner need not reduce in the same order, so bit-equality tested the hardware.
+            assert [t for t, _ in scores.top] == [t for t, _ in direct.top]
+            assert max(abs(a - b) for (_, a), (_, b) in zip(scores.top, direct.top)) <= 1e-5
+            assert n == ids.input_ids.shape[1]
     finally:
         clear_loaded()
 

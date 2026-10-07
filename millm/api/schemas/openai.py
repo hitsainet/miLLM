@@ -521,9 +521,42 @@ class EmbeddingRequest(BaseModel):
     model: str
     input: Union[str, list[str]]
     encoding_format: Literal["float", "base64"] = "float"
+    # Refused on every model by the request policy (Feature 30, T-91): no model declares
+    # truncated-embedding support. Declared so a non-positive value is a schema error.
     dimensions: Optional[int] = Field(default=None, gt=0)
+    # Feature 30 (FR-30.2): how the last hidden layer is pooled over REAL tokens, and whether
+    # the vector is L2-normalised. The defaults return the vectors served before Feature 30.
+    pooling: Literal["mean", "last", "cls"] = "mean"
+    normalize: bool = False
 
     model_config = {"extra": "allow"}
+
+    @field_validator("input")
+    @classmethod
+    def _input_shape(cls, value: str | list[str]) -> str | list[str]:
+        """Empty input and lists over the cap are refused here, before any auto-load
+        (FR-30.3.6, FR-30.3.8, T-94).
+
+        A FIELD validator, not a model validator: the /v1 validation handler builds `param`
+        from the error's `loc`, which for a field validator is ("body", "input"). The message
+        carries the index. `[]` used to auto-load the model and return a 200 with no data.
+        """
+        from millm.core.config import settings
+
+        items = [value] if isinstance(value, str) else value
+        if not items:
+            raise ValueError("input must contain at least one string")
+        empty = [i for i, text in enumerate(items) if text == ""]
+        if empty:
+            where = "input" if isinstance(value, str) else f"input[{empty[0]}]"
+            more = f" (and {len(empty) - 1} more empty)" if len(empty) > 1 else ""
+            raise ValueError(f"{where} must not be empty{more}")
+        cap = settings.EMBEDDINGS_MAX_INPUTS
+        if len(items) > cap:
+            raise ValueError(
+                f"input has {len(items)} items; the limit is {cap} (EMBEDDINGS_MAX_INPUTS)"
+            )
+        return value
 
 
 # =============================================================================

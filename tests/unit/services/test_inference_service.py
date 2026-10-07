@@ -780,14 +780,19 @@ class TestCreateEmbeddings:
         assert response.data[1].index == 1
 
     @pytest.mark.asyncio
+    @pytest.mark.parametrize("pooling", ["mean", "last", "cls"])
     async def test_embeddings_suppress_attached_sae(
-        self, service, embedding_request, mock_model_for_embeddings
+        self, service, mock_model_for_embeddings, pooling
     ):
-        """Embeddings run inside the SAE's suppressed() context (M4).
+        """Embeddings run inside the SAE's suppressed() context (M4), in EVERY pooling mode
+        (Feature 30, FR-30.2.8: no pooling mode adds a forward path).
 
         An attached steering hook must not perturb the hidden states the
         embeddings are pooled from.
         """
+        embedding_request = EmbeddingRequest(
+            model="test-model", input="Hello, world!", pooling=pooling
+        )
         from contextlib import contextmanager
 
         # ⚠ TWO ATTACHED SAEs, as a multi-layer circuit attaches (2026-10-04). Suppression used to

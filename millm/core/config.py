@@ -7,7 +7,7 @@ with support for .env files.
 
 from typing import Literal, Optional
 
-from pydantic import field_validator, model_validator
+from pydantic import Field, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -271,6 +271,12 @@ class Settings(BaseSettings):
     # generations interleave apply/restore and share the sensing buffer).
     MAX_CONCURRENT_REQUESTS: int = 1
     MAX_PENDING_REQUESTS: int = 10
+    # Feature 30 (FR-30.3.6, T-93): maximum strings in one /v1/embeddings request. A capped
+    # request holds the only admission slot (MAX_CONCURRENT_REQUESTS = 1), so this bounds how
+    # long a chat waits behind it. To be set from measured latency: the largest power of two
+    # with cap x p95 seconds-per-input <= 30 s (S3-11), in [64, 2048]. 256 is PROVISIONAL
+    # until that measurement on the RTX 3090 is recorded (030_FTASKS 8.3).
+    EMBEDDINGS_MAX_INPUTS: int = Field(default=256, ge=1, le=2048)
 
     # Feature 29: model lease (process memory only; a restart ends every lease, X-01).
     # The default TTL is also the maximum (2 hours); a TTL outside 1..LEASE_MAX_TTL_SECONDS

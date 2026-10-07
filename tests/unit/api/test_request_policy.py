@@ -93,11 +93,19 @@ class TestTheTableIsComplete:
     def test_fprd_table_cells(self, field, endpoint, engine, honoured):
         assert isinstance(OUTPUT_CHANGING[field][(endpoint, engine)], Honoured) is honoured
 
-    def test_steering_and_dimensions_name_their_owning_feature(self):
-        """FR-25.3.7: refused until Features 28 and 30, and the reason says so."""
+    def test_steering_names_its_owning_feature(self):
+        """FR-25.3.7: refused until Feature 28, and the reason says so."""
         assert "Feature 28" in OUTPUT_CHANGING["steering"][(Endpoint.CHAT, Engine.TRANSFORMERS)].reason
-        assert "Feature 30" in OUTPUT_CHANGING["dimensions"][
-            (Endpoint.EMBEDDINGS, Engine.TRANSFORMERS)].reason
+
+    @pytest.mark.parametrize("engine", list(Engine))
+    def test_dimensions_is_refused_for_want_of_a_declaration(self, engine):
+        """Feature 30 replaced "refused until Feature 30" (FR-30.1.7). Under T-91 no model
+        declares truncated-embedding support, so the cell is refused on both engines and says
+        why — never honoured-and-ignored."""
+        outcome = OUTPUT_CHANGING["dimensions"][(Endpoint.EMBEDDINGS, engine)]
+        assert isinstance(outcome, Refused)
+        assert "truncated-embedding support" in outcome.reason and "T-91" in outcome.reason
+        assert "dimensions" not in NEUTRAL, "dimensions has no neutral value (FR-30.1.6)"
 
 
 class TestNeutralValues:

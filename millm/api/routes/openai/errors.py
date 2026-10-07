@@ -125,6 +125,9 @@ ERROR_STATUS_MAP: dict[str, tuple[int, str]] = {
     "RESPONSE_FORMAT_UNSUPPORTED": (400, "invalid_request_error"),
     "NO_CHAT_TEMPLATE": (400, "invalid_request_error"),
     "CONSTRAINED_OUTPUT_INVALID": (500, "server_error"),
+    # Feature 30: a pooled embedding vector that is non-finite or has a zero norm under
+    # `normalize`. The request was valid; the server could not produce a finite vector.
+    "EMBEDDING_VECTOR_INVALID": (500, "server_error"),
     # Every other MiLLMError code, so the map is COMPLETE and a /v1 request never meets
     # the fallback (exc.status_code, "server_error") — which types a 4xx as a server
     # fault to retry. test_error_map_complete.py walks MiLLMError.__subclasses__() and

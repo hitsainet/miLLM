@@ -206,7 +206,14 @@ def test_an_embeddings_input_past_the_context_is_a_400_and_the_model_is_not_run(
 
     response = _client(inference).post("/v1/embeddings", json={"model": "wanted", "input": "hi"})
 
-    _assert_refused(response, 70, "70 in the input")
+    # Feature 30 (FR-30.3.4) replaced the generation-shaped message with one naming the input's
+    # index, its token count and the limit, and set `param`.
+    assert response.status_code == 400, response.text
+    error = response.json()["error"]
+    assert (error["type"], error["code"]) == ("invalid_request_error", "context_length_exceeded")
+    assert error["param"] == "input"
+    assert "Input 0 has 70 tokens" in error["message"]
+    assert f"limit is {MAX_CONTEXT} tokens" in error["message"]
     assert model.call_count == 0
 
 

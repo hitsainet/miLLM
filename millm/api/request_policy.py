@@ -133,6 +133,22 @@ _NEVER_STEERED = refused("embeddings are never steered")
 _ACTIVATIONS_LC = refused(
     "per-request SAE activations need forward hooks on a PyTorch module tree; llama.cpp has none"
 )
+#: Feature 30, T-91. The route prefixes the model's name, so the message names the model.
+DIMENSIONS_REASON = (
+    "this model does not declare truncated-embedding support, and no model can: "
+    "miLLM records no such declaration (T-91), so vectors are always full width"
+)
+_DIMENSIONS_UNDECLARED = refused(DIMENSIONS_REASON)
+_GGUF_POOLING = refused(
+    "llama.cpp fixes pooling when the model is loaded, and miLLM loads GGUF models with mean "
+    "pooling; only `pooling: \"mean\"` is served on a GGUF model"
+)
+
+
+def _EMBEDDINGS_ONLY(name: str) -> Refused:  # noqa: N802 - reads as a table constant
+    return refused(f"{name} applies to /v1/embeddings")
+
+
 _SCORING_UNSTEERED = "scoring is always unsteered (X-09), so a steering field cannot be honoured"
 
 #: THE output-changing list (FR-25.3.3). Field -> (endpoint, engine) -> outcome.
@@ -176,8 +192,24 @@ OUTPUT_CHANGING: dict[str, dict[tuple[Endpoint, Engine], Outcome]] = {
         refused("dimensions applies to /v1/embeddings"),
         refused("dimensions applies to /v1/embeddings"),
         refused("dimensions applies to /v1/embeddings"),
-        refused("dimensions is not implemented until Feature 30; vectors are full width"),
-        refused("dimensions is not implemented until Feature 30; vectors are full width"),
+        # Feature 30 (FR-30.1.1, FR-30.1.6): `dimensions` is honoured only for a model that
+        # DECLARES truncated-embedding support, and no model can (T-91: no declaration exists).
+        # So it is refused on both engines, at every value — the native width included, since
+        # `dimensions` has no neutral value — and never accepted and ignored.
+        _DIMENSIONS_UNDECLARED, _DIMENSIONS_UNDECLARED,
+    ),
+    # Feature 30 (FR-30.2.7, FR-30.2.11): llama.cpp fixes pooling at construction and miLLM
+    # builds GGUF models with MEAN, so `last` and `cls` are refused there before any load
+    # (`mean` is neutral). `normalize` is post-processing in miLLM, honoured on both engines.
+    "pooling": _cells(
+        _EMBEDDINGS_ONLY("pooling"), _EMBEDDINGS_ONLY("pooling"),
+        _EMBEDDINGS_ONLY("pooling"), _EMBEDDINGS_ONLY("pooling"),
+        HONOURED, _GGUF_POOLING,
+    ),
+    "normalize": _cells(
+        _EMBEDDINGS_ONLY("normalize"), _EMBEDDINGS_ONLY("normalize"),
+        _EMBEDDINGS_ONLY("normalize"), _EMBEDDINGS_ONLY("normalize"),
+        HONOURED, HONOURED,
     ),
     "steering": _cells(
         refused("per-request `steering` is not implemented until Feature 28"),
@@ -227,6 +259,9 @@ NEUTRAL: dict[str, Callable[[Any], bool]] = {
     "response_format": lambda v: _format_type(v) == "text",
     "tools": lambda v: v == [],
     "logit_bias": lambda v: v == {},
+    # Feature 30: the defaults, which change nothing (FR-30.2.2).
+    "pooling": lambda v: v == "mean",
+    "normalize": lambda v: v is False,
 }
 
 #: Declared fields an engine path does not consume (FR-25.1.2 case b). On llama.cpp the template
@@ -296,7 +331,12 @@ def _message_locations(request: Any) -> list[str]:
 
 
 def evaluate(
-    request: Any, endpoint: Endpoint, engine: Engine, *, strict: bool
+    request: Any,
+    endpoint: Endpoint,
+    engine: Engine,
+    *,
+    strict: bool,
+    model_name: str | None = None,
 ) -> PolicyResult:
     """Apply the output-changing table, then find the unused fields.
 
@@ -342,9 +382,12 @@ def evaluate(
             " (also refused: " + ", ".join(f"'{n}'" for n, _ in refusals[1:]) + ")"
             if refusals[1:] else ""
         )
+        # The model is named when the caller knows it (Feature 30, FR-30.1.2: a `dimensions`
+        # refusal names the model that declares nothing).
+        on_model = f" for model '{model_name}'" if model_name else ""
         raise FieldNotHonouredError(
-            f"'{name}' is not honoured on /v1/{_path_name(endpoint)} with the {engine.value} "
-            f"engine: {reason}{others}",
+            f"'{name}' is not honoured on /v1/{_path_name(endpoint)}{on_model} with the "
+            f"{engine.value} engine: {reason}{others}",
             details={
                 "param": name,
                 "fields": [n for n, _ in refusals],
@@ -429,7 +472,11 @@ def apply_request_policy(
     Called after the row lookup and before the auto-load, so every refusal here costs no load.
     """
     strict = parse_strict(headers.get(STRICT_HEADER))
-    result = evaluate(request, endpoint, engine_of(row), strict=strict)
+    name = getattr(row, "name", None)
+    result = evaluate(
+        request, endpoint, engine_of(row), strict=strict,
+        model_name=name if isinstance(name, str) else None,
+    )
     if result.unused:
         request_id = headers.get("X-Request-ID") or uuid.uuid4().hex[:16]
         log_unused(endpoint, request_id, result.unused)

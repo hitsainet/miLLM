@@ -335,6 +335,36 @@ class TestEmbeddingRequest:
         )
         assert request.input == ["Hello", "World"]
 
+    def test_feature_30_defaults_change_nothing(self):
+        request = EmbeddingRequest(model="m", input="x")
+        assert (request.pooling, request.normalize) == ("mean", False)
+        assert "pooling" not in request.model_fields_set, "a default is not a presence"
+
+    @pytest.mark.parametrize("mode", ["mean", "last", "cls"])
+    def test_pooling_accepts_the_three_modes(self, mode):
+        assert EmbeddingRequest(model="m", input="x", pooling=mode).pooling == mode
+
+    def test_pooling_refuses_anything_else(self):
+        with pytest.raises(ValidationError) as caught:
+            EmbeddingRequest(model="m", input="x", pooling="max")
+        assert caught.value.errors()[0]["loc"] == ("pooling",)
+
+    @pytest.mark.parametrize("value", ["", [], ["a", ""]])
+    def test_empty_input_is_refused_on_the_input_field(self, value):
+        with pytest.raises(ValidationError) as caught:
+            EmbeddingRequest(model="m", input=value)
+        assert caught.value.errors()[0]["loc"] == ("input",), "param must be `input` (ID1)"
+
+    def test_the_cap_reads_the_live_setting(self):
+        from unittest.mock import patch
+
+        from millm.core.config import settings
+
+        with patch.object(settings, "EMBEDDINGS_MAX_INPUTS", 2):
+            EmbeddingRequest(model="m", input=["a", "b"])
+            with pytest.raises(ValidationError, match="input has 3 items; the limit is 2"):
+                EmbeddingRequest(model="m", input=["a", "b", "c"])
+
 
 class TestEmbeddingResponse:
     """Tests for EmbeddingResponse schema."""

@@ -154,6 +154,26 @@ class ContextLengthExceededError(MiLLMError):
     status_code = 400
 
 
+class EmbeddingInputTooLongError(ContextLengthExceededError):
+    """One or more `/v1/embeddings` inputs exceed the model's limit (Feature 30, FR-30.3).
+
+    Inputs are NEVER truncated. Before Feature 30 the tokenizer was called with
+    `truncation=True`, so an over-long input was embedded from its first N tokens and returned
+    a 200 for text the caller never sent whole. Every input is measured before any forward pass
+    and the refusal names each over-limit index. `details["param"]` is `input[i]` for the first
+    (or `input` for a string input); the live handler forwards it as the OpenAI `param`.
+    """
+
+
+class EmbeddingVectorInvalidError(MiLLMError):
+    """A pooled embedding vector is non-finite, or has a zero or non-finite norm under
+    `normalize` (FR-30.2.6). The request was valid, so this is a 500, and it names the input's
+    index rather than return NaN."""
+
+    code = "EMBEDDING_VECTOR_INVALID"
+    status_code = 500
+
+
 class AmbiguousModelNameError(MiLLMError):
     """A bare repo name matches several quantizations.
 

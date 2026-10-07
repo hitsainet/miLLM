@@ -781,7 +781,15 @@ class TestGGUFEmbeddings:
       * restore _refuse_on_llamacpp("Embeddings") in create_embeddings -> all fail
       * drop the nested-vector flattening                              -> "flat vector" fails
       * drop the GGUF_ENABLE_EMBEDDINGS hint on failure                -> "names the setting" fails
+      * Feature 30 M4: delete the length check in _llamacpp_embeddings -> the over-limit test
+
+    Feature 30: the fake engine states its context window and batch size and tokenises one id
+    per whitespace word plus a BOS, so the length check measures something real — a bare
+    MagicMock tokenises to length 0 and would pass any limit.
     """
+
+    N_CTX = 32
+    N_BATCH = 16
 
     def _service(self, embed_return=None, *, raises=None):
         from millm.services.inference_service import InferenceService
@@ -799,6 +807,9 @@ class TestGGUFEmbeddings:
         info.name = "zora-v1.13-gguf"
         svc.get_loaded_model_info = lambda: info
         handle = state.current.model
+        handle.n_ctx = MagicMock(return_value=self.N_CTX)
+        handle.n_batch = self.N_BATCH
+        handle.tokenize = MagicMock(side_effect=lambda data: [1] + [7] * len(data.split()))
         if raises is not None:
             handle.create_embedding = MagicMock(side_effect=raises)
         else:
@@ -881,6 +892,78 @@ class TestGGUFEmbeddings:
             settings.GGUF_ENABLE_EMBEDDINGS = original
 
         assert "GGUF_ENABLE_EMBEDDINGS" in str(exc.value)
+
+    @pytest.mark.asyncio
+    async def test_an_over_limit_input_is_refused_before_the_engine_runs(self):
+        """FR-30.3.5: counted with the instance's tokenizer and checked before ANY
+        create_embedding call, against min(n_ctx, n_batch) — llama-cpp-python's embed()
+        otherwise cuts an input to n_batch tokens."""
+        from millm.core.errors import EmbeddingInputTooLongError
+
+        svc = self._service({"data": [{"embedding": [0.5]}], "usage": {"prompt_tokens": 2}})
+        handle = svc._model_state.current.model
+        fits = " ".join(["w"] * (self.N_BATCH - 1))  # 16 ids with the BOS
+        over = " ".join(["w"] * self.N_BATCH)  # 17 ids: under n_ctx, over n_batch
+
+        with pytest.raises(EmbeddingInputTooLongError) as caught:
+            await svc.create_embeddings(self._request(["a", fits, over]))
+
+        assert caught.value.details["param"] == "input[2]"
+        assert caught.value.details["max_context_tokens"] == self.N_BATCH
+        assert caught.value.details["over_limit"] == [{"index": 2, "tokens": self.N_BATCH + 1}]
+        assert handle.create_embedding.call_count == 0
+        assert handle.tokenize.call_count == 3
+        assert [c.args[0] for c in handle.tokenize.call_args_list] == [
+            b"a", fits.encode("utf-8"), over.encode("utf-8")
+        ]
+
+    @pytest.mark.asyncio
+    async def test_the_limit_is_the_context_window_when_it_is_smaller(self):
+        svc = self._service({"data": [{"embedding": [0.5]}], "usage": {}})
+        handle = svc._model_state.current.model
+        handle.n_ctx = MagicMock(return_value=4)
+        handle.n_batch = 512
+        assert svc._embedding_limit() == 4
+
+    @pytest.mark.asyncio
+    async def test_pooling_other_than_mean_is_refused_by_the_service_too(self):
+        """Defence in depth behind the request policy (FR-30.2.7): llama.cpp fixed MEAN pooling
+        when the model was built, so `last` would silently return a mean."""
+        from millm.core.errors import EngineUnsupportedError
+
+        svc = self._service({"data": [{"embedding": [0.5]}], "usage": {}})
+        handle = svc._model_state.current.model
+        for mode in ("last", "cls"):
+            with pytest.raises(EngineUnsupportedError) as caught:
+                await svc.create_embeddings(self._request(pooling=mode))
+            assert caught.value.details["param"] == "pooling"
+        assert handle.create_embedding.call_count == 0
+
+    @pytest.mark.asyncio
+    async def test_normalize_gives_unit_norm(self):
+        import math
+
+        svc = self._service({"data": [{"embedding": [3.0, 4.0, 12.0]}], "usage": {}})
+        result = await svc.create_embeddings(self._request(["a", "b"], normalize=True))
+        for item in result.data:
+            assert abs(math.sqrt(sum(x * x for x in item.embedding)) - 1.0) < 1e-5
+            assert item.embedding == pytest.approx([3 / 13, 4 / 13, 12 / 13], abs=1e-7)
+
+    @pytest.mark.asyncio
+    async def test_the_default_returns_the_engines_floats_unchanged(self):
+        values = [0.1, -0.2, 0.30000000000000004]
+        svc = self._service({"data": [{"embedding": list(values)}], "usage": {}})
+        result = await svc.create_embeddings(self._request(pooling="mean", normalize=False))
+        assert result.data[0].embedding == values
+
+    @pytest.mark.asyncio
+    async def test_a_non_finite_engine_vector_is_refused(self):
+        from millm.core.errors import EmbeddingVectorInvalidError
+
+        svc = self._service({"data": [{"embedding": [float("nan"), 1.0]}], "usage": {}})
+        with pytest.raises(EmbeddingVectorInvalidError) as caught:
+            await svc.create_embeddings(self._request())
+        assert caught.value.details["param"] == "input"
 
     @pytest.mark.asyncio
     async def test_an_unrelated_failure_is_not_dressed_up_as_a_config_problem(self):

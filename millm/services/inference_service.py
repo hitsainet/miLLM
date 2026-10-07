@@ -57,6 +57,8 @@ from millm.api.schemas.openai import (
 )
 from millm.core.errors import (
     ContextLengthExceededError,
+    EmbeddingInputTooLongError,
+    EmbeddingVectorInvalidError,
     EngineUnsupportedError,
     FieldNotHonouredError,
     InvalidScoringRequestError,
@@ -76,6 +78,12 @@ from millm.ml.constrained_decoding import (
     schema_name,
     stop_token_ids,
     validate_output,
+)
+from millm.ml.embedding_pooling import (
+    EmbeddingOptions,
+    NonFiniteEmbeddingError,
+    finalize_vector,
+    pool_hidden,
 )
 from millm.ml.generation_config import GenerationConfig
 from millm.ml.model_loader import LoadedModelState
@@ -280,6 +288,27 @@ def _served_max_context(config: Any) -> Optional[int]:
         if isinstance(value, int) and not isinstance(value, bool) and value > 0:
             return value
     return None
+
+
+def _attention_mask_of(encoded: Any) -> torch.Tensor:
+    """The attention mask of one tokenizer encoding; all ones when the tokenizer returns none
+    (one unpadded sequence has no padding to mask)."""
+    input_ids = encoded["input_ids"]
+    try:
+        mask = encoded["attention_mask"]
+    except KeyError:
+        return torch.ones_like(input_ids)
+    return mask if isinstance(mask, torch.Tensor) else torch.ones_like(input_ids)
+
+
+def _encode_embedding(vector: list[float], encoding_format: str) -> list[float] | str:
+    """One embedding in the requested encoding: the floats, or little-endian float32 base64."""
+    if encoding_format != "base64":
+        return vector
+    import base64
+    import struct
+
+    return base64.b64encode(struct.pack(f"<{len(vector)}f", *vector)).decode("ascii")
 
 
 #: Per-request memo for "which circuit is actually steering". A ContextVar
@@ -5846,72 +5875,35 @@ class InferenceService:
     # Embeddings
     # =========================================================================
 
+    #: At most this many over-limit inputs are named in one refusal; the rest are counted.
+    EMBEDDING_MAX_LISTED = 16
+
     async def create_embeddings(self, request: EmbeddingRequest) -> EmbeddingResponse:
-        """
-        Create embeddings for input text.
+        """Create embeddings for input text (Feature 30).
 
-        Uses the model's last hidden layer with mean pooling.
-        Supports float and base64 encoding formats.
-
-        Args:
-            request: The embedding request
-
-        Returns:
-            EmbeddingResponse with embeddings
+        The last hidden layer, pooled over real tokens by `request.pooling` (`mean` default,
+        `last`, `cls`) and L2-normalised when `request.normalize` is true. Every input is
+        tokenised WITHOUT truncation and measured before any forward pass; an input over the
+        model's limit is refused naming its index (FR-30.3). Float and base64 encodings. Always
+        unsteered, and no probe or sensing event is recorded.
         """
         if self._engine_is_llamacpp():
             return await self._llamacpp_embeddings(request)
 
-        import base64
-        import struct
-
-        # Normalize input to list
-        inputs = (
-            request.input if isinstance(request.input, list) else [request.input]
-        )
-
+        texts = request.input if isinstance(request.input, list) else [request.input]
+        options = EmbeddingOptions(pooling=request.pooling, normalize=request.normalize)
         encoding_format = getattr(request, "encoding_format", "float") or "float"
 
-        embeddings_data: list[EmbeddingData] = []
-        total_tokens = 0
-
-        # Embeddings must reflect the *unsteered* model: an attached SAE hook
-        # would otherwise perturb the hidden states these embeddings are pooled
-        # from, and the pass would clobber the last-captured monitoring
-        # activations.  Suppress the hook for the duration of the embedding
-        # forward passes.
         async with self._admit():
-            for i, text in enumerate(inputs):
-                # Tokenize
-                encoded = self._tokenizer(
-                    text, return_tensors="pt", padding=True, truncation=True
-                ).to(self._get_input_device())
-                # A tokenizer with no model_max_length does not truncate, and an
-                # input past the model's positions ran as a 500 or out of memory.
-                self._check_context_length(int(encoded.input_ids.shape[1]), 0)
-                total_tokens += encoded.input_ids.shape[1]
+            vectors, counts = self._embed_inputs(
+                texts, options, param_for_string=isinstance(request.input, str)
+            )
 
-                # Get embeddings from last hidden layer
-                with torch.no_grad(), self._unsteered():
-                    outputs = self._model(
-                        **encoded, output_hidden_states=True
-                    )
-
-                # Extract last hidden layer and mean pool
-                last_hidden = outputs.hidden_states[-1]
-                embedding = last_hidden.mean(dim=1).squeeze().cpu().tolist()
-
-                # Ensure embedding is a list
-                if isinstance(embedding, float):
-                    embedding = [embedding]
-
-                # Encode as base64 if requested
-                if encoding_format == "base64":
-                    packed = struct.pack(f"<{len(embedding)}f", *embedding)
-                    embedding = base64.b64encode(packed).decode("ascii")
-
-                embeddings_data.append(EmbeddingData(index=i, embedding=embedding))
-
+        embeddings_data = [
+            EmbeddingData(index=i, embedding=_encode_embedding(vector, encoding_format))
+            for i, vector in enumerate(vectors)
+        ]
+        total_tokens = sum(counts)
         model_info = self.get_loaded_model_info()
         model_name = model_info.name if model_info else "unknown"
 
@@ -5923,6 +5915,116 @@ class InferenceService:
                 completion_tokens=0,
                 total_tokens=total_tokens,
             ),
+        )
+
+    def _embed_inputs(
+        self,
+        texts: list[str],
+        options: EmbeddingOptions,
+        *,
+        param_for_string: bool = False,
+    ) -> tuple[list[list[float]], list[int]]:
+        """Embed `texts` on the transformers engine: (vectors, full token counts).
+
+        THE embedding body, and the entry point Feature 26's batch executor calls. Synchronous
+        and takes NO slot: the caller holds one (`create_embeddings` enters `_admit()`).
+
+        Measure, then refuse, then run. Every input is tokenised first, with `truncation=False`
+        stated explicitly — before Feature 30 it was `truncation=True`, so an over-long input was
+        embedded from its first N tokens and returned a 200 — and the whole set is checked
+        before ANY forward. The check used to run inside the loop, so input 0 was embedded
+        before input 1 was refused.
+
+        Each forward runs under `torch.no_grad()` and `_unsteered()`, entered on THIS thread,
+        the one running the forward: suppression is per-thread, and every attached SAE (a
+        circuit attaches one per layer) must be inert (2026-10-04 fix). No probe context is
+        opened, so the probe hook records nothing (FR-30.2.9).
+        """
+        tokenizer = self._tokenizer
+        encoded = [tokenizer(text, return_tensors="pt", truncation=False) for text in texts]
+        counts = [int(enc["input_ids"].shape[1]) for enc in encoded]
+        self._check_embedding_lengths(
+            counts, self._embedding_limit(), param_for_string=param_for_string
+        )
+
+        device = self._get_input_device()
+        vectors: list[list[float]] = []
+        for index, enc in enumerate(encoded):
+            enc = enc.to(device)
+            with torch.no_grad(), self._unsteered():
+                outputs = self._model(**enc, output_hidden_states=True)
+            pooled = pool_hidden(
+                outputs.hidden_states[-1], _attention_mask_of(enc), options.pooling
+            )[0]
+            try:
+                vectors.append(finalize_vector(pooled, options.normalize))
+            except NonFiniteEmbeddingError as exc:
+                raise self._embedding_vector_invalid(
+                    index, exc, param_for_string=param_for_string
+                ) from exc
+        return vectors, counts
+
+    def _embedding_limit(self) -> int | None:
+        """The longest input, in tokens, this model embeds without truncation; None if unknown.
+
+        transformers: the served context (`_served_max_context`), the same limit generation uses.
+        llama.cpp: `min(n_ctx(), n_batch)`. llama-cpp-python's `embed()` cuts each input to
+        `n_batch` tokens by default (its `truncate=True`), and `create_embedding` does not expose
+        the flag, so an input longer than `n_batch` would be embedded from a prefix. Bounding by
+        both refuses it instead. (030_FTASKS 0.1 confirms the names and the truncation on the
+        backend image; FTDD TD15.)
+        """
+        if self._engine_is_llamacpp():
+            handle = self._model
+            return min(int(handle.n_ctx()), int(handle.n_batch))
+        return _served_max_context(getattr(self._model, "config", None))
+
+    def _check_embedding_lengths(
+        self, counts: list[int], limit: int | None, *, param_for_string: bool
+    ) -> None:
+        """Refuse when any input exceeds `limit`, naming every over-limit index (bounded).
+
+        `limit` None means the model states no limit: inputs are served untruncated and
+        unchecked (FTDD R3). Logs one `embedding_refused` warning carrying indices and counts,
+        never input text.
+        """
+        if limit is None:
+            return
+        over = [(i, n) for i, n in enumerate(counts) if n > limit]
+        if not over:
+            return
+        listed = over[: self.EMBEDDING_MAX_LISTED]
+        omitted = len(over) - len(listed)
+        parts = ", ".join(f"input {i} has {n:,} tokens" for i, n in listed)
+        more = f" ({omitted} more over the limit not listed)" if omitted else ""
+        param = "input" if param_for_string else f"input[{over[0][0]}]"
+        logger.warning(
+            "embedding_refused",
+            reason="input_too_long",
+            indices=[i for i, _ in listed],
+            tokens=[n for _, n in listed],
+            omitted=omitted,
+            limit=limit,
+        )
+        raise EmbeddingInputTooLongError(
+            f"{parts[0].upper()}{parts[1:]}{more}; this model's limit is {limit:,} tokens. "
+            "Inputs are never truncated. Shorten or split them.",
+            details={
+                "param": param,
+                "max_context_tokens": limit,
+                "over_limit": [{"index": i, "tokens": n} for i, n in listed],
+                "omitted": omitted,
+            },
+        )
+
+    @staticmethod
+    def _embedding_vector_invalid(
+        index: int, exc: Exception, *, param_for_string: bool
+    ) -> EmbeddingVectorInvalidError:
+        param = "input" if param_for_string else f"input[{index}]"
+        logger.warning("embedding_refused", reason="vector_invalid", indices=[index])
+        return EmbeddingVectorInvalidError(
+            f"Input {index}: {exc}", details={"param": param, "index": index}
         )
 
     async def _llamacpp_embeddings(self, request: Any) -> Any:
@@ -5941,19 +6043,31 @@ class InferenceService:
             the vectors are comparable in METHOD rather than merely both being
             called embeddings.
 
+        Feature 30: pooling is fixed at construction, so only `mean` is served (the request
+        policy refuses `last` and `cls` before any load; the guard here is defence in depth).
+        `normalize` is applied here, after the engine. Every input is tokenised with the
+        instance's own tokenizer and checked against `_embedding_limit()` before the first
+        `create_embedding` call, so the engine never truncates. Tokenising runs inside the
+        slot: an unload frees the model the tokenizer belongs to.
+
         The load-time flag is `settings.GGUF_ENABLE_EMBEDDINGS` (default on;
         measured cost 6.7% of generation throughput). When it is off the model
         was built without embedding support and llama.cpp raises — surfaced here
         as a clear refusal naming the setting, rather than the library's error.
         """
-        import base64
-        import struct
-
         from millm.api.schemas.openai import EmbeddingData, EmbeddingResponse
         from millm.core.config import settings as _settings
 
-        inputs = request.input if isinstance(request.input, list) else [request.input]
+        texts = request.input if isinstance(request.input, list) else [request.input]
+        param_for_string = isinstance(request.input, str)
+        options = EmbeddingOptions(pooling=request.pooling, normalize=request.normalize)
         encoding_format = getattr(request, "encoding_format", "float") or "float"
+        if options.pooling != "mean":
+            raise EngineUnsupportedError(
+                f"pooling '{options.pooling}' is not served on a GGUF model: llama.cpp fixes "
+                "pooling when the model is loaded, and miLLM loads GGUF models with mean pooling.",
+                details={"param": "pooling"},
+            )
 
         embeddings_data: list[Any] = []
         total_tokens = 0
@@ -5970,7 +6084,12 @@ class InferenceService:
             return vector, used
 
         async with self._admit():
-            for index, text in enumerate(inputs):
+            handle = self._model
+            counts = [len(handle.tokenize(text.encode("utf-8"))) for text in texts]
+            self._check_embedding_lengths(
+                counts, self._embedding_limit(), param_for_string=param_for_string
+            )
+            for index, text in enumerate(texts):
                 try:
                     vector, used = await asyncio.to_thread(_embed, text)
                 except Exception as exc:  # noqa: BLE001
@@ -5983,12 +6102,16 @@ class InferenceService:
                         ) from exc
                     raise
 
+                try:
+                    values = finalize_vector(vector, options.normalize)
+                except NonFiniteEmbeddingError as exc:
+                    raise self._embedding_vector_invalid(
+                        index, exc, param_for_string=param_for_string
+                    ) from exc
                 total_tokens += used
-                payload: Any = vector
-                if encoding_format == "base64":
-                    packed = struct.pack(f"<{len(vector)}f", *vector)
-                    payload = base64.b64encode(packed).decode("ascii")
-                embeddings_data.append(EmbeddingData(index=index, embedding=payload))
+                embeddings_data.append(
+                    EmbeddingData(index=index, embedding=_encode_embedding(values, encoding_format))
+                )
 
         model_info = self.get_loaded_model_info()
         return EmbeddingResponse(

@@ -45,7 +45,7 @@ VALUES = {
     "seed": 7,
     "n": 2,
     "dimensions": 8,
-    "steering": {"clusters": []},
+    "steering": {"features": [{"index": 1, "strength": 1.0}]},
     "tools": [{"type": "function", "function": {"name": "f"}}],
     "tool_choice": "auto",
     "logit_bias": {"1": 1},

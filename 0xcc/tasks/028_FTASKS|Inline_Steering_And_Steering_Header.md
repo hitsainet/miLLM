@@ -96,21 +96,23 @@ reads `X-miLLM-Steering` verbatim.
   - [x] 1.8 Publish the vectors and grammar in the API reference now (draft section), so consumers
         can pin them before the rest lands.
 
-- [ ] 2.0 Request schemas (covers FR-28.1.1, FR-28.1.6 (shape), FR-28.2.1, FR-28.2.2 (shape),
+- [x] 2.0 Request schemas (covers FR-28.1.1, FR-28.1.6 (shape), FR-28.2.1, FR-28.2.2 (shape),
       FR-28.2.4, FR-28.4.1, FR-28.4.6)
-  - [ ] 2.1 Add `InlineSteeringFeature` and `InlineSteering` (`extra="forbid"`, `sae_id` ≤ 100
+  - [x] 2.1 Add `InlineSteeringFeature` and `InlineSteering` (`extra="forbid"`, `sae_id` ≤ 100
         characters) to `millm/api/schemas/openai.py`; add `steering` to `ChatCompletionRequest`
         after `:128`.
-  - [ ] 2.2 Validators: refuse a boolean strength, a non-finite strength, a duplicate index (naming
+  - [x] 2.2 Validators: refuse a boolean strength, a non-finite strength, a duplicate index (naming
         it), and `sae_id` beside an empty list. Test each.
-  - [ ] 2.3 Model validators on both requests: `steering` + `profile` → refused naming both
+  - [x] 2.3 Model validators on both requests: `steering` + `profile` → refused naming both
         (FR-28.2.1); `steering` + `steering_intensity` → refused naming both (T-78). Test each.
-  - [ ] 2.4 Add `profile`, `steering_intensity` and `steering` to `TextCompletionRequest`, copying
+  - [x] 2.4 Add `profile`, `steering_intensity` and `steering` to `TextCompletionRequest`, copying
         the dial validators (`openai.py:182-195`). Test that `steering_intensity: true` and `2.5` are
         refused on completions too.
-  - [ ] 2.5 Extend the scoring check (`openai.py:258-281`, or Feature 25's rule if already
+  - [x] 2.5 *(Feature 25's rule was already present — the policy table's `_unless_scoring` cells —
+        so it was extended, not duplicated: `steering`, and `profile`/`steering_intensity` on
+        completions, refuse on a scoring request. `features: []` is refused too.)* Extend the scoring check (`openai.py:258-281`, or Feature 25's rule if already
         present): any steering field with scoring → refused (FR-25.7.2, X-09). Test.
-  - [ ] 2.6 Test: a misspelt key inside `steering` (`strenght`) is refused, not ignored.
+  - [x] 2.6 Test: a misspelt key inside `steering` (`strenght`) is refused, not ignored.
 
 - [ ] 3.0 Inline and unsteered apply and restore (covers FR-28.1.2, FR-28.1.3, FR-28.1.4,
       FR-28.1.5, FR-28.1.6 (live), FR-28.1.7, FR-28.1.10, FR-28.2.2, FR-28.2.3)

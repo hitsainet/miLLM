@@ -509,3 +509,85 @@ class TestSteeringIntensityField:
         kept in model_extra and reported (X-miLLM-Ignored-Fields), not silently dropped."""
         request = self.make(some_future_field={"nested": True})
         assert request.model_extra == {"some_future_field": {"nested": True}}
+
+
+class TestInlineSteeringSchema:
+    """Feature 28 (FR-28.1.1, FR-28.1.6, FR-28.2.1, FR-28.2.2, FR-28.2.4, FR-28.4.1)."""
+
+    @staticmethod
+    def chat(**kwargs):
+        return ChatCompletionRequest(
+            model="m", messages=[{"role": "user", "content": "x"}], **kwargs
+        )
+
+    @staticmethod
+    def text(**kwargs):
+        return TextCompletionRequest(model="m", prompt="x", **kwargs)
+
+    @pytest.mark.parametrize("make", ["chat", "text"])
+    def test_a_valid_set_parses(self, make):
+        req = getattr(self, make)(steering={"sae_id": "s1",
+                                            "features": [{"index": 3, "strength": 500}]})
+        assert req.steering.sae_id == "s1"
+        assert [(f.index, f.strength) for f in req.steering.features] == [(3, 500.0)]
+
+    @pytest.mark.parametrize("make", ["chat", "text"])
+    def test_explicit_unsteered_form_parses(self, make):
+        req = getattr(self, make)(steering={"features": []})
+        assert req.steering.features == [] and req.steering.sae_id is None
+
+    @pytest.mark.parametrize("make", ["chat", "text"])
+    @pytest.mark.parametrize("bad, message", [
+        ({"features": [{"index": 1, "strength": True}]}, "not a boolean"),
+        ({"features": [{"index": True, "strength": 1.0}]}, "not a boolean"),
+        ({"features": [{"index": 1, "strength": float("nan")}]}, "finite"),
+        ({"features": [{"index": 1, "strength": float("inf")}]}, "finite"),
+        ({"features": [{"index": 1, "strength": float("-inf")}]}, "finite"),
+        ({"features": [{"index": 7, "strength": 1.0}, {"index": 7, "strength": 2.0}]},
+         "index 7 more than once"),
+        ({"sae_id": "s1", "features": []}, "empty features"),
+        ({"features": [{"index": -1, "strength": 1.0}]}, "greater than or equal to 0"),
+        ({"features": [{"index": 1, "strength": 1.0}], "sae_id": ""}, "at least 1"),
+        ({"features": [{"index": 1, "strength": 1.0}], "sae_id": "x" * 101}, "at most 100"),
+        ({"sae_id": "s1"}, "Field required"),
+    ])
+    def test_refusals(self, make, bad, message):
+        with pytest.raises(ValidationError, match=message):
+            getattr(self, make)(steering=bad)
+
+    @pytest.mark.parametrize("make", ["chat", "text"])
+    def test_a_misspelt_key_inside_steering_is_refused_not_ignored(self, make):
+        """FTASKS 2.6 / FTID ID5: `strenght` must fail, not vanish."""
+        with pytest.raises(ValidationError) as exc:
+            getattr(self, make)(steering={"features": [{"index": 1, "strength": 1.0,
+                                                        "strenght": 9.0}]})
+        assert "strenght" in str(exc.value)
+        with pytest.raises(ValidationError) as exc:
+            getattr(self, make)(steering={"features": [], "clusters": []})
+        assert "clusters" in str(exc.value)
+
+    @pytest.mark.parametrize("make", ["chat", "text"])
+    def test_steering_with_profile_is_refused_naming_both(self, make):
+        with pytest.raises(ValidationError) as exc:
+            getattr(self, make)(profile="p", steering={"features": []})
+        assert "'steering' and 'profile'" in str(exc.value)
+
+    @pytest.mark.parametrize("make", ["chat", "text"])
+    @pytest.mark.parametrize("dial", [0.0, 1.0, "max"])
+    def test_steering_with_intensity_is_refused_naming_both(self, make, dial):
+        """T-78: even λ=0 — the dial scales a profile or circuit, an inline set has none."""
+        with pytest.raises(ValidationError) as exc:
+            getattr(self, make)(steering_intensity=dial,
+                                steering={"features": [{"index": 1, "strength": 1.0}]})
+        assert "'steering' and 'steering_intensity'" in str(exc.value)
+
+    def test_text_completion_gains_profile_and_dial(self):
+        req = self.text(profile="humor", steering_intensity="max")
+        assert req.profile == "humor" and req.steering_intensity == "max"
+        assert self.text(steering_intensity=1.5).steering_intensity == 1.5
+
+    @pytest.mark.parametrize("value", [True, False, 2.5, -0.1, float("nan"), "loud"])
+    def test_text_completion_dial_has_the_chat_validators(self, value):
+        """FTASKS 2.4: `true` and `2.5` are refused on completions too."""
+        with pytest.raises(ValidationError):
+            self.text(steering_intensity=value)

@@ -248,7 +248,10 @@ class TestRefusals:
     @pytest.mark.parametrize("over, param", [
         ({"profile": "p"}, "profile"),
         ({"steering_intensity": 1.0}, "steering_intensity"),
-        ({"steering": {"clusters": []}}, "steering"),
+        ({"steering": {"features": [{"index": 1, "strength": 2.0}]}}, "steering"),
+        # X-09 / FTASKS 028 2.5: even the explicitly-unsteered form is a steering field, and
+        # scoring refuses every one of them rather than accepting a no-op.
+        ({"steering": {"features": []}}, "steering"),
         ({"response_format": {"type": "json_object"}}, "response_format"),
     ])
     def test_steering_and_format_fields_on_a_scoring_request_are_400_before_load(self, over,

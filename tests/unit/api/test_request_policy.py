@@ -79,7 +79,13 @@ class TestTheTableIsComplete:
         ("tools", Endpoint.CHAT, Engine.TRANSFORMERS, False),
         ("logit_bias", Endpoint.CHAT, Engine.TRANSFORMERS, False),
         ("dimensions", Endpoint.EMBEDDINGS, Engine.TRANSFORMERS, False),
-        ("steering", Endpoint.CHAT, Engine.TRANSFORMERS, False),
+        ("steering", Endpoint.CHAT, Engine.TRANSFORMERS, True),
+        ("steering", Endpoint.COMPLETIONS, Engine.TRANSFORMERS, True),
+        ("steering", Endpoint.CHAT, Engine.LLAMACPP, False),
+        ("steering", Endpoint.COMPLETIONS, Engine.LLAMACPP, False),
+        ("steering", Endpoint.EMBEDDINGS, Engine.TRANSFORMERS, False),
+        ("profile", Endpoint.COMPLETIONS, Engine.TRANSFORMERS, True),
+        ("steering_intensity", Endpoint.COMPLETIONS, Engine.TRANSFORMERS, True),
         ("n", Endpoint.COMPLETIONS, Engine.TRANSFORMERS, False),
         ("n", Endpoint.CHAT, Engine.LLAMACPP, False),
         ("n", Endpoint.CHAT, Engine.TRANSFORMERS, True),
@@ -93,9 +99,24 @@ class TestTheTableIsComplete:
     def test_fprd_table_cells(self, field, endpoint, engine, honoured):
         assert isinstance(OUTPUT_CHANGING[field][(endpoint, engine)], Honoured) is honoured
 
-    def test_steering_names_its_owning_feature(self):
-        """FR-25.3.7: refused until Feature 28, and the reason says so."""
-        assert "Feature 28" in OUTPUT_CHANGING["steering"][(Endpoint.CHAT, Engine.TRANSFORMERS)].reason
+    @pytest.mark.parametrize("field", ["steering", "profile", "steering_intensity"])
+    @pytest.mark.parametrize("endpoint", [Endpoint.CHAT, Endpoint.COMPLETIONS])
+    def test_steering_fields_are_honoured_except_on_scoring(self, field, endpoint):
+        """Feature 28 flipped FR-25.3.7 (FR-28.4.5): honoured on transformers chat and
+        completions, still refused on a scoring request (X-09, FR-25.7.2)."""
+        outcome = OUTPUT_CHANGING[field][(endpoint, Engine.TRANSFORMERS)]
+        assert isinstance(outcome, Honoured) and outcome.refuse_if is not None
+
+        class _Scoring:
+            def wants_scores(self):
+                return True
+
+        class _Generating:
+            def wants_scores(self):
+                return False
+
+        assert "X-09" in outcome.refuse_if(_Scoring())
+        assert outcome.refuse_if(_Generating()) is None
 
     @pytest.mark.parametrize("engine", list(Engine))
     def test_dimensions_is_refused_for_want_of_a_declaration(self, engine):

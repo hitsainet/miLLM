@@ -141,7 +141,6 @@ _NO_FUNCTIONS = refused("function calling is not implemented")
 #: A cell whose phase of Feature 25 has not landed yet: refused, never silently dropped.
 _PENDING = refused("not implemented on this endpoint yet")
 _STEER_LC = refused("steering needs forward hooks on a PyTorch module tree; llama.cpp has none")
-_STEER_CHAT_ONLY = refused("steering profiles and the intensity dial apply to /v1/chat/completions")
 _NEVER_STEERED = refused("embeddings are never steered")
 _ACTIVATIONS_LC = refused(
     "per-request SAE activations need forward hooks on a PyTorch module tree; llama.cpp has none"
@@ -224,11 +223,12 @@ OUTPUT_CHANGING: dict[str, dict[tuple[Endpoint, Engine], Outcome]] = {
         _EMBEDDINGS_ONLY("normalize"), _EMBEDDINGS_ONLY("normalize"),
         HONOURED, HONOURED,
     ),
+    # Feature 28 (FR-28.4.5, FR-25.3.7): inline steering is honoured on transformers chat and
+    # completions; scoring is always unsteered (X-09, FR-25.7.2); llama.cpp has no hooks and is
+    # refused here, before any auto-load (FR-28.1.9); embeddings are never steered.
     "steering": _cells(
-        refused("per-request `steering` is not implemented until Feature 28"),
-        _STEER_LC,
-        refused("per-request `steering` is not implemented until Feature 28"),
-        _STEER_LC,
+        _unless_scoring(_SCORING_UNSTEERED), _STEER_LC,
+        _unless_scoring(_SCORING_UNSTEERED), _STEER_LC,
         _NEVER_STEERED, _NEVER_STEERED,
     ),
     "tools": _cells(*([_NO_FUNCTIONS] * 6)),
@@ -239,13 +239,14 @@ OUTPUT_CHANGING: dict[str, dict[tuple[Endpoint, Engine], Outcome]] = {
         refused("embeddings generate no tokens"),
         refused("embeddings generate no tokens"),
     ),
+    # Feature 28 (FR-28.4.1): /v1/completions gains `profile` and the dial too.
     "profile": _cells(
         _unless_scoring(_SCORING_UNSTEERED), _STEER_LC,
-        _STEER_CHAT_ONLY, _STEER_CHAT_ONLY, _NEVER_STEERED, _NEVER_STEERED,
+        _unless_scoring(_SCORING_UNSTEERED), _STEER_LC, _NEVER_STEERED, _NEVER_STEERED,
     ),
     "steering_intensity": _cells(
         _unless_scoring(_SCORING_UNSTEERED), _STEER_LC,
-        _STEER_CHAT_ONLY, _STEER_CHAT_ONLY, _NEVER_STEERED, _NEVER_STEERED,
+        _unless_scoring(_SCORING_UNSTEERED), _STEER_LC, _NEVER_STEERED, _NEVER_STEERED,
     ),
     # Feature 27 (FR-27.1, FR-27.2g): refused on a GGUF row BEFORE any auto-load — llama.cpp
     # exposes no layer to read — and on embeddings, which generate no positions to report.

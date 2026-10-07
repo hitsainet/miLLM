@@ -16,6 +16,7 @@ Key implementation notes:
    (test_unused_fields_http pins that a message extra never reaches apply_chat_template).
 """
 
+import math
 from typing import Annotated, Any, Literal, Optional, Union
 
 from pydantic import BaseModel, Field, ValidationInfo, field_validator, model_validator
@@ -140,6 +141,102 @@ def _fold_max_completion_tokens(data: Any) -> Any:
     return data
 
 
+# =============================================================================
+# Inline steering (Feature 28, FR-28.1 / FR-28.2)
+# =============================================================================
+
+
+def _reject_bool_number(v: Any, name: str) -> Any:
+    # bool is an int subclass: without this, `true` silently becomes 1 / 1.0.
+    if isinstance(v, bool):
+        raise ValueError(f"{name} must be a number, not a boolean")
+    return v
+
+
+class InlineSteeringFeature(BaseModel):
+    """One `{index, strength}` of an inline set. `strength` is clamped to ±200 at apply time
+    (FR-28.1.7) and the clamp is reported in `X-miLLM-Steering`, never silent."""
+
+    index: int = Field(ge=0)
+    strength: float
+
+    # ⚠ forbid INSIDE `steering` (FTID ID5): a misspelt `strenght` must fail, not vanish — a
+    # vanished strength is a request steered differently from what the client sent.
+    model_config = {"extra": "forbid"}
+
+    @field_validator("index", mode="before")
+    @classmethod
+    def _index_not_bool(cls, v: Any) -> Any:
+        return _reject_bool_number(v, "steering.features[].index")
+
+    @field_validator("strength", mode="before")
+    @classmethod
+    def _strength_not_bool(cls, v: Any) -> Any:
+        return _reject_bool_number(v, "steering.features[].strength")
+
+    @field_validator("strength")
+    @classmethod
+    def _strength_finite(cls, v: float) -> float:
+        if not math.isfinite(v):
+            raise ValueError("steering.features[].strength must be a finite number")
+        return v
+
+
+class InlineSteering(BaseModel):
+    """`steering: {sae_id?, features: [{index, strength}]}` (FR-28.1.1).
+
+    `features: []` means EXPLICITLY UNSTEERED for this request, on every attached SAE (FR-28.2.2);
+    an `sae_id` beside it is refused, because it suggests a scope the empty form does not have.
+    """
+
+    #: `SAE.id` is String(100).
+    sae_id: Optional[str] = Field(default=None, min_length=1, max_length=100)
+    features: list[InlineSteeringFeature]
+
+    model_config = {"extra": "forbid"}
+
+    @model_validator(mode="after")
+    def _set_rules(self) -> "InlineSteering":
+        seen: set[int] = set()
+        for feature in self.features:
+            if feature.index in seen:
+                # A dictionary merge would keep one strength silently (FR-28.1.6).
+                raise ValueError(
+                    f"steering.features lists index {feature.index} more than once"
+                )
+            seen.add(feature.index)
+        if not self.features and self.sae_id is not None:
+            raise ValueError(
+                "steering.sae_id cannot be sent with an empty features list: "
+                "`steering: {\"features\": []}` unsteers every attached SAE"
+            )
+        return self
+
+
+def _validate_steering_intensity_value(v: Any) -> Any:
+    # Runs after Union coercion, so numeric strings ("1.5") are floats here.
+    if isinstance(v, float) and not 0.0 <= v <= 2.0:
+        raise ValueError("steering_intensity must be within [0, 2]")
+    return v
+
+
+def _steering_conflicts(request: Any) -> None:
+    """`steering` with `profile` (FR-28.2.1) or with `steering_intensity` (T-78): refused,
+    naming both fields, at schema validation — before admission and any auto-load."""
+    if request.steering is None:
+        return
+    if request.profile is not None:
+        raise ValueError(
+            "'steering' and 'profile' are mutually exclusive: send an inline feature set or a "
+            "saved profile, not both"
+        )
+    if request.steering_intensity is not None:
+        raise ValueError(
+            "'steering' and 'steering_intensity' cannot be combined: the dial scales a profile "
+            "or circuit, and an inline set has no stored intensity to scale"
+        )
+
+
 
 class ChatCompletionRequest(BaseModel):
     """
@@ -245,6 +342,11 @@ class ChatCompletionRequest(BaseModel):
     # "min"/"max" -> the range bounds. Applied and restored inside the
     # request boundary - concurrent requests never see each other's dial.
     steering_intensity: Optional[Union[float, Literal["off", "min", "max"]]] = None
+
+    # miLLM extension (Feature 28, FR-28.1) - an inline feature set for THIS request only.
+    # Applied and restored inside the admission slot; no profile is created and the steering
+    # epoch never moves. Mutually exclusive with `profile` and `steering_intensity`.
+    steering: Optional[InlineSteering] = None
 
     @field_validator("chat_template_kwargs", mode="before")
     @classmethod
@@ -359,11 +461,13 @@ class ChatCompletionRequest(BaseModel):
 
     @field_validator("steering_intensity")
     @classmethod
-    def _validate_steering_intensity(cls, v):
-        # Runs after Union coercion, so numeric strings ("1.5") are floats here.
-        if isinstance(v, float) and not 0.0 <= v <= 2.0:
-            raise ValueError("steering_intensity must be within [0, 2]")
-        return v
+    def _validate_steering_intensity(cls, v: Any) -> Any:
+        return _validate_steering_intensity_value(v)
+
+    @model_validator(mode="after")
+    def _steering_exclusive(self) -> "ChatCompletionRequest":
+        _steering_conflicts(self)
+        return self
 
     #: Feature 27 (FR-27.1): this request's own SAE activations, in the response's `millm` object.
     #: Declared, so Feature 25's policy knows it (never reported as an ignored field).
@@ -454,7 +558,31 @@ class TextCompletionRequest(BaseModel):
     #: Declared, so Feature 25's policy knows it (never reported as an ignored field).
     return_sae_activations: Optional[ReturnSaeActivations] = None
 
+    # Feature 28 (FR-28.4.1): the same three steering fields chat carries, with the same types and
+    # validators, so a text completion can choose the active profile or refuse it. Before this a
+    # text completion ran under whatever steering was live and could neither see nor change it.
+    profile: Optional[str] = None
+    steering_intensity: Optional[Union[float, Literal["off", "min", "max"]]] = None
+    steering: Optional[InlineSteering] = None
+
     model_config = {"extra": "allow"}
+
+    @field_validator("steering_intensity", mode="before")
+    @classmethod
+    def _reject_bool_steering_intensity(cls, v: Any) -> Any:
+        if isinstance(v, bool):
+            raise ValueError("steering_intensity must be a number or off|min|max")
+        return v
+
+    @field_validator("steering_intensity")
+    @classmethod
+    def _validate_steering_intensity(cls, v: Any) -> Any:
+        return _validate_steering_intensity_value(v)
+
+    @model_validator(mode="after")
+    def _steering_exclusive(self) -> "TextCompletionRequest":
+        _steering_conflicts(self)
+        return self
 
     @field_validator("seed", mode="before")
     @classmethod

@@ -183,19 +183,19 @@ executor calls `_embed_inputs`.
   - [x] 6.4 **[row added with the provisional 256, marked provisional; the measured value replaces it when 8.3 runs]** `manual/docs/reference/configuration.md`: `EMBEDDINGS_MAX_INPUTS` row beside `:85`, with the
         measured value once 8.3 records it. (FR-30.3.6)
 
-- [ ] 7.0 Mutation controls (covers FR-30.1.6, FR-30.1.7, FR-30.2.3, FR-30.2.8, FR-30.3.1, FR-30.3.3,
+- [x] 7.0 Mutation controls (covers FR-30.1.6, FR-30.1.7, FR-30.2.3, FR-30.2.8, FR-30.3.1, FR-30.3.3,
       FR-30.3.4, FR-30.3.6). Run each, require red, restore, verify the restore, record it.
-  - [ ] 7.1 **Truncation refusal:** M1 `truncation=True` in `_embed_inputs` → 3.8 12-token test red;
+  - [x] 7.1 **Truncation refusal:** M1 `truncation=True` in `_embed_inputs` → 3.8 12-token test red;
         M3 delete the length-check call → red; M2 move the check into the loop → 3.8 four-input test
         red (a forward runs first); M4 delete the GGUF length check → 4.2 red. (FR-30.3.1, FR-30.3.3)
-  - [ ] 7.2 **`dimensions` handling:** M5 flip both `dimensions` rows to `HONOURED` → 1.4 red and
+  - [x] 7.2 **`dimensions` handling:** M5 flip both `dimensions` rows to `HONOURED` → 1.4 red and
         Feature 25's every-entry test red; M6 move the policy call after auto-load → 1.4 "not
         awaited" red; M7 make `NEUTRAL["pooling"]` always true → 1.4 GGUF `last` red. (FR-30.1.6,
         FR-30.1.7, FR-30.2.7)
-  - [ ] 7.3 M8 drop the mask branch in `mean` → 2.3 red; M10 hardcode `"mean"` at the call → 3.8 spy red;
+  - [x] 7.3 M8 drop the mask branch in `mean` → 2.3 red; M10 hardcode `"mean"` at the call → 3.8 spy red;
         M11 delete `_unsteered()` → 3.9 red; M9 drop `param=` in the handler → 3.8 and 5.3 red; M12
         remove the cap check → 5.3 red. (FR-30.2.3, FR-30.2.8, FR-30.3.4, FR-30.3.6)
-  - [ ] 7.4 Any mutation that survives is a test finding: write the test, re-run the mutation as a
+  - [x] 7.4 **[none survived (28 of 28 red, incl. 16 extra X-controls); M5 did not redden Feature 25's every-entry test, which cannot by construction — finding F1 in the controls record]** Any mutation that survives is a test finding: write the test, re-run the mutation as a
         negative control, and record both.
 
 - [ ] 8.0 Feature Acceptance

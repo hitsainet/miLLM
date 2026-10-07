@@ -15,9 +15,10 @@ actually applied):
 * `post_generation(...)` — the header dict for a finished non-streaming response.
 * `finish_body(result, model_row, inference)` — the body-level `system_fingerprint` (FR-25.13.8).
 
-⚠ Feature 28's `X-miLLM-Steering` value (FR-28.3.10) is NOT in this tree; today the header is set
-only on a scoring response carrying activations (X-09). It joins `post_generation` when 028 lands,
-and every batch line then carries it with no batch-side change.
+Feature 28 (FR-28.3.10): `X-miLLM-Steering` is set here, from the report the generation path
+PUBLISHED (`get_steering_report()`, computed from a snapshot of what the hooks applied — never
+from the request). The synchronous routes and every Batch API line read this one function, so a
+header and a batch line cannot disagree; the streaming chunk serialises the same report.
 """
 
 from __future__ import annotations
@@ -26,12 +27,38 @@ from dataclasses import dataclass
 from typing import Any, Optional
 
 from millm.api.request_policy import IGNORED_FIELDS_HEADER
+from millm.core.logging import get_logger
 from millm.services.inference_service import (
     circuit_apply_failed,
     get_probe_verdicts,
     get_request_outcome,
+    get_steering_report,
     reset_steering_memo,
 )
+
+logger = get_logger(__name__)
+
+#: The header when a generation path published no report — a defect (every path publishes one,
+#: `test_steering_report_every_path.py`), reported honestly rather than guessed or omitted.
+STEERING_UNREPORTED = "unknown;reason=read_failed"
+
+
+def steering_header_value(request: Any) -> str:
+    """`X-miLLM-Steering` for a finished request (FR-28.3.8, FR-28.3.10).
+
+    Scoring is always unsteered (X-09) and its report is the constant `none` whatever path served
+    it, including the Batch API's packed scorer, which builds its body without the service's
+    scoring entry point.
+    """
+    wants = getattr(request, "wants_scores", None)
+    if callable(wants) and wants():
+        return "none"
+    report = get_steering_report()
+    if report is None:
+        logger.warning("steering_report_missing",
+                       detail="a generation path published no steering report")
+        return STEERING_UNREPORTED
+    return str(report.header)
 from millm.services.system_fingerprint import build_system_fingerprint
 
 
@@ -125,9 +152,9 @@ def post_generation(
     probe_header = build_probe_verdicts_header(get_probe_verdicts())
     if probe_header:
         headers["X-miLLM-Probe-Verdicts"] = probe_header
-    if request.wants_scores() and getattr(request, "return_sae_activations", None) is not None:
-        # X-09: scoring is always unsteered, and a scoring response carrying activations says so.
-        headers["X-miLLM-Steering"] = "none"
+    # Feature 28: every generation response states its steering, read after generation from the
+    # snapshot the path took before restoring (FR-28.3.1). Scoring answers `none` (X-09).
+    headers["X-miLLM-Steering"] = steering_header_value(request)
     return headers
 
 

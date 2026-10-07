@@ -645,7 +645,8 @@ class TestLlamaCppStreaming:
         text = "".join(
             json.loads(c.removeprefix("data: ").strip())["choices"][0]["delta"].get("content") or ""
             for c in out
-            if c != "data: [DONE]\n\n"
+            # Feature 28's terminal steering chunk carries `choices: []`, like the probe chunk.
+            if c != "data: [DONE]\n\n" and '"millm_steering"' not in c
         )
         assert text == "Hello world"
 
@@ -657,7 +658,9 @@ class TestLlamaCppStreaming:
         )
         out = await self._collect(svc, _stream_request())
 
-        final = json.loads(out[-2].removeprefix("data: ").strip())
+        steering = json.loads(out[-2].removeprefix("data: ").strip())
+        assert steering["choices"] == [] and steering["millm_steering"] == "none"
+        final = json.loads(out[-3].removeprefix("data: ").strip())
         assert final["choices"][0]["finish_reason"] == "length", (
             "the reason llama.cpp reported must survive, not be replaced by a "
             "default we did not observe"

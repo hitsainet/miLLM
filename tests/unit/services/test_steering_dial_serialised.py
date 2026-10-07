@@ -33,7 +33,12 @@ import pytest
 from millm.api.schemas.openai import ChatCompletionRequest
 from millm.services.inference_service import InferenceService
 
-APPLY_PATHS = {"create_chat_completion", "_create_batched_chat_completion", "stream_chat_completion"}
+#: Feature 28: every generation site applies per-request steering through ONE dispatcher, and the
+#: dispatcher is the only caller of `_apply_request_steering`. Text completion joined the set.
+APPLY_PATHS = {
+    "create_chat_completion", "_create_batched_chat_completion", "stream_chat_completion",
+    "create_text_completion",
+}
 
 
 class _Queue:
@@ -120,7 +125,21 @@ async def test_streamed_chat_completion_applies_the_dial_inside_the_slot(service
     assert queue.held is False
 
 
-def test_every_path_that_applies_the_dial_is_covered_here():
+@pytest.mark.asyncio
+async def test_text_completion_applies_the_dial_inside_the_slot(service):
+    """Feature 28 (FR-28.4.2): text completions apply the dial too — inside the slot."""
+    from millm.api.schemas.openai import TextCompletionRequest
+
+    svc, queue, held_at_apply = service
+    with pytest.raises(_StopAtApply):
+        await svc.create_text_completion(
+            TextCompletionRequest(model="m", prompt="hi", max_tokens=4, steering_intensity=0.5)
+        )
+    assert held_at_apply == [True]
+    assert queue.held is False
+
+
+def _self_callers(method: str) -> set[str]:
     tree = ast.parse(textwrap.dedent(inspect.getsource(InferenceService)))
     callers = set()
     for fn in ast.walk(tree):
@@ -130,11 +149,19 @@ def test_every_path_that_applies_the_dial_is_covered_here():
             if (
                 isinstance(node, ast.Call)
                 and isinstance(node.func, ast.Attribute)
-                and node.func.attr == "_apply_request_steering"
+                and node.func.attr == method
                 and isinstance(node.func.value, ast.Name)
                 and node.func.value.id == "self"
             ):
                 callers.add(fn.name)
+    return callers
+
+
+def test_every_path_that_applies_the_dial_is_covered_here():
+    assert _self_callers("_apply_request_steering") == {"_dispatch_request_steering"}, (
+        "Feature 28: the dispatcher is the ONLY caller of _apply_request_steering"
+    )
+    callers = _self_callers("_dispatch_request_steering")
     assert callers == APPLY_PATHS, (
         "the set of methods that apply the per-request steering dial changed; add a behaviour "
         f"test above for each new one. Found: {sorted(callers)}"

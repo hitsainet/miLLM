@@ -238,7 +238,8 @@ class TestEverySeamIsWired:
             range(out.usage.prompt_tokens))
 
     async def test_streaming_chat_puts_one_chunk_after_the_probe_chunk(self, served):
-        """6.7 / T-76: … final chunk, probe chunk, `millm` chunk, [DONE]."""
+        """6.7 / T-76: … final chunk, probe chunk, `millm` chunk, [Feature 28's steering chunk],
+        [DONE]."""
         import json
 
         from tests.unit.services.test_probe_paths_discovered import _probe
@@ -251,9 +252,11 @@ class TestEverySeamIsWired:
                 chat(stream=True, return_sae_activations=spec(positions="last")))]
         assert calls == {"begin": 1, "finish": 1}
         assert chunks[-1] == "data: [DONE]\n\n"
-        millm = json.loads(chunks[-2][len("data: "):])
-        probe = json.loads(chunks[-3][len("data: "):])
-        final = json.loads(chunks[-4][len("data: "):])
+        steering = json.loads(chunks[-2][len("data: "):])
+        millm = json.loads(chunks[-3][len("data: "):])
+        probe = json.loads(chunks[-4][len("data: "):])
+        final = json.loads(chunks[-5][len("data: "):])
+        assert steering["choices"] == [] and "millm_steering" in steering
         assert millm["choices"] == [] and "sae_activations" in millm["millm"]
         assert "millm_probe_verdicts" in probe
         assert final["choices"][0]["finish_reason"] is not None

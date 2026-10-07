@@ -526,16 +526,23 @@ class TestRequestIdReachesTheLog:
         # call to _apply_request_steering supplies it.
         import re
 
+        # Feature 28: generation sites call `_dispatch_request_steering(request, ...)`, and the
+        # dispatcher is the one place that calls `_apply_request_steering` with the request's
+        # fields. Both links must carry the id.
         calls = re.findall(
-            r"_apply_request_steering\((.*?)\)", src, re.S
+            r"_dispatch_request_steering\((.*?)\)", src, re.S
         )
-        invoking = [c for c in calls if "request.profile" in c]
-        assert invoking, "no generation call site found"
+        invoking = [c for c in calls if c.strip().startswith("request")]
+        assert len(invoking) == 4, f"expected the four generation sites, found {len(invoking)}"
         for c in invoking:
             assert "request_id=" in c, (
-                f"a generation path calls _apply_request_steering without a "
-                f"request id: {c.strip()[:80]}"
+                f"a generation path dispatches steering without a request id: {c.strip()[:80]}"
             )
+        inner = [c for c in re.findall(r"_apply_request_steering\((.*?)\)", src, re.S)
+                 if not c.strip().startswith("self")]
+        assert inner, "the dispatcher's call to _apply_request_steering was not found"
+        for c in inner:
+            assert "request_id=request_id" in c, c.strip()[:80]
 
     def test_the_apply_functions_accept_and_store_it(self):
         import inspect

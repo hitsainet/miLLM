@@ -25,7 +25,11 @@ from millm.api.request_policy import (
     parse_strict,
     report_unused,
 )
-from millm.api.routes.openai.load_policy import apply_load_policy, parse_load_policy
+from millm.api.routes.openai.load_policy import (
+    apply_load_policy,
+    parse_load_policy,
+    refuse_inline_steering_before_load,
+)
 from millm.api.routes.openai.errors import (
     OpenAIRefusal,
     create_openai_error,
@@ -150,6 +154,10 @@ async def create_completion(
     # raises ModelLockedError for that, and only that.
     # Feature 29: `X-miLLM-Load-Policy: refuse` promises this request never causes a swap.
     # After the pre-load refusals above, before the auto-load below (FR-29.4.5).
+    # Feature 28 (T-82): a non-empty inline set on a non-resident model can never be honoured —
+    # refused before the auto-load below would evict the resident model and its SAEs.
+    refuse_inline_steering_before_load(request, inference)
+
     load_policy = parse_load_policy(x_millm_load_policy)
     policy_refusal = await apply_load_policy(load_policy, model, inference, service)
     if policy_refusal is not None:
@@ -202,6 +210,8 @@ async def create_completion(
     # Every `X-miLLM-*` value from `millm.api.provenance`, the function a batch output line
     # reads too (FR-26.10.1). Probe verdicts (FR-24.7, FR-27.8g) included: this route once never
     # sent them. Decided AFTER generation — the verdict and seed scope do not exist before.
+    # `pre_generation` resets the request-scoped context (FR-28: completions now read the
+    # steering circuit and publish a steering report, so it must start clean).
     pre = await pre_generation(request, inference, chat=False)
     result = await inference.create_text_completion(request)
     response.headers.update(

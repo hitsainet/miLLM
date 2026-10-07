@@ -113,6 +113,43 @@ async def test_a_batch_line_equals_the_synchronous_response(harness):
     assert "x-millm-seed" in line_headers
 
 
+@pytest.mark.parametrize("extra, kind", [
+    ({"steering": {"features": [{"index": 1, "strength": 30.0}]}}, "inline;"),
+    ({"profile": "batchprof"}, 'profile;name="batchprof";source=request;'),
+    ({}, "none"),
+])
+async def test_a_batch_line_carries_the_synchronous_steering_header(harness, monkeypatch,
+                                                                     extra, kind):
+    """Feature 28 closes FR-26.10.1 (026 FTASKS F-3): every output line carries the SAME
+    `X-miLLM-Steering` the synchronous response does, for inline, profile and none — from the one
+    provenance function, with no batch-side code."""
+    from millm.services.sae_service import AttachedSAEState
+    from tests.unit.f28_fixtures import add_profile, attach
+
+    monkeypatch.setattr("millm.db.base.async_session_factory", harness.factory)
+    AttachedSAEState().reset_for_tests()
+    served = attach(harness.inference._model, [("sae_batch", 0, 11)])
+    try:
+        await add_profile(harness.factory, "batchprof", {1: 30.0})
+        body = {"model": "tiny", "prompt": "w1 w2", "max_tokens": 3, "temperature": 0.0, **extra}
+        async with client_for(harness.app()) as client:
+            sync = await client.post("/v1/completions", json=body)
+        assert sync.status_code == 200, sync.text
+        line = {"custom_id": "s", "method": "POST", "url": "/v1/completions", "body": body}
+        client, batch_id = await _start(harness, [line], pack=False)
+        async with client:
+            await harness.drain()
+            out = await harness.lines(client, (await harness.batch(batch_id)).output_file_id)
+        line_headers = {k.lower(): v for k, v in out[0]["response"]["millm"]["headers"].items()}
+        assert line_headers["x-millm-steering"] == sync.headers["x-millm-steering"]
+        assert line_headers["x-millm-steering"].startswith(kind)
+        assert out[0]["response"]["body"]["choices"] == sync.json()["choices"]
+    finally:
+        for handle in served.handles:
+            handle.remove()
+        AttachedSAEState().reset_for_tests()
+
+
 async def test_a_row_failing_on_its_own_merits_goes_to_the_error_file_and_the_batch_goes_on(
     harness, monkeypatch
 ):

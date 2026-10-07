@@ -613,8 +613,9 @@ class TestStreamChatCompletion:
             async for chunk in service.stream_chat_completion(chat_request):
                 chunks.append(chunk)
 
-        # Penultimate chunk should have finish_reason
-        final_data_str = chunks[-2].removeprefix("data: ").strip()
+        # Feature 28: the steering chunk is last before [DONE]; the finish chunk precedes it.
+        assert '"millm_steering"' in chunks[-2]
+        final_data_str = chunks[-3].removeprefix("data: ").strip()
         final_data = json.loads(final_data_str)
         assert final_data["choices"][0]["finish_reason"] in [
             "stop",
@@ -647,8 +648,9 @@ class TestStreamChatCompletion:
                 chunks.append(chunk)
 
         assert chunks[-1] == "data: [DONE]\n\n"
-        # The chunk before [DONE] should have finish_reason "stop"
-        final_data = json.loads(chunks[-2].removeprefix("data: ").strip())
+        # The finish chunk precedes the Feature 28 steering chunk, which precedes [DONE].
+        assert '"millm_steering"' in chunks[-2]
+        final_data = json.loads(chunks[-3].removeprefix("data: ").strip())
         assert final_data["choices"][0]["finish_reason"] == "stop"
 
 
@@ -1252,7 +1254,8 @@ class TestCBMStreamChatCompletion:
         async for chunk in cbm_stream_service.stream_chat_completion(chat_request):
             chunks.append(chunk)
 
-        final_data = json.loads(chunks[-2].removeprefix("data: ").strip())
+        assert '"millm_steering"' in chunks[-2], "Feature 28: the CBM stream reports steering too"
+        final_data = json.loads(chunks[-3].removeprefix("data: ").strip())
         assert final_data["choices"][0]["finish_reason"] in ["stop", "length"]
 
 
@@ -1616,7 +1619,8 @@ class TestSpeculativeDecoding:
             chunks = [c async for c in service.stream_chat_completion(chat_request)]
 
         # Find the final data chunk before [DONE]
-        data_chunks = [c for c in chunks if c != "data: [DONE]\n\n" and c.startswith("data: ")]
+        data_chunks = [c for c in chunks if c != "data: [DONE]\n\n" and c.startswith("data: ")
+                       and '"millm_steering"' not in c]
         final = json.loads(data_chunks[-1].removeprefix("data: ").strip())
 
         # Final chunk must carry usage

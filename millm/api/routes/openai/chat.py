@@ -27,7 +27,11 @@ from millm.api.request_policy import (
     parse_strict,
     report_unused,
 )
-from millm.api.routes.openai.load_policy import apply_load_policy, parse_load_policy
+from millm.api.routes.openai.load_policy import (
+    apply_load_policy,
+    parse_load_policy,
+    refuse_inline_steering_before_load,
+)
 from millm.api.routes.openai.errors import (
     OpenAIRefusal,
     embedding_model_error,
@@ -211,6 +215,10 @@ async def create_chat_completion(
     # raises ModelLockedError for that, and only that.
     # Feature 29: `X-miLLM-Load-Policy: refuse` promises this request never causes a swap.
     # After the pre-load refusals above, before the auto-load below (FR-29.4.5).
+    # Feature 28 (T-82): a non-empty inline set on a non-resident model can never be honoured —
+    # refused before the auto-load below would evict the resident model and its SAEs.
+    refuse_inline_steering_before_load(request, inference)
+
     load_policy = parse_load_policy(x_millm_load_policy)
     policy_refusal = await apply_load_policy(load_policy, model, inference, service)
     if policy_refusal is not None:
@@ -301,6 +309,10 @@ async def create_chat_completion(
         # a dial is present the echo resolution above already verified it.
         if request.profile and request.steering_intensity is None:
             await inference.ensure_profile_exists(request.profile)
+        # Feature 28 (FTASKS 6.4): the in-slot inline checks as a dry run — an unattached
+        # `sae_id`, an ambiguous selection or an out-of-range index answers a proper 400 here,
+        # not a 200 stream that ends in an error chunk.
+        inference.check_inline_steering(request)
 
         # And a prompt past the model's context: a 400 with the error envelope,
         # not a 200 whose stream is cut off (hardware acceptance, 2026-09-14).

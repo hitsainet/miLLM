@@ -94,3 +94,35 @@ async def apply_load_policy(
         leased=lease is not None,
     )
     return model_not_resident_error(model_row.name, resident_name, lease)
+
+
+def refuse_inline_steering_before_load(request: Any, inference: Any) -> None:
+    """A non-empty `steering` set naming a model that is not resident: refused with
+    `SAE_NOT_ATTACHED` BEFORE any auto-load (Feature 28, FR-28.1.11, T-82).
+
+    Decidable from the request: SAEs attach only to the resident model, and no load path
+    re-attaches one (`SAERepository.get_active_attachment` has no caller), so after the load the
+    in-slot check would refuse anyway — having evicted the resident model and every SAE attached
+    to it to get there. The attach-time model lock would usually refuse the swap first, but that
+    lock is best-effort, so this does not rely on it. `steering: {"features": []}` is not
+    refused: there is nothing to attach.
+    """
+    from millm.core.errors import SAENotAttachedError
+
+    steering = getattr(request, "steering", None)
+    if steering is None or not steering.features:
+        return
+    info = inference.get_loaded_model_info()
+    resident = info.name if info else None
+    if resident == request.model:
+        return
+    sae_id = steering.sae_id
+    raise SAENotAttachedError(
+        f"inline steering names model '{request.model}', which is not resident "
+        f"({'resident: ' + repr(resident) if resident else 'no model is loaded'}); an SAE "
+        + (f"('{sae_id}') " if sae_id else "")
+        + "attaches only to the resident model, so nothing could steer this request. "
+        "Load the model and attach the SAE first.",
+        details={"param": "steering", "sae_id": sae_id, "model": request.model,
+                 "resident_model": resident},
+    )

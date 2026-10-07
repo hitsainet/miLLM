@@ -20,7 +20,6 @@ import re
 import struct
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
-from typing import Optional
 
 from millm.core.steering_range import clamp_steering
 
@@ -149,20 +148,20 @@ class SteeringItem:
     """One member of `X-miLLM-Steering`: a kind and the parameters FTDD §5.2 gives it."""
 
     kind: str
-    sae: Optional[str] = None
-    layer: Optional[int] = None
-    features: Optional[int] = None
-    hash: Optional[str] = None
+    sae: str | None = None
+    layer: int | None = None
+    features: int | None = None
+    hash: str | None = None
     clamped: int = 0
-    name: Optional[str] = None
-    source: Optional[str] = None
-    intensity: Optional[float] = None
-    circuit_id: Optional[str] = None
+    name: str | None = None
+    source: str | None = None
+    intensity: float | None = None
+    circuit_id: str | None = None
     composed: bool = False
     changed: bool = False
-    reason: Optional[str] = None
+    reason: str | None = None
 
-    def sort_key(self) -> tuple:
+    def sort_key(self) -> tuple[int, str, int, str]:
         """Member order (FTDD §5.2): circuits first by id, then SAE items by layer, then sae."""
         if self.kind == "circuit":
             return (0, str(self.circuit_id or ""), 0, "")
@@ -202,7 +201,7 @@ def _serialize_item(item: SteeringItem) -> str:
         if item.source not in SOURCES:
             raise ValueError(f"profile source must be one of {sorted(SOURCES)}: {item.source!r}")
         params.append(f"name={_sf_string(encode_name(item.name))}")  # type: ignore[arg-type]
-        params.append(f"source={_sf_token(item.source)}")  # type: ignore[arg-type]
+        params.append(f"source={_sf_token(str(item.source))}")
         params.append(f"intensity={_sf_string(format_intensity(item.intensity))}")  # type: ignore[arg-type]
         params.extend(_sae_params(item))
         if item.clamped:

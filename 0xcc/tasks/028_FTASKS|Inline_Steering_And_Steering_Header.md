@@ -114,95 +114,95 @@ reads `X-miLLM-Steering` verbatim.
         present): any steering field with scoring → refused (FR-25.7.2, X-09). Test.
   - [x] 2.6 Test: a misspelt key inside `steering` (`strenght`) is refused, not ignored.
 
-- [ ] 3.0 Inline and unsteered apply and restore (covers FR-28.1.2, FR-28.1.3, FR-28.1.4,
+- [x] 3.0 Inline and unsteered apply and restore (covers FR-28.1.2, FR-28.1.3, FR-28.1.4,
       FR-28.1.5, FR-28.1.6 (live), FR-28.1.7, FR-28.1.10, FR-28.2.2, FR-28.2.3)
-  - [ ] 3.1 Add `_dispatch_request_steering` (FTID §3.3). Set `_REQUEST_STEERING` with
+  - [x] 3.1 Add `_dispatch_request_steering` (FTID §3.3). Set `_REQUEST_STEERING` with
         `epoch_at_admission`. Test that each branch is chosen for its input.
-  - [ ] 3.2 Add `_apply_inline_steering`: select by registry entries, never `attached_sae`;
+  - [x] 3.2 Add `_apply_inline_steering`: select by registry entries, never `attached_sae`;
         validate before mutating; clamp and count; save every entry; set the target; disable the
         others with `enable_steering(False)` (T-79).
-  - [ ] 3.3 Edge: `sae_id` not attached → `SAE_NOT_ATTACHED` naming it; no SAE attached with a
+  - [x] 3.3 Edge: `sae_id` not attached → `SAE_NOT_ATTACHED` naming it; no SAE attached with a
         non-empty set → the same. Implement and test.
-  - [ ] 3.4 Edge: `sae_id` omitted with two entries, or one `sae_id` at two layers → `400` naming
+  - [x] 3.4 *(Ambiguity raises `InvalidParameterError` (400, `invalid_parameter`) rather than the FTID's `ValidationError` — same 400 on /v1, with `details.param` = `steering.sae_id` and the attached pairs.)* Edge: `sae_id` omitted with two entries, or one `sae_id` at two layers → `400` naming
         each `(sae_id, layer)`. Implement and test with two real `LoadedSAE`s.
-  - [ ] 3.5 Edge: an index ≥ `d_sae` → `INVALID_FEATURE_INDEX` naming index and `d_sae`, and global
+  - [x] 3.5 Edge: an index ≥ `d_sae` → `INVALID_FEATURE_INDEX` naming index and `d_sae`, and global
         state unchanged afterwards. Test.
-  - [ ] 3.6 Add `_apply_explicit_unsteered` (disable every entry; `None` when nothing attached).
+  - [x] 3.6 Add `_apply_explicit_unsteered` (disable every entry; `None` when nothing attached).
         Test: other entries' monitoring and sensing still capture (T-80), and `features: []` with no
         SAE attached is accepted.
-  - [ ] 3.7 Change the restore branch to `saved.get("layers") is not None` (`:2206`) and the skip
+  - [x] 3.7 Change the restore branch to `saved.get("layers") is not None` (`:2206`) and the skip
         log's `path`. Test: restore after inline returns every entry's values *and* enabled flag
         exactly; an epoch bump mid-request skips the restore (existing F16 behaviour).
-  - [ ] 3.8 Real-model tests (tiny Llama + real `LoadedSAE`, the `test_scoring_completions.py:48-54`,
+  - [x] 3.8 Real-model tests (tiny Llama + real `LoadedSAE`, the `test_scoring_completions.py:48-54`,
         `:416` pattern), greedy: inline equals an equivalent saved profile (separate literals);
         `features: []` under an active profile equals the detached output; the next request without
         `steering` is steered again (US-3, US-5).
-  - [ ] 3.9 AST guard: no generation method calls `_apply_request_steering` or
+  - [x] 3.9 AST guard: no generation method calls `_apply_request_steering` or
         `_restore_request_profile` directly except via the dispatcher and finisher, with the two
         streaming restores (`:4450`, `:4762`) named once with their reason.
-  - [ ] 3.10 Partial-failure rollback: a mutation raising mid-apply restores the saved shape before
+  - [x] 3.10 Partial-failure rollback: a mutation raising mid-apply restores the saved shape before
         re-raising. Test by making `set_steering_batch` raise.
-  - [ ] 3.11 Test: inline and unsteered applies never bump the steering epoch (FR-28.1.10).
+  - [x] 3.11 Test: inline and unsteered applies never bump the steering epoch (FR-28.1.10).
 
-- [ ] 4.0 Routing, engine limits and text-completion steering (covers FR-28.1.8, FR-28.1.9,
+- [x] 4.0 Routing, engine limits and text-completion steering (covers FR-28.1.8, FR-28.1.9,
       FR-28.1.11, FR-28.4.2, FR-28.4.3, FR-28.4.4, FR-28.4.5)
-  - [ ] 4.1 `_has_steering_override` reads `steering` on both request types; fix its docstring
+  - [x] 4.1 `_has_steering_override` reads `steering` on both request types; fix its docstring
         (`inference_service.py:945-956`). Test: a `steering` request with CBM enabled routes serial
         (`:1002-1007`), for chat and text.
-  - [ ] 4.2 `_refuse_unsupported_llamacpp_request` refuses `steering` (`:3885-3890`). Chat and
+  - [x] 4.2 `_refuse_unsupported_llamacpp_request` refuses `steering` (`:3885-3890`). Chat and
         completions routes refuse `steering` on a GGUF model row before auto-load. Test that the
         loader is not called (assert call count 0).
-  - [ ] 4.3 Pre-load refusal (T-82): a non-empty `steering` set naming a non-resident model →
+  - [x] 4.3 Pre-load refusal (T-82): a non-empty `steering` set naming a non-resident model →
         `SAE_NOT_ATTACHED` before auto-load, on both routes. Test with the loader mocked: zero calls,
         and the error names the SAE. Test that `features: []` on a non-resident model is not refused.
-  - [ ] 4.4 Add the dispatch/finish block inside `create_text_completion`'s `_admit()`
+  - [x] 4.4 Add the dispatch/finish block inside `create_text_completion`'s `_admit()`
         (`:4828`), around every prompt of a multi-prompt request. Test: a named profile applies, a
         missing one returns `404`, and `features: []` opts out (US-5).
-  - [ ] 4.5 Test: a text completion with no steering field still runs under live global steering
+  - [x] 4.5 Test: a text completion with no steering field still runs under live global steering
         (FR-28.4.4) and reports it.
 
-- [ ] 5.0 The steering report (covers FR-28.3.1, FR-28.3.2, FR-28.3.3, FR-28.3.6, FR-28.3.7,
+- [x] 5.0 The steering report (covers FR-28.3.1, FR-28.3.2, FR-28.3.3, FR-28.3.6, FR-28.3.7,
       FR-28.3.10)
-  - [ ] 5.1 Create `SteeringSnapshot.capture` (never raises; copies live values with zeros removed,
+  - [x] 5.1 Create `SteeringSnapshot.capture` (never raises; copies live values with zeros removed,
         the enabled flag and the epoch).
-  - [ ] 5.2 Add `_STEERING_REPORT`, `get_steering_report()`, and resets for both new contextvars
+  - [x] 5.2 Add `_STEERING_REPORT`, `get_steering_report()`, and resets for both new contextvars
         inside `reset_steering_memo` (`:333-349`). Test: a stale report from a previous request in a
         reused context is never returned.
-  - [ ] 5.3 Create `SteeringStateReader.describe`: labelling order record → circuit → active
+  - [x] 5.3 *(Code wins, recorded: circuits are read STRICTLY (`CircuitRepository.list_active`, every full-serving circuit, one item each) instead of the memoised `_steering_circuit()`, which fails open — a DB blip would relabel circuit steering `manual`. Costs one extra read only when an entry is steered and the record does not claim it.)* Create `SteeringStateReader.describe`: labelling order record → circuit → active
         profile → `manual`; exact value equality; `changed` from the epochs; `composed` from a strict
         composition read (unreadable → `unknown;reason=claims_unreadable`); `profile_sae_mismatch`
         warning. Test each label.
-  - [ ] 5.4 Replace the bare restores at `:3506` and `:3734` with `_finish_request_steering`; add
+  - [x] 5.4 Replace the bare restores at `:3506` and `:3734` with `_finish_request_steering`; add
         the stream capture beside `_probe_finish` (`:4650-4653`). Publish the report after the slot
         releases on non-streaming paths.
-  - [ ] 5.5 Scoring paths publish `none`; CBM and llama.cpp paths capture an entry epoch and an exit
+  - [x] 5.5 Scoring paths publish `none`; CBM and llama.cpp paths capture an entry epoch and an exit
         snapshot and describe with no record. Test each.
-  - [ ] 5.6 **Honesty tests** (FTID §8): record claims inline `{5: 8.0}`, snapshot holds `{5: 4.0}` →
+  - [x] 5.6 **Honesty tests** (FTID §8): record claims inline `{5: 8.0}`, snapshot holds `{5: 4.0}` →
         `manual` with the hash of `{5: 4.0}`; an operator write inside generation → new values plus
         `changed` (T-81); an active profile at λ = 0.75 → `profile;source=active;intensity="0.75"`
         with an independently computed hash (US-4).
-  - [ ] 5.7 Failure paths: `describe` raising internally → `unknown;reason=read_failed` and a
+  - [x] 5.7 Failure paths: `describe` raising internally → `unknown;reason=read_failed` and a
         `steering_report_unknown` warning, while the request still succeeds (FR-28.3.7). Test.
-  - [ ] 5.8 Discovery test (`tests/support/generation_entry_points.py`, FR-27.9 definition): every
+  - [x] 5.8 *(Feature 27 landed first; its discovery code was extracted from `test_probe_paths_discovered.py` into `tests/support/generation_entry_points.py` and both guards import it.)* Discovery test (`tests/support/generation_entry_points.py`, FR-27.9 definition): every
         generation entry point publishes a report; exemptions in one dict with reasons; each exempt
         method asserted to reach no generation primitive. Coordinate with Feature 27: whichever lands
         first creates the helper.
-  - [ ] 5.9 Expose `steering_report_for_row(...)` for Feature 26 (FR-28.3.10). Test that it returns
+  - [x] 5.9 Expose `steering_report_for_row(...)` for Feature 26 (FR-28.3.10). Test that it returns
         the same string as the header for the same snapshot and record.
 
-- [ ] 6.0 Publication: headers and stream chunk (covers FR-28.3.5, FR-28.3.8, FR-28.3.9,
+- [x] 6.0 Publication: headers and stream chunk (covers FR-28.3.5, FR-28.3.8, FR-28.3.9,
       FR-28.3.11)
-  - [ ] 6.1 Chat route: set `X-miLLM-Steering` after generation, beside the probe header
+  - [x] 6.1 Chat route: set `X-miLLM-Steering` after generation, beside the probe header
         (`chat.py:293-297`). Test the value per kind.
-  - [ ] 6.2 Completions route: call `reset_steering_memo()` at the top; set the header after
+  - [x] 6.2 *(The reset already runs via `provenance.pre_generation`, which the completions route calls before generation; no second call added.)* Completions route: call `reset_steering_memo()` at the top; set the header after
         `create_text_completion` (`completions.py:148`). Test.
-  - [ ] 6.3 Stream: emit `{"choices": [], "millm_steering": <header>}` after the probe chunk and
+  - [x] 6.3 *(The chunk is emitted on the CBM and llama.cpp streaming paths too, after the activations chunk where present.)* Stream: emit `{"choices": [], "millm_steering": <header>}` after the probe chunk and
         before `[DONE]` (`inference_service.py:4656-4660`), always, even for `none`. No header
         before the body. Test ordering, uniqueness and presence for `none`.
-  - [ ] 6.4 Streaming pre-checks: run the in-slot validations as a dry run before the
+  - [x] 6.4 Streaming pre-checks: run the in-slot validations as a dry run before the
         `StreamingResponse`, beside `ensure_profile_exists` (`chat.py:236-237`), so a bad `sae_id` or
         index returns a proper `400`. Test.
-  - [ ] 6.5 Route integration tests: chat (non-streaming, streaming, batched `extra_messages`) and
+  - [x] 6.5 *(Route tests live in `tests/unit/api/test_steering_header_routes.py`, not `tests/integration/`: CI runs `tests/unit` only.)* Route integration tests: chat (non-streaming, streaming, batched `extra_messages`) and
         completions (single, multi-prompt) each carry exactly one correct report; existing
         `X-miLLM-Steering-Intensity` and `X-miLLM-Circuit-Rung` unchanged (FR-28.3.11).
 

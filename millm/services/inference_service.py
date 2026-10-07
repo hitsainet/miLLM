@@ -347,6 +347,37 @@ _PROBE_VERDICTS: "contextvars.ContextVar[list]" = contextvars.ContextVar(
 )
 
 
+#: Feature 28: what THIS request applied (`RequestSteeringRecord`), set by the dispatcher inside
+#: the slot. LABELLING ONLY — the report's truth is the snapshot of what the hooks read.
+_REQUEST_STEERING: "contextvars.ContextVar[Any]" = contextvars.ContextVar(
+    "millm_request_steering", default=None
+)
+
+#: Feature 28: this request's `SteeringReport`, published after generation and read by the routes
+#: (`X-miLLM-Steering`) and the Batch API, the pattern `get_probe_verdicts()` uses. Same explicit
+#: reset as the verdicts: a stale report would describe another request's steering.
+_STEERING_REPORT: "contextvars.ContextVar[Any]" = contextvars.ContextVar(
+    "millm_steering_report", default=None
+)
+
+
+def note_request_steering(record: Any) -> None:
+    _REQUEST_STEERING.set(record)
+
+
+def get_request_steering() -> Any:
+    return _REQUEST_STEERING.get()
+
+
+def set_steering_report(report: Any) -> None:
+    _STEERING_REPORT.set(report)
+
+
+def get_steering_report() -> Any:
+    """This request's steering report, or None when no generation path published one."""
+    return _STEERING_REPORT.get()
+
+
 def _verdict_payload(verdict: Any) -> dict:
     """One verdict, as it travels on the wire.
 
@@ -510,6 +541,10 @@ def reset_steering_memo() -> None:
     # route that will one day remember one. Same context, same lifetime, same hazard.
     _PROBE_VERDICTS.set([])
     _REQUEST_OUTCOME.set({})
+    # Feature 28: the request record and the published report, for the same reason — a report
+    # left from an earlier request in a reused context would describe someone else's steering.
+    _REQUEST_STEERING.set(None)
+    _STEERING_REPORT.set(None)
 
 
 def note_circuit_apply_failed() -> None:
@@ -1293,15 +1328,20 @@ class InferenceService:
     @staticmethod
     def _has_steering_override(request: Any) -> bool:
         """
-        True when the request carries a per-request steering override
-        (profile and/or intensity dial) — such requests must route through
-        the serial path: they mutate the process-global SAE steering state,
-        which CBM-batched rows would share. getattr-based so schemas without
-        the extension fields (text completions, embeddings) answer False.
+        True when the request carries a per-request steering override — a profile, an intensity
+        dial, or an inline `steering` set (Feature 28, FR-28.1.8), including the explicitly
+        unsteered `steering: {"features": []}`. Such requests must route through the serial
+        path: they mutate the process-global SAE steering state, which CBM-batched rows would
+        share, and the manager runs no per-request apply/restore at all.
+
+        Chat AND text completions carry all three fields since Feature 28 (this docstring used
+        to say text completions had none). getattr-based only so an embeddings request, which
+        declares none of them, answers False.
         """
         return (
             bool(getattr(request, "profile", None))
             or getattr(request, "steering_intensity", None) is not None
+            or getattr(request, "steering", None) is not None
         )
 
     def _cbm_route_kwargs(self, request: Any) -> dict[str, Any]:
@@ -2275,6 +2315,7 @@ class InferenceService:
                 e.sae.enable_steering(False)
             logger.info("circuit_dial_disabled", circuit_id=circuit.id,
                         layers=[e.layer for e in entries])
+            self._note_steering_record("disabled", intensity=0.0)
             return {"circuit": True, "epoch": saved_epoch,
                     "request_id": request_id,
                     "layers": saved_layers}
@@ -2364,6 +2405,8 @@ class InferenceService:
                 hazards=[str(h) for h in hazards],
                 clamp_warnings=[str(c) for c in clamps],
             )
+        # Feature 28: the reader names the circuit's λ from this when the request dialled it.
+        self._note_steering_record("circuit", intensity=lam)
         return {"circuit": True, "epoch": saved_epoch,
                 "request_id": request_id,
                 "layers": saved_layers}
@@ -2575,6 +2618,7 @@ class InferenceService:
                 "request_id": request_id,
             }
             sae.enable_steering(False)
+            self._note_steering_record("disabled", intensity=0.0)
             logger.info(
                 "request_steering_disabled",
                 profile=profile.name if profile else None,
@@ -2634,6 +2678,29 @@ class InferenceService:
         sae.set_steering_batch(steering)
         sae.enable_steering(True)
 
+        # Feature 28: what this request applied, for LABELLING the report (never its source).
+        # The entry is the FIRST attached one — the recorded first-SAE profile defect (S3-09),
+        # which the report makes visible by naming the SAE actually steered.
+        first = next(iter(AttachedSAEState().entries()), None)
+        if profile is not None and profile.steering:
+            from millm.core.steering_state import count_clamped as _count_clamped
+
+            self._note_steering_record(
+                "profile",
+                sae_id=first.sae_id if first is not None else None,
+                layer=first.layer if first is not None else None,
+                applied=dict(steering),
+                clamped=_count_clamped(
+                    (int(k), float(v) * effective) for k, v in profile.steering.items()
+                ),
+                profile_name=profile.name,
+                profile_source="request" if explicit else "active",
+                profile_sae_id=getattr(profile, "sae_id", None),
+                intensity=effective,
+            )
+        else:
+            self._note_steering_record("dial", intensity=effective)
+
         logger.info(
             "request_steering_applied",
             profile=profile.name if profile else None,
@@ -2641,6 +2708,291 @@ class InferenceService:
             features=len(steering),
         )
         return saved
+
+    # ── Feature 28: request-scoped steering — dispatch, inline, unsteered, finish ──────────────
+
+    def _note_steering_record(self, kind: str, **fields: Any) -> None:
+        """Record what this request applied, keeping the epoch read at admission."""
+        from millm.services.steering_report import RequestSteeringRecord
+
+        current = _REQUEST_STEERING.get()
+        epoch = getattr(current, "epoch_at_admission", None)
+        if epoch is None:
+            epoch = self._current_steering_epoch()
+        _REQUEST_STEERING.set(RequestSteeringRecord(kind=kind, epoch_at_admission=epoch, **fields))
+
+    @staticmethod
+    def _current_steering_epoch() -> Optional[int]:
+        try:
+            from millm.services.sae_service import AttachedSAEState
+
+            return AttachedSAEState().steering_epoch
+        except Exception:  # noqa: BLE001 - no SAE service: no epoch to compare
+            return None
+
+    async def _dispatch_request_steering(
+        self, request: Any, request_id: Optional[str] = None
+    ) -> Optional[dict[str, Any]]:
+        """THE one place a generation site decides which per-request apply runs (FTID §3.3).
+
+        Must be called INSIDE `_admit()`. Records `epoch_at_admission` first, so `changed`
+        (FR-28.3.6) compares against the state the request was admitted under.
+        """
+        from millm.services.steering_report import RequestSteeringRecord
+
+        _REQUEST_STEERING.set(RequestSteeringRecord(
+            kind="none", epoch_at_admission=self._current_steering_epoch()
+        ))
+        steering = getattr(request, "steering", None)
+        if steering is not None:
+            if not steering.features:
+                return self._apply_explicit_unsteered(request_id)
+            return self._apply_inline_steering(steering, request_id)
+        profile = getattr(request, "profile", None)
+        intensity = getattr(request, "steering_intensity", None)
+        if profile or intensity is not None:
+            return await self._apply_request_steering(profile, intensity, request_id=request_id)
+        return None
+
+    @staticmethod
+    def _select_inline_entry(steering: Any, entries: list[Any]) -> Any:
+        """The ONE attached entry an inline set steers (FR-28.1.3, FR-28.1.4).
+
+        Selected from the REGISTRY, never `attached_sae` (the first entry — the recorded profile
+        defect). Ambiguity refuses, as `AttachedSAEState.by_layer` returns nothing rather than
+        pick a basis.
+        """
+        from millm.core.errors import InvalidParameterError, SAENotAttachedError
+
+        sae_id = steering.sae_id
+        if sae_id is not None:
+            matches = [e for e in entries if e.sae_id == sae_id]
+            if not matches:
+                raise SAENotAttachedError(
+                    f"steering.sae_id '{sae_id}' is not attached"
+                    + (f"; attached: {sorted({e.sae_id for e in entries})}" if entries
+                       else "; no SAE is attached"),
+                    details={"param": "steering.sae_id", "sae_id": sae_id},
+                )
+        else:
+            matches = list(entries)
+            if not matches:
+                raise SAENotAttachedError(
+                    "inline steering needs an attached SAE, and none is attached",
+                    details={"param": "steering"},
+                )
+        if len(matches) > 1:
+            pairs = [(e.sae_id, e.layer) for e in matches]
+            what = (f"'{sae_id}' is attached at {len(matches)} layers" if sae_id is not None
+                    else f"{len(matches)} SAEs are attached")
+            raise InvalidParameterError(
+                f"inline steering is ambiguous: {what} — "
+                + ", ".join(f"({sid}, layer {lay})" for sid, lay in pairs)
+                + (". Name one with steering.sae_id." if sae_id is None
+                   else ". One sae_id must name exactly one attached entry."),
+                details={"param": "steering.sae_id",
+                         "attached": [{"sae_id": sid, "layer": lay} for sid, lay in pairs]},
+            )
+        return matches[0]
+
+    def _validate_inline_steering(self, steering: Any) -> Any:
+        """Every in-slot check, mutating nothing: selection and index range (FR-28.1.6).
+
+        Also the streaming route's dry run (FTASKS 6.4), so a bad `sae_id` or index answers a
+        proper 400 before the 200 is committed. Returns the selected entry.
+        """
+        from millm.core.errors import InvalidFeatureIndexError
+        from millm.services.sae_service import AttachedSAEState
+
+        entry = self._select_inline_entry(steering, AttachedSAEState().entries())
+        d_sae = entry.sae.d_sae
+        for feature in steering.features:
+            if not 0 <= feature.index < d_sae:
+                raise InvalidFeatureIndexError(
+                    f"steering.features index {feature.index} is out of range [0, {d_sae}) for "
+                    f"SAE '{entry.sae_id}' at layer {entry.layer}",
+                    details={"param": "steering.features", "feature_idx": feature.index,
+                             "d_sae": d_sae, "sae_id": entry.sae_id},
+                )
+        return entry
+
+    def check_inline_steering(self, request: Any) -> None:
+        """The streaming route's pre-commit dry run of the in-slot checks (FTDD §5.1). State can
+        still change before admission; the in-slot check is authoritative."""
+        steering = getattr(request, "steering", None)
+        if steering is not None and steering.features:
+            self._validate_inline_steering(steering)
+
+    @staticmethod
+    def _save_entries(entries: list[Any]) -> list[dict[str, Any]]:
+        """Every entry's values AND enabled flag — the per-layer shape the restore serves."""
+        return [
+            {
+                "sae_id": e.sae_id,
+                "layer": e.layer,
+                "values": e.sae.get_steering_values(),
+                "enabled": e.sae.is_steering_enabled,
+            }
+            for e in entries
+        ]
+
+    def _apply_inline_steering(
+        self, steering: Any, request_id: Optional[str] = None
+    ) -> dict[str, Any]:
+        """Steer THIS request with exactly `steering` (FR-28.1.2 – FR-28.1.7, FR-28.1.10).
+
+        Validates before mutating; clamps every strength through `clamp_steering`; saves every
+        attached entry; then the target carries only these features and every OTHER entry is
+        disabled with `enable_steering(False)` — disabled, not suppressed, so their sensing and
+        monitoring keep recording (T-79, T-80). Never bumps the steering epoch: an inline apply is
+        not an authoritative writer, and bumping would make the request supersede its own restore.
+        """
+        from millm.core.steering_state import applied_set, count_clamped
+        from millm.services.sae_service import AttachedSAEState
+
+        state = AttachedSAEState()
+        target = self._validate_inline_steering(steering)
+        pairs = [(f.index, f.strength) for f in steering.features]
+        applied = applied_set(pairs)
+        clamped = count_clamped(pairs)
+        if clamped:
+            logger.warning(
+                "inline_steering_values_clamped",
+                request_id=request_id,
+                sae_id=target.sae_id,
+                indices=[i for i, s in pairs if abs(s) > 200.0][:20],
+            )
+        entries = state.entries()
+        saved = {
+            "kind": "inline",
+            "epoch": state.steering_epoch,
+            "request_id": request_id,
+            "layers": self._save_entries(entries),
+        }
+        try:
+            # set_steering_batch MERGES, so clear first: the request runs under EXACTLY this set.
+            target.sae.clear_steering()
+            target.sae.set_steering_batch(applied)
+            target.sae.enable_steering(True)
+            for entry in entries:
+                if entry is not target:
+                    entry.sae.enable_steering(False)  # T-79: unsteered for this request
+        except BaseException:
+            # A mutation raising part-way restores the saved shape before re-raising.
+            self._restore_request_profile(saved)
+            raise
+        self._note_steering_record(
+            "inline", sae_id=target.sae_id, layer=target.layer, applied=dict(applied),
+            clamped=clamped,
+        )
+        logger.info(
+            "request_inline_steering_applied",
+            request_id=request_id,
+            sae_id=target.sae_id,
+            layer=target.layer,
+            features=len(applied),
+            clamped=clamped,
+        )
+        return saved
+
+    def _apply_explicit_unsteered(
+        self, request_id: Optional[str] = None
+    ) -> Optional[dict[str, Any]]:
+        """`steering: {"features": []}`: steering off on EVERY attached entry for this request
+        (FR-28.2.2), whatever profile, circuit or manual steering is live. Disabled, not
+        suppressed (T-80). None when nothing is attached — there is nothing to turn off."""
+        from millm.services.sae_service import AttachedSAEState
+
+        state = AttachedSAEState()
+        entries = state.entries()
+        self._note_steering_record("unsteered")
+        if not entries:
+            return None
+        saved = {
+            "kind": "unsteered",
+            "epoch": state.steering_epoch,
+            "request_id": request_id,
+            "layers": self._save_entries(entries),
+        }
+        try:
+            for entry in entries:
+                entry.sae.enable_steering(False)
+        except BaseException:
+            self._restore_request_profile(saved)
+            raise
+        logger.info("request_unsteered_applied", request_id=request_id, entries=len(entries))
+        return saved
+
+    def _finish_request_steering(self, saved: Optional[dict[str, Any]]) -> Any:
+        """Capture what the hooks ran under, THEN restore (FTDD §6.3).
+
+        The only finish at a non-streaming generation site, so a site cannot restore without
+        capturing — after the restore the evidence is gone.
+        """
+        from millm.services.steering_report import SteeringSnapshot
+
+        snapshot = SteeringSnapshot.capture()
+        self._restore_request_profile(saved)
+        return snapshot
+
+    async def _describe_steering(
+        self,
+        snapshot: Any,
+        *,
+        record: Any = _MEMO_UNSET,
+        epoch_at_admission: Optional[int] = None,
+        engine: Optional[str] = None,
+        request_id: Optional[str] = None,
+    ) -> Any:
+        """Label `snapshot` and PUBLISH it as this request's report. Never raises."""
+        from millm.services.steering_report import SteeringReport, SteeringStateReader
+
+        if record is _MEMO_UNSET:
+            record = _REQUEST_STEERING.get()
+        try:
+            report = await SteeringStateReader(self).describe(
+                snapshot, record, epoch_at_admission=epoch_at_admission, engine=engine,
+                request_id=request_id,
+            )
+        except Exception as exc:  # noqa: BLE001 - describe already never raises; belt and braces
+            logger.warning("steering_report_unknown", request_id=request_id,
+                           reason="read_failed", error=str(exc))
+            report = SteeringReport.unknown("read_failed")
+        _STEERING_REPORT.set(report)
+        return report
+
+    async def _report_unrecorded_path(
+        self, entry_epoch: Optional[int], *, engine: str, request_id: Optional[str]
+    ) -> Any:
+        """The report for a path that applies no per-request steering (CBM, llama.cpp; FTDD
+        §2.3): an exit snapshot of global state, described with NO request record, `changed`
+        from the epoch read at entry — these paths read global state that can move mid-request."""
+        from millm.services.steering_report import SteeringSnapshot
+
+        return await self._describe_steering(
+            SteeringSnapshot.capture(), record=None, epoch_at_admission=entry_epoch,
+            engine=engine, request_id=request_id,
+        )
+
+    @staticmethod
+    def _publish_scoring_steering_report() -> None:
+        """Scoring is ALWAYS unsteered (X-09): every attached SAE is suppressed for its forward,
+        and the schema refuses every steering field. The report is the constant `none`."""
+        from millm.services.steering_report import NONE_REPORT
+
+        _STEERING_REPORT.set(NONE_REPORT)
+
+    def _steering_stream_chunk(
+        self, report: Any, completion_id: str, created: int, model_name: str
+    ) -> str:
+        """The terminal `millm_steering` chunk (FR-28.3.9): `choices: []`, the exact header
+        value, after the probe and activations chunks and before `[DONE]`. Always emitted."""
+        import json as _json
+
+        return "data: " + _json.dumps({
+            "id": completion_id, "object": "chat.completion.chunk", "created": created,
+            "model": model_name, "choices": [], "millm_steering": report.header,
+        }) + "\n\n"
 
     def _restore_request_profile(self, saved: Optional[dict]) -> None:
         """
@@ -2683,7 +3035,7 @@ class InferenceService:
                     "request_restore_skipped_superseded",
                     saved_epoch=saved_epoch,
                     current_epoch=current_epoch,
-                    path="circuit" if saved.get("circuit") else "profile",
+                    path=saved.get("kind") or ("circuit" if saved.get("circuit") else "profile"),
                     # FR-16.3: without this a skip cannot be correlated to the
                     # request that caused it in a concurrent log stream.
                     request_id=saved.get("request_id"),
@@ -2698,8 +3050,11 @@ class InferenceService:
             # Feature 14: a circuit dial saved EVERY participating layer.
             # Restoring only the first would leave the other layers dialled
             # for every subsequent request — a per-request override leaking
-            # into global state.
-            if saved.get("circuit"):
+            # into global state. Feature 28: inline and unsteered applies save the
+            # same per-layer shape, so the branch is on `layers`, not on `circuit` —
+            # keyed on `circuit` it sent them to the single-SAE branch below, which
+            # restores only the FIRST entry and leaves every other one disabled.
+            if saved.get("layers") is not None:
                 for entry_state in saved.get("layers", []):
                     # Each layer restores INDEPENDENTLY: without this, one
                     # failing layer aborted the loop and left the remaining
@@ -4020,13 +4375,11 @@ class InferenceService:
             # still leaves an event (FR-27.8c).
             _probe_ctx = self._probe_begin_detached(completion_id, "batched_request")
             _probe_verdicts = None
+            _steering_snapshot = None
             try:
-                _saved_steering = None
-                if request.profile or request.steering_intensity is not None:
-                    _saved_steering = await self._apply_request_steering(
-                        request.profile, request.steering_intensity,
-                        request_id=completion_id,
-                    )
+                _saved_steering = await self._dispatch_request_steering(
+                    request, request_id=completion_id
+                )
 
                 # Sensing is refused for a batch: hit positions are absolute within
                 # a row, and there is no way to attribute them back to a
@@ -4069,7 +4422,8 @@ class InferenceService:
                             total_prompt_tokens += row["prompt_tokens"]
                             total_completion_tokens += row["completion_tokens"]
                 finally:
-                    self._restore_request_profile(_saved_steering)
+                    # Feature 28: capture what the hooks ran under, then restore.
+                    _steering_snapshot = self._finish_request_steering(_saved_steering)
                 if constraint is not None:
                     note_request_outcome(constrained=constraint.header)
                 if gen_config.seed is not None:
@@ -4083,6 +4437,10 @@ class InferenceService:
                 await self._probe_record(
                     _probe_ctx, _probe_verdicts, full_ids=None, detached=True
                 )
+
+        # Feature 28: labelled AFTER the slot is released (the snapshot is a memory copy; the
+        # reader's database reads hold no slot), before the route reads it.
+        await self._describe_steering(_steering_snapshot, request_id=completion_id)
 
         model_info = self.get_loaded_model_info()
         model_name = model_info.name if model_info else "unknown"
@@ -4206,16 +4564,14 @@ class InferenceService:
         total_prompt_tokens = 0
         total_completion_tokens = 0
 
+        _steering_snapshot = None
         async with self._admit():
-            # Per-request profile override: applied inside the semaphore so that
-            # concurrent requests cannot race on the global steering state.
-            # The previous state is restored in the finally block below.
-            _saved_steering = None
-            if request.profile or request.steering_intensity is not None:
-                _saved_steering = await self._apply_request_steering(
-                    request.profile, request.steering_intensity,
-                    request_id=completion_id,
-                )
+            # Per-request steering (profile, dial, or Feature 28's inline set): applied inside the
+            # semaphore so concurrent requests cannot race on the global steering state. The
+            # previous state is restored in the finally block below.
+            _saved_steering = await self._dispatch_request_steering(
+                request, request_id=completion_id
+            )
 
             # Sensing boundary (Feature 11): n==1 only — with n>1 the
             # absolute-position accounting would concatenate independent
@@ -4340,14 +4696,17 @@ class InferenceService:
                 _millm = self._activations_finish(_activations, _sensing_full_ids)
             finally:
                 self._activations_close(_activations)
-                # Restore steering to its pre-request state regardless of success/failure.
-                self._restore_request_profile(_saved_steering)
+                # Capture what the hooks ran under (Feature 28), then restore steering to its
+                # pre-request state regardless of success/failure.
+                _steering_snapshot = self._finish_request_steering(_saved_steering)
                 # Flush sensing hits (post-generation, inside the semaphore
                 # so the boundary can't interleave with the next request)
                 await self._notify_sensing(_sensing_sae, _sensing_full_ids)
                 await self._notify_circuit_sensing(_circuit_sensing, _sensing_full_ids)
                 # `_probe_finish` ran before the response was built (below); this only persists.
                 await self._probe_record(_probe_ctx, _probe_verdicts, full_ids=_sensing_full_ids)
+
+        await self._describe_steering(_steering_snapshot, request_id=completion_id)
 
         model_info = self.get_loaded_model_info()
         model_name = model_info.name if model_info else "unknown"
@@ -4474,6 +4833,26 @@ class InferenceService:
             return _completion_as_chat(raw)
         return self._model.create_chat_completion(messages=messages, **params)
 
+    @staticmethod
+    def _refuse_llamacpp_steering(request: Any) -> None:
+        """Steering of any kind on llama.cpp: refused, never quietly unsteered (FR-28.1.9).
+
+        Shared by chat (both paths) and, since Feature 28 gave text completions the steering
+        fields, `_llamacpp_text_completion`. The request policy refuses these from a GGUF model
+        ROW before any load; this is the defence in depth for a direct caller (Feature 26).
+        """
+        if (getattr(request, "profile", None)
+                or getattr(request, "steering_intensity", None) is not None
+                or getattr(request, "steering", None) is not None):
+            raise EngineUnsupportedError(
+                "Steering requires forward hooks on a PyTorch module tree, which "
+                "the llama.cpp engine does not have. Load a transformers-served "
+                "model to steer.",
+                details={"param": "steering" if getattr(request, "steering", None) is not None
+                         else ("profile" if getattr(request, "profile", None)
+                               else "steering_intensity")},
+            )
+
     def _refuse_unsupported_llamacpp_request(
         self, request: ChatCompletionRequest
     ) -> None:
@@ -4493,12 +4872,7 @@ class InferenceService:
             raise EngineUnsupportedError(
                 "Batched conversations are not supported on the llama.cpp engine."
             )
-        if request.profile or request.steering_intensity is not None:
-            raise EngineUnsupportedError(
-                "Steering requires forward hooks on a PyTorch module tree, which "
-                "the llama.cpp engine does not have. Load a transformers-served "
-                "model to steer."
-            )
+        self._refuse_llamacpp_steering(request)
         # chat_template_kwargs is IGNORED here, not refused, and the difference
         # matters more than the principle it bends.
         #
@@ -4604,6 +4978,7 @@ class InferenceService:
         messages = self._llamacpp_messages(request)
 
         async with self._admit():
+            _entry_epoch = self._current_steering_epoch()
             # FR-27.8f: llama.cpp exposes no hook, so a probe cannot score here — and says so
             # rather than reaching generation silently. Arming refuses on this engine, so in
             # production nothing is armed and this is None; it lets the path guard hold on every
@@ -4621,6 +4996,9 @@ class InferenceService:
                 await self._probe_record(
                     _probe_ctx, _probe_verdicts, full_ids=None, detached=True
                 )
+            # Feature 28: entries are expected empty here (an SAE attaches to transformers only).
+            await self._report_unrecorded_path(_entry_epoch, engine="llamacpp",
+                                               request_id=completion_id)
 
         choice_raw = (raw.get("choices") or [{}])[0]
         text = (choice_raw.get("message") or {}).get("content") or ""
@@ -4717,6 +5095,7 @@ class InferenceService:
             stream = None
             token_count = 0
             finish_reason = "stop"
+            _entry_epoch = self._current_steering_epoch()
             # FR-27.8f, as in `_llamacpp_chat_completion`. Recorded in the `finally` below.
             _probe_ctx = self._probe_begin_detached(completion_id, "engine_unsupported")
             _probe_verdicts = None
@@ -4814,6 +5193,13 @@ class InferenceService:
                     _probe_verdicts, completion_id, created, model_name
                 ):
                     yield _probe_extra
+                # FR-28.3.9: the steering chunk on every streaming engine, last before [DONE].
+                _steering_report = await self._report_unrecorded_path(
+                    _entry_epoch, engine="llamacpp", request_id=completion_id
+                )
+                yield self._steering_stream_chunk(
+                    _steering_report, completion_id, created, model_name
+                )
                 yield "data: [DONE]\n\n"
 
             except Exception as e:  # noqa: BLE001
@@ -4894,7 +5280,10 @@ class InferenceService:
         def _complete(text: str) -> dict:
             return self._model.create_completion(prompt=text, **params)
 
+        # Feature 28 gave text completions the steering fields; refused here as on chat.
+        self._refuse_llamacpp_steering(request)
         async with self._admit():
+            _entry_epoch = self._current_steering_epoch()
             # FR-27.8f, as in `_llamacpp_chat_completion`.
             _probe_ctx = self._probe_begin_detached(completion_id, "engine_unsupported")
             _probe_verdicts = None
@@ -4920,6 +5309,8 @@ class InferenceService:
                 await self._probe_record(
                     _probe_ctx, _probe_verdicts, full_ids=None, detached=True
                 )
+            await self._report_unrecorded_path(_entry_epoch, engine="llamacpp",
+                                               request_id=completion_id)
 
         return TextCompletionResponse(
             id=completion_id,
@@ -5018,36 +5409,35 @@ class InferenceService:
                 yield _stream_error_event(refusal)
                 yield "data: [DONE]\n\n"
                 return
-            # Per-request profile override (same logic as non-streaming path)
+            # Per-request steering (same dispatcher as the non-streaming paths)
             _saved_steering = None
-            if request.profile or request.steering_intensity is not None:
-                try:
-                    _saved_steering = await self._apply_request_steering(
-                        request.profile, request.steering_intensity,
-                        request_id=completion_id,
-                    )
-                except MiLLMError as exc:
-                    # The 200 + headers are already committed (route-level
-                    # pre-checks catch the 404 case, but gate/index errors
-                    # and pre-check TOCTOUs land here) — emit an OpenAI-style
-                    # error event instead of aborting the stream (010 R3).
-                    logger.info(
-                        "stream_steering_error_event",
-                        code=exc.code,
-                        profile=request.profile,
-                    )
-                    import json as _sse_json
+            try:
+                _saved_steering = await self._dispatch_request_steering(
+                    request, request_id=completion_id
+                )
+            except MiLLMError as exc:
+                # The 200 + headers are already committed (route-level
+                # pre-checks catch the 404 case, but gate/index errors
+                # and pre-check TOCTOUs land here) — emit an OpenAI-style
+                # error event instead of aborting the stream (010 R3).
+                logger.info(
+                    "stream_steering_error_event",
+                    code=exc.code,
+                    profile=request.profile,
+                    inline=request.steering is not None,
+                )
+                import json as _sse_json
 
-                    error_event = _sse_json.dumps({
-                        "error": {
-                            "message": exc.message,
-                            "type": "invalid_request_error",
-                            "code": exc.code.lower(),
-                        }
-                    })
-                    yield f"data: {error_event}\n\n"
-                    yield "data: [DONE]\n\n"
-                    return
+                error_event = _sse_json.dumps({
+                    "error": {
+                        "message": exc.message,
+                        "type": "invalid_request_error",
+                        "code": exc.code.lower(),
+                    }
+                })
+                yield f"data: {error_event}\n\n"
+                yield "data: [DONE]\n\n"
+                return
 
             # Probe boundary (Feature 24) — serial streaming path
             _probe_ctx = self._probe_begin(completion_id)
@@ -5334,6 +5724,12 @@ class InferenceService:
                 # By the time a `finally` runs here the stream is already closed and there is
                 # nothing left to attach a verdict to. FTDD §8 names this precise hazard.
                 _probe_verdicts = self._probe_finish(_probe_ctx)
+                # Feature 28: the same hazard for the steering report — captured HERE, beside
+                # `_probe_finish`, while the request's steering is still applied. The restore in
+                # the `finally` below runs after the stream has closed, too late to report.
+                from millm.services.steering_report import SteeringSnapshot
+
+                _steering_snapshot = SteeringSnapshot.capture()
 
                 yield f"data: {final_chunk.model_dump_json(exclude_none=True)}\n\n"
                 async for _probe_extra in self._probe_stream_chunk(
@@ -5355,6 +5751,14 @@ class InferenceService:
                             "created": created, "model": model_name, "choices": [],
                             "millm": _millm.model_dump(),
                         }) + "\n\n"
+                # FR-28.3.9: the steering chunk, last before [DONE], ALWAYS — even for `none`.
+                # Described inside the slot: the stream cannot hand the report to the route.
+                _steering_report = await self._describe_steering(
+                    _steering_snapshot, request_id=completion_id
+                )
+                yield self._steering_stream_chunk(
+                    _steering_report, completion_id, created, model_name
+                )
                 yield "data: [DONE]\n\n"
 
             except Exception as e:
@@ -5525,8 +5929,16 @@ class InferenceService:
         total_prompt_tokens = 0
         total_completion_tokens = 0
 
+        _steering_snapshot = None
         async with self._admit():
             gen_config = GenerationConfig.from_request(request)
+
+            # Feature 28 (FR-28.4.2): a text completion applies `profile`, the dial or an inline
+            # set like chat does — ONCE, around every prompt of a multi-prompt request, so one
+            # request has one steering state and one header. Before this it never applied any.
+            _saved_steering = await self._dispatch_request_steering(
+                request, request_id=completion_id
+            )
 
             # Sensing boundary (011 R1: this endpoint was silently unsensed
             # while status said armed). Single-prompt only — multiple
@@ -5619,9 +6031,12 @@ class InferenceService:
                 _millm = self._activations_finish(_activations, _sensing_full_ids)
             finally:
                 self._activations_close(_activations)
+                _steering_snapshot = self._finish_request_steering(_saved_steering)
                 await self._notify_sensing(_sensing_ctx, _sensing_full_ids)
                 await self._notify_circuit_sensing(_circuit_sensing, _sensing_full_ids)
                 await self._probe_record(_probe_ctx, _probe_verdicts, full_ids=_sensing_full_ids)
+
+        await self._describe_steering(_steering_snapshot, request_id=completion_id)
 
         model_info = self.get_loaded_model_info()
         model_name = model_info.name if model_info else "unknown"
@@ -5671,6 +6086,8 @@ class InferenceService:
                 pack_size=1,
             )
             response = self._text_scoring_response(request, prompts, scored, _millm_out)
+        # X-09 (FR-28.3.1): scoring runs under `_unsteered`, so its report is the constant `none`.
+        self._publish_scoring_steering_report()
         return response
 
     def _text_scoring_response(
@@ -5762,6 +6179,8 @@ class InferenceService:
                 pack_size=1,
             )
             response = self._chat_scoring_response(request, scored, _millm_out)
+        # X-09 (FR-28.3.1): scoring runs under `_unsteered`, so its report is the constant `none`.
+        self._publish_scoring_steering_report()
         return response
 
     def _chat_scoring_texts(self, request: ChatCompletionRequest, conversations: list) -> list[str]:
@@ -6396,6 +6815,9 @@ class InferenceService:
         probe_ctx = self._probe_begin_detached(completion_id, "continuous_batching")
         probe_verdicts = None
         input_ids: list[int] = []
+        # Feature 28: the manager holds no slot and applies no per-request steering; it reads
+        # global state, which can move while it generates (`changed` from this epoch).
+        entry_epoch = self._current_steering_epoch()
         try:
             prompt = self._format_chat_messages(
                 request.messages, request.chat_template_kwargs
@@ -6423,6 +6845,8 @@ class InferenceService:
             model_name = model_info.name if model_info else "unknown"
             # Before the return: the chat route reads the verdicts straight afterwards.
             probe_verdicts = self._probe_finish(probe_ctx)
+            await self._report_unrecorded_path(entry_epoch, engine="cbm",
+                                               request_id=completion_id)
 
             return ChatCompletionResponse(
                 id=completion_id,
@@ -6467,6 +6891,7 @@ class InferenceService:
         probe_ctx = self._probe_begin_detached(completion_id, "continuous_batching")
         probe_verdicts = None
         input_ids: list[int] = []
+        entry_epoch = self._current_steering_epoch()
 
         try:
             model_info = self.get_loaded_model_info()
@@ -6580,6 +7005,11 @@ class InferenceService:
                 probe_verdicts, completion_id, created, model_name
             ):
                 yield extra
+            # FR-28.3.9: the steering chunk on every streaming engine, last before [DONE].
+            steering_report = await self._report_unrecorded_path(
+                entry_epoch, engine="cbm", request_id=completion_id
+            )
+            yield self._steering_stream_chunk(steering_report, completion_id, created, model_name)
             yield "data: [DONE]\n\n"
         finally:
             # In the `finally`, so a failed or abandoned stream still records (FR-27.8c).
@@ -6613,6 +7043,7 @@ class InferenceService:
         probe_ctx = self._probe_begin_detached(completion_id, "continuous_batching")
         probe_verdicts = None
         input_ids: list[int] = []
+        entry_epoch = self._current_steering_epoch()
         try:
             for i, prompt_text in enumerate(prompts):
                 input_ids = self._tokenizer.encode(
@@ -6655,6 +7086,8 @@ class InferenceService:
             model_name = model_info.name if model_info else "unknown"
             # Before the return: the completions route reads the verdicts straight afterwards.
             probe_verdicts = self._probe_finish(probe_ctx)
+            await self._report_unrecorded_path(entry_epoch, engine="cbm",
+                                               request_id=completion_id)
 
             return TextCompletionResponse(
                 id=completion_id,

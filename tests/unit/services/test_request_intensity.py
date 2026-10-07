@@ -405,6 +405,7 @@ class TestReviewRound1Fixes:
         request = MagicMock()
         request.profile = None
         request.steering_intensity = 0.0
+        request.steering = None  # Feature 28: a MagicMock attribute would read as an inline set
         request.messages = [MagicMock(role="user", content="hi")]
         request.temperature = None
         request.top_p = None
@@ -434,11 +435,11 @@ class TestReviewRound1Fixes:
         """R1: pin the actual call-site expression — a dial-only request must
         reach _use_cbm_for_request with has_steering_override=True."""
         assert service._has_steering_override(
-            MagicMock(profile=None, steering_intensity=1.5)) is True
+            MagicMock(profile=None, steering_intensity=1.5, steering=None)) is True
         assert service._has_steering_override(
-            MagicMock(profile="p", steering_intensity=None)) is True
+            MagicMock(profile="p", steering_intensity=None, steering=None)) is True
         assert service._has_steering_override(
-            MagicMock(profile=None, steering_intensity=None)) is False
+            MagicMock(profile=None, steering_intensity=None, steering=None)) is False
         assert service._has_steering_override(object()) is False  # no fields
 
         seen = {}

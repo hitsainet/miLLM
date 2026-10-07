@@ -199,20 +199,20 @@ executor calls `_embed_inputs`.
         negative control, and record both.
 
 - [ ] 8.0 Feature Acceptance
-  - [ ] 8.1 Verify each FPRD success criterion (§11, 1–7) and each user story's acceptance (US-1–US-5),
+  - [x] 8.1 **[unit half done; SC-1/SC-4/SC-7 hardware halves open — table in 0xcc/reviews/030_implementation_controls_2026-10-07.md]** Verify each FPRD success criterion (§11, 1–7) and each user story's acceptance (US-1–US-5),
         one by one, citing the test that proves it.
-  - [ ] 8.2 Hardware, on the node: a transformers model returns unit vectors for `pooling: last,
+  - [?] 8.2 **[needs hardware — operator session]** Hardware, on the node: a transformers model returns unit vectors for `pooling: last,
         normalize: true` (BRD-04 acceptance 13); an over-limit input is refused, naming its index;
         `dimensions` returns 400 before load (BRD-04 acceptance 2); a GGUF model refuses `pooling: last`
         without evicting the resident model; one real Open WebUI document upload still embeds.
-  - [ ] 8.3 **Cap measurement (T-93):** on the RTX 3090, p95 seconds per input at 512 tokens over 64
+  - [?] 8.3 **[needs hardware — operator session]** **Cap measurement (T-93):** on the RTX 3090, p95 seconds per input at 512 tokens over 64
         inputs for LFM2.5-1.2B-Instruct (bfloat16) and the largest transformers model served for
         embeddings; set `EMBEDDINGS_MAX_INPUTS` to the largest power of two with cap × p95 ≤ 30 s,
         within [64, 2048]; record the numbers in the review notes, the setting's comment and 6.4.
-  - [ ] 8.4 With a profile active and a circuit attached, embeddings equal those with no SAE attached
+  - [?] 8.4 **[needs hardware — operator session]** With a profile active and a circuit attached, embeddings equal those with no SAE attached
         (FPRD §11 criterion 4).
-  - [ ] 8.5 Run the full backend suite, `ruff` and `mypy`.
-  - [ ] 8.6 Record the mutation-control table (7.x) in the review notes. Report the Document Inventory
+  - [x] 8.5 **[4593 passed / 3 skipped / 0 failed; ruff and mypy run from a scratch venv (absent from ~/app/miLLM/venv): no new findings, mypy 616 → 616]** Run the full backend suite, `ruff` and `mypy`.
+  - [x] 8.6 Record the mutation-control table (7.x) in the review notes. Report the Document Inventory
         update to the coordinator; this task list does not edit `CLAUDE.md` or the PPRD.
 
 ## Implementation Notes (2026-10-07, branch `feat/030-embedding-options`)

@@ -45,7 +45,7 @@
 
 ## Tasks
 
-- [ ] 0.0 Gates and spikes (covers the FTDD §14 open items; no product question remains open — FPRD §14)
+- [x] 0.0 Gates and spikes (covers the FTDD §14 open items; no product question remains open — FPRD §14)
   - [x] 0.1 **Gate: Feature 25 contract.** Confirm 025 shipped `request_policy.evaluate(request, endpoint, engine, strict=...)`, the JSON-schema subset check and `_score_prompts` as its FTDD (§1, §5) specifies. Blocks 4.x and 6.1.
     - *Verified 2026-10-06 at `6cce090`:* `millm/api/request_policy.py` `evaluate(request, endpoint, engine, *, strict)` (keyword-only `strict`), `json_schema_subset.check(schema)`, and `InferenceService._score_prompts(texts, *, add_special_tokens, allowed, temperature, top_k, …)` all present. **Code wins:** the scorer takes ONE option set for all texts, not per-spec options; the packed path (6.x) therefore adds a per-spec function beside it rather than widening this signature.
   - [x] 0.2 **Gate: Feature 29 contract.** Confirm `ModelService` offers in-process `acquire_lease`, `renew_lease`, `release_lease`, `resolve_lease` and `get_lease`, the errors `ModelLeasedError`, `ModelNotResidentError`, `LeaseNotFoundError` and `LeaseExpiredError`, plus `RequestQueue.holding_count` and `register_backlog_provider`, as 029 FTDD §2 and §6 fix them; and that a restart ends every lease (029 FR-29.1.9). (Stage 3, 2026-10-06, requested by 029) Blocks 5.4.

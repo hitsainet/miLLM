@@ -1022,6 +1022,10 @@ class CircuitSensingService:
         # signal but measured the circuit's own members would be compared
         # against F11 rows as though it were the same quantity.
         ambient = self._ambient_fired_count()
+        from millm.services.batch.state import BATCH_ROW, origin_fields_for
+
+        batch_row = BATCH_ROW.get()
+        origin_fields = origin_fields_for(batch_row)
 
         rows: list[dict[str, Any]] = []
         for edge in edges:
@@ -1053,6 +1057,7 @@ class CircuitSensingService:
                     context_parts=parts,
                     summary=self.summarize(edge),
                     truncated=truncated,
+                    **origin_fields,
                 )
             )
 
@@ -1064,8 +1069,14 @@ class CircuitSensingService:
                 payloads = [r.to_dict(include_context=False) for r in saved]
                 await repo.prune(
                     circuit_id,
-                    cap=settings.CIRCUIT_SENSING_MAX_EVENTS_PER_CIRCUIT,
+                    # ⚠ Separate caps per origin (Feature 26, FTASKS 0.4).
+                    cap=(
+                        settings.CIRCUIT_SENSING_MAX_BATCH_EVENTS_PER_CIRCUIT
+                        if batch_row is not None
+                        else settings.CIRCUIT_SENSING_MAX_EVENTS_PER_CIRCUIT
+                    ),
                     max_age_days=settings.CIRCUIT_SENSING_MAX_AGE_DAYS,
+                    origin=origin_fields["origin"],
                 )
                 await session.commit()
         except Exception:
@@ -1073,7 +1084,9 @@ class CircuitSensingService:
             return []
 
         self.note_events_recorded(len(payloads))
-        self._emit(payloads)
+        if batch_row is None:
+            # Batch events stay off the live feed (FR-26.4.8's rule, applied by FTASKS 0.4).
+            self._emit(payloads)
         return payloads
 
     def _ambient_fired_count(self) -> Optional[int]:

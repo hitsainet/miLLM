@@ -73,6 +73,14 @@ BATCH_ROW: "contextvars.ContextVar[Optional[tuple[str, int]]]" = contextvars.Con
 )
 
 
+def origin_fields_for(batch_row: Optional[tuple[str, int]]) -> dict[str, Any]:
+    """`origin`/`batch_id`/`batch_line` for an event row: `live`, or the batch row it came from
+    (T-70 for probe events; FTASKS 0.4 extends it to sensing and circuit-edge sensing)."""
+    if batch_row is None:
+        return {"origin": "live", "batch_id": None, "batch_line": None}
+    return {"origin": "batch", "batch_id": batch_row[0], "batch_line": int(batch_row[1])}
+
+
 def utcnow() -> datetime:
     return datetime.now(timezone.utc)
 

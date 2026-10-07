@@ -154,6 +154,8 @@ class Settings(BaseSettings):
     SENSING_CONTEXT_TOKENS: int = 16          # +-K context window; hard max 64
     SENSING_MAX_EVENTS_PER_REQUEST: int = 20
     SENSING_MAX_EVENTS_PER_CLUSTER: int = 1000
+    #: Feature 26 (FTASKS 0.4): batch generation rows' sensing events, capped apart from live.
+    SENSING_MAX_BATCH_EVENTS_PER_CLUSTER: int = 50000
     SENSING_MAX_AGE_DAYS: int = 7
     SENSING_FORCE_SERIAL: bool = True         # armed sensing forces serial routing
     SENSING_DEDUP_HISTORY: bool = True        # report re-read chat history once, not per turn
@@ -170,6 +172,7 @@ class Settings(BaseSettings):
     CIRCUIT_SENSING_CONTEXT_TOKENS: int = 16
     CIRCUIT_SENSING_MAX_EVENTS_PER_REQUEST: int = 20
     CIRCUIT_SENSING_MAX_EVENTS_PER_CIRCUIT: int = 1000
+    CIRCUIT_SENSING_MAX_BATCH_EVENTS_PER_CIRCUIT: int = 50000
     CIRCUIT_SENSING_MAX_AGE_DAYS: int = 7
     CIRCUIT_SENSING_FORCE_SERIAL: bool = True
     CIRCUIT_SENSING_MAX_OVERHEAD_MS: float = 5.0

@@ -177,7 +177,26 @@ class ProbeEventRepository:
         await self.session.commit()
         return int(result.rowcount or 0)
 
-    async def prune_to_cap(self, probe_id: str, cap: int) -> int:
+    async def without_recorded_batch_events(
+        self, rows: list[dict[str, Any]]
+    ) -> list[dict[str, Any]]:
+        """Drop batch-event dicts whose (probe, batch, line, window) is already recorded (T-70)."""
+        keys = {(r["probe_id"], r["batch_id"], r["batch_line"], r["window"]) for r in rows}
+        if not keys:
+            return rows
+        batch_ids = {k[1] for k in keys}
+        existing = await self.session.execute(
+            select(
+                ProbeEvent.probe_id, ProbeEvent.batch_id, ProbeEvent.batch_line, ProbeEvent.window
+            ).where(ProbeEvent.batch_id.in_(batch_ids))
+        )
+        seen = {tuple(r) for r in existing.all()}
+        return [
+            r for r in rows
+            if (r["probe_id"], r["batch_id"], r["batch_line"], r["window"]) not in seen
+        ]
+
+    async def prune_to_cap(self, probe_id: str, cap: int, origin: str = "live") -> int:
         """Keep only the newest `cap` events for one probe.
 
         Selects the ids to keep and deletes the rest, rather than computing an offset and deleting
@@ -187,12 +206,15 @@ class ProbeEventRepository:
         """
         if cap <= 0:
             return 0
-        keep = select(ProbeEvent.id).where(ProbeEvent.probe_id == probe_id).order_by(
-            ProbeEvent.created_at.desc(), ProbeEvent.id.desc()
-        ).limit(cap)
+        # ⚠ BY ORIGIN (Feature 26, T-70): live and batch events have separate caps, and each cap
+        # counts and deletes only its own origin's rows — so a batch never evicts live history.
+        keep = select(ProbeEvent.id).where(
+            ProbeEvent.probe_id == probe_id, ProbeEvent.origin == origin
+        ).order_by(ProbeEvent.created_at.desc(), ProbeEvent.id.desc()).limit(cap)
         result = await self.session.execute(
             delete(ProbeEvent).where(
                 ProbeEvent.probe_id == probe_id,
+                ProbeEvent.origin == origin,
                 ProbeEvent.id.not_in(keep.scalar_subquery()),
             ),
             # Same reason as `prune_aged`: no Python-side evaluation of the criteria. This one
@@ -203,8 +225,10 @@ class ProbeEventRepository:
         await self.session.commit()
         return int(result.rowcount or 0)
 
-    async def prune(self, probe_id: str, *, cap: int, max_age_days: int) -> int:
+    async def prune(
+        self, probe_id: str, *, cap: int, max_age_days: int, origin: str = "live"
+    ) -> int:
         """Both retention rules, as one call. Returns the total number of rows removed."""
         removed = await self.prune_aged(max_age_days)
-        removed += await self.prune_to_cap(probe_id, cap)
+        removed += await self.prune_to_cap(probe_id, cap, origin)
         return removed

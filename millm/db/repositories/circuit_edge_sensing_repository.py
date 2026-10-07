@@ -91,7 +91,9 @@ class CircuitEdgeSensingRepository:
         )
         return int(result.rowcount or 0)
 
-    async def prune(self, circuit_id: str, cap: int, max_age_days: int) -> int:
+    async def prune(
+        self, circuit_id: str, cap: int, max_age_days: int, origin: str = "live"
+    ) -> int:
         """Enforce retention for one circuit: age window, then newest `cap`."""
         deleted = 0
 
@@ -106,7 +108,7 @@ class CircuitEdgeSensingRepository:
 
         keep_ids = (
             select(CircuitEdgeSensingEvent.id)
-            .where(CircuitEdgeSensingEvent.circuit_id == circuit_id)
+            .where(CircuitEdgeSensingEvent.circuit_id == circuit_id, CircuitEdgeSensingEvent.origin == origin)
             .order_by(
                 CircuitEdgeSensingEvent.created_at.desc(),
                 CircuitEdgeSensingEvent.id.desc(),
@@ -116,6 +118,7 @@ class CircuitEdgeSensingRepository:
         result = await self.session.execute(
             delete(CircuitEdgeSensingEvent)
             .where(CircuitEdgeSensingEvent.circuit_id == circuit_id)
+            .where(CircuitEdgeSensingEvent.origin == origin)
             .where(CircuitEdgeSensingEvent.id.not_in(keep_ids)),
             execution_options={"synchronize_session": False},
         )

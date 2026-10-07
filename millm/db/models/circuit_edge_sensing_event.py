@@ -16,7 +16,7 @@ only statement about causality, and it comes from miStudio — never from
 having watched the edge fire.
 """
 
-from typing import Any
+from typing import Any, Optional
 
 from sqlalchemy import (
     JSON,
@@ -89,6 +89,14 @@ class CircuitEdgeSensingEvent(Base):
     truncated: Mapped[bool] = mapped_column(
         Boolean, server_default="false", nullable=False
     )
+    #: Feature 26 (FTASKS 0.4): `live`, or `batch` for an event a batch generation row produced.
+    #: Capped apart from live traffic so a labelling run never evicts the live history.
+    origin: Mapped[str] = mapped_column(
+        String(8), nullable=False, default="live", server_default="live"
+    )
+    batch_id: Mapped[Optional[str]] = mapped_column(String(32), nullable=True)
+    batch_line: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+
     created_at: Mapped[Any] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=False
     )
@@ -97,6 +105,7 @@ class CircuitEdgeSensingEvent(Base):
         Index("idx_circuit_edge_events_circuit_created", "circuit_id", "created_at"),
         Index("idx_circuit_edge_events_request", "request_id"),
         Index("idx_circuit_edge_events_edge", "circuit_id", "edge_key"),
+        Index("idx_circuit_edge_events_circuit_origin_created", "circuit_id", "origin", "created_at"),
     )
 
     def to_dict(self, include_context: bool = True) -> dict[str, Any]:

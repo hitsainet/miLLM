@@ -264,6 +264,10 @@ class SensingService:
         # context window size and member count.
         config = config_snapshot or self._armed_config
         k = config.context_tokens if config else 0
+        from millm.services.batch.state import BATCH_ROW, origin_fields_for
+
+        batch_row = BATCH_ROW.get()
+        origin_fields = origin_fields_for(batch_row)
 
         rows: list[dict[str, Any]] = []
         for i, hit in enumerate(hits):
@@ -289,6 +293,7 @@ class SensingService:
                 # per-request cap actually cut (011 R1: stamping every row
                 # made the cut point unrecoverable).
                 "truncated": truncated and i == len(hits) - 1,
+                **origin_fields,
             })
 
         from millm.db.base import async_session_factory
@@ -299,14 +304,21 @@ class SensingService:
             persisted = await repo.create_many(rows)
             await repo.prune(
                 profile_id,
-                cap=settings.SENSING_MAX_EVENTS_PER_CLUSTER,
+                # ⚠ Separate caps per origin (Feature 26, FTASKS 0.4): a batch never evicts live.
+                cap=(
+                    settings.SENSING_MAX_BATCH_EVENTS_PER_CLUSTER if batch_row is not None
+                    else settings.SENSING_MAX_EVENTS_PER_CLUSTER
+                ),
                 max_age_days=settings.SENSING_MAX_AGE_DAYS,
+                origin=origin_fields["origin"],
             )
             payloads = [row.to_dict(include_context=True) for row in persisted]
             await session.commit()
 
         self._events_recorded += len(payloads)
-        self._emit_events(payloads)
+        if batch_row is None:
+            # Batch events stay off the live feed, as batch probe events do (FR-26.4.8).
+            self._emit_events(payloads)
         return payloads
 
     @staticmethod

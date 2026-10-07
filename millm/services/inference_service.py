@@ -3239,6 +3239,9 @@ class InferenceService:
                     # budget goes back to judging long answers.
                     n_passes=context.n_passes,
                     contexts=contexts or None,
+                    # Feature 26 (T-70): a batch row's events are marked, capped apart from live
+                    # traffic, deduplicated per (probe, line, window), and never emitted live.
+                    batch_row=BATCH_ROW.get(),
                 )
         except Exception as exc:
             logger.warning("probe_record_failed", error=str(exc))

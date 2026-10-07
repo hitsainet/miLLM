@@ -80,7 +80,7 @@ class SensingRepository:
         return int(result.rowcount or 0)
 
     async def prune(
-        self, profile_id: str, cap: int, max_age_days: int
+        self, profile_id: str, cap: int, max_age_days: int, origin: str = "live"
     ) -> int:
         """
         Enforce retention for one profile: drop rows older than the age
@@ -98,13 +98,14 @@ class SensingRepository:
         deleted += int(result.rowcount or 0)
 
         keep_ids = select(SensingEvent.id).where(
-            SensingEvent.profile_id == profile_id
+            SensingEvent.profile_id == profile_id, SensingEvent.origin == origin
         ).order_by(
             SensingEvent.created_at.desc(), SensingEvent.id.desc()
         ).limit(cap)
         result = await self.session.execute(
             delete(SensingEvent)
             .where(SensingEvent.profile_id == profile_id)
+            .where(SensingEvent.origin == origin)
             .where(SensingEvent.id.not_in(keep_ids)),
             execution_options={"synchronize_session": False},
         )

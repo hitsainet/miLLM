@@ -201,3 +201,18 @@ class TestSerialisation:
         assert d["down"] == {"layer": 13, "feature_idx": 2, "pos": 7, "act": 0.9}
         assert d["token_lag"] == 2
         assert d["edge_rung_language"] == "causally validated (edge)"
+
+
+async def test_feature_26_prune_counts_each_origin_against_its_own_cap(repo, circuit, test_session):
+    """FTASKS 0.4: a batch's edge events never evict live ones (and vice versa)."""
+    await repo.create_many([make_event(request_id=f"live{i}") for i in range(4)])
+    await repo.create_many([
+        make_event(request_id=f"b{i}", origin="batch", batch_id="bx", batch_line=i)
+        for i in range(9)
+    ])
+    await repo.prune("circ_sense01", cap=3, max_age_days=7, origin="batch")
+    await repo.prune("circ_sense01", cap=2, max_age_days=7, origin="live")
+    await test_session.flush()
+    rows = (await test_session.execute(select(CircuitEdgeSensingEvent))).scalars().all()
+    origins = sorted(r.origin for r in rows)
+    assert origins == ["batch"] * 3 + ["live"] * 2

@@ -6,7 +6,7 @@ one request where >= min_k members of the armed cluster fired together.
 """
 
 from datetime import datetime
-from typing import Any
+from typing import Any, Optional
 
 from sqlalchemy import (
     Boolean,
@@ -79,6 +79,14 @@ class SensingEvent(Base):
     truncated: Mapped[bool] = mapped_column(
         Boolean, server_default="false", nullable=False
     )
+    #: Feature 26 (FTASKS 0.4): `live`, or `batch` for an event a batch generation row produced.
+    #: Capped apart from live traffic so a labelling run never evicts the live history.
+    origin: Mapped[str] = mapped_column(
+        String(8), nullable=False, default="live", server_default="live"
+    )
+    batch_id: Mapped[Optional[str]] = mapped_column(String(32), nullable=True)
+    batch_line: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         server_default=func.now(),
@@ -88,6 +96,7 @@ class SensingEvent(Base):
     __table_args__ = (
         Index("idx_sensing_events_profile_created", "profile_id", "created_at"),
         Index("idx_sensing_events_request", "request_id"),
+        Index("idx_sensing_events_profile_origin_created", "profile_id", "origin", "created_at"),
     )
 
     def to_dict(self, include_context: bool = True) -> dict[str, Any]:

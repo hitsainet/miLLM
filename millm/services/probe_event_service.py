@@ -53,6 +53,7 @@ class ProbeEventService:
         overhead_ms: Optional[float] = None,
         n_passes: int = 0,
         contexts: Optional[dict[str, dict[str, Any]]] = None,
+        batch_row: Optional[tuple[str, int]] = None,
     ) -> int:
         """Write one event per verdict, prune, and emit. Never raises.
 
@@ -97,21 +98,43 @@ class ProbeEventService:
                     "context_text": extra.get("context_text"),
                     "context_token_ids": extra.get("context_token_ids"),
                     "summary": _summary(verdict),
+                    # Feature 26 (T-70, FR-26.4.8). `live` unless this verdict came from a batch row.
+                    "origin": "batch" if batch_row is not None else "live",
+                    "batch_id": batch_row[0] if batch_row is not None else None,
+                    "batch_line": int(batch_row[1]) if batch_row is not None else None,
                 }
             )
 
+        origin = "batch" if batch_row is not None else "live"
         try:
+            if batch_row is not None:
+                # A row re-run after a crash (its chunk was never recorded) must not record a
+                # second event for the same (probe, line, window); the partial unique index is the
+                # backstop, this is the skip.
+                rows = await self.events.without_recorded_batch_events(rows)
+                if not rows:
+                    return 0
             persisted = await self.events.create_many(rows)
             for probe_id in {row["probe_id"] for row in rows}:
                 await self.events.prune(
                     probe_id,
-                    cap=settings.PROBE_MAX_EVENTS_PER_PROBE,
+                    # ⚠ SEPARATE CAPS (mutation control M10): a batch must never evict the live
+                    # history, so each origin is pruned only against its own rows and its own cap.
+                    cap=(
+                        settings.PROBE_MAX_BATCH_EVENTS_PER_PROBE if origin == "batch"
+                        else settings.PROBE_MAX_EVENTS_PER_PROBE
+                    ),
                     max_age_days=settings.PROBE_MAX_AGE_DAYS,
+                    origin=origin,
                 )
         except Exception as exc:
             logger.warning("probe_event_persist_failed", extra={"error": str(exc)})
             return 0
 
+        if batch_row is not None:
+            # Batch events are NOT emitted on the live feed (FR-26.4.8): a labelling run would
+            # otherwise flood the operator's live probe view.
+            return len(rows)
         # ⚠ The PERSISTED rows, not the dicts above: only these carry `id` and `created_at`,
         # which the UI needs to key the list and to open the event detail.
         self._emit_events([event_summary(row) for row in persisted])

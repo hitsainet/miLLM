@@ -33,7 +33,7 @@ spec:
       initContainers:
         - name: fix-permissions
           image: busybox:latest
-          command: ["sh", "-c", "mkdir -p /data/model_cache /data/sae_cache /data/hf_cache && chown -R 1000:1000 /data"]
+          command: ["sh", "-c", "mkdir -p /data/model_cache /data/sae_cache /data/hf_cache /data/batch_files && chown -R 1000:1000 /data"]
           volumeMounts:
             - name: millm-data
               mountPath: /data
@@ -55,6 +55,9 @@ spec:
               value: "/data/model_cache"
             - name: SAE_CACHE_DIR
               value: "/data/sae_cache"
+            # Feature 26: batch file bytes on the data volume, so they survive a pod restart.
+            - name: BATCH_FILES_DIR
+              value: "/data/batch_files"
             - name: HF_HOME
               value: "/data/hf_cache"
             - name: CORS_ORIGINS

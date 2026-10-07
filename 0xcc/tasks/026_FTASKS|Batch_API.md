@@ -125,11 +125,11 @@
   - [x] 7.3 Tests: a batch of more than `PROBE_MAX_EVENTS_PER_PROBE` generation rows leaves every live event in place (M10); a re-run row records no second event; batch events never reach the socket; probe-score rows produce no `probe_events` (027 FR-27.4f) and run one input at a time.
     - → `tests/unit/services/test_probe_events_batch_origin.py` (7, real repository): live 3 / batch 4 under caps 3 / 4 after 7 batch rows; a re-run line records nothing; batch events never reach `_emit_events`; `_probe_record` hands `BATCH_ROW` to `record` (call + payload, both values). **Code wins:** dedupe is a pre-insert filter (`without_recorded_batch_events`) with the partial unique index as the backstop — an `ON CONFLICT` clause would differ per dialect.
 
-- [ ] 8.0 Configuration, contract and documentation (covers FR-26.8.1, FR-26.10.2)
-  - [ ] 8.1 `BATCH_*` and `PROBE_MAX_BATCH_EVENTS_PER_PROBE` in `millm/core/config.py` and `.env.example`; `BATCH_FILES_DIR` and the `mkdir -p` entry in `k8s/base/backend.yaml` (`:36`, `:55`); `batch_files` volume in `docker-compose.yml`. Boolean settings fail to their default.
-  - [ ] 8.2 `docs/mcp-contract.md`: section for files and batches routes — paths, payloads, statuses, limits, `completion_window` extension, `/lease` extension, media type `application/jsonl`, `millm` extension objects, packed-versus-single measurement (filled by 9.4). Add the batch routers to `tests/unit/test_mcp_tool_paths_are_real.py`'s served set.
-  - [ ] 8.3 Feature 29 health: `batch_backlog_rows` reads `backlog_rows()`; test that it is a number (not `null`) once this feature is live and counts pending rows.
-  - [ ] 8.4 `manual/docs/api/batches.md` (registered in the sidebar): the journey, limits, retention, packing and its measured difference, resume and lease behaviour, the waiting reasons.
+- [x] 8.0 Configuration, contract and documentation (covers FR-26.8.1, FR-26.10.2)
+  - [x] 8.1 `BATCH_*` and `PROBE_MAX_BATCH_EVENTS_PER_PROBE` in `millm/core/config.py` and `.env.example`; `BATCH_FILES_DIR` and the `mkdir -p` entry in `k8s/base/backend.yaml` (`:36`, `:55`); `batch_files` volume in `docker-compose.yml`. Boolean settings fail to their default.
+  - [x] 8.2 `docs/mcp-contract.md`: section for files and batches routes — paths, payloads, statuses, limits, `completion_window` extension, `/lease` extension, media type `application/jsonl`, `millm` extension objects, packed-versus-single measurement (filled by 9.4). Add the batch routers to `tests/unit/test_mcp_tool_paths_are_real.py`'s served set.
+  - [x] 8.3 Feature 29 health: `batch_backlog_rows` reads `backlog_rows()`; test that it is a number (not `null`) once this feature is live and counts pending rows.
+  - [x] 8.4 `manual/docs/api/batches.md` (registered in the sidebar): the journey, limits, retention, packing and its measured difference, resume and lease behaviour, the waiting reasons.
 
 - [ ] 9.0 Feature Acceptance (covers all FRs; BRD-04 acceptance 7, 8, 9)
   - [ ] 9.1 Walk FPRD FR-26.1 – FR-26.10 and §11 one by one; tick each against a passing test.

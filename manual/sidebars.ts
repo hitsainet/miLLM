@@ -62,6 +62,7 @@ const sidebars: SidebarsConfig = {
       items: [
         'api/overview',
         'api/openai-compatible',
+        'api/batches',
         'api/models',
         'api/saes',
         'api/monitoring',

@@ -139,6 +139,24 @@ SURFACES = {
             ("PUT", "/api/sensing/{profile_id}/config"),
         ],
     },
+    # v1.11 — Feature 26. The batch routes JOIN the served set now; miStudio's batch tools
+    # (034 phase 6) are built against §4f afterwards, so the module may not exist yet.
+    "millm_batches": {
+        "module": "millm_batches.py",
+        "routers": {
+            "millm/api/routes/openai/files.py": "/v1",
+            "millm/api/routes/openai/batches.py": "/v1",
+        },
+        "min_calls": 5,
+        "pins": [
+            ("POST", "/v1/files"),
+            ("GET", "/v1/files/{file_id}/content"),
+            ("POST", "/v1/batches"),
+            ("POST", "/v1/batches/{batch_id}/cancel"),
+            ("POST", "/v1/batches/{batch_id}/lease"),
+        ],
+        "pending": "miStudio 034 phase 6 builds the batch tools after this contract section",
+    },
 }
 
 SURFACE_IDS = sorted(SURFACES)
@@ -188,6 +206,10 @@ def _served_routes(surface: str) -> set[tuple[str, str]]:
 def _tool_calls(surface: str) -> set[tuple[str, str]]:
     """(METHOD, path) pairs one surface's MCP tools issue, params normalised."""
     module = TOOLS_DIR / SURFACES[surface]["module"]
+    if not module.exists() and SURFACES[surface].get("pending") and TOOLS_DIR.exists():
+        # A tool surface not built YET is not a missing checkout: skip with the reason even
+        # under MILLM_REQUIRE_CROSS_REPO_CHECKS, and let the served-routes pins below still run.
+        pytest.skip(f"{surface}: {SURFACES[surface]['pending']}")
     if not module.exists():
         _absent(
             f"miStudio checkout not found at {MISTUDIO} — the {surface} MCP "

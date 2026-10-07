@@ -1,6 +1,6 @@
 # miLLM ↔ Unified MCP Server Contract
 
-**Status:** Normative for miLLM Feature 9 (Unified MCP), Feature 15 (Circuit Edge Sensing / circuit MCP surface), Feature 19 (Concurrent Circuit Serving) and Feature 24 (Probe Monitor Runtime), the model-lease / backpressure surface of Feature 29, and the stateless probe scoring and per-request activations of Feature 27. **Version:** 1.10 (2026-10-06)
+**Status:** Normative for miLLM Feature 9 (Unified MCP), Feature 15 (Circuit Edge Sensing / circuit MCP surface), Feature 19 (Concurrent Circuit Serving) and Feature 24 (Probe Monitor Runtime), the model-lease / backpressure surface of Feature 29, the stateless probe scoring and per-request activations of Feature 27, and the Batch API of Feature 26. **Version:** 1.11 (2026-10-07)
 **Consumer:** the unified MCP server that ships in the miStudio repo
 (`backend/src/mcp_server/`), exposing `millm_runtime` / `millm_clusters` /
 `millm_sensing` / `millm_circuits` / `millm_probes` tool categories against a miLLM
@@ -12,6 +12,18 @@ This contract is **additive-only**: miLLM may add endpoints, response fields, an
 error codes; it must not rename or remove anything listed here, change field
 types, or change status-code semantics without a new contract version. The MCP
 server must tolerate unknown fields everywhere.
+
+**v1.11 (2026-10-07)** is a strict additive superset of v1.10: it adds the Batch API (§4f) —
+`/v1/files` and `/v1/batches` routes in OpenAI's shapes, the miLLM `POST /v1/batches/{id}/lease`
+extension, the `completion_window` hours extension, the `millm` extension objects on the batch
+object and on every output line, the `application/jsonl` results media type, the `batch:progress`
+Socket.IO event, and the codes `INVALID_BATCH_REQUEST`, `BATCH_FILE_LIMIT`, `FILE_NOT_FOUND`,
+`FILE_EXPIRED`, `FILE_DELETED`, `FILE_IN_USE`, `BATCH_NOT_FOUND`, `BATCH_STATE_CONFLICT`.
+`GET /api/health/detailed`'s `inference.batch_backlog_rows` now carries a number (it was always
+`null` before a batch API existed). **No tool is added here**: the batch tools are miStudio's
+(034 phase 6, `millm_upload_batch_file`, `millm_submit_batch`, `millm_batch_status`,
+`millm_cancel_batch`, `millm_batch_results`) to build against §4f. Nothing was renamed, removed or
+re-typed.
 
 **v1.10 (2026-10-06)** is a strict additive superset of v1.9: it adds `POST /api/probes/score`
 (stateless probe scoring, §4 `millm_probes`), the `INVALID_PROBE_SCORE_REQUEST` and
@@ -710,6 +722,64 @@ them, and FR-19 sends `X-miLLM-Load-Policy: refuse` on every scoring and generat
   envelope and code unchanged. A client passes it to the agent unchanged. A refusal inside a
   committed stream carries `retry_after` in its error event instead.
 
+### 4f. Batch API (v1.11 — Feature 26)
+
+A durable JSONL job: upload a file, create a batch, poll it, cancel it, download results. Every
+row runs through the same admission slot and the same service code as the synchronous endpoint;
+a batch NEVER loads, unloads or swaps a model. No authentication, like every miLLM route. Every
+route accepts `X-miLLM-Load-Policy` and `X-miLLM-Lease` and is not broken by them.
+
+| Endpoint | Body / headers | Success | Refusals |
+|---|---|---|---|
+| `POST /v1/files` | multipart: `file` (JSONL), `purpose: "batch"` | `200`, OpenAI file object `{id, object: "file", bytes, created_at, expires_at, filename, purpose, status, status_details}` | `400 invalid_batch_request` (`param: purpose` / `file`), `400 batch_file_limit` (names the limit and the MEASURED value; nothing stored) |
+| `GET /v1/files` | `?purpose&limit(1–10000, 100)&after&order(desc)` | `200`, `{object: "list", data, first_id, last_id, has_more}`, newest first | — |
+| `GET /v1/files/{id}` | — | `200`, file object (`status` `processed`, `deleted` or `expired`) | `404 file_not_found` |
+| `GET /v1/files/{id}/content` | — | `200`, the bytes, **`Content-Type: application/jsonl`** | `404 file_not_found`, `404 file_expired`, `404 file_deleted` |
+| `DELETE /v1/files/{id}` | — | `200`, `{id, object: "file", deleted: true}` | `404`, `409 file_in_use` (names the non-terminal batch) |
+| `POST /v1/batches` | `{input_file_id, endpoint, completion_window, metadata?, output_expires_after?: {anchor: "created_at", seconds}, pack?}`; optional `X-miLLM-Lease`, `X-miLLM-Strict` | `200`, batch object in `validating` | `404 file_not_found`; `400 invalid_batch_request` (`param` `endpoint`, `completion_window`, `output_expires_after.seconds`, `input_file_id`); `409 model_leased` (a live lease the request does not present); `400 unused_fields_refused` under strict |
+| `GET /v1/batches` | `?limit(1–100, 20)&after` | `200`, list, newest first | — |
+| `GET /v1/batches/{id}` | — | `200`, batch object, counts current to the last recorded chunk | `404 batch_not_found` |
+| `POST /v1/batches/{id}/cancel` | — | `200`, batch object in `cancelling` (idempotent while cancelling) | `404`, `409 batch_state_conflict` (names the status) |
+| `POST /v1/batches/{id}/lease` | header `X-miLLM-Lease` (required) | `200`, batch object, `millm.lease_mode: "caller"` | `400 invalid_lease_request`, `404 lease_not_found` (unknown, or a lease on another model), `409 batch_state_conflict` (terminal) |
+
+- **Endpoints** a batch may name: `/v1/chat/completions`, `/v1/completions`, `/v1/embeddings`,
+  `/api/probes/score` — accepted only while the route is served (derived from the live OpenAPI
+  document). A probe-score line's body has no `model`; its batch's model is the resident model.
+- **Input line:** `{custom_id (≤512, unique), method: "POST", url: <the batch endpoint>, body}`.
+  Every line is validated before any row runs, **strict whatever the headers said**; an invalid
+  line becomes an error-file line `{id, custom_id, line, response: null, error: {code, message}}`
+  and the batch's `errors.data` lists the first 100 as `{code, line, message, param}`.
+- **Statuses** (exactly OpenAI's): `validating → in_progress | failed | cancelling`;
+  `in_progress → finalizing | cancelling | expired | failed`; `finalizing → completed | failed`;
+  `cancelling → cancelled`. A file with no valid line, lines naming two models, a non-resident
+  model, or a foreign lease at the move to `in_progress` end `failed` with `errors` set.
+- **`completion_window`:** `"24h"`, or whole hours `"<N>h"` from 1 to 168 (miLLM extension;
+  `millm.completion_window_extension: true`). `expires_at = created_at + window`; unrun rows of an
+  expired batch are error lines `batch_expired`, of a cancelled one `batch_cancelled`.
+- **Limits:** 50,000 lines, 209,715,200 bytes per file (OpenAI's), 1 MiB per line.
+- **Retention:** every batch file expires 30 days after creation (outputs: `output_expires_after`,
+  3,600–2,592,000 s). Files a non-terminal batch references are never pruned.
+- **Batch object extension:** `millm: {pack, waiting_reason (queued | model_not_resident |
+  lease_unavailable | null), lease_mode (own | caller | null), completion_window_extension,
+  output_expires_after}`.
+- **Output line:** `{id, custom_id, response: {status_code, request_id, body, millm: {packed,
+  headers}}, error: null}`, in input-line order. `body` is what the synchronous endpoint returns;
+  `millm.headers` holds every `X-miLLM-*` value the synchronous route would set. A row failing on
+  its own merits is an error-file line carrying the synchronous status and body.
+- **Packing:** scoring rows (chat/text completions in scoring mode) run in right-padded packs
+  unless `pack: false` (default from `BATCH_PACK_DEFAULT`, true). Generation and probe-score rows
+  always run singly; embedding rows run singly until Feature 30. **Packed-versus-single
+  measurement on JEV-9B-decision (bfloat16): pending the hardware session (026 FTASKS 9.4)** —
+  until it is published here, use `pack: false` where scores must equal the synchronous endpoint
+  bit for bit.
+- **Leases:** a batch takes its own lease (`holder: "millm-batch:<id>"`), renews it and releases it
+  at any terminal status. A batch created with a valid `X-miLLM-Lease` — or handed one through
+  `/lease` — runs under the caller's lease, renews it and never releases it. A restart ends every
+  lease: a resumed batch re-acquires one or waits, running no row, until `expires_at`.
+- **Progress:** Socket.IO `batch:progress` `{id, status, request_counts}` on every transition and
+  after recorded chunks (throttled to one per second per batch). `GET /api/health/detailed`
+  `inference.batch_backlog_rows` = rows not yet run across active batches.
+
 ## 5. Error codes the MCP client must map
 
 `VALIDATION_ERROR` (422), `PROFILE_NOT_FOUND` (404), `MODEL_NOT_LOADED`
@@ -766,6 +836,12 @@ before its render is verified; `details.param` names the field) and `SAE_ACTIVAT
 `/v1` `sae_activations_refused` — `n > 1`, `extra_messages`, several prompts, an ambiguous SAE, a
 feature index past the SAE's width, `top_k` or the worst-case entry count over its cap). Per-input
 `MODEL_CHANGED` and `TOKENIZATION_FAILED` are data inside a 200, never a status.
+
+**v1.11 codes (Feature 26):** `INVALID_BATCH_REQUEST` (400 — `details.param` names the field),
+`BATCH_FILE_LIMIT` (400 — names the limit and the measured value), `FILE_NOT_FOUND` (404),
+`FILE_EXPIRED` (404 — content pruned by retention; the record remains), `FILE_DELETED` (404),
+`FILE_IN_USE` (409 — `details.batch_id`), `BATCH_NOT_FOUND` (404), `BATCH_STATE_CONFLICT` (409 —
+`details.status`). All are lowercased on `/v1` (e.g. `file_in_use`).
 
 ⚠ **`UNVALIDATED_PROBE` and `PROBE_MODEL_MISMATCH` must not be collapsed into one
 "arming failed".** They call for opposite actions — the first is resolved by asserting

@@ -18,6 +18,18 @@ from millm.ml.model_loader import LoadedModelState
 from tests.unit.f25_fixtures import clear_loaded, make_service, word_model, word_tokenizer
 
 
+
+def bounded(fn):
+    """A deadlocked slot must FAIL the test, not hang the suite: a mutation that leaves a waiter
+    asleep forever (M1 makes `_pending` never return to zero) otherwise never turns red."""
+    import functools
+
+    @functools.wraps(fn)
+    async def wrapper(*args, **kwargs):
+        return await asyncio.wait_for(fn(*args, **kwargs), timeout=10)
+
+    return wrapper
+
 @pytest.fixture
 def service():
     svc = make_service(word_model(), word_tokenizer())
@@ -26,6 +38,7 @@ def service():
     clear_loaded()
 
 
+@bounded
 async def test_a_nested_admit_in_the_owner_task_re_enters(service):
     queue = service.request_queue
     async with service._admit(background=True):
@@ -41,6 +54,7 @@ async def test_a_nested_admit_in_the_owner_task_re_enters(service):
     assert queue.occupied_count == 0
 
 
+@bounded
 async def test_re_entry_is_also_what_an_interactive_holder_gets(service):
     async with service._admit():
         async with asyncio.timeout(1.0):
@@ -48,6 +62,7 @@ async def test_re_entry_is_also_what_an_interactive_holder_gets(service):
                 assert service.request_queue.pending_count == 1
 
 
+@bounded
 async def test_a_child_task_created_inside_the_slot_queues(service):
     """M3's target: the child inherits `_SLOT_OWNER` but is a different task, so it must wait."""
     queue = service.request_queue
@@ -67,6 +82,7 @@ async def test_a_child_task_created_inside_the_slot_queues(service):
     assert entered.is_set()
 
 
+@bounded
 async def test_re_entry_still_refuses_while_the_model_unloads(service):
     state = LoadedModelState()
     async with service._admit(background=True):
@@ -79,6 +95,7 @@ async def test_re_entry_still_refuses_while_the_model_unloads(service):
             state.cancel_unload()
 
 
+@bounded
 async def test_the_owner_is_cleared_when_the_slot_is_released(service):
     from millm.services.inference_service import _SLOT_OWNER
 

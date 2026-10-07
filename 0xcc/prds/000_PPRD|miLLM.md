@@ -994,7 +994,11 @@ miLLM as a dependable backend for offline labelling, steered generation and dete
 #### Feature 26: Batch API
 **User Value:** A 50,000-row labelling run is one job with server-side progress, cancel and resume — not 50,000 requests that die with the pod.
 
-**Priority:** ❌ Planned (BRD-04, 2026-10-06). After Features 25 and 29 (RSK-09).
+**Priority:** ⏳ **IMPLEMENTED on `feat/026-batch-api` (2026-10-07), NOT MERGED, NOT ✅.** Tasks 0–8
+and the non-hardware half of Feature Acceptance shipped (`026_FTASKS`); acceptance 7–9 and the
+FR-26.5.8 packed-versus-single measurement wait for the hardware session. Record:
+`0xcc/reviews/026_implementation_controls_2026-10-06.md`. (Was: ❌ Planned, BRD-04, 2026-10-06;
+after Features 25 and 29, RSK-09.)
 
 **UI Tab:** none (OpenAI-shaped API; progress on Socket.IO)
 

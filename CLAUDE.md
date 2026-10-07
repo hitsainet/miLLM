@@ -1,6 +1,25 @@
 # Project: miLLM - Mechanistic Interpretability LLM Server
 
 ## Current Status
+- **⏳ FEATURE 26 BATCH API: TASKS 0–8 + NON-HARDWARE ACCEPTANCE SHIPPED ON `feat/026-batch-api`
+  (2026-10-07), NOT MERGED, NOT ✅.** OpenAI-shaped `/v1/files` and `/v1/batches` (+ the
+  `POST /v1/batches/{id}/lease` extension): a JSONL file becomes one durable job in PostgreSQL
+  (bytes on `BATCH_FILES_DIR`), validated line by line in strict mode before any row runs, run by
+  ONE `BatchRunner` task through `_admit(background=True)` — a new `RequestQueue.acquire_background`
+  that never counts as pending, never gets `QUEUE_FULL`, and always lets a waiting chat go first —
+  with `_admit` re-entrant only for the TASK holding the slot. Rows run through the synchronous
+  service code; recorded per chunk in one transaction guarded by `state='pending'` (exactly-once
+  across a crash, proved with a fresh runner + `reconcile_batches_on_startup`). Own lease
+  acquired/renewed/released in `finally`; a caller's lease renewed and never released; after a
+  restart the batch re-acquires or WAITS (`lease_unavailable`) running no row. Packed scoring
+  (right padding, per-row gather, OOM halving) by default; `pack:false` equals the synchronous
+  endpoint. Batch probe AND sensing events are marked `origin='batch'`, capped apart from live,
+  never emitted live (migrations 019, 020). Every `X-miLLM-*` header now comes from
+  `millm/api/provenance.py`, shared by the routes and the batch lines. MCP contract **v1.11** §4f
+  (no tools — miStudio 034 phase 6). **32 mutation controls, 3 not red first time (M1 hung, M2 and
+  X1 survived) — all closed and re-run red.** Record:
+  `0xcc/reviews/026_implementation_controls_2026-10-06.md`. **Open: 9.3–9.5 need the GPU node.**
+  ⚠ Feature 28 is not in the tree, so batch lines carry no steering-value header yet.
 - **⏳ FEATURE 27 PROBE SCORING AND PER-REQUEST ACTIVATIONS: TASKS 1–7 + NON-HARDWARE ACCEPTANCE
   SHIPPED ON `feat/027-probe-scoring` (2026-10-06), NOT MERGED, NOT ✅.** `POST /api/probes/score`
   scores stored inputs with any imported probe, armed or not, and persists nothing — built by
@@ -243,7 +262,7 @@ refactor(services): extract HuggingFace logic
 
 ### Project Level Documents
 - ⏳ 0xcc/prds/BRD-04-miLLM-Dataworks-Support.md (miLLM additions for miDataworks: chat scoring, structured output, seed, batch API, per-request SAE activations, stateless probe scoring, inline steering, embedding options, model lease, backpressure, GPU visibility, probe-path fixes; 47 requirements R-04.1–47; needed by miDataworks BRD-03 and miStudio BRD-MIS-DATAWORKS-001; 2026-10-06)
-- ⏳ PPRD v1.5 (Features 25–30, FR-25.x–FR-30.x, BRD-04 coverage 47/47) · PADR v1.5 (§1 "(v1.5)" rows, §10 Dataworks Support trade-offs) — ✅ feature chains 025–030 complete 2026-10-06 — FPRD v1.1 (operator decisions applied, FR IDs unchanged), FTDD, FTID, FTASKS each: 025 Chat_Scoring_Structured_Output_And_Seed (10/83, xgrammar measured), 026 Batch_API (10/63), 027 Probe_Scoring_And_Per_Request_Activations (9/66; ⏳ implemented 2026-10-06 on `feat/027-probe-scoring` through task 7 + non-hardware acceptance, hardware 0.1/0.2/8.5–8.9 open), 028 Inline_Steering_And_Steering_Header (9/58, hash test vectors TV-1..4), 029 Model_Lease_Backpressure_And_GPU_Visibility (12/71; ⏳ implemented 2026-10-06 through task 10, hardware 0.2/11.3–11.5 open), 030 Embedding_Options (9/44) — parent/sub-task counts; BRD-04 coverage 47/47 — Stage 3 consistency review 2026-10-06 (`0xcc/reviews/stage3_dataworks_consistency_2026-10-06.md`): PADR amendments applied (xgrammar, jsonschema, http-sfv dev-only; GGUF structured output refused; `_score_prompts` shared; lease debts; first-SAE profile debt), 026↔029 lease API names aligned, hash vectors TV-1..4 reproduced
+- ⏳ PPRD v1.5 (Features 25–30, FR-25.x–FR-30.x, BRD-04 coverage 47/47) · PADR v1.5 (§1 "(v1.5)" rows, §10 Dataworks Support trade-offs) — ✅ feature chains 025–030 complete 2026-10-06 — FPRD v1.1 (operator decisions applied, FR IDs unchanged), FTDD, FTID, FTASKS each: 025 Chat_Scoring_Structured_Output_And_Seed (10/83, xgrammar measured), 026 Batch_API (10/63; ⏳ implemented 2026-10-07 on `feat/026-batch-api` through task 8 + non-hardware acceptance, hardware 9.3–9.5 open), 027 Probe_Scoring_And_Per_Request_Activations (9/66; ⏳ implemented 2026-10-06 on `feat/027-probe-scoring` through task 7 + non-hardware acceptance, hardware 0.1/0.2/8.5–8.9 open), 028 Inline_Steering_And_Steering_Header (9/58, hash test vectors TV-1..4), 029 Model_Lease_Backpressure_And_GPU_Visibility (12/71; ⏳ implemented 2026-10-06 through task 10, hardware 0.2/11.3–11.5 open), 030 Embedding_Options (9/44) — parent/sub-task counts; BRD-04 coverage 47/47 — Stage 3 consistency review 2026-10-06 (`0xcc/reviews/stage3_dataworks_consistency_2026-10-06.md`): PADR amendments applied (xgrammar, jsonschema, http-sfv dev-only; GGUF structured output refused; `_score_prompts` shared; lease debts; first-SAE profile debt), 026↔029 lease API names aligned, hash vectors TV-1..4 reproduced
 - ⏳ 0xcc/prds/BRD-MILLM-PROBES-001.md (Probe Monitor Runtime; consumes miStudio's `mistudio.probe-definition/v1`; sibling BRD-MIS-PROBES-001; handed off 2026-09-25)
 - ⏳ PPRD v1.4 (Feature 24, FR-24.1–24.15) · PADR v1.4 (§1 probe rows, §10 Probe Monitor Runtime trade-offs)
 

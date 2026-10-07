@@ -90,7 +90,9 @@ class TestSelectingAModelLoadsIt:
     def test_chat_loads_a_model_that_is_not_resident(self):
         target = _model("gemma-4-12B-it", 33)
 
-        async def _load(mid):
+        async def _load(mid, lease_id=None):
+            # `lease_id` since Feature 29 (the holder's lease lifts a lease refusal); the stub
+            # predating it raised TypeError on every call (fixed in 026).
             assert mid == 33
             state["loaded"] = "gemma-4-12B-it"
 

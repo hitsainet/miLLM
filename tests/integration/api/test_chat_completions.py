@@ -222,12 +222,13 @@ class TestChatCompletionsWithValidParams:
             json={
                 "model": "gpt-4",
                 "messages": [{"role": "user", "content": "Hello"}],
-                "logprobs": True,  # Not supported
-                "n": 5,  # Not supported
                 "unknown_field": "value",
             },
         )
-        # Should be 503 (no model) not 422 (validation)
+        # An unknown field is REPORTED (Feature 25), never a validation error: the request goes
+        # on to the model lookup, which 404s ("gpt-4" is not downloaded). The old body also sent
+        # `logprobs: true` with `n: 5`, which Feature 25 made a 400 (scoring needs n=1) — so this
+        # test had failed since 025 for a reason unrelated to what it checks (fixed in 026).
         assert response.status_code == 404
 
 

@@ -1590,14 +1590,19 @@ class TestR3TheRungHeaderIsRetractedWhenTheApplyFails:
 
         from millm.api.routes.openai import chat
 
+        # Feature 26 moved the header construction into `millm.api.provenance.post_generation`
+        # (shared with batch lines); the ORDER is still the route's, and the apply check is
+        # provenance's.
+        from millm.api import provenance
+
         src = inspect.getsource(chat.create_chat_completion)
         gen = src.index("result = await inference.create_chat_completion")
-        hdr = src.index('response.headers["X-miLLM-Circuit-Rung"]')
+        hdr = src.index("post_generation(")
         assert gen < hdr, (
             "the rung header is still set before generation, so an apply "
             "failure inside generation cannot retract it"
         )
-        assert "not circuit_apply_failed()" in src, (
+        assert "not circuit_apply_failed()" in inspect.getsource(provenance.post_generation), (
             "the header is emitted without consulting the apply outcome"
         )
 

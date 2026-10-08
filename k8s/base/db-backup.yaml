@@ -180,8 +180,13 @@ spec:
                   # Payload, not just a count. `probe_events` is named deliberately: it is the
                   # table holding observations that CANNOT be reconstructed, which is the whole
                   # reason this job exists.
+                  # A here-string, NEVER `printf ... | grep -q`. `grep -q` exits at its first
+                  # match and bash writes the TOC line by line, so the writer meets a closed
+                  # pipe, dies of SIGPIPE (141), and `pipefail` turns a FOUND table into a
+                  # refusal that also deletes the dump. Found by miDataworks (84ba1c7), whose
+                  # nightly backup failed this way on 2026-10-08; this script had the same line.
                   for required in probes probe_events models; do
-                    printf '%s\n' "$toc" | grep -q "TABLE DATA public $required " || {
+                    grep -q "TABLE DATA public $required " <<<"$toc" || {
                       say "REFUSING: no TABLE DATA entry for '$required'"
                       rm -f "$partial"; exit 1
                     }

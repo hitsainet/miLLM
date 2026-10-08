@@ -338,6 +338,35 @@ def test_the_served_span_matches_the_shared_cases(case):
     assert got == case["expected_span"]
 
 
+@pytest.mark.parametrize("case", _CASES["cases"], ids=lambda c: c["name"])
+def test_the_scored_span_matches_the_shared_cases(case):
+    """What `/api/probes/score` scores — `ProbeInputPreparer.prepare`, which renders an
+    assistant-ended input WITHOUT the generation prompt and must place the span over THAT render
+    (defect 2, 2026-10-08: it placed it over a render WITH the prompt, so `last_user` never
+    resolved for such an input). The live-chat test above always renders with the prompt, so it
+    could not see this; the assistant-ended cases in the shared file exist for this test."""
+    from types import SimpleNamespace
+
+    from millm.services.probe_scoring import ProbeInputPreparer, template_renderer
+
+    tok = _case_tokenizer(case["prepend_bos"], case.get("template"), case)
+    item = SimpleNamespace(
+        kinds=lambda: ["messages"],
+        messages=[SimpleNamespace(role=m["role"], content=m["content"]) for m in case["messages"]],
+    )
+    try:
+        prepared = ProbeInputPreparer(tok, template_renderer(tok)).prepare(0, item)
+    except Exception:  # noqa: BLE001 - a template that refuses this conversation has no span
+        prepared = None
+    span = prepared.last_user_span if prepared is not None and prepared.error is None else None
+    got = tok.convert_ids_to_tokens(prepared.ids[span[0]: span[1]]) if span else None
+    assert got == case["expected_span"]
+
+
+def test_the_shared_cases_include_an_assistant_ended_conversation():
+    assert any(c["messages"][-1]["role"] == "assistant" for c in _CASES["cases"])
+
+
 def test_the_case_file_is_identical_in_mistudio():
     if not _STUDIO_CASES.exists():
         if _os.environ.get("MILLM_REQUIRE_CROSS_REPO_CHECKS") == "1":

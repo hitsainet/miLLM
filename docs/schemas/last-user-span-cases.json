@@ -203,6 +203,56 @@
         }
       ],
       "expected_span": null
+    },
+    {
+      "name": "assistant-ended: served WITHOUT the generation prompt, the span is still the newest user turn",
+      "prepend_bos": false,
+      "messages": [
+        {
+          "role": "user",
+          "content": "virus spreads fast"
+        },
+        {
+          "role": "assistant",
+          "content": "an answer"
+        }
+      ],
+      "expected_span": [
+        "<|user|>",
+        "virus",
+        "spreads",
+        "fast",
+        "<|end|>"
+      ]
+    },
+    {
+      "name": "assistant-ended multi-turn: the newest user turn, not the reply after it",
+      "prepend_bos": false,
+      "messages": [
+        {
+          "role": "user",
+          "content": "first question"
+        },
+        {
+          "role": "assistant",
+          "content": "an answer"
+        },
+        {
+          "role": "user",
+          "content": "virus spreads fast"
+        },
+        {
+          "role": "assistant",
+          "content": "an answer"
+        }
+      ],
+      "expected_span": [
+        "<|user|>",
+        "virus",
+        "spreads",
+        "fast",
+        "<|end|>"
+      ]
     }
   ]
 }

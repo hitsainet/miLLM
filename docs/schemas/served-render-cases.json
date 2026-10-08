@@ -1,0 +1,1023 @@
+{
+  "version": 1,
+  "about": "The probe SERVED-RENDER rule, pinned for BOTH repos (2026-10-08). miStudio's probe_monitor_render.served_render/render_messages renders every probe input it trains, calibrates and exports; miLLM's probe_scoring.served_render (with prompt_encoding.rendered_chat_ids) renders every input /api/probes/score and parity read. They are mirrored by hand, so each repo runs its OWN renderer over these cases and asserts the ids, the prompt/response boundary and the last_user span, and asserts this file is byte-identical to the other repo's copy. THE RULE: a conversation that does not end on an assistant turn (plain prose is one user turn; a tool turn counts) is rendered WITH the generation prompt and every position is prompt (prompt_tokens = len(ids)); an assistant-ended one is rendered WITHOUT it, and prompt_tokens is the length of the preceding turns rendered WITH it - only when those ids are a token prefix of the full render, null otherwise, never guessed; the ids carry exactly one BOS when the model uses one. last_user_span is [start, end) in the served ids, starting at the newest user message's own role header, or null. Truncation is NOT part of served_render in either repo: miStudio caps a row keeping the TAIL (render_messages max_length) and miLLM's parity recognises a vector that is exactly the tail of its re-render, so a case with max_length states truncated_ids = the last max_length served ids. A case carrying known_divergence.<repo> is one that repo is KNOWN not to meet; it runs there as a strict xfail (recorded, never pinned as correct), and every other repo asserts `expected`.",
+  "structural": {
+    "about": "Tokenizer-free: each repo builds a WordLevel tokenizer over `vocab` with a WhitespaceSplit pre-tokenizer, unk_token [UNK], bos_token <s> (absent when the case says bos_token null), and - when tokenizer_adds_bos - a TemplateProcessing post-processor single='<s> $A'. The chat template is templates[case.template]. These ALWAYS run. `tokens` are the expected ids as token strings.",
+    "vocab": [
+      "<s>",
+      "<|user|>",
+      "<|assistant|>",
+      "<|system|>",
+      "<|tool|>",
+      "<|bot|>",
+      "<|end|>",
+      "be",
+      "brief",
+      "a",
+      "b",
+      "x",
+      "y",
+      "first",
+      "question",
+      "an",
+      "answer",
+      "virus",
+      "spreads",
+      "fast",
+      "sunny",
+      "weather",
+      "[UNK]"
+    ],
+    "templates": {
+      "bos": "<s> {% for m in messages %}<|{{ m['role'] }}|> {{ m['content'] }} <|end|> {% endfor %}{% if add_generation_prompt %}<|assistant|> {% endif %}",
+      "no_bos": "{% for m in messages %}<|{{ m['role'] }}|> {{ m['content'] }} <|end|> {% endfor %}{% if add_generation_prompt %}<|assistant|> {% endif %}",
+      "prompt_is_not_the_reply_header": "<s> {% for m in messages %}{% if m['role'] == 'assistant' %}<|bot|> {% else %}<|{{ m['role'] }}|> {% endif %}{{ m['content'] }} <|end|> {% endfor %}{% if add_generation_prompt %}<|assistant|> {% endif %}"
+    },
+    "cases": [
+      {
+        "name": "prose as one user turn: generation prompt on, every position is prompt",
+        "template": "bos",
+        "tokenizer_adds_bos": false,
+        "messages": [
+          {
+            "role": "user",
+            "content": "virus spreads fast"
+          }
+        ],
+        "expected": {
+          "generation_prompt": true,
+          "prompt_tokens": 7,
+          "tokens": [
+            "<s>",
+            "<|user|>",
+            "virus",
+            "spreads",
+            "fast",
+            "<|end|>",
+            "<|assistant|>"
+          ],
+          "last_user_span": [
+            1,
+            6
+          ]
+        }
+      },
+      {
+        "name": "the tokenizer would add a BOS too: still exactly one",
+        "template": "bos",
+        "tokenizer_adds_bos": true,
+        "messages": [
+          {
+            "role": "user",
+            "content": "virus spreads fast"
+          }
+        ],
+        "expected": {
+          "generation_prompt": true,
+          "prompt_tokens": 7,
+          "tokens": [
+            "<s>",
+            "<|user|>",
+            "virus",
+            "spreads",
+            "fast",
+            "<|end|>",
+            "<|assistant|>"
+          ],
+          "last_user_span": [
+            1,
+            6
+          ]
+        }
+      },
+      {
+        "name": "system then user",
+        "template": "bos",
+        "tokenizer_adds_bos": false,
+        "messages": [
+          {
+            "role": "system",
+            "content": "be brief"
+          },
+          {
+            "role": "user",
+            "content": "virus spreads fast"
+          }
+        ],
+        "expected": {
+          "generation_prompt": true,
+          "prompt_tokens": 11,
+          "tokens": [
+            "<s>",
+            "<|system|>",
+            "be",
+            "brief",
+            "<|end|>",
+            "<|user|>",
+            "virus",
+            "spreads",
+            "fast",
+            "<|end|>",
+            "<|assistant|>"
+          ],
+          "last_user_span": [
+            5,
+            10
+          ]
+        }
+      },
+      {
+        "name": "multi-turn ending on user",
+        "template": "bos",
+        "tokenizer_adds_bos": false,
+        "messages": [
+          {
+            "role": "user",
+            "content": "first question"
+          },
+          {
+            "role": "assistant",
+            "content": "an answer"
+          },
+          {
+            "role": "user",
+            "content": "virus spreads fast"
+          }
+        ],
+        "expected": {
+          "generation_prompt": true,
+          "prompt_tokens": 15,
+          "tokens": [
+            "<s>",
+            "<|user|>",
+            "first",
+            "question",
+            "<|end|>",
+            "<|assistant|>",
+            "an",
+            "answer",
+            "<|end|>",
+            "<|user|>",
+            "virus",
+            "spreads",
+            "fast",
+            "<|end|>",
+            "<|assistant|>"
+          ],
+          "last_user_span": [
+            9,
+            14
+          ]
+        }
+      },
+      {
+        "name": "assistant-ended: no generation prompt, boundary at the preceding turns' served render",
+        "template": "bos",
+        "tokenizer_adds_bos": false,
+        "messages": [
+          {
+            "role": "user",
+            "content": "virus spreads fast"
+          },
+          {
+            "role": "assistant",
+            "content": "an answer"
+          }
+        ],
+        "expected": {
+          "generation_prompt": false,
+          "prompt_tokens": 7,
+          "tokens": [
+            "<s>",
+            "<|user|>",
+            "virus",
+            "spreads",
+            "fast",
+            "<|end|>",
+            "<|assistant|>",
+            "an",
+            "answer",
+            "<|end|>"
+          ],
+          "last_user_span": [
+            1,
+            6
+          ]
+        }
+      },
+      {
+        "name": "assistant-ended with a BOS-adding tokenizer: one BOS, boundary unchanged",
+        "template": "bos",
+        "tokenizer_adds_bos": true,
+        "messages": [
+          {
+            "role": "user",
+            "content": "virus spreads fast"
+          },
+          {
+            "role": "assistant",
+            "content": "an answer"
+          }
+        ],
+        "expected": {
+          "generation_prompt": false,
+          "prompt_tokens": 7,
+          "tokens": [
+            "<s>",
+            "<|user|>",
+            "virus",
+            "spreads",
+            "fast",
+            "<|end|>",
+            "<|assistant|>",
+            "an",
+            "answer",
+            "<|end|>"
+          ],
+          "last_user_span": [
+            1,
+            6
+          ]
+        }
+      },
+      {
+        "name": "assistant-ended where the generation prompt is not the reply's header: boundary null, never guessed",
+        "template": "prompt_is_not_the_reply_header",
+        "tokenizer_adds_bos": false,
+        "messages": [
+          {
+            "role": "user",
+            "content": "virus spreads fast"
+          },
+          {
+            "role": "assistant",
+            "content": "an answer"
+          }
+        ],
+        "expected": {
+          "generation_prompt": false,
+          "prompt_tokens": null,
+          "tokens": [
+            "<s>",
+            "<|user|>",
+            "virus",
+            "spreads",
+            "fast",
+            "<|end|>",
+            "<|bot|>",
+            "an",
+            "answer",
+            "<|end|>"
+          ],
+          "last_user_span": [
+            1,
+            6
+          ]
+        }
+      },
+      {
+        "name": "a lone assistant turn has no preceding turns: boundary null",
+        "template": "bos",
+        "tokenizer_adds_bos": false,
+        "messages": [
+          {
+            "role": "assistant",
+            "content": "an answer"
+          }
+        ],
+        "expected": {
+          "generation_prompt": false,
+          "prompt_tokens": null,
+          "tokens": [
+            "<s>",
+            "<|assistant|>",
+            "an",
+            "answer",
+            "<|end|>"
+          ],
+          "last_user_span": null
+        }
+      },
+      {
+        "name": "ending on a tool turn: generation prompt on",
+        "template": "bos",
+        "tokenizer_adds_bos": false,
+        "messages": [
+          {
+            "role": "user",
+            "content": "sunny weather"
+          },
+          {
+            "role": "assistant",
+            "content": "an answer"
+          },
+          {
+            "role": "tool",
+            "content": "sunny"
+          }
+        ],
+        "expected": {
+          "generation_prompt": true,
+          "prompt_tokens": 13,
+          "tokens": [
+            "<s>",
+            "<|user|>",
+            "sunny",
+            "weather",
+            "<|end|>",
+            "<|assistant|>",
+            "an",
+            "answer",
+            "<|end|>",
+            "<|tool|>",
+            "sunny",
+            "<|end|>",
+            "<|assistant|>"
+          ],
+          "last_user_span": [
+            1,
+            5
+          ]
+        }
+      },
+      {
+        "name": "template writes no BOS and the tokenizer adds one: exactly one, from the tokenizer",
+        "template": "no_bos",
+        "tokenizer_adds_bos": true,
+        "messages": [
+          {
+            "role": "user",
+            "content": "virus spreads fast"
+          }
+        ],
+        "known_divergence": {
+          "mistudio": "miStudio tokenizes every render with add_special_tokens=False, so on this form it trains on ZERO BOS while miLLM serves one (TinyLlama-Chat / Zephyr-style templates). `expected` is the rule, which miLLM meets. miStudio runs this case as a STRICT xfail - red the moment either side changes - until the operator decides between adopting the one-BOS rule (recording add_special_tokens per model) and refusing such models. Tracked: miStudio 0xcc/reviews/served_render_cases_2026-10-08.md."
+        },
+        "expected": {
+          "generation_prompt": true,
+          "prompt_tokens": 7,
+          "tokens": [
+            "<s>",
+            "<|user|>",
+            "virus",
+            "spreads",
+            "fast",
+            "<|end|>",
+            "<|assistant|>"
+          ],
+          "last_user_span": [
+            1,
+            6
+          ]
+        }
+      },
+      {
+        "name": "template writes no BOS and the tokenizer adds none: zero, nothing invented",
+        "template": "no_bos",
+        "tokenizer_adds_bos": false,
+        "bos_token": null,
+        "messages": [
+          {
+            "role": "user",
+            "content": "virus spreads fast"
+          }
+        ],
+        "expected": {
+          "generation_prompt": true,
+          "prompt_tokens": 6,
+          "tokens": [
+            "<|user|>",
+            "virus",
+            "spreads",
+            "fast",
+            "<|end|>",
+            "<|assistant|>"
+          ],
+          "last_user_span": [
+            0,
+            5
+          ]
+        }
+      }
+    ]
+  },
+  "real": {
+    "about": "A NAMED real tokenizer: Llama-3.1-8B-Instruct, identified by the sha256 of its chat template (not by name - a tokenizer that merely shares a name cannot stand in). Each repo looks for it in its own real-tokenizer path variable and the HuggingFace cache, and SKIPS LOUDLY when it is absent - never passes vacuously. The template's 'Today Date' defaults to 26 Jul 2024 when no date_string is passed, so these ids do not move with the clock.",
+    "tokenizer": {
+      "hf_id": "meta-llama/Llama-3.1-8B-Instruct",
+      "chat_template_sha256": "e10ca381b1ccc5cf9db52e371f3b6651576caee0a630b452e2816b2d404d4b65"
+    },
+    "cases": [
+      {
+        "name": "prose as one user turn",
+        "messages": [
+          {
+            "role": "user",
+            "content": "My brother lost his flat last week and I don't know how to help him."
+          }
+        ],
+        "expected": {
+          "generation_prompt": true,
+          "prompt_tokens": 52,
+          "ids": [
+            128000,
+            128006,
+            9125,
+            128007,
+            271,
+            38766,
+            1303,
+            33025,
+            2696,
+            25,
+            6790,
+            220,
+            2366,
+            18,
+            198,
+            15724,
+            2696,
+            25,
+            220,
+            1627,
+            10263,
+            220,
+            2366,
+            19,
+            271,
+            128009,
+            128006,
+            882,
+            128007,
+            271,
+            5159,
+            10868,
+            5675,
+            813,
+            10269,
+            1566,
+            2046,
+            323,
+            358,
+            1541,
+            956,
+            1440,
+            1268,
+            311,
+            1520,
+            1461,
+            13,
+            128009,
+            128006,
+            78191,
+            128007,
+            271
+          ],
+          "last_user_span": [
+            26,
+            48
+          ]
+        }
+      },
+      {
+        "name": "system then user",
+        "messages": [
+          {
+            "role": "system",
+            "content": "You are a concise assistant."
+          },
+          {
+            "role": "user",
+            "content": "What is the capital of France?"
+          }
+        ],
+        "expected": {
+          "generation_prompt": true,
+          "prompt_tokens": 48,
+          "ids": [
+            128000,
+            128006,
+            9125,
+            128007,
+            271,
+            38766,
+            1303,
+            33025,
+            2696,
+            25,
+            6790,
+            220,
+            2366,
+            18,
+            198,
+            15724,
+            2696,
+            25,
+            220,
+            1627,
+            10263,
+            220,
+            2366,
+            19,
+            271,
+            2675,
+            527,
+            264,
+            64694,
+            18328,
+            13,
+            128009,
+            128006,
+            882,
+            128007,
+            271,
+            3923,
+            374,
+            279,
+            6864,
+            315,
+            9822,
+            30,
+            128009,
+            128006,
+            78191,
+            128007,
+            271
+          ],
+          "last_user_span": [
+            32,
+            44
+          ]
+        }
+      },
+      {
+        "name": "multi-turn ending on user",
+        "messages": [
+          {
+            "role": "user",
+            "content": "Hi there."
+          },
+          {
+            "role": "assistant",
+            "content": "Hello! How can I help?"
+          },
+          {
+            "role": "user",
+            "content": "Tell me a short joke."
+          }
+        ],
+        "expected": {
+          "generation_prompt": true,
+          "prompt_tokens": 61,
+          "ids": [
+            128000,
+            128006,
+            9125,
+            128007,
+            271,
+            38766,
+            1303,
+            33025,
+            2696,
+            25,
+            6790,
+            220,
+            2366,
+            18,
+            198,
+            15724,
+            2696,
+            25,
+            220,
+            1627,
+            10263,
+            220,
+            2366,
+            19,
+            271,
+            128009,
+            128006,
+            882,
+            128007,
+            271,
+            13347,
+            1070,
+            13,
+            128009,
+            128006,
+            78191,
+            128007,
+            271,
+            9906,
+            0,
+            2650,
+            649,
+            358,
+            1520,
+            30,
+            128009,
+            128006,
+            882,
+            128007,
+            271,
+            41551,
+            757,
+            264,
+            2875,
+            22380,
+            13,
+            128009,
+            128006,
+            78191,
+            128007,
+            271
+          ],
+          "last_user_span": [
+            46,
+            57
+          ]
+        }
+      },
+      {
+        "name": "assistant-ended",
+        "messages": [
+          {
+            "role": "user",
+            "content": "What is the capital of France?"
+          },
+          {
+            "role": "assistant",
+            "content": "The capital of France is Paris."
+          }
+        ],
+        "expected": {
+          "generation_prompt": false,
+          "prompt_tokens": 42,
+          "ids": [
+            128000,
+            128006,
+            9125,
+            128007,
+            271,
+            38766,
+            1303,
+            33025,
+            2696,
+            25,
+            6790,
+            220,
+            2366,
+            18,
+            198,
+            15724,
+            2696,
+            25,
+            220,
+            1627,
+            10263,
+            220,
+            2366,
+            19,
+            271,
+            128009,
+            128006,
+            882,
+            128007,
+            271,
+            3923,
+            374,
+            279,
+            6864,
+            315,
+            9822,
+            30,
+            128009,
+            128006,
+            78191,
+            128007,
+            271,
+            791,
+            6864,
+            315,
+            9822,
+            374,
+            12366,
+            13,
+            128009
+          ],
+          "last_user_span": [
+            26,
+            38
+          ]
+        }
+      },
+      {
+        "name": "a lone assistant turn: boundary null",
+        "messages": [
+          {
+            "role": "assistant",
+            "content": "The capital of France is Paris."
+          }
+        ],
+        "expected": {
+          "generation_prompt": false,
+          "prompt_tokens": null,
+          "ids": [
+            128000,
+            128006,
+            9125,
+            128007,
+            271,
+            38766,
+            1303,
+            33025,
+            2696,
+            25,
+            6790,
+            220,
+            2366,
+            18,
+            198,
+            15724,
+            2696,
+            25,
+            220,
+            1627,
+            10263,
+            220,
+            2366,
+            19,
+            271,
+            128009,
+            128006,
+            78191,
+            128007,
+            271,
+            791,
+            6864,
+            315,
+            9822,
+            374,
+            12366,
+            13,
+            128009
+          ],
+          "last_user_span": null
+        }
+      },
+      {
+        "name": "ending on a tool turn",
+        "messages": [
+          {
+            "role": "user",
+            "content": "What is the weather in Paris?"
+          },
+          {
+            "role": "assistant",
+            "content": "Let me check."
+          },
+          {
+            "role": "tool",
+            "content": "sunny, 21C"
+          }
+        ],
+        "expected": {
+          "generation_prompt": true,
+          "prompt_tokens": 64,
+          "ids": [
+            128000,
+            128006,
+            9125,
+            128007,
+            271,
+            38766,
+            1303,
+            33025,
+            2696,
+            25,
+            6790,
+            220,
+            2366,
+            18,
+            198,
+            15724,
+            2696,
+            25,
+            220,
+            1627,
+            10263,
+            220,
+            2366,
+            19,
+            271,
+            128009,
+            128006,
+            882,
+            128007,
+            271,
+            3923,
+            374,
+            279,
+            9282,
+            304,
+            12366,
+            30,
+            128009,
+            128006,
+            78191,
+            128007,
+            271,
+            10267,
+            757,
+            1817,
+            13,
+            128009,
+            128006,
+            23799,
+            4690,
+            128007,
+            271,
+            41887,
+            28397,
+            11,
+            220,
+            1691,
+            34,
+            1,
+            128009,
+            128006,
+            78191,
+            128007,
+            271
+          ],
+          "last_user_span": [
+            26,
+            38
+          ]
+        }
+      },
+      {
+        "name": "truncated keeping the tail",
+        "messages": [
+          {
+            "role": "user",
+            "content": "Please summarise this: the quick brown fox jumps over the lazy dog. the quick brown fox jumps over the lazy dog. the quick brown fox jumps over the lazy dog. the quick brown fox jumps over the lazy dog. the quick brown fox jumps over the lazy dog. the quick brown fox jumps over the lazy dog. "
+          }
+        ],
+        "max_length": 40,
+        "expected": {
+          "generation_prompt": true,
+          "prompt_tokens": 100,
+          "ids": [
+            128000,
+            128006,
+            9125,
+            128007,
+            271,
+            38766,
+            1303,
+            33025,
+            2696,
+            25,
+            6790,
+            220,
+            2366,
+            18,
+            198,
+            15724,
+            2696,
+            25,
+            220,
+            1627,
+            10263,
+            220,
+            2366,
+            19,
+            271,
+            128009,
+            128006,
+            882,
+            128007,
+            271,
+            5618,
+            29385,
+            1082,
+            420,
+            25,
+            279,
+            4062,
+            14198,
+            39935,
+            35308,
+            927,
+            279,
+            16053,
+            5679,
+            13,
+            279,
+            4062,
+            14198,
+            39935,
+            35308,
+            927,
+            279,
+            16053,
+            5679,
+            13,
+            279,
+            4062,
+            14198,
+            39935,
+            35308,
+            927,
+            279,
+            16053,
+            5679,
+            13,
+            279,
+            4062,
+            14198,
+            39935,
+            35308,
+            927,
+            279,
+            16053,
+            5679,
+            13,
+            279,
+            4062,
+            14198,
+            39935,
+            35308,
+            927,
+            279,
+            16053,
+            5679,
+            13,
+            279,
+            4062,
+            14198,
+            39935,
+            35308,
+            927,
+            279,
+            16053,
+            5679,
+            13,
+            128009,
+            128006,
+            78191,
+            128007,
+            271
+          ],
+          "last_user_span": [
+            26,
+            96
+          ],
+          "truncated_ids": [
+            927,
+            279,
+            16053,
+            5679,
+            13,
+            279,
+            4062,
+            14198,
+            39935,
+            35308,
+            927,
+            279,
+            16053,
+            5679,
+            13,
+            279,
+            4062,
+            14198,
+            39935,
+            35308,
+            927,
+            279,
+            16053,
+            5679,
+            13,
+            279,
+            4062,
+            14198,
+            39935,
+            35308,
+            927,
+            279,
+            16053,
+            5679,
+            13,
+            128009,
+            128006,
+            78191,
+            128007,
+            271
+          ]
+        }
+      }
+    ]
+  }
+}

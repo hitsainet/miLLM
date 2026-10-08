@@ -220,7 +220,13 @@ class ProbeInputPreparer:
                 error={"code": TOKENIZATION_FAILED, "message": f"rendering failed: {exc}"},
             )
         try:
-            span, reason = last_user_token_span(self.tokenizer, messages, served.ids, None)
+            # ⚠ OVER THE RENDER THAT MADE THE IDS. An assistant-ended input is served WITHOUT the
+            # generation prompt; its span was computed against a render WITH it until 2026-10-08,
+            # which could never match the ids, so `last_user` never resolved for such an input.
+            span, reason = last_user_token_span(
+                self.tokenizer, messages, served.ids, None,
+                generation_prompt=served.generation_prompt,
+            )
         except Exception:  # noqa: BLE001
             span, reason = None, "last_user_span_unresolved"
         return PreparedInput(

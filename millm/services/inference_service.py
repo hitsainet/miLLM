@@ -3452,6 +3452,9 @@ class InferenceService:
                 [{"role": m.role, "content": m.content} for m in messages],
                 ids,
                 template_kwargs,
+                # A live chat is ALWAYS rendered with the generation prompt
+                # (`_format_chat_messages`), whatever its last role.
+                generation_prompt=True,
             )
             context.set_last_user_span(span, reason)
         except Exception as exc:  # a probe must never break generation

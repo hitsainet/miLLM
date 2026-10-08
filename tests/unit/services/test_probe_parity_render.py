@@ -253,7 +253,7 @@ def llama():
 
 class TestTheRealDefinitions:
     def test_high_stakes_reproduces_with_its_two_truncated_vectors_named(self, llama):
-        """`pm_f736aa73969d` (imported as `pr_f90227264893`): 16 vectors, seven assistant-ended,
+        """`pm_f736aa73969d` (imported as `pr_f90227264893`): 16 vectors, eight assistant-ended,
         two cut to the 1,024-token cap keeping the tail. Live parity reported 0 of 16."""
         d = DEFINITIONS["pm_f736aa73969d"]
         drift = _drift(_definition_from(d), llama)

@@ -69,7 +69,7 @@ def _served(tokenizer, messages, *, extra_bos=False):
 class TestTheSpan:
     def test_it_is_the_newest_user_turn_with_its_header_and_end(self, tokenizer):
         served = _served(tokenizer, CHAT)
-        span, reason = last_user_token_span(tokenizer, CHAT, served)
+        span, reason = last_user_token_span(tokenizer, CHAT, served, generation_prompt=True)
         assert reason is None
         assert tokenizer.convert_ids_to_tokens(served[span[0]: span[1]]) == [
             "<|user|>", "virus", "spreads", "fast", "<|end|>",
@@ -77,8 +77,8 @@ class TestTheSpan:
 
     def test_a_bos_the_tokenizer_prepended_shifts_it(self, tokenizer):
         """Serving may add a BOS the template render does not carry; positions must follow."""
-        plain, _ = last_user_token_span(tokenizer, CHAT, _served(tokenizer, CHAT))
-        shifted, _ = last_user_token_span(tokenizer, CHAT, _served(tokenizer, CHAT, extra_bos=True))
+        plain, _ = last_user_token_span(tokenizer, CHAT, _served(tokenizer, CHAT), generation_prompt=True)
+        shifted, _ = last_user_token_span(tokenizer, CHAT, _served(tokenizer, CHAT, extra_bos=True), generation_prompt=True)
         assert shifted == (plain[0] + 1, plain[1] + 1)
 
     def test_a_first_and_only_user_turn_starts_at_its_own_header(self, tokenizer):
@@ -86,21 +86,21 @@ class TestTheSpan:
         starts at the message's own role header, as miStudio calibrates it."""
         messages = [{"role": "user", "content": "virus spreads fast"}]
         served = _served(tokenizer, messages)
-        span, _ = last_user_token_span(tokenizer, messages, served)
+        span, _ = last_user_token_span(tokenizer, messages, served, generation_prompt=True)
         assert tokenizer.convert_ids_to_tokens(served[span[0]: span[1]]) == [
             "<|user|>", "virus", "spreads", "fast", "<|end|>",
         ]
 
     def test_no_user_turn_is_a_reason(self, tokenizer):
         messages = [{"role": "system", "content": "be brief"}]
-        assert last_user_token_span(tokenizer, messages, _served(tokenizer, messages)) == (None, NO_USER_TURN)
+        assert last_user_token_span(tokenizer, messages, _served(tokenizer, messages), generation_prompt=True) == (None, NO_USER_TURN)
 
     def test_ids_that_are_not_this_render_are_refused_not_guessed(self, tokenizer):
-        assert last_user_token_span(tokenizer, CHAT, [1, 2, 3]) == (None, SPAN_UNRESOLVED)
+        assert last_user_token_span(tokenizer, CHAT, [1, 2, 3], generation_prompt=True) == (None, SPAN_UNRESOLVED)
 
     def test_no_chat_template_is_a_reason(self, tokenizer):
         bare = PreTrainedTokenizerFast(tokenizer_object=tokenizer.backend_tokenizer, unk_token="[UNK]")
-        assert last_user_token_span(bare, CHAT, [0]) == (None, NO_CHAT_TEMPLATE)
+        assert last_user_token_span(bare, CHAT, [0], generation_prompt=True) == (None, NO_CHAT_TEMPLATE)
 
 
 D = 4
@@ -293,7 +293,7 @@ class TestTheWindowBandsAreWiredEndToEnd:
         )
         text = fast.apply_chat_template(CHAT, tokenize=False, add_generation_prompt=True)
         served = fast(text, add_special_tokens=False)["input_ids"]
-        assert last_user_token_span(fast, CHAT, served) == (None, SPAN_UNRESOLVED)
+        assert last_user_token_span(fast, CHAT, served, generation_prompt=True) == (None, SPAN_UNRESOLVED)
 
 
 # ── Review round 1, H1/H2: the span is pinned by a case file BOTH repos test ──
@@ -333,7 +333,7 @@ def test_the_served_span_matches_the_shared_cases(case):
     tok = _case_tokenizer(case["prepend_bos"], case.get("template"), case)
     prompt = tok.apply_chat_template(case["messages"], tokenize=False, add_generation_prompt=True)
     served = tok(prompt)["input_ids"]
-    span, _reason = last_user_token_span(tok, case["messages"], served)
+    span, _reason = last_user_token_span(tok, case["messages"], served, generation_prompt=True)
     got = tok.convert_ids_to_tokens(served[span[0]: span[1]]) if span else None
     assert got == case["expected_span"]
 
@@ -395,13 +395,13 @@ class TestTheCachedPreambleCannotGoStale:
         tok = _case_tokenizer(False)
         messages = [{"role": "user", "content": "virus spreads fast"}]
         served = tok(tok.apply_chat_template(messages, tokenize=False, add_generation_prompt=True))["input_ids"]
-        good, _ = last_user_token_span(tok, messages, served)
+        good, _ = last_user_token_span(tok, messages, served, generation_prompt=True)
         prefix, start = probe_turns.first_user_header(tok)
         stale = list(prefix)
         stale[1] = tok.convert_tokens_to_ids("brief")
         [key] = [k for k in probe_turns._cache[tok] if k.startswith("first:")]
         probe_turns._cache[tok][key] = (stale, start)
-        span, reason = last_user_token_span(tok, messages, served)
+        span, reason = last_user_token_span(tok, messages, served, generation_prompt=True)
         assert (span, reason) == (good, None)
         assert probe_turns.first_user_header(tok) == (prefix, start)
 

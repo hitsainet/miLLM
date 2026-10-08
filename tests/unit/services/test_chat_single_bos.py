@@ -381,7 +381,7 @@ class TestWindowBoundaries:
         resolve — and land on the user turn — on whatever the live path now serves."""
         svc, _, tok, family, rec = served
         await svc.create_chat_completion(chat_request())
-        span, reason = last_user_token_span(tok, PLAIN, rec.first())
+        span, reason = last_user_token_span(tok, PLAIN, rec.first(), generation_prompt=True)
         assert reason is None
         assert tok.convert_ids_to_tokens(rec.first()[span[0]: span[1]]) == [
             "user", "w3", "w4", "w5",

@@ -166,8 +166,19 @@ def last_user_token_span(
     messages: Sequence[dict[str, Any]],
     served_ids: Sequence[int],
     template_kwargs: Optional[dict] = None,
+    *,
+    generation_prompt: bool,
 ) -> tuple[Optional[tuple[int, int]], Optional[str]]:
-    """`((start, end), None)` in served-id positions, or `(None, reason)`."""
+    """`((start, end), None)` in served-id positions, or `(None, reason)`.
+
+    ⚠ `generation_prompt` IS THE RENDER THAT MADE `served_ids`, AND IT HAS NO DEFAULT (2026-10-08).
+    The span is placed by matching a render of the whole conversation against the served ids, so
+    that render must be the SAME one. A live chat is always rendered WITH the generation prompt
+    (`InferenceService._format_chat_messages`); `/api/probes/score` renders an assistant-ended
+    conversation WITHOUT it (`probe_scoring.served_render`). This used to hard-code True, so the
+    full render never matched an assistant-ended input's ids and `last_user` was unresolvable for
+    every such input. Required, because a default is how a caller silently gets the other render.
+    """
     roles = [str(m.get("role", "")) for m in messages]
     last = max((i for i, role in enumerate(roles) if role == "user"), default=None)
     if last is None:
@@ -188,7 +199,7 @@ def last_user_token_span(
     try:
         before = encode(plain[:last], False)
         through = encode(plain[: last + 1], False)
-        full = encode(plain, True)
+        full = encode(plain, generation_prompt)
     except Exception:  # a template may refuse a partial conversation
         return None, SPAN_UNRESOLVED
     # THE PREFIX PROPERTY, CHECKED — the same check miStudio makes before trusting a role mask.

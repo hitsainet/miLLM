@@ -315,6 +315,23 @@ class TestTextCompletion:
             clear_loaded()
 
 
+class TestContinuousBatchingText:
+    @pytest.mark.parametrize("special,bos", [(True, 1), (False, 0)])
+    async def test_cbm_text_honours_add_special_tokens(self, special, bos, monkeypatch):
+        """Review control M13 survived without this: the CBM text path had no test at all."""
+        tok = family_tokenizer("template_bos")
+        svc = make_service(word_model(), tok)
+        try:
+            captured = _route_to_fake_cbm(svc, monkeypatch)
+            await svc.create_text_completion(TextCompletionRequest(
+                model="tiny", prompt="w1 w2", max_tokens=2, temperature=1.0,
+                add_special_tokens=special))
+            assert len(captured) == 1, "the request did not reach continuous batching"
+            assert leading_bos(captured[0]) == bos
+        finally:
+            clear_loaded()
+
+
 # ── chat scoring ─────────────────────────────────────────────────────────────────
 
 

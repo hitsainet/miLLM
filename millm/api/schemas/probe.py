@@ -274,6 +274,11 @@ class ProbeDefinitionV1(_Contract):
     evidence: Evidence
     provenance: dict[str, Any] = Field(default_factory=dict)
     test_vectors: TestVectors
+    # How the producer rendered a conversation into token ids (miStudio, 2026-10-08):
+    # `{"generation_prompt": true, "add_special_tokens": false}` = the form miLLM serves.
+    # None = NOT RECORDED — the document predates the field, and for miStudio that means rendered
+    # WITHOUT the generation prompt. Never read as the served form.
+    render: dict[str, Any] | None = None
 
     @model_validator(mode="after")
     def _shapes_are_coherent(self) -> "ProbeDefinitionV1":

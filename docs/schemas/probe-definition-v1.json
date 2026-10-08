@@ -790,6 +790,26 @@
       "title": "ReadPoint",
       "type": "object"
     },
+    "RenderForm": {
+      "additionalProperties": false,
+      "description": "How the producer turned a conversation into the token ids it trained and scored on.\n\n\u26a0 ADDITIVE AND OPTIONAL (2026-10-08). miLLM scores a live chat with the model's GENERATION\nPROMPT after the last user turn; miStudio rendered without it until this date, so every probe\nbuilt before it was calibrated on a form it never sees live (measured on production: AUROC\n0.9558 served against 0.9420 without the prompt). Since then miStudio renders exactly as\nmiLLM serves:\n\n  * `generation_prompt: true` \u2014 a conversation that does not end on an assistant turn\n    (including plain prose, rendered as one user turn) carries the generation prompt, and\n    every position is prompt. An assistant-ended conversation is rendered WITHOUT it, its\n    prompt/response boundary at the render of the preceding turns WITH it.\n  * `add_special_tokens: false` \u2014 the template emits the BOS itself; the tokenizer adds none.\n\nThe block ABSENT means NOT RECORDED \u2014 the document predates the field, and for miStudio that\nmeans rendered WITHOUT the generation prompt. It must never be read as the served form. A\nconsumer may warn on an absent block; it may not treat it as recorded.",
+      "properties": {
+        "generation_prompt": {
+          "title": "Generation Prompt",
+          "type": "boolean"
+        },
+        "add_special_tokens": {
+          "default": false,
+          "title": "Add Special Tokens",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "generation_prompt"
+      ],
+      "title": "RenderForm",
+      "type": "object"
+    },
     "SaeReference": {
       "additionalProperties": false,
       "description": "Where the SAE lives and exactly how it normalises \u2014 required for `sae_features`.\n\n\u26a0 `normalization` IS NOT DECORATION. `encode_with_training_normalization` exists because\nencoding with a bare `encode()` reads the right weights in the wrong basis, produces\nplausible features and is invisible in the numbers. A consumer that cannot reproduce the\nnormalisation cannot reproduce the probe.",
@@ -1158,6 +1178,17 @@
         },
         "test_vectors": {
           "$ref": "#/$defs/TestVectors"
+        },
+        "render": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/RenderForm"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
         }
       },
       "required": [

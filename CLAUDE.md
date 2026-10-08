@@ -1,6 +1,13 @@
 # Project: miLLM - Mechanistic Interpretability LLM Server
 
 ## Current Status
+- **Dependabot sweep 2026-10-08 (`chore/dependabot-2026-10`).** All 31 alerts were npm and build-time
+  only. Lockfiles refreshed with `npm audit fix` (never `--force`). Three npm `overrides` cross a
+  parent's pinned major because no in-range release is patched, each verified by a BYTE-IDENTICAL
+  build before vs after: `postcss-selector-parser ^7.1.6` (admin-ui under tailwind 3; manual under
+  cssnano 6) and `tinypool ^2.1.2` (manual, under @docusaurus/core, which loads it only when
+  `future.faster.ssgWorkerThreads` is on — it is not). **Drop them when tailwind 4 / Docusaurus 4
+  land.** braces dismissed (no patched release, build tooling only).
 - **⏳ SERVED-RENDER SHARED CASES ON `feat/served-render-cases` (2026-10-08), NOT PUSHED.**
   `docs/schemas/served-render-cases.json` is byte-identical in miStudio and pins
   `probe_scoring.served_render` + `prompt_encoding.rendered_chat_ids` to miStudio's renderer

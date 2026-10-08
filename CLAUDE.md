@@ -1,6 +1,19 @@
 # Project: miLLM - Mechanistic Interpretability LLM Server
 
 ## Current Status
+- **⏳ PROBE SERVED-RENDER FOLLOW-UPS ON `fix/probe-render-followups` (2026-10-08), NOT PUSHED,
+  NOT DEPLOYED.** Two defects found while moving probes to miStudio's served render. (1) Parity's
+  informational `messages` round-trip re-rendered without the generation prompt, and on
+  transformers 5 it compared `list(BatchEncoding)`, which is its KEYS, so it reported 0 matched on
+  every definition. It now re-renders through `probe_scoring.served_render`, the one served-render
+  rule, which `/api/probes/score` also calls, whenever the definition's `render` block records the
+  served form. An absent block keeps the no-generation-prompt render and says so. Keep-tail
+  truncated vectors are listed in `truncated_vectors`. Real definitions: 14 matched with vectors
+  10 and 15 truncated, and 16 of 16. (2) `last_user_token_span` hard-coded a full render WITH the
+  generation prompt, so an assistant-ended scoring input never resolved `last_user`. It now
+  requires `generation_prompt=`: scoring passes the value it rendered with, and live passes True.
+  14 mutation controls, all red. Suite 5064 passed. Record:
+  `0xcc/reviews/probe_render_followups_2026-10-08.md`. **Open: the hardware check after deploy.**
 - **⏳ CHAT DOUBLE-BOS FIX ON `fix/chat-double-bos` (2026-10-08), NOT MERGED, NOT DEPLOYED.**
   Operator-approved. Every chat path tokenized the rendered template with the default
   `add_special_tokens=True`, so Llama 3 / gemma 2-3 / LFM2.5 chats began with TWO BOS tokens

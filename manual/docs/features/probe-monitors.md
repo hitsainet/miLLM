@@ -232,6 +232,10 @@ anything**:
   report. An armed probe on the same layer sees nothing either.
 - **Offline equals live.** The probe is built, run and decided by the same code live serving uses,
   on the same layer hook, unsteered (every attached SAE is suppressed for the scoring forward).
+- **Same ids as a live chat.** A `messages` input is tokenized exactly as live serving tokenizes a
+  chat — one BOS, never two. Before 2026-10-08 both carried a duplicate BOS on Llama 3, gemma and
+  LFM2.5, so scores from that period differ slightly from today's (see *How a chat becomes token
+  ids* in the OpenAI-compatible API page).
 - **One input at a time.** Each input takes its own place in the request queue, so a chat request
   waits at most one input's forward behind a scoring batch. Inputs are never packed together:
   bfloat16 results change with batch shape.

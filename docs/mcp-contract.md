@@ -13,6 +13,17 @@ error codes; it must not rename or remove anything listed here, change field
 types, or change status-code semantics without a new contract version. The MCP
 server must tolerate unknown fields everywhere.
 
+**Tokenization correction (2026-10-08, no version change — no field, type, route or status code
+moved).** A chat is tokenized ONCE, by one rule, on every path: the rendered chat template is
+encoded with no special tokens when it already begins with the tokenizer's BOS text, and with the
+tokenizer's default otherwise (`millm/services/prompt_encoding.py`). Before this, live chat on
+Llama 3, gemma and LFM2.5 carried a DUPLICATE BOS (`128000, 128000, …`), and so did the `token_ids`
+`POST /api/probes/score` returns for a `messages` input, which copy live serving. Consumers see:
+`usage.prompt_tokens` on those models is 1 lower; `return_token_ids` begins with one BOS; armed
+probes' live scores move to the single-BOS sequence miStudio calibrated them on. Raw-text
+`/v1/completions` keeps the request's `add_special_tokens` (default `true`) and now honours it for
+generation as well as scoring.
+
 **v1.11 (2026-10-07)** is a strict additive superset of v1.10: it adds the Batch API (§4f) —
 `/v1/files` and `/v1/batches` routes in OpenAI's shapes, the miLLM `POST /v1/batches/{id}/lease`
 extension, the `completion_window` hours extension, the `millm` extension objects on the batch
@@ -261,7 +272,8 @@ mismatch refuses the request with arming's own error; omitted, mismatched probes
 `skipped` with their code. A model change mid-request fails the remaining inputs with
 `MODEL_CHANGED` and keeps the earlier results. ⚠ `text` inputs are refused with
 `INVALID_PROBE_SCORE_REQUEST` until the one-user-turn render has reproduced a miStudio AUROC on
-hardware (T-49). Consumed by miStudio's 034 scoring tool; no tool is registered in this contract
+hardware (T-49). A `messages` input is tokenized exactly as a live chat request is — one BOS,
+never two (§1, tokenization correction 2026-10-08). Consumed by miStudio's 034 scoring tool; no tool is registered in this contract
 version. It is not a generation endpoint and carries no `X-miLLM-Steering` header.
 
 Also served, and deliberately **not** exposed as tools:

@@ -456,9 +456,29 @@ and are accepted everywhere.
 without `logprobs: true` is refused.
 
 The chat template is rendered with the generation prompt and scored through the same function
-`/v1/completions` uses, **without adding special tokens again** (a rendered template already has
-its BOS). So chat scoring of `messages` equals completion scoring of the rendered prompt with
-`add_special_tokens: false`. A model with no chat template is refused with `400
+`/v1/completions` uses, tokenized exactly as a generated chat is (see *How a chat becomes token
+ids* below). On a model whose template writes its own BOS (Llama 3, gemma, LFM2.5), chat scoring
+of `messages` equals completion scoring of the rendered prompt with `add_special_tokens: false`.
+
+### How a chat becomes token ids
+
+Every chat path — generation (streaming or not, `n > 1`, batched `extra_messages`, continuous
+batching), chat scoring, `POST /api/probes/score` and per-request activations — tokenizes the
+rendered template the same way, so each sees the same ids:
+
+- the render already **begins with the tokenizer's BOS** (Llama 3 `<|begin_of_text|>`, gemma
+  `<bos>`, LFM2.5 `<|startoftext|>`) → no special tokens are added: **one BOS**;
+- otherwise the tokenizer adds what it normally adds: one BOS for a model whose template writes
+  none but whose tokenizer adds it (TinyLlama-style), nothing for a model without one (Qwen2.5,
+  granite).
+
+:::note Changed 2026-10-08
+Before this, live chat on Llama 3, gemma and LFM2.5 began with **two** BOS tokens, because the
+tokenizer added one in front of the template's own. Prompt token counts on those models are now
+**1 lower**, and armed probes' live scores move toward the single-BOS form they were calibrated on
+in miStudio. Raw `/v1/completions` prompts keep `add_special_tokens` (default `true`), which
+generation now honours as scoring always did.
+::: A model with no chat template is refused with `400
 no_chat_template` — generation keeps its generic fallback; scoring would score a prompt the model
 was never trained on.
 

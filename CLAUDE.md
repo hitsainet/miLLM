@@ -1,6 +1,21 @@
 # Project: miLLM - Mechanistic Interpretability LLM Server
 
 ## Current Status
+- **⏳ CHAT DOUBLE-BOS FIX ON `fix/chat-double-bos` (2026-10-08), NOT MERGED, NOT DEPLOYED.**
+  Operator-approved. Every chat path tokenized the rendered template with the default
+  `add_special_tokens=True`, so Llama 3 / gemma 2-3 / LFM2.5 chats began with TWO BOS tokens
+  (`128000, 128000`); `/api/probes/score` copied it; chat scoring hard-coded `False` and so gave a
+  BOS-less-template model (TinyLlama-style) NONE. Now one rule in `millm/services/prompt_encoding.py`
+  (no special tokens when the render already starts with `bos_token`, the tokenizer's default
+  otherwise), routed through by all 14 serving/scoring/probe sites; raw `/v1/completions` honours
+  `add_special_tokens` for generation too (it was scoring-only); the llama.cpp continuation prompt
+  drops its leading BOS text when llama.cpp adds one. **Release effect: live chat prompt lengths on
+  Llama 3 / gemma / LFM2.5 drop by 1 token, and armed probes' live scores move toward the
+  single-BOS form miStudio calibrated them on.** Guard: `test_prompt_encoding_guard.py` (AST
+  discovery == allowlist, plus each path CALLS its helper); behaviour on four real-tokenizer
+  families in `test_chat_single_bos.py`. Four existing tests had PINNED the duplicate. 15 mutation
+  controls, 1 survived first time (M13, CBM text had no test; closed, re-run red). Record:
+  `0xcc/reviews/chat_double_bos_2026-10-08.md`. **Open: the hardware check after deploy.**
 - **⏳ FEATURE 26 BATCH API: TASKS 0–8 + NON-HARDWARE ACCEPTANCE SHIPPED ON `feat/026-batch-api`
   (2026-10-07), NOT MERGED, NOT ✅.** OpenAI-shaped `/v1/files` and `/v1/batches` (+ the
   `POST /v1/batches/{id}/lease` extension): a JSONL file becomes one durable job in PostgreSQL

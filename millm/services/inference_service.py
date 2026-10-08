@@ -88,6 +88,12 @@ from millm.ml.embedding_pooling import (
 )
 from millm.ml.generation_config import GenerationConfig
 from millm.ml.model_loader import LoadedModelState
+from millm.services.prompt_encoding import (
+    encode_prompt,
+    encode_rendered_chat,
+    encode_rendered_chats,
+    llamacpp_completion_prompt,
+)
 from millm.services.request_queue import RequestQueue
 
 if TYPE_CHECKING:
@@ -570,6 +576,9 @@ class ScoreSpec:
     allowed: Optional[list[int]]
     temperature: float
     top_k: int
+    #: A chat-template render: encoded under `prompt_encoding.encode_rendered_chat` (never a
+    #: duplicate BOS) and `add_special_tokens` is ignored. False: raw text, which honours it.
+    rendered_chat: bool = False
 
 
 @dataclass(frozen=True)
@@ -1611,17 +1620,18 @@ class InferenceService:
 
     def count_prompt_tokens(self, request: Any, *, chat: bool) -> int:
         """The request's prompt length, tokenized as the path that will serve it does — for the
-        pre-generation activation cap (FR-27.2f). Scoring renders without special tokens for chat
-        (a template carries its own BOS) and honours `add_special_tokens` for text."""
-        scoring = bool(getattr(request, "wants_scores", lambda: False)())
+        pre-generation activation cap (FR-27.2f). A chat is a template render, encoded under the
+        one rule every chat path uses (`prompt_encoding.encode_rendered_chat`: never a duplicate
+        BOS), generating or scoring; text honours the request's `add_special_tokens`."""
         if chat:
             text = self._format_chat_messages(request.messages, request.chat_template_kwargs)
-            special = not scoring
-        else:
-            prompt = request.prompt
-            text = prompt[0] if isinstance(prompt, list) else prompt
-            special = bool(getattr(request, "add_special_tokens", True)) if scoring else True
-        return len(self._tokenizer(text, add_special_tokens=special)["input_ids"])
+            return len(encode_rendered_chat(self._tokenizer, text)["input_ids"])
+        prompt = request.prompt
+        text = prompt[0] if isinstance(prompt, list) else prompt
+        special = bool(getattr(request, "add_special_tokens", True))
+        return len(encode_prompt(
+            self._tokenizer, text, rendered_chat=False, add_special_tokens=special
+        )["input_ids"])
 
     def _activations_begin(self, request: Any, n_prompt: int, read_point: Optional[str] = None):
         """Open this request's activation capture, if it asked for one. Never raises.
@@ -3992,7 +4002,7 @@ class InferenceService:
         if not self._model_state.is_loaded or self._engine_is_llamacpp():
             return
         prompt = self._format_chat_messages(request.messages, request.chat_template_kwargs)
-        inputs = self._tokenizer(prompt, return_tensors="pt")
+        inputs = encode_rendered_chat(self._tokenizer, prompt, return_tensors="pt")
         self._check_context_length(
             int(inputs["input_ids"].shape[1]),
             GenerationConfig.from_request(request).max_new_tokens,
@@ -4090,7 +4100,8 @@ class InferenceService:
         # Passed per-call, never by assigning self._tokenizer.padding_side: that
         # object is shared with the streaming path, embeddings, chat formatting
         # and stop_strings, and a global mutation here would reach all of them.
-        inputs = self._tokenizer(
+        inputs = encode_rendered_chats(
+            self._tokenizer,
             prompts,
             return_tensors="pt",
             padding=True,
@@ -4273,7 +4284,9 @@ class InferenceService:
                 from millm.ml.gpu_placement import layer_share_by_index
 
                 shares = layer_share_by_index(self._model, gpu_indices)
-                longest = max(len(self._tokenizer.encode(p)) for p in prompts)
+                longest = max(
+                    len(encode_rendered_chat(self._tokenizer, p)["input_ids"]) for p in prompts
+                )
                 total_len = longest + max(int(max_new_tokens or 0), 0)
                 while rows > 1:
                     projected = self._project_kv_bytes(rows, total_len)
@@ -4601,7 +4614,9 @@ class InferenceService:
 
             try:
                 # Tokenize input
-                inputs = self._tokenizer(prompt, return_tensors="pt").to(self._get_input_device())
+                inputs = encode_rendered_chat(
+                    self._tokenizer, prompt, return_tensors="pt"
+                ).to(self._get_input_device())
                 prompt_tokens = inputs.input_ids.shape[1]
                 self._probe_note_prompt_length(_probe_ctx, prompt_tokens)
                 self._probe_note_last_user_span(
@@ -4802,9 +4817,13 @@ class InferenceService:
             # installed — which is every developer machine here, though not CI.
             # A capability that can only be exercised in CI is one nobody can
             # iterate on.
-            return _render_chat_template(
-                template, list(messages[:-1]), bos=bos, eos=eos
-            ) + partial
+            # `create_completion` adds the vocabulary's BOS itself; a render that already begins
+            # with it would start with two (prompt_encoding.llamacpp_completion_prompt).
+            return llamacpp_completion_prompt(
+                model,
+                _render_chat_template(template, list(messages[:-1]), bos=bos, eos=eos) + partial,
+                bos,
+            )
         except Exception as exc:  # noqa: BLE001
             # Never let this break a request. A model whose template does not
             # render is served the ordinary way — it restarts, which is the old
@@ -5456,7 +5475,9 @@ class InferenceService:
             # leaks into the global steering state (review R1, top finding).
             try:
                 # Tokenize
-                inputs = self._tokenizer(prompt, return_tensors="pt").to(self._get_input_device())
+                inputs = encode_rendered_chat(
+                    self._tokenizer, prompt, return_tensors="pt"
+                ).to(self._get_input_device())
                 prompt_tokens = inputs["input_ids"].shape[1]
                 self._probe_note_prompt_length(_probe_ctx, prompt_tokens)
                 self._probe_note_last_user_span(
@@ -5958,9 +5979,12 @@ class InferenceService:
             try:
                 for i, prompt_text in enumerate(prompts):
                     # Tokenize input
-                    inputs = self._tokenizer(prompt_text, return_tensors="pt").to(
-                        self._get_input_device()
-                    )
+                    # Raw text, not a template render: the request's own `add_special_tokens`
+                    # (default True), as completion scoring already honoured it.
+                    inputs = encode_prompt(
+                        self._tokenizer, prompt_text, rendered_chat=False,
+                        add_special_tokens=request.add_special_tokens, return_tensors="pt",
+                    ).to(self._get_input_device())
                     prompt_tokens = inputs.input_ids.shape[1]
                     self._probe_note_prompt_length(_probe_ctx, prompt_tokens)
                     if _probe_ctx is not None:
@@ -6147,8 +6171,10 @@ class InferenceService:
     ) -> ChatCompletionResponse:
         """Chat scoring (FR-25.5 – FR-25.9): render each conversation's chat template with the
         generation prompt, then score it through `_score_prompts` — the scorer /v1/completions
-        uses — with `add_special_tokens=False`, because a rendered template already carries its
-        BOS (a double BOS would shift every score while looking plausible).
+        uses — encoded as a template render (`prompt_encoding.encode_rendered_chat`): no special
+        tokens when the render already begins with the BOS (a double BOS would shift every score
+        while looking plausible), the tokenizer's own BOS when the template writes none (before
+        2026-10-08 this passed False unconditionally, so such a model was scored with NO BOS).
 
         Unsteered and unrecorded like completion scoring (FR-25.7, X-09): no probe, sensing or
         circuit-sensing context is opened, no steering is applied (the table refuses steering
@@ -6169,7 +6195,7 @@ class InferenceService:
             texts = self._chat_scoring_texts(request, conversations)
             scored = await self._score_prompts(
                 texts,
-                add_special_tokens=False,
+                rendered_chat=True,
                 allowed=request.allowed_token_ids,
                 temperature=request.temperature,
                 top_k=top_n,
@@ -6260,7 +6286,8 @@ class InferenceService:
         self,
         texts: list[str],
         *,
-        add_special_tokens: bool,
+        add_special_tokens: bool = True,
+        rendered_chat: bool = False,
         allowed: Optional[list[int]],
         temperature: float,
         top_k: int,
@@ -6294,7 +6321,9 @@ class InferenceService:
 
         if pack_size > 1 and activations_request is None:
             specs = [
-                ScoreSpec(text, add_special_tokens, allowed, temperature, top_k) for text in texts
+                ScoreSpec(text, add_special_tokens, allowed, temperature, top_k,
+                          rendered_chat=rendered_chat)
+                for text in texts
             ]
             outcomes = await self._score_specs_packed(specs, max_rows=pack_size)
             for index, outcome in enumerate(outcomes):
@@ -6307,8 +6336,9 @@ class InferenceService:
         results: list[tuple[Any, int]] = []
         for index, text in enumerate(texts):
             try:
-                inputs = self._tokenizer(
-                    text, return_tensors="pt", add_special_tokens=add_special_tokens
+                inputs = encode_prompt(
+                    self._tokenizer, text, rendered_chat=rendered_chat,
+                    add_special_tokens=add_special_tokens, return_tensors="pt",
                 ).to(self._get_input_device())
                 prompt_tokens = int(inputs.input_ids.shape[1])
                 if prompt_tokens == 0:
@@ -6398,8 +6428,9 @@ class InferenceService:
         ready: list[tuple[int, list[int]]] = []
         for index, spec in enumerate(specs):
             try:
-                ids = list(self._tokenizer(
-                    spec.text, add_special_tokens=spec.add_special_tokens
+                ids = list(encode_prompt(
+                    self._tokenizer, spec.text, rendered_chat=spec.rendered_chat,
+                    add_special_tokens=spec.add_special_tokens,
                 )["input_ids"])
                 if not ids:
                     raise InvalidScoringRequestError(
@@ -6822,7 +6853,9 @@ class InferenceService:
             prompt = self._format_chat_messages(
                 request.messages, request.chat_template_kwargs
             )
-            input_ids = self._tokenizer.encode(prompt, return_tensors="pt")[0].tolist()
+            input_ids = encode_rendered_chat(
+                self._tokenizer, prompt, return_tensors="pt"
+            )["input_ids"][0].tolist()
             gen_config = GenerationConfig.from_request(request)
             # The serial path's check; this delegation had none (hardware acceptance,
             # 2026-09-14, item 7).
@@ -6900,7 +6933,9 @@ class InferenceService:
             prompt = self._format_chat_messages(
                 request.messages, request.chat_template_kwargs
             )
-            input_ids = self._tokenizer.encode(prompt, return_tensors="pt")[0].tolist()
+            input_ids = encode_rendered_chat(
+                self._tokenizer, prompt, return_tensors="pt"
+            )["input_ids"][0].tolist()
             self._probe_note_prompt_length(probe_ctx, len(input_ids))
             gen_config = GenerationConfig.from_request(request)
             try:
@@ -7046,9 +7081,10 @@ class InferenceService:
         entry_epoch = self._current_steering_epoch()
         try:
             for i, prompt_text in enumerate(prompts):
-                input_ids = self._tokenizer.encode(
-                    prompt_text, return_tensors="pt"
-                )[0].tolist()
+                input_ids = encode_prompt(
+                    self._tokenizer, prompt_text, rendered_chat=False,
+                    add_special_tokens=request.add_special_tokens, return_tensors="pt",
+                )["input_ids"][0].tolist()
                 prompt_tokens = len(input_ids)
                 self._check_context_length(prompt_tokens, gen_config.max_new_tokens)
 

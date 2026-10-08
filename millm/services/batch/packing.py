@@ -69,7 +69,7 @@ async def run_packed_scoring(executor: Any, rows: Sequence[Any]) -> Optional[lis
                 if chat:
                     text = inference._chat_scoring_texts(req, [req.messages])[0]
                     specs.append(ScoreSpec(text, False, req.allowed_token_ids, req.temperature,
-                                           req.top_logprobs or 0))
+                                           req.top_logprobs or 0, rendered_chat=True))
                 else:
                     text = req.prompt if isinstance(req.prompt, str) else req.prompt[0]
                     specs.append(ScoreSpec(text, req.add_special_tokens, req.allowed_token_ids,

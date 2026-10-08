@@ -312,7 +312,10 @@ class TestIsolation:
         for out, content in ((a, "w1"), (b, "w4 w5 w6 w7 w8")):
             rendered = tokenizer.apply_chat_template([{"role": "user", "content": content}],
                                                      tokenize=False, add_generation_prompt=True)
-            ids = tokenizer(rendered)["input_ids"]
+            # The template carries the BOS, so the tokenizer adds none (2026-10-08: this was
+            # `tokenizer(rendered)`, which pinned live serving's duplicate BOS).
+            ids = tokenizer(rendered, add_special_tokens=False)["input_ids"]
+            assert ids[0] == tokenizer.bos_token_id != ids[1]
             block = out.millm.sae_activations
             assert [p.position for p in block.positions] == list(range(len(ids)))
             assert [p.token_id for p in block.positions] == ids

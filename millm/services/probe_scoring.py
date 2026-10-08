@@ -134,8 +134,10 @@ class ProbeInputPreparer:
 
     `render(messages, generation_prompt)` must be live serving's renderer
     (`InferenceService._format_chat_messages` with the generation prompt on), and ids are produced
-    exactly as live serving produces them (`tokenizer(prompt)`), so a `messages` input scored here
-    is the sequence a live chat request would have read (FR-27.5).
+    exactly as live serving produces them (`prompt_encoding.encode_rendered_chat` — the SAME
+    function, never a copy), so a `messages` input scored here is the sequence a live chat request
+    would have read (FR-27.5). Before 2026-10-08 both used `tokenizer(prompt)`, which put a
+    duplicate BOS on every Llama 3 / gemma / LFM2.5 render; they were identical, and both wrong.
     """
 
     def __init__(self, tokenizer: Any, render: Callable[[list[dict[str, str]], bool], str]) -> None:
@@ -143,7 +145,9 @@ class ProbeInputPreparer:
         self.render = render
 
     def _encode(self, text: str) -> list[int]:
-        return list(self.tokenizer(text)["input_ids"])
+        from millm.services.prompt_encoding import rendered_chat_ids
+
+        return rendered_chat_ids(self.tokenizer, text)
 
     def prepare(self, index: int, item: Any) -> PreparedInput:
         from millm.services.probe_turns import last_user_token_span

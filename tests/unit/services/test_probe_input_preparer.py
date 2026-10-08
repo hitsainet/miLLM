@@ -21,8 +21,13 @@ def prep(item: dict, render=None):
 
 
 def encode(tok, messages, gp):
-    return list(tok(tok.apply_chat_template(messages, tokenize=False,
-                                            add_generation_prompt=gp))["input_ids"])
+    """The expected ids, written out: `word_tokenizer`'s template begins with `<s>`, so the
+    render is encoded WITHOUT the tokenizer's own BOS — one BOS, never two. Until 2026-10-08
+    this helper was `tok(render)`, which pinned the duplicate BOS live serving produced."""
+    ids = list(tok(tok.apply_chat_template(messages, tokenize=False, add_generation_prompt=gp),
+                   add_special_tokens=False)["input_ids"])
+    assert ids[0] == tok.bos_token_id and ids[1] != tok.bos_token_id
+    return ids
 
 
 class TestKinds:

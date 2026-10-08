@@ -1,12 +1,12 @@
 """Chat scoring (Feature 25, FR-25.5 – FR-25.9; SC-4 unit form, SC-5).
 
 `/v1/chat/completions` renders the chat template and scores through `_score_prompts` — THE scorer
-`/v1/completions` uses — with `add_special_tokens=False`. These tests run a TINY REAL Llama and
+`/v1/completions` uses — as a template render (`rendered_chat=True`: no duplicate BOS). These tests run a TINY REAL Llama and
 a real tokenizer whose chat template begins with BOS while its post-processor ALSO adds one, so a
 double BOS is a visible difference rather than a fixture that agrees by construction.
 
 MUTATION CONTROLS: M6 (`_unsteered` removed), M7 (scoring branch after the batched branch), M8
-(`add_special_tokens=False` -> True), M9 (`_score_chat_completion` stops calling `_score_prompts`).
+(`rendered_chat=True` -> False), M9 (`_score_chat_completion` stops calling `_score_prompts`).
 """
 
 from __future__ import annotations
@@ -108,7 +108,10 @@ class TestParityWithCompletionScoring:
         texts, kwargs = calls[0]
         assert texts == [svc._format_chat_messages(req.messages),
                          svc._format_chat_messages(req.extra_messages[0])]
-        assert kwargs["add_special_tokens"] is False
+        # A template render (2026-10-08): `encode_rendered_chat` decides the BOS, never a
+        # hard-coded `add_special_tokens` the caller could get wrong for a BOS-less template.
+        assert kwargs["rendered_chat"] is True
+        assert "add_special_tokens" not in kwargs
         assert kwargs["allowed"] == ALLOWED and kwargs["top_k"] == 3
         assert kwargs["temperature"] == 1.0
 

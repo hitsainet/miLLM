@@ -284,8 +284,12 @@ class TestResponse:
         tok = word_tokenizer()
         rendered = tok.apply_chat_template([{"role": "user", "content": "w1"}], tokenize=False,
                                            add_generation_prompt=True)
-        # Exactly as live serving tokenizes its rendered prompt (`tokenizer(prompt)`).
-        assert out["results"][0]["token_ids"] == list(tok(rendered)["input_ids"])
+        # Exactly as live serving tokenizes its rendered prompt: the template carries the BOS, so
+        # the tokenizer adds none (2026-10-08; this assertion was `tok(rendered)` and pinned the
+        # duplicate BOS live serving produced).
+        expected = list(tok(rendered, add_special_tokens=False)["input_ids"])
+        assert out["results"][0]["token_ids"] == expected
+        assert expected[:2] == [tok.bos_token_id, expected[1]] and expected[1] != tok.bos_token_id
 
     def test_a_null_verdict_stays_null(self):
         v = Verdict(probe_id="p", name="n", rung=2, rung_language="x", scored=True, score=3.0,

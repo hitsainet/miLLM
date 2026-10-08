@@ -1,6 +1,14 @@
 # Project: miLLM - Mechanistic Interpretability LLM Server
 
 ## Current Status
+- **⏳ SERVED-RENDER SHARED CASES ON `feat/served-render-cases` (2026-10-08), NOT PUSHED.**
+  `docs/schemas/served-render-cases.json` is byte-identical in miStudio and pins
+  `probe_scoring.served_render` + `prompt_encoding.rendered_chat_ids` to miStudio's renderer
+  (`tests/unit/services/test_served_render_cases.py`, run through `ProbeInputPreparer.prepare`).
+  `last-user-span-cases.json` gained two assistant-ended cases, and a new span test runs every case
+  through the `/api/probes/score` preparer — reverting defect 2 now goes red. One known divergence
+  is miStudio's (no-BOS template + BOS-adding tokenizer), asserted here as the rule. **Push this
+  before miStudio.** Pointer: `0xcc/reviews/served_render_cases_2026-10-08.md`.
 - **⏳ PROBE SERVED-RENDER FOLLOW-UPS ON `fix/probe-render-followups` (2026-10-08), NOT PUSHED,
   NOT DEPLOYED.** Two defects found while moving probes to miStudio's served render. (1) Parity's
   informational `messages` round-trip re-rendered without the generation prompt, and on

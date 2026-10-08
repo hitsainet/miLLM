@@ -350,9 +350,6 @@
             "content": "virus spreads fast"
           }
         ],
-        "known_divergence": {
-          "mistudio": "miStudio tokenizes every render with add_special_tokens=False, so on this form it trains on ZERO BOS while miLLM serves one (TinyLlama-Chat / Zephyr-style templates). `expected` is the rule, which miLLM meets. miStudio runs this case as a STRICT xfail - red the moment either side changes - until the operator decides between adopting the one-BOS rule (recording add_special_tokens per model) and refusing such models. Tracked: miStudio 0xcc/reviews/served_render_cases_2026-10-08.md."
-        },
         "expected": {
           "generation_prompt": true,
           "prompt_tokens": 7,

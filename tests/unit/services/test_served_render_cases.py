@@ -12,10 +12,11 @@ boundary and the `last_user` span. The `structural` set builds WordLevel tokeniz
 and ALWAYS runs; the `real` set needs the Llama-3.1-8B-Instruct tokenizer identified by its
 chat-template hash and SKIPS LOUDLY when it is absent (`MILLM_REAL_TOKENIZERS`).
 
-A case carrying `known_divergence.mistudio` is one miStudio is KNOWN not to meet (today: a template
-that writes no BOS while its tokenizer adds one — this server serves one BOS, miStudio trains on
-none). miStudio runs it as a strict xfail; `expected` is the rule, and it is asserted HERE like any
-other case, so this side cannot drift into agreeing with the divergence.
+A case carrying `known_divergence.mistudio` is one miStudio is KNOWN not to meet; miStudio runs it
+as a strict xfail, and `expected` is still asserted HERE like any other case, so this side cannot
+drift into agreeing with a divergence. TODAY THERE IS NONE: the one there was (F1, a template that
+writes no BOS while its tokenizer adds one — this server served one BOS, miStudio trained on none)
+closed on 2026-10-08 when miStudio adopted this server's start-of-text rule.
 """
 
 from __future__ import annotations

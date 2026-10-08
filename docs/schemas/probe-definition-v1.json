@@ -68,6 +68,33 @@
       "title": "Aggregation",
       "type": "object"
     },
+    "BosHandling": {
+      "additionalProperties": false,
+      "description": "What the start-of-text (BOS) rule did when the producer tokenized its renders.\n\n\u26a0 ADDITIVE AND OPTIONAL (2026-10-08, finding F1). miLLM tokenizes a chat render with\n`add_special_tokens=False` only when the render already begins with the tokenizer's BOS text,\nand lets the tokenizer add its specials otherwise \u2014 so exactly one BOS when the model uses\none, never a duplicate. miStudio adopted that rule on this date; before it, it ALWAYS passed\nFalse, which differs on one form: a template that writes no BOS while its tokenizer adds one\n(TinyLlama-Chat / Zephyr-style), where miLLM serves one BOS and miStudio trained on none.\n\nMeasured from the ids on the producer's tokenizer, never inferred from the flags.",
+      "properties": {
+        "template_wrote_bos": {
+          "title": "Template Wrote Bos",
+          "type": "boolean"
+        },
+        "tokenizer_added_bos": {
+          "title": "Tokenizer Added Bos",
+          "type": "boolean"
+        },
+        "bos_count": {
+          "maximum": 1,
+          "minimum": 0,
+          "title": "Bos Count",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "template_wrote_bos",
+        "tokenizer_added_bos",
+        "bos_count"
+      ],
+      "title": "BosHandling",
+      "type": "object"
+    },
     "DatasetRef": {
       "additionalProperties": false,
       "description": "Where a dataset came from, portably. `{hf_id, config, split, revision}`.",
@@ -792,7 +819,7 @@
     },
     "RenderForm": {
       "additionalProperties": false,
-      "description": "How the producer turned a conversation into the token ids it trained and scored on.\n\n\u26a0 ADDITIVE AND OPTIONAL (2026-10-08). miLLM scores a live chat with the model's GENERATION\nPROMPT after the last user turn; miStudio rendered without it until this date, so every probe\nbuilt before it was calibrated on a form it never sees live (measured on production: AUROC\n0.9558 served against 0.9420 without the prompt). Since then miStudio renders exactly as\nmiLLM serves:\n\n  * `generation_prompt: true` \u2014 a conversation that does not end on an assistant turn\n    (including plain prose, rendered as one user turn) carries the generation prompt, and\n    every position is prompt. An assistant-ended conversation is rendered WITHOUT it, its\n    prompt/response boundary at the render of the preceding turns WITH it.\n  * `add_special_tokens: false` \u2014 the template emits the BOS itself; the tokenizer adds none.\n\nThe block ABSENT means NOT RECORDED \u2014 the document predates the field, and for miStudio that\nmeans rendered WITHOUT the generation prompt. It must never be read as the served form. A\nconsumer may warn on an absent block; it may not treat it as recorded.",
+      "description": "How the producer turned a conversation into the token ids it trained and scored on.\n\n\u26a0 ADDITIVE AND OPTIONAL (2026-10-08). miLLM scores a live chat with the model's GENERATION\nPROMPT after the last user turn; miStudio rendered without it until this date, so every probe\nbuilt before it was calibrated on a form it never sees live (measured on production: AUROC\n0.9558 served against 0.9420 without the prompt). Since then miStudio renders exactly as\nmiLLM serves:\n\n  * `generation_prompt: true` \u2014 a conversation that does not end on an assistant turn\n    (including plain prose, rendered as one user turn) carries the generation prompt, and\n    every position is prompt. An assistant-ended conversation is rendered WITHOUT it, its\n    prompt/response boundary at the render of the preceding turns WITH it.\n  * `add_special_tokens` \u2014 what was passed to the tokenizer. With `bos_handling` present it\n    follows miLLM's start-of-text rule: `false` when the template writes the BOS, `true`\n    otherwise (the tokenizer adds exactly what it adds by default).\n  * `bos_handling` \u2014 what that rule produced (see `BosHandling`).\n\n\u26a0 `bos_handling` ABSENT MEANS NOT RECORDED, NEVER \"the tokenizer added one\". A document\nwithout it was built under the earlier rule, `add_special_tokens: false` for every model, and\nstill means exactly that; its ids equal the start-of-text rule's only when the model's\ntemplate writes the BOS or its tokenizer adds nothing, which a consumer can check against the\ntokenizer but must not assume.\n\nThe block ABSENT means NOT RECORDED \u2014 the document predates the field, and for miStudio that\nmeans rendered WITHOUT the generation prompt. It must never be read as the served form. A\nconsumer may warn on an absent block; it may not treat it as recorded.",
       "properties": {
         "generation_prompt": {
           "title": "Generation Prompt",
@@ -802,6 +829,17 @@
           "default": false,
           "title": "Add Special Tokens",
           "type": "boolean"
+        },
+        "bos_handling": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/BosHandling"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
         }
       },
       "required": [

@@ -275,9 +275,19 @@ class ProbeDefinitionV1(_Contract):
     provenance: dict[str, Any] = Field(default_factory=dict)
     test_vectors: TestVectors
     # How the producer rendered a conversation into token ids (miStudio, 2026-10-08):
-    # `{"generation_prompt": true, "add_special_tokens": false}` = the form miLLM serves.
+    # `{"generation_prompt": true, "add_special_tokens": <bool>, "bos_handling": {...}}`.
     # None = NOT RECORDED — the document predates the field, and for miStudio that means rendered
     # WITHOUT the generation prompt. Never read as the served form.
+    #
+    # `bos_handling` (additive, F1, 2026-10-08) = `{template_wrote_bos, tokenizer_added_bos,
+    # bos_count}`: miStudio now tokenizes with THIS server's start-of-text rule
+    # (`prompt_encoding.rendered_chat_ids`), and records what it did. `add_special_tokens` then
+    # follows that rule (false when the template writes the BOS, true otherwise). A block WITHOUT
+    # `bos_handling` was tokenized with add_special_tokens=false for every model: identical to the
+    # rule when the template writes the BOS or the tokenizer adds nothing, one BOS short on a
+    # TinyLlama-style template. Absent means not recorded — never "the tokenizer added one".
+    # Kept as a dict: the vendored schema validates the shape, and parity re-renders a served-form
+    # document by `probe_scoring.served_render`, which IS the rule, so it needs no field of its own.
     render: dict[str, Any] | None = None
 
     @model_validator(mode="after")

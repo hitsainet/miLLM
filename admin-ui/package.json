@@ -48,5 +48,8 @@
     "typescript-eslint": "^8.46.4",
     "vite": "^7.3.5",
     "vitest": "^4.1.0"
+  },
+  "overrides": {
+    "postcss-selector-parser": "^7.1.6"
   }
 }

@@ -20,7 +20,7 @@ from __future__ import annotations
 
 import time
 from dataclasses import dataclass, field
-from typing import Any, Callable, Optional
+from typing import Any, Callable, NamedTuple, Optional
 
 import torch
 
@@ -128,6 +128,59 @@ def check_shape(request: Any) -> None:
 # ── preparing an input ────────────────────────────────────────────────────────────
 
 
+class ServedRender(NamedTuple):
+    """A conversation as miLLM serves it: the ids, where the prompt ends, and which render made them."""
+
+    ids: list[int]
+    prompt_tokens: Optional[int]
+    #: Whether the render ended with the generation prompt. Everything positional computed over
+    #: `ids` afterwards — the `last_user` span above all — must be computed over THIS render.
+    generation_prompt: bool
+
+
+def served_render(
+    tokenizer: Any, messages: list[dict[str, str]], render: Callable[[list[dict[str, str]], bool], str]
+) -> ServedRender:
+    """THE served-render rule — the one place it lives in miLLM (miStudio: `probe_monitor_render.
+    served_render`, which mirrors it branch for branch and must stay identical).
+
+    * last turn is `assistant` → rendered WITHOUT the generation prompt; the prompt ends at the
+      render of the preceding turns WITH it — accepted only when those ids are a prefix of the
+      full render, `None` otherwise, never guessed (T-72);
+    * anything else → rendered WITH the generation prompt; the whole input is prompt (TD6);
+    * tokenized by `prompt_encoding.rendered_chat_ids` — exactly one BOS (2026-10-08).
+
+    Used by `/api/probes/score` (`ProbeInputPreparer.prepare`) and by parity's informational
+    `messages` round-trip (`ProbeParityEngine._drift`), so the two cannot disagree about what a
+    served-render definition's `messages` should reproduce.
+    """
+    from millm.services.prompt_encoding import rendered_chat_ids
+    from millm.services.probe_turns import served_generation_prompt
+
+    generation_prompt = served_generation_prompt(messages)
+    if not generation_prompt:
+        ids = rendered_chat_ids(tokenizer, render(messages, False))
+        head = rendered_chat_ids(tokenizer, render(messages[:-1], True)) if messages[:-1] else []
+        prompt_tokens = len(head) if head and ids[: len(head)] == head else None
+    else:
+        ids = rendered_chat_ids(tokenizer, render(messages, True))
+        prompt_tokens = len(ids)
+    return ServedRender(ids, prompt_tokens, generation_prompt)
+
+
+def template_renderer(tokenizer: Any) -> Callable[[list[dict[str, str]], bool], str]:
+    """The model's chat template, verbatim — what live serving's renderer reduces to whenever the
+    tokenizer HAS a template (`InferenceService._format_chat_messages`), for a caller with no
+    inference service (parity)."""
+
+    def render(messages: list[dict[str, str]], generation_prompt: bool) -> str:
+        return str(tokenizer.apply_chat_template(
+            messages, tokenize=False, add_generation_prompt=generation_prompt
+        ))
+
+    return render
+
+
 class ProbeInputPreparer:
     """Turns one input into ids + boundaries. Pure: the tokenizer and the renderer are arguments,
     so it needs no model.
@@ -143,11 +196,6 @@ class ProbeInputPreparer:
     def __init__(self, tokenizer: Any, render: Callable[[list[dict[str, str]], bool], str]) -> None:
         self.tokenizer = tokenizer
         self.render = render
-
-    def _encode(self, text: str) -> list[int]:
-        from millm.services.prompt_encoding import rendered_chat_ids
-
-        return rendered_chat_ids(self.tokenizer, text)
 
     def prepare(self, index: int, item: Any) -> PreparedInput:
         from millm.services.probe_turns import last_user_token_span
@@ -165,28 +213,18 @@ class ProbeInputPreparer:
         else:
             messages = [{"role": m.role, "content": m.content} for m in item.messages]
         try:
-            if messages[-1]["role"] == "assistant":
-                # T-72: an assistant-ended conversation has a response. Rendered WITHOUT the
-                # generation prompt; the boundary is the conversation before that turn WITH it —
-                # accepted only when it is a prefix of the full render, never guessed otherwise.
-                ids = self._encode(self.render(messages, False))
-                head = self._encode(self.render(messages[:-1], True)) if messages[:-1] else []
-                prompt_tokens = len(head) if head and ids[: len(head)] == head else None
-            else:
-                # TD6: no response exists, so the whole input is prompt — nothing is guessed.
-                ids = self._encode(self.render(messages, True))
-                prompt_tokens = len(ids)
+            served = served_render(self.tokenizer, messages, self.render)
         except Exception as exc:  # noqa: BLE001 - a per-input failure is data, not a 500
             return PreparedInput(
                 index=index, input_kind=kind,
                 error={"code": TOKENIZATION_FAILED, "message": f"rendering failed: {exc}"},
             )
         try:
-            span, reason = last_user_token_span(self.tokenizer, messages, ids, None)
+            span, reason = last_user_token_span(self.tokenizer, messages, served.ids, None)
         except Exception:  # noqa: BLE001
             span, reason = None, "last_user_span_unresolved"
         return PreparedInput(
-            index=index, input_kind=kind, ids=ids, prompt_tokens=prompt_tokens,
+            index=index, input_kind=kind, ids=served.ids, prompt_tokens=served.prompt_tokens,
             last_user_span=span, last_user_reason=reason,
         )
 

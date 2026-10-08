@@ -70,7 +70,12 @@ REQUIRED_CALLS = {
     ("services/inference_service.py", "InferenceService._cbm_text_completion"): "encode_prompt",
     ("services/inference_service.py", "InferenceService._llamacpp_continuation_prompt"):
         "llamacpp_completion_prompt",
-    ("services/probe_scoring.py", "ProbeInputPreparer._encode"): "rendered_chat_ids",
+    ("services/probe_scoring.py", "served_render"): "rendered_chat_ids",
+    # The served-render rule's two consumers: `/api/probes/score` and parity's `messages`
+    # round-trip. Both must reach ids through `served_render`, or they can disagree about what a
+    # served-render definition's `messages` reproduce (2026-10-08).
+    ("services/probe_scoring.py", "ProbeInputPreparer.prepare"): "served_render",
+    ("services/probe_parity.py", "ProbeParityEngine._drift"): "served_render",
 }
 
 

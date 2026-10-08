@@ -204,11 +204,20 @@ class TestScopeReproducibility:
 
 class TestTokenizationDrift:
     class Tok:
+        """Renders to text, then tokenizes that text to fixed ids — the two steps the round-trip
+        takes. (`apply_chat_template(tokenize=True)` is not used: on transformers 5 it returns a
+        `BatchEncoding`, whose `list()` is its keys, so the round-trip could never match.)
+        Real-tokenizer coverage of the render rule is in `test_probe_parity_render.py`."""
+
         def __init__(self, ids):
             self.ids = ids
 
-        def apply_chat_template(self, messages, tokenize=True, add_generation_prompt=False):
-            return self.ids
+        def apply_chat_template(self, messages, tokenize=False, add_generation_prompt=False):
+            assert tokenize is False, "the round-trip must render text, then tokenize it"
+            return "rendered"
+
+        def __call__(self, text, add_special_tokens=True):
+            return {"input_ids": list(self.ids)}
 
     def test_drift_is_reported_but_does_NOT_fail_parity(self):
         """⚠ The defect this avoids: miStudio measured re-rendered `messages` missing by up to

@@ -17,6 +17,9 @@ is worse than no check, because it is believed the first time.
 **Tokenization drift is reported BESIDE the verdict, never inside it.** Re-rendering `messages`
 still tells you something worth knowing — whether a consumer following the document's prose would
 get the same ids — so it is measured and reported separately. It never contributes to pass/fail.
+It re-renders the way the definition's `render` block says the ids were made (`_drift`), with the
+same rule `/api/probes/score` uses, and names keep-tail-truncated vectors rather than counting them
+as mismatches (2026-10-08).
 
 **A scope it cannot reproduce fails rather than passes.** Only `scope="all"` is exactly
 reproducible: for `prompt` and `response`, miStudio recorded scores under its narrower internal
@@ -470,7 +473,9 @@ class ProbeParityEngine:
             report.vectors.append(result)
 
         if tokenizer is not None:
-            report.tokenization_drift = self._drift(vectors, tokenizer)
+            report.tokenization_drift = self._drift(
+                vectors, tokenizer, (definition or {}).get("render")
+            )
 
         logger.info(
             "probe_parity probe=%s passed=%s gated_diff=%s combined_diff=%s max_abs_diff=%s "
@@ -525,36 +530,93 @@ class ProbeParityEngine:
         return abs(values[0] - values[1])
 
     @staticmethod
-    def _drift(vectors: Sequence[dict[str, Any]], tokenizer: Any) -> dict[str, Any]:
+    def _drift(
+        vectors: Sequence[dict[str, Any]], tokenizer: Any, render: Any = None
+    ) -> dict[str, Any]:
         """Do the document's `messages` re-render to the ids it recorded?
 
-        ⚠ REPORTED, NEVER SCORED. A mismatch here does not mean this build is wrong — miStudio's
-        acceptance already established that `messages` is a prose reconstruction whose re-render
-        adds template tokens. It means a consumer following the document's prose instead of its
-        ids would get different tokens, which is worth knowing and is not a parity failure.
+        ⚠ REPORTED, NEVER SCORED. A mismatch here does not mean this build is wrong; it means a
+        consumer following the document's `messages` instead of its ids would get different
+        tokens, which is worth knowing and is not a parity failure.
+
+        ⚠ RE-RENDERED THE WAY THE DOCUMENT SAYS IT WAS RENDERED (2026-10-08). A definition whose
+        `render` block records the served form (`generation_prompt: true`) was produced by
+        miStudio's `served_render`, which is miLLM's `/api/probes/score` rule — so it is
+        re-rendered by THAT rule (`probe_scoring.served_render`: generation prompt on unless the
+        conversation ends on an assistant turn, exactly one BOS). Rendering it without the
+        generation prompt, as this did before, reported 0 of 16 on documents whose `messages`
+        reproduce exactly.
+
+        A definition with NO `render` block predates render recording; for miStudio that means
+        rendered WITHOUT the generation prompt, and it is re-rendered that way — never read as the
+        served form — and the report says so.
+
+        ⚠ KEEP-TAIL TRUNCATION IS NAMED, NOT COUNTED AS A MISMATCH. miStudio caps a vector at its
+        token limit keeping the TAIL (`truncate_tokens`), and records no per-vector flag: its own
+        round-trip compares the re-render's tail. A vector whose recorded ids are exactly the end
+        of a longer re-render is reported in `truncated_vectors` — reproduced, as far as a
+        truncated row can be, and never as a defect.
         """
+        from millm.services.probe_scoring import served_render, template_renderer
+        from millm.services.prompt_encoding import rendered_chat_ids
+
+        recorded_render = dict(render) if isinstance(render, dict) else None
+        served_form = recorded_render is not None and recorded_render.get("generation_prompt") is True
+        template = template_renderer(tokenizer)
+
         matched = 0
+        truncated: list[int] = []
         mismatched: list[int] = []
         for index, vector in enumerate(vectors):
-            messages = vector.get("messages") or []
+            messages = [
+                {"role": m.get("role"), "content": m.get("content")}
+                for m in (vector.get("messages") or [])
+            ]
             recorded = list(vector.get("token_ids") or [])
             try:
-                rendered = tokenizer.apply_chat_template(
-                    messages, tokenize=True, add_generation_prompt=False
-                )
+                if not messages:
+                    raise ValueError("no messages")
+                if served_form:
+                    rendered = served_render(tokenizer, messages, template).ids
+                else:
+                    rendered = rendered_chat_ids(tokenizer, template(messages, False))
             except Exception:
                 mismatched.append(index)
                 continue
-            if list(rendered) == recorded:
+            if rendered == recorded:
                 matched += 1
+            elif recorded and len(rendered) > len(recorded) and rendered[-len(recorded):] == recorded:
+                truncated.append(index)
             else:
                 mismatched.append(index)
-        return {
+        report: dict[str, Any] = {
             "checked": len(vectors),
             "messages_reproduce_token_ids": matched,
+            "truncated_vectors": truncated,
+            "mismatched": len(mismatched),
             "mismatched_vectors": mismatched[:10],
+            "render": recorded_render,
+            "rendered_with": "served_form" if served_form else "no_generation_prompt",
             "note": (
                 "informational only — parity scores from token_ids, which is the contract's "
                 "authoritative input"
             ),
         }
+        if truncated:
+            report["truncation_note"] = (
+                "truncated_vectors were cut to the producer's token cap keeping the TAIL; their "
+                "recorded ids are exactly the end of the re-render, so they reproduce as far as a "
+                "truncated row can and are not mismatches"
+            )
+        if recorded_render is None:
+            report["render_note"] = (
+                "the definition predates render recording (no `render` block), so `messages` were "
+                "re-rendered WITHOUT the generation prompt, as such documents were produced; this "
+                "is not assumed to be the served form"
+            )
+        elif not served_form:
+            report["render_note"] = (
+                "the definition's `render` block does not record the served form, so `messages` "
+                "were re-rendered WITHOUT the generation prompt"
+            )
+        return report

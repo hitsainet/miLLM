@@ -26,6 +26,17 @@ NO_CHAT_TEMPLATE = "no_chat_template"
 SPAN_UNRESOLVED = "last_user_span_unresolved"
 
 
+def served_generation_prompt(messages: Sequence[Any]) -> bool:
+    """Whether miLLM serves this conversation WITH the generation prompt: every conversation but
+    an assistant-ended one. THE one decision of the served-render rule
+    (`probe_scoring.served_render`; miStudio `probe_monitor_render.served_render`)."""
+    if not messages:
+        return True
+    last = messages[-1]
+    role = last.get("role", "") if isinstance(last, dict) else getattr(last, "role", "")
+    return str(role) != "assistant"
+
+
 #: Two tiny conversations whose final user turns differ only in content; the common start of those
 #: turns' token spans is the template's user header. The SAME construction as miStudio's
 #: `probe_monitor_render.user_header_ids`, pinned by `docs/schemas/last-user-span-cases.json`.

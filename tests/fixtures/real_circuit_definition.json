@@ -1,0 +1,136 @@
+{
+  "kind": "mistudio.circuit-definition",
+  "schema_version": "1",
+  "name": "fear -> threat-detection circuit",
+  "narrative": "An L10 fear feature drives an L13 threat-detection feature.",
+  "model": {
+    "hf_id": "google/gemma-2-2b",
+    "mistudio_model_id": null
+  },
+  "saes": [
+    {
+      "mistudio_sae_id": "sae_L10",
+      "layer": 10,
+      "hook_type": "residual",
+      "n_features": 8192,
+      "d_model": 2048,
+      "source_hint": null
+    },
+    {
+      "mistudio_sae_id": "sae_L13",
+      "layer": 13,
+      "hook_type": "residual",
+      "n_features": 8192,
+      "d_model": 2048,
+      "source_hint": null
+    }
+  ],
+  "members": [
+    {
+      "layer": 10,
+      "member_kind": "feature_ref",
+      "feature": {
+        "feature_idx": 1234,
+        "label": "fear",
+        "similarity": null,
+        "activation_frequency": null,
+        "max_activation": null,
+        "strength": 42.5,
+        "sign": 1,
+        "pinned": false,
+        "meta": null
+      },
+      "cluster_profile_id": null,
+      "cluster_name": null,
+      "expanded_members": null
+    },
+    {
+      "layer": 13,
+      "member_kind": "feature_ref",
+      "feature": {
+        "feature_idx": 5678,
+        "label": "threat detection",
+        "similarity": null,
+        "activation_frequency": null,
+        "max_activation": null,
+        "strength": 31.0,
+        "sign": 1,
+        "pinned": false,
+        "meta": null
+      },
+      "cluster_profile_id": null,
+      "cluster_name": null,
+      "expanded_members": null
+    }
+  ],
+  "edges": [
+    {
+      "up": {
+        "layer": 10,
+        "kind": "feature",
+        "feature_idx": 1234,
+        "cluster_profile_id": null
+      },
+      "down": {
+        "layer": 13,
+        "kind": "feature",
+        "feature_idx": 5678,
+        "cluster_profile_id": null
+      },
+      "type": "computed",
+      "type_signals": null,
+      "rung": 2,
+      "tested_and_failed": [],
+      "coactivation": null,
+      "weight_prior": 0.61,
+      "attribution": null,
+      "validation_manifest_ref": null,
+      "effect_size": 0.47,
+      "position": null
+    }
+  ],
+  "budget": {
+    "formula_id": "freq-budget/sim-alloc/per-layer@1",
+    "layers": {
+      "10": {
+        "B": 42.5,
+        "B_dir": 42.5,
+        "G": null,
+        "f_eff": null,
+        "formula_id": "freq-budget/sim-alloc@1",
+        "constants": null,
+        "intensity": 1.0,
+        "intensity_range": [
+          0.0,
+          2.0
+        ]
+      },
+      "13": {
+        "B": 31.0,
+        "B_dir": 31.0,
+        "G": null,
+        "f_eff": null,
+        "formula_id": "freq-budget/sim-alloc@1",
+        "constants": null,
+        "intensity": 1.0,
+        "intensity_range": [
+          0.0,
+          2.0
+        ]
+      }
+    },
+    "intensity": 1.0,
+    "intensity_range": [
+      0.0,
+      2.0
+    ]
+  },
+  "faithfulness": null,
+  "provenance": {
+    "created_at": null,
+    "exported_at": null,
+    "mistudio_version": null,
+    "source_note": null
+  },
+  "discovery": null
+}

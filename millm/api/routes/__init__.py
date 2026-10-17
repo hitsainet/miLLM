@@ -1,0 +1,56 @@
+"""
+API route registration.
+
+Collects all route modules and registers them with the FastAPI application.
+"""
+
+from fastapi import FastAPI
+
+from millm.api.routes.management.models import router as models_router
+from millm.api.routes.management.monitoring import router as monitoring_router
+from millm.api.routes.management.probes import router as probes_router
+from millm.api.routes.management.profiles import router as profiles_router
+from millm.api.routes.management.clusters import router as clusters_router
+from millm.api.routes.management.circuits import router as circuits_router
+from millm.api.routes.management.circuit_sensing import (
+    router as circuit_sensing_router,
+)
+from millm.api.routes.management.sensing import router as sensing_router
+from millm.api.routes.management.saes import router as saes_router
+from millm.api.routes.management.weights import router as weights_router
+from millm.api.routes.management.weights_adapters import router as weights_adapters_router
+from millm.api.routes.management.weights_checkpoints import (
+    router as weights_checkpoints_router,
+)
+from millm.api.routes.openai import openai_router
+from millm.api.routes.system.health import router as health_router
+
+
+def register_routes(app: FastAPI) -> None:
+    """
+    Register all API routes with the application.
+
+    Args:
+        app: The FastAPI application instance.
+    """
+    # System routes (health, status, etc.)
+    app.include_router(health_router)
+
+    # Management API routes (models, SAE, steering, monitoring, profiles, etc.)
+    app.include_router(models_router)
+    app.include_router(saes_router)
+    app.include_router(monitoring_router)
+    app.include_router(probes_router)
+    app.include_router(profiles_router)
+    app.include_router(clusters_router)
+    app.include_router(circuits_router)
+    app.include_router(sensing_router)
+    app.include_router(circuit_sensing_router)
+    # Attachable weights (Features 31, 32, 33): three routers under one /api/weights prefix,
+    # one per feature, so no two features edit one router file.
+    app.include_router(weights_router)
+    app.include_router(weights_checkpoints_router)
+    app.include_router(weights_adapters_router)
+
+    # OpenAI-compatible API routes (mounted at /v1)
+    app.include_router(openai_router, prefix="/v1")

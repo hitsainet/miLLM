@@ -1,0 +1,409 @@
+"""Recording verdicts, reporting status, and the one thing that must never leave the process.
+
+⚠ `TestThePayloadNeverCarriesPromptText` ASSERTS ABSENCE, NOT PRESENCE.
+
+This estate has already shipped a socket broadcast that leaked user prompt text while the suite
+stayed 135/135 green, because the test checked what the payload *contained*. A test that asserts
+the right fields are present passes perfectly well against a payload that also carries the user's
+words. The only test that catches it is one that asserts the forbidden keys are gone.
+"""
+
+from __future__ import annotations
+
+from unittest.mock import MagicMock, patch
+
+import pytest
+
+from millm.db.repositories.probe_repository import ProbeEventRepository, ProbeRepository
+from millm.services.probe_event_service import CONTEXT_PREFIX, ProbeEventService, strip_context
+from millm.services.probe_runtime import Verdict
+from millm.services.probe_service import ProbeService
+from tests.unit.probe_fixtures import probe_definition
+
+pytestmark = pytest.mark.asyncio
+
+
+@pytest.fixture(autouse=True)
+def _no_armed_probe_outlives_a_test():
+    """`_install_hook` puts a probe in the process-wide `ProbeRuntimeState`, and two tests in
+    `TestWindowsAreReported` never took it out again: the armed probe leaked into every later
+    test file, where `_use_cbm_for_request` routes serial (`probes_armed`) — so
+    `batch/test_runner.py::test_a_batch_row_never_runs_on_the_continuous_batching_manager`
+    failed whenever it ran after this file (R2-C). Reset on both sides of every test."""
+    from millm.services.probe_runtime import ProbeRuntimeState
+
+    ProbeRuntimeState.reset_for_tests()
+    yield
+    ProbeRuntimeState.reset_for_tests()
+
+
+def verdict(**over) -> Verdict:
+    base = dict(
+        probe_id="pr_1", name="high-stakes", rung=2, rung_language="detects on unseen tasks",
+        scored=True, score=2.31, threshold=1.07, fires=True,
+        n_scored_tokens=12, top_positions=[4, 9],
+    )
+    base.update(over)
+    return Verdict(**base)
+
+
+@pytest.fixture
+async def ctx(test_session):
+    repo = ProbeRepository(test_session)
+    events = ProbeEventRepository(test_session)
+    probe = await ProbeService(repo).import_definition(probe_definition())
+    return repo, events, ProbeEventService(repo, events), probe
+
+
+class TestRecording:
+    async def test_every_verdict_becomes_an_event(self, ctx):
+        """A probe with no row for a request is indistinguishable from one never armed."""
+        repo, events, service, probe = ctx
+        written = await service.record(
+            "chatcmpl-a", [verdict(probe_id=probe.id), verdict(probe_id=probe.id, name="b")]
+        )
+        assert written == 2
+        assert await events.count(probe.id) == 2
+
+    async def test_an_unscored_verdict_records_its_reason_and_no_numbers(self, ctx):
+        repo, events, service, probe = ctx
+        await service.record(
+            "chatcmpl-a",
+            [verdict(probe_id=probe.id, scored=False, not_scored_reason="continuous_batching",
+                     score=None, threshold=None, fires=None)],
+        )
+        row = (await events.list_events(probe_id=probe.id))[0]
+        assert row.scored is False
+        assert row.not_scored_reason == "continuous_batching"
+        assert row.score is None
+        assert "not scored: continuous_batching" in row.summary
+
+    async def test_a_provisional_verdict_is_STORED_provisional(self, ctx):
+        """P-20 (Feature 27, task 5.4): a provisional window's event keeps its flag in the row.
+        Excluding provisional verdicts from labels is the consumer's job, so it must reach them."""
+        repo, events, service, probe = ctx
+        await service.record("chatcmpl-p", [
+            verdict(probe_id=probe.id, window="response", provisional=True, threshold_revision=3),
+            verdict(probe_id=probe.id, window="all", provisional=False),
+        ])
+        rows = {r.window: r for r in await events.list_events(probe_id=probe.id)}
+        assert rows["response"].provisional is True
+        assert rows["response"].threshold_revision == 3
+        assert rows["all"].provisional is False
+
+    async def test_the_request_id_links_the_event_to_its_response(self, ctx):
+        repo, events, service, probe = ctx
+        await service.record("chatcmpl-abc", [verdict(probe_id=probe.id)])
+        assert (await events.list_events(request_id="chatcmpl-abc"))[0].probe_id == probe.id
+
+    async def test_no_verdicts_writes_nothing(self, ctx):
+        _repo, events, service, _probe = ctx
+        assert await service.record("chatcmpl-a", []) == 0
+        assert await events.count() == 0
+
+    async def test_a_persistence_failure_does_not_raise(self, ctx):
+        """A monitor must not take a request down. The verdict is already on the response."""
+        _repo, events, service, probe = ctx
+        with patch.object(events, "create_many", side_effect=RuntimeError("db gone")):
+            assert await service.record("chatcmpl-a", [verdict(probe_id=probe.id)]) == 0
+
+    async def test_retention_runs_on_every_write(self, ctx, monkeypatch):
+        """Bounded by construction, like sensing: the table cannot grow without bound even if
+        nobody ever calls the API."""
+        from millm.core.config import settings
+
+        monkeypatch.setattr(settings, "PROBE_MAX_EVENTS_PER_PROBE", 3)
+        _repo, events, service, probe = ctx
+        for i in range(8):
+            await service.record(f"chatcmpl-{i}", [verdict(probe_id=probe.id)])
+        assert await events.count(probe.id) == 3
+
+
+class TestThePayloadNeverCarriesPromptText:
+    def test_context_keys_are_ABSENT_from_the_stripped_payload(self):
+        payload = {
+            "probe_id": "pr_1",
+            "score": 2.31,
+            "context_text": "the user's actual words",
+            "context_token_ids": [1, 2, 3],
+        }
+        slim = strip_context(payload)
+        assert "context_text" not in slim
+        assert "context_token_ids" not in slim
+        assert not any(key.startswith(CONTEXT_PREFIX) for key in slim)
+        # and the useful fields survive
+        assert slim["score"] == 2.31
+
+    def test_no_VALUE_in_the_payload_contains_the_prompt(self):
+        """Belt and braces: a future field could carry the text under another name."""
+        secret = "ESCALATE THE SBA FILING"
+        slim = strip_context({"probe_id": "p", "context_text": secret, "summary": "score 2.3"})
+        assert secret not in repr(slim)
+
+    async def test_the_EMITTED_payload_carries_no_context(self, ctx):
+        """The end-to-end assertion: what actually reaches the socket."""
+        _repo, _events, service, probe = ctx
+        emitter = MagicMock()
+        with patch("millm.sockets.progress.progress_emitter", emitter):
+            await service.record(
+                "chatcmpl-a",
+                [verdict(probe_id=probe.id)],
+                contexts={(probe.id, "all"): {"context_text": "user words", "context_token_ids": [7]}},
+            )
+        assert emitter.emit_probe_event.called
+        sent = emitter.emit_probe_event.call_args[0][0]
+        assert "context_text" not in sent and "context_token_ids" not in sent
+        assert "user words" not in repr(sent)
+
+    async def test_the_context_IS_still_stored_for_the_detail_route(self, ctx):
+        """Stripped from the broadcast, kept in the row — a reviewer asks for one event."""
+        _repo, events, service, probe = ctx
+        await service.record(
+            "chatcmpl-a",
+            [verdict(probe_id=probe.id)],
+            contexts={(probe.id, "all"): {"context_text": "user words", "context_token_ids": [7]}},
+        )
+        assert (await events.list_events(probe_id=probe.id))[0].context_text == "user words"
+
+
+def _install_hook(probe_id: str):
+    """Put the probe in the LIVE registry, which is what `armed_count` now counts.
+
+    ⚠ These tests used to set `armed=True` on the row alone and assert `armed_count == 1`. That
+    pinned a defect rather than preventing one: the hook lives in `ProbeRuntimeState`, so a row
+    saying armed with nothing installed is precisely the post-restart state where status reported a
+    monitor that was not monitoring (observed live 2026-09-28). The stale case now has its own
+    coverage in `test_probe_survives_no_restart.py`; here the probe is genuinely armed.
+    """
+    from unittest.mock import MagicMock
+
+    from millm.services.probe_runtime import ProbeRuntimeState
+
+    ProbeRuntimeState.reset_for_tests()
+    armed = MagicMock()
+    armed.probe_id = probe_id
+    # ⚠ STATED, NOT LEFT TO THE MOCK. A MagicMock answers every attribute, so `p.windows` came
+    # back as a Mock and `status()` reported it — a stand-in must never be more forgiving than
+    # the thing it stands in for. `()` is the real default: report my own scope.
+    armed.windows = ()
+    armed.scope = "all"
+    ProbeRuntimeState()._armed[probe_id] = armed
+
+
+class TestStatus:
+    async def test_it_reports_the_armed_probes_with_their_language(self, ctx):
+        repo, _events, service, probe = ctx
+        await repo.update(probe, armed=True)
+        _install_hook(probe.id)
+        try:
+            status = await service.status()
+            assert status["armed_count"] == 1
+            assert status["armed_rows"] == 1
+            assert status["stale_armed"] == []
+            assert status["armed"][0]["hook_installed"] is True
+            assert status["armed"][0]["rung_language"] == "detects on unseen tasks"
+            assert status["armed"][0]["next_step"]
+        finally:
+            from millm.services.probe_runtime import ProbeRuntimeState
+
+            ProbeRuntimeState.reset_for_tests()
+
+    async def test_a_paused_probe_says_WHY(self, ctx):
+        """⚠ "A probe never goes silently quiet" applies to status above all. An armed probe
+        listed with no further comment IS that silence."""
+        repo, _events, service, probe = ctx
+        await repo.update(probe, armed=True, paused_reason="speculative_decoding")
+        _install_hook(probe.id)
+        try:
+            status = await service.status()
+            assert status["armed"][0]["paused_reason"] == "speculative_decoding"
+            assert status["paused_reasons"] == ["speculative_decoding"]
+        finally:
+            from millm.services.probe_runtime import ProbeRuntimeState
+
+            ProbeRuntimeState.reset_for_tests()
+
+    async def test_the_overhead_field_is_present_even_when_nothing_has_run(self, ctx):
+        """So an operator can tell "nothing is wrong" from "this field is missing"."""
+        _repo, _events, service, _probe = ctx
+        status = await service.status()
+        assert "last_request_overhead_ms" in status
+        # ⚠ The RATE is what decides the warning as of 2026-09-30; the absolute pair stays for the
+        # tile that renders it and as a pathology backstop. Both are asserted, because a payload
+        # that carries only the total sends an operator back to judging long answers.
+        assert status["overhead_warn_threshold_ms"] == 500.0
+        assert status["overhead_warn_threshold_ms_per_pass"] == 0.25
+        assert "last_overhead_ms_per_pass" in status
+        assert status["last_overhead_ms_per_pass"] is None, (
+            "nothing has been scored, so there is no rate — 0.0 would read as 'free', which is a "
+            "different claim from 'not yet measured'"
+        )
+        assert status["last_request_n_passes"] == 0
+
+    async def test_dropped_socket_events_are_reported_not_hidden(self, ctx):
+        _repo, _events, service, probe = ctx
+        service._ws_dropped = 7
+        assert (await service.status())["socket_events_dropped"] == 7
+
+    async def test_overhead_above_the_threshold_warns(self, ctx, caplog):
+        _repo, _events, service, _probe = ctx
+        service.note_request_overhead(99.0)
+        assert service._last_request_overhead_ms == 99.0
+
+
+class TestTheRoutesAreReachable:
+    """⚠ A capability is not shipped until a test fails when its wiring is removed.
+
+    This repo has already shipped 16 MCP tools that were fully implemented, unit-tested and
+    documented while never registered — every test passed by importing the module directly.
+    """
+
+    def test_the_event_routes_are_in_the_LIVE_app(self):
+        """⚠ **THE WHOLE SURFACE IS ASSERTED AS A SET IN
+        `tests/unit/api/test_probe_route_surface.py`.** This assertion was once the only one, and it
+        was a `for expected in (…): assert expected in paths` membership loop over seven literals.
+        A subset check cannot fail for a route missing from both the code and the list, and five
+        were: `arm`, `parity` and the three `hub` paths. The arming service, the identity gate, the
+        parity engine and the k-sparse slice therefore had no production caller at all. What remains
+        here is the two routes this file's own subject depends on.
+        """
+        from fastapi import FastAPI
+
+        from millm.api.routes import register_routes
+
+        app = FastAPI()
+        register_routes(app)
+        # ⚠ app.openapi()['paths'], NOT app.routes — this FastAPI version wraps included routers
+        # in objects with no `.path`, so introspecting app.routes reports an empty app that
+        # serves fine.
+        paths = set(app.openapi()["paths"])
+        assert "/api/probes/events" in paths
+        assert "/api/probes/events/{event_id}" in paths
+
+    def test_the_router_is_included_not_merely_importable(self):
+        import inspect
+
+        from millm.api.routes import register_routes
+
+        source = inspect.getsource(register_routes)
+        assert "app.include_router(probes_router)" in source
+
+
+class TestTheSocketAndTheRestListAgree:
+    """⚠ TWO SHAPES FOR ONE UI LIST IS THE DEFECT, so the shapes are compared, not described.
+
+    `record()` used to emit the dicts it had just built to INSERT. Those carry no `id` — it is an
+    autoincrement column — and no `created_at`, a server default. The REST list served both. The
+    browser's live handler prepends a socket event into the list the REST query filled, so a live
+    verdict arrived with `id: undefined`: the tile's `key={event.id}` collapsed every live row onto
+    one key, and `onClick={() => onOpen(event.id)}` could not open the only route that serves the
+    prompt window. The list looked correct after a refetch and only then.
+
+    Reported 2026-09-28 as *"I have to refresh the browser for the verdicts to be displayed"*, on a
+    request that produced two verdicts — so both live rows shared the same undefined key.
+    """
+
+    async def test_the_emitted_payload_has_the_SAME_KEYS_as_the_rest_list(self, ctx):
+        from millm.api.routes.management.probes import _event_summary
+
+        _repo, events, service, probe = ctx
+        emitter = MagicMock()
+        with patch("millm.sockets.progress.progress_emitter", emitter):
+            await service.record("chatcmpl-shape", [verdict(probe_id=probe.id)])
+
+        sent = emitter.emit_probe_event.call_args[0][0]
+        row = (await events.list_events(probe_id=probe.id))[0]
+        served = _event_summary(row)
+
+        assert set(sent) == set(served), (
+            f"the socket and the REST list disagree; socket-only="
+            f"{sorted(set(sent) - set(served))} rest-only={sorted(set(served) - set(sent))}"
+        )
+
+    async def test_the_emitted_payload_carries_the_id_and_the_timestamp(self, ctx):
+        """The two fields the UI cannot work without, asserted by name because those are the two
+        that were missing — a key-set comparison alone would pass if BOTH sides lost them."""
+        _repo, _events, service, probe = ctx
+        emitter = MagicMock()
+        with patch("millm.sockets.progress.progress_emitter", emitter):
+            await service.record("chatcmpl-ids", [verdict(probe_id=probe.id)])
+
+        sent = emitter.emit_probe_event.call_args[0][0]
+        assert isinstance(sent["id"], int), f"id is {sent['id']!r}; the tile keys the list on it"
+        assert sent["created_at"], "created_at is empty; the row cannot show when it happened"
+
+    async def test_created_at_is_json_encodable(self, ctx):
+        """⚠ socket.io's encoder has no datetime support, and the fire-and-forget wrapper
+        swallows the error it would raise — so a datetime here would drop the event silently."""
+        import json
+
+        _repo, _events, service, probe = ctx
+        emitter = MagicMock()
+        with patch("millm.sockets.progress.progress_emitter", emitter):
+            await service.record("chatcmpl-json", [verdict(probe_id=probe.id)])
+
+        sent = emitter.emit_probe_event.call_args[0][0]
+        json.dumps(sent)  # raises TypeError on a datetime
+
+    async def test_every_verdict_in_one_request_is_emitted_with_its_own_id(self, ctx):
+        """The reported case: one prompt, two armed probes, two verdicts. Distinct ids or the
+        browser cannot tell the rows apart."""
+        _repo, _events, service, probe = ctx
+        emitter = MagicMock()
+        with patch("millm.sockets.progress.progress_emitter", emitter):
+            await service.record(
+                "chatcmpl-two",
+                [verdict(probe_id=probe.id), verdict(probe_id=probe.id, score=-1.0)],
+            )
+
+        ids = [call[0][0]["id"] for call in emitter.emit_probe_event.call_args_list]
+        assert len(ids) == 2, f"expected two emissions, got {len(ids)}"
+        assert None not in ids
+        assert len(set(ids)) == 2, f"both verdicts were emitted with the same id: {ids}"
+
+    def test_the_route_does_not_keep_its_own_copy(self):
+        """⚠ The durable half. Two functions that happen to agree today will drift; this asserts
+        they are the SAME OBJECT, which cannot."""
+        from millm.api.routes.management.probes import _event_summary
+        from millm.services.probe_event_service import event_summary
+
+        assert _event_summary is event_summary
+
+
+class TestStatusSaysWhichWindowsAreLive:
+    """⚠ "I see the one armed, but I don't see which windows were selected when it was armed."
+
+    Arming took a window choice and NOTHING reported it back — not this payload, not the UI. The
+    picker shows an intention that resets on re-render, which is not state. A capability you can
+    set and cannot read is the same shape as one that is not wired at all: from outside, they are
+    indistinguishable.
+
+    Read from the LIVE REGISTRY for the same reason `hook_installed` is — the windows live on the
+    in-memory `ArmedProbe`, the row knows nothing about them, and after a restart a row claiming
+    to be armed is scoring nothing.
+    """
+
+    async def test_it_reports_the_windows_a_probe_is_scoring(self, ctx):
+        _repo, _events, service, probe = ctx
+        _install_hook(probe.id)
+        probe.armed = True
+        status = await service.status()
+        entry = next(a for a in status["armed"] if a["id"] == probe.id)
+        assert "windows" in entry, "the status payload still cannot answer which windows are live"
+        assert entry["windows"], "an armed probe reports no windows at all"
+
+    async def test_an_empty_windows_tuple_reports_the_probes_own_scope(self, ctx):
+        """`()` is the ENCODING of "my own scope"; a reader wants the answer, not the encoding."""
+        _repo, _events, service, probe = ctx
+        _install_hook(probe.id)
+        probe.armed = True
+        entry = next(a for a in (await service.status())["armed"] if a["id"] == probe.id)
+        assert entry["windows"] == ["all"]
+
+    async def test_a_stale_row_reports_no_windows(self, ctx):
+        """A row claiming armed with no live hook is scoring nothing — `None`, not a guess."""
+        _repo, _events, service, probe = ctx
+        probe.armed = True            # row only; no hook installed
+        entry = next(a for a in (await service.status())["armed"] if a["id"] == probe.id)
+        assert entry["windows"] is None
+        assert entry["hook_installed"] is False

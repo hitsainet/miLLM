@@ -1,0 +1,251 @@
+import {
+  Server,
+  Layers,
+  Sliders,
+  Activity,
+  Cpu,
+  HardDrive,
+  Thermometer,
+  Zap,
+} from 'lucide-react';
+import { useServerStore } from '@stores/serverStore';
+import { useModels } from '@hooks/useModels';
+import { useSAE } from '@hooks/useSAE';
+import { useSteering } from '@hooks/useSteering';
+import { useMonitoring } from '@hooks/useMonitoring';
+import { useWeightsStatus } from '@hooks/useWeightsStatus';
+import {
+  StatusCard,
+  SystemMetricCard,
+  QuickActions,
+  ActionButtons,
+  GpuCardList,
+  WeightsCard,
+} from '@components/dashboard';
+import type { StatusType } from '@components/dashboard/StatusCard';
+
+export function DashboardPage() {
+  // Call data fetching hooks to populate the store on mount/refresh
+  useModels();
+  useSAE();
+  useSteering();
+  useMonitoring();
+  const weights = useWeightsStatus();
+
+  // Use direct properties instead of computed getters for proper Zustand reactivity
+  const {
+    loadedModel,
+    attachedSAE,
+    steering,
+    monitoring,
+    gpuMemoryUsed,
+    gpuMemoryTotal,
+    gpuUtilization,
+    gpuTemperature,
+    gpus,
+    connectionStatus,
+  } = useServerStore();
+
+  const hasModel = loadedModel !== null;
+  const hasSAE = attachedSAE !== null;
+  const hasSteering = steering !== null && steering.enabled && (steering.features?.length || 0) > 0;
+
+  const getModelStatus = (): { status: StatusType; text: string; details?: string } => {
+    if (!hasModel) {
+      return { status: 'neutral', text: 'No Model' };
+    }
+    return {
+      status: 'success',
+      text: 'Loaded',
+      details: loadedModel?.name,
+    };
+  };
+
+  const getSAEStatus = (): { status: StatusType; text: string; details?: string } => {
+    if (!hasModel) {
+      return { status: 'neutral', text: 'Waiting', details: 'Load a model first' };
+    }
+    if (!hasSAE) {
+      return { status: 'warning', text: 'Not Attached' };
+    }
+    return {
+      status: 'success',
+      text: 'Attached',
+      details: `Layer ${attachedSAE?.trained_layer ?? 'N/A'}`,
+    };
+  };
+
+  const getSteeringStatus = (): { status: StatusType; text: string; details?: string } => {
+    if (!hasSAE) {
+      return { status: 'neutral', text: 'Waiting', details: 'Attach SAE first' };
+    }
+    if (!steering?.enabled) {
+      return { status: 'warning', text: 'Disabled' };
+    }
+    const featureCount = steering?.features?.length || 0;
+    if (featureCount === 0) {
+      return { status: 'info', text: 'Enabled', details: 'No features configured' };
+    }
+    return {
+      status: 'success',
+      text: 'Active',
+      details: `${featureCount} feature${featureCount !== 1 ? 's' : ''}`,
+    };
+  };
+
+  const getMonitoringStatus = (): { status: StatusType; text: string; details?: string } => {
+    if (!hasSAE) {
+      return { status: 'neutral', text: 'Waiting', details: 'Attach SAE first' };
+    }
+    if (!monitoring?.enabled) {
+      return { status: 'warning', text: 'Disabled' };
+    }
+    return {
+      status: 'success',
+      text: 'Active',
+      details: `Top ${monitoring?.top_k || 10} features`,
+    };
+  };
+
+  const modelStatus = getModelStatus();
+  const saeStatus = getSAEStatus();
+  const steeringStatus = getSteeringStatus();
+  const monitoringStatus = getMonitoringStatus();
+
+  const getGpuTempStatus = (): StatusType => {
+    const temp = gpuTemperature || 0;
+    if (temp >= 85) return 'error';
+    if (temp >= 70) return 'warning';
+    return 'success';
+  };
+
+  const getGpuUsageStatus = (): StatusType => {
+    const usage = gpuUtilization || 0;
+    if (usage >= 95) return 'warning';
+    return 'success';
+  };
+
+  return (
+    <div className="space-y-6">
+      {/* System Status Cards */}
+      <section>
+        <h2 className="text-lg font-semibold text-slate-200 mb-4">System Status</h2>
+        <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4">
+          <StatusCard
+            title="Model"
+            icon={<Server className="w-5 h-5" />}
+            status={modelStatus.status}
+            statusText={modelStatus.text}
+            details={modelStatus.details}
+          />
+          <StatusCard
+            title="SAE"
+            icon={<Layers className="w-5 h-5" />}
+            status={saeStatus.status}
+            statusText={saeStatus.text}
+            details={saeStatus.details}
+          />
+          <StatusCard
+            title="Steering"
+            icon={<Sliders className="w-5 h-5" />}
+            status={steeringStatus.status}
+            statusText={steeringStatus.text}
+            details={steeringStatus.details}
+          />
+          <StatusCard
+            title="Feature Monitor"
+            icon={<Activity className="w-5 h-5" />}
+            status={monitoringStatus.status}
+            statusText={monitoringStatus.text}
+            details={monitoringStatus.details}
+          />
+          <WeightsCard {...weights} />
+        </div>
+      </section>
+
+      {/* System Metrics */}
+      <section>
+        <h2 className="text-lg font-semibold text-slate-200 mb-4">System Metrics</h2>
+        <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
+          <SystemMetricCard
+            label="GPU Utilization"
+            value={gpuUtilization ?? '--'}
+            unit="%"
+            icon={<Zap className="w-5 h-5" />}
+            status={getGpuUsageStatus()}
+          />
+          <SystemMetricCard
+            label="GPU Memory"
+            value={gpuMemoryUsed
+              ? `${(gpuMemoryUsed / 1024).toFixed(1)}/${(gpuMemoryTotal / 1024).toFixed(1)}`
+              : '--'}
+            unit="GB"
+            icon={<HardDrive className="w-5 h-5" />}
+            status="neutral"
+          />
+          <SystemMetricCard
+            label="GPU Temp"
+            value={gpuTemperature ?? '--'}
+            unit="°C"
+            icon={<Thermometer className="w-5 h-5" />}
+            status={getGpuTempStatus()}
+          />
+          <SystemMetricCard
+            label="CPU Usage"
+            value={'--'}
+            unit="%"
+            icon={<Cpu className="w-5 h-5" />}
+            status="neutral"
+          />
+        </div>
+      </section>
+
+      {/* Each GPU. The metrics above are aggregates across every card. */}
+      <section>
+        <h2 className="text-lg font-semibold text-slate-200 mb-4">
+          GPUs{gpus.length ? ` (${gpus.length})` : ''}
+        </h2>
+        <GpuCardList gpus={gpus} />
+      </section>
+
+      {/* Quick Start / Actions */}
+      <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+        <QuickActions
+          hasModel={hasModel}
+          hasSAE={hasSAE}
+          hasSteering={hasSteering}
+        />
+        <ActionButtons
+          hasModel={hasModel}
+          hasSAE={hasSAE}
+        />
+      </div>
+
+      {/* Connection Status Banner */}
+      {connectionStatus !== 'connected' && (
+        <div className={`
+          p-4 rounded-lg border
+          ${connectionStatus === 'connecting'
+            ? 'bg-yellow-500/10 border-yellow-500/30 text-yellow-400'
+            : 'bg-red-500/10 border-red-500/30 text-red-400'
+          }
+        `}>
+          <div className="flex items-center gap-3">
+            <div className={`
+              w-3 h-3 rounded-full
+              ${connectionStatus === 'connecting' ? 'bg-yellow-500 animate-pulse' : 'bg-red-500'}
+            `} />
+            <span className="font-medium">
+              {connectionStatus === 'connecting'
+                ? 'Connecting to server...'
+                : 'Disconnected from server'
+              }
+            </span>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+export default DashboardPage;

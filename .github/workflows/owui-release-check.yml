@@ -1,0 +1,62 @@
+name: Open WebUI release check
+
+# Nightly at 00:00 UTC: if upstream has published a newer Open WebUI release,
+# pin it on gitops/pilot (k8s/open-webui/.argocd-source-open-webui.yaml).
+# ArgoCD (Application open-webui, k8s/open-webui/argocd-application.yaml)
+# syncs that branch and rolls the deployment. Run it by hand from the
+# Actions tab to check immediately.
+#
+# GitHub may start scheduled runs some minutes late under load.
+
+on:
+  schedule:
+    - cron: '0 0 * * *'
+  workflow_dispatch: {}
+
+# Shares the gitops/pilot writer lock with sync-main-to-gitops-pilot.yml.
+concurrency:
+  group: sync-main-to-gitops-pilot
+  cancel-in-progress: false
+
+# Least privilege (2026-10-17): read-only by default; the job that writes grants it below.
+permissions:
+  contents: read
+
+jobs:
+  check:
+    permissions:
+      contents: write
+    # HARD STOP: only run in Onegaishimas/miLLM (source repo)
+    if: github.repository == 'Onegaishimas/miLLM'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout gitops/pilot
+        uses: actions/checkout@v4
+        with:
+          ref: gitops/pilot
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Check for a newer release
+        id: check
+        run: bash k8s/open-webui/check-release.sh .
+
+      - name: Commit and push the pin
+        if: steps.check.outputs.changed == 'true'
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add k8s/open-webui/.argocd-source-open-webui.yaml
+          git commit -m "build: automatic update of open-webui" \
+            -m "updates image open-webui/open-webui tag '${{ steps.check.outputs.from }}' to '${{ steps.check.outputs.to }}'"
+          for attempt in 1 2 3; do
+            if git push origin HEAD:gitops/pilot; then
+              echo "Pushed on attempt $attempt"
+              exit 0
+            fi
+            git pull --rebase origin gitops/pilot || {
+              echo "::error::Rebase failed — needs operator attention"
+              exit 1
+            }
+          done
+          echo "::error::Push failed after 3 retries — needs operator attention"
+          exit 1

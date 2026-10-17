@@ -1,0 +1,31 @@
+# miLLM GitOps base — deployed by the `millm` ArgoCD Application
+# (k8s/argocd/millm-app.yaml) from the gitops/pilot branch.
+#
+# Image tags below are the *defaults*; ArgoCD Image Updater overrides them
+# with digest pins via the parameter-override file `.argocd-source-millm.yaml`
+# it commits to gitops/pilot. Never hand-edit that file on main.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+resources:
+  - namespace.yaml
+  - postgres.yaml
+  - redis.yaml
+  - db-backup.yaml
+  - backend.yaml
+  - frontend.yaml
+  - ingress.yaml
+
+# ⚠ F11 HOT-UPDATE SESSION, 2026-10-17 (suite decision D38): hostIPC switched ON in the path
+# ArgoCD deploys, for the run window only, then reverted by the same route. The Application is
+# NOT repointed (Image Updater's pin file is keyed on its path). The component stays the ONLY
+# source of hostIPC; tests/unit/test_k8s_hostipc_component.py pins that and goes back to
+# pinning "no components" in the revert commit.
+components:
+  - ../components/hostipc
+
+images:
+  - name: hitsai/millm-backend
+    newTag: latest
+  - name: hitsai/millm-admin-ui
+    newTag: latest

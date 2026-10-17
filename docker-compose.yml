@@ -1,0 +1,141 @@
+version: "3.8"
+
+services:
+  # Nginx Reverse Proxy
+  nginx:
+    image: nginx:alpine
+    container_name: millm-nginx
+    restart: unless-stopped
+    ports:
+      - "${NGINX_HTTP_PORT:-80}:80"
+    volumes:
+      - ./nginx/nginx.conf:/etc/nginx/nginx.conf:ro
+      - nginx_logs:/var/log/nginx
+    depends_on:
+      - api
+      - frontend
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://localhost/nginx-health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  # PostgreSQL Database
+  db:
+    image: postgres:16-alpine
+    container_name: millm-db
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-millm}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-millm_dev}
+      POSTGRES_DB: ${POSTGRES_DB:-millm}
+    ports:
+      - "${POSTGRES_PORT:-5432}:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-millm} -d ${POSTGRES_DB:-millm}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # Redis for caching and session storage
+  redis:
+    image: redis:7-alpine
+    container_name: millm-redis
+    restart: unless-stopped
+    ports:
+      - "${REDIS_PORT:-6379}:6379"
+    volumes:
+      - redis_data:/data
+    command: redis-server --appendonly yes
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # miLLM Backend API
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: millm-api
+    restart: unless-stopped
+    environment:
+      - DATABASE_URL=postgresql+asyncpg://${POSTGRES_USER:-millm}:${POSTGRES_PASSWORD:-millm_dev}@db:5432/${POSTGRES_DB:-millm}
+      - REDIS_URL=redis://redis:6379/0
+      - MODEL_CACHE_DIR=/app/model_cache
+      - SAE_CACHE_DIR=/app/sae_cache
+      - BATCH_FILES_DIR=/app/batch_files
+      # Feature 32: the checkpoint root miLLM saves to and loads from (named volume below).
+      - WEIGHTS_CHECKPOINT_DIR=/app/checkpoints
+      - HF_HOME=/app/hf_cache
+      - HOST=0.0.0.0
+      - PORT=8000
+      - DEBUG=${DEBUG:-false}
+      - LOG_LEVEL=${LOG_LEVEL:-INFO}
+      - CORS_ORIGINS=${CORS_ORIGINS:-http://localhost,http://localhost:3000,http://millm.hitsai.local}
+      - AUTO_LOAD_MODEL=${AUTO_LOAD_MODEL:-}
+      # cuda:N must be the card nvidia-smi calls N; CUDA's default order is
+      # fastest-first, which disagrees with NVML once there are two GPUs.
+      - CUDA_DEVICE_ORDER=PCI_BUS_ID
+    ports:
+      - "${API_PORT:-8000}:8000"
+    volumes:
+      - model_cache:/app/model_cache
+      - sae_cache:/app/sae_cache
+      - batch_files:/app/batch_files
+      - checkpoints:/app/checkpoints
+      - ${HF_CACHE_DIR:-/home/x-sean/.cache/huggingface}:/app/hf_cache
+      - ./millm:/app/millm:ro
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+
+  # Frontend (Vite dev server)
+  frontend:
+    image: node:22-alpine
+    container_name: millm-frontend
+    working_dir: /app
+    command: sh -c "npm install && npm run dev -- --host 0.0.0.0"
+    environment:
+      - VITE_API_URL=${VITE_API_URL:-http://localhost:8000}
+    ports:
+      - "${FRONTEND_PORT:-3000}:3000"
+    volumes:
+      - ./admin-ui:/app
+      - frontend_node_modules:/app/node_modules
+    depends_on:
+      - api
+
+volumes:
+  postgres_data:
+    name: millm-postgres-data
+  redis_data:
+    name: millm-redis-data
+  model_cache:
+    name: millm-model-cache
+  sae_cache:
+    name: millm-sae-cache
+  batch_files:
+    name: millm-batch-files
+  checkpoints:
+    name: millm-checkpoints
+  frontend_node_modules:
+    name: millm-frontend-node-modules
+  nginx_logs:
+    name: millm-nginx-logs
+
+networks:
+  default:
+    name: millm-network

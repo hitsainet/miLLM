@@ -1,0 +1,414 @@
+name: Build and Push Docker Images
+
+on:
+  push:
+    branches:
+      - main
+    tags:
+      - 'v*'
+  # Manual full rebuild (detect treats a dispatch as "no diff base" → all).
+  workflow_dispatch: {}
+
+# Least privilege for every job (CodeQL actions/missing-workflow-permissions, mirror alert 7,
+# 2026-10-17): the default GITHUB_TOKEN may be read-write. Jobs that need more grant it
+# themselves below; a job that declares nothing gets read-only contents.
+permissions:
+  contents: read
+
+jobs:
+  # ── Change detection ─────────────────────────────────────────────────────
+  # Build ONLY the images whose code changed in this push (same strategy as
+  # the WASAT monorepo). Conservative by design: tag pushes, unknown diff
+  # bases (first push / force-push), and Dockerfile/dependency changes
+  # rebuild the affected image; docs/tests/manual-only changes build nothing.
+  detect:
+    # HARD STOP: only run in hitsainet/miLLM (public/clean repo)
+    if: github.repository == 'hitsainet/millm' || github.repository == 'hitsainet/miLLM'
+    runs-on: ubuntu-latest
+    outputs:
+      images: ${{ steps.detect.outputs.images }}
+    steps:
+      - name: Checkout source
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0   # need history to diff the push range
+
+      - name: Detect changed images
+        id: detect
+        env:
+          REF: ${{ github.ref }}
+        run: |
+          set -euo pipefail
+          ALL=(backend admin-ui)
+          emit_all() { printf '%s\n' "${ALL[@]}" | jq -R . | jq -cs .; }
+
+          # Tag push (release) → full rebuild.
+          if [[ "$REF" == refs/tags/* ]]; then
+            echo "images=$(emit_all)" >> "$GITHUB_OUTPUT"; echo "tag push → all"; exit 0
+          fi
+
+          # ── The diff base is PER IMAGE, and it is the commit that image was
+          # ── actually built from.
+          #
+          # ⚠ THIS USED TO DIFF `github.event.before`, AND THAT SILENTLY STRANDED IMAGES.
+          # An image can fail to publish for reasons unrelated to its own code — the test gate
+          # refusing a red backend suite skipped the WHOLE matrix, admin-ui included. The next
+          # push then diffed from the commit that was never built, saw no changes under
+          # `admin-ui/`, and skipped it again. And again. The published image drifted from main
+          # indefinitely, with every run green, until a human dispatched a full rebuild.
+          #
+          # That happened on 2026-09-27: a merge carrying a new admin-ui page was gated out by a
+          # backend test failure, and the page reached the cluster only because the rebuild was
+          # triggered by hand. Nothing would ever have corrected it.
+          #
+          # Reading each image's own `org.opencontainers.image.revision` makes this
+          # SELF-CORRECTING: an image that was not published keeps its old revision, so the next
+          # run diffs across everything it missed and rebuilds it. No state to keep in sync, and
+          # the registry is the authority on what is actually deployed.
+          #
+          # Conservative at every failure: no label, an unreachable registry, or a commit git
+          # cannot resolve all mean "build it". Never silently skip.
+
+          published_revision() {
+            # Echo the commit `<repo>:latest` was built from, or nothing.
+            #
+            # ⚠ TWO THINGS HERE ARE LOAD-BEARING AND BOTH FAILED SILENTLY WHEN I FIRST WROTE THEM,
+            # returning empty rather than erroring — which reads as "never published" and would have
+            # made this whole mechanism inert (rebuild everything, every push, forever):
+            #
+            #   1. `-L` on the BLOB fetch. Docker Hub 307-redirects blob reads to a CDN. Without
+            #      -L, curl prints nothing and exits 0.
+            #   2. Following the INDEX. `:latest` is a multi-arch index with no `.config` of its
+            #      own; the config lives on the per-platform child manifest.
+            #
+            # Verified against a real public image carrying a real label before shipping.
+            local repo="$1" token accept doc mt cfg child
+            accept='application/vnd.docker.distribution.manifest.v2+json,application/vnd.oci.image.manifest.v1+json,application/vnd.docker.distribution.manifest.list.v2+json,application/vnd.oci.image.index.v1+json'
+
+            token="$(curl -fsSL --max-time 30 \
+              "https://auth.docker.io/token?service=registry.docker.io&scope=repository:${repo}:pull" \
+              | jq -r .token 2>/dev/null)" || return 0
+            [ -n "$token" ] && [ "$token" != "null" ] || return 0
+
+            doc="$(curl -fsSL --max-time 30 -H "Authorization: Bearer ${token}" -H "Accept: ${accept}" \
+              "https://registry-1.docker.io/v2/${repo}/manifests/latest" 2>/dev/null)" || return 0
+
+            mt="$(echo "$doc" | jq -r '.mediaType // empty' 2>/dev/null)"
+            case "$mt" in
+              *manifest.list*|*image.index*)
+                child="$(echo "$doc" | jq -r '
+                  [.manifests[] | select((.platform.os=="linux") and (.platform.architecture=="amd64")
+                    and ((.platform.variant // "")|test("unknown")|not))] | .[0].digest // empty' 2>/dev/null)"
+                [ -n "$child" ] || return 0
+                doc="$(curl -fsSL --max-time 30 -H "Authorization: Bearer ${token}" -H "Accept: ${accept}" \
+                  "https://registry-1.docker.io/v2/${repo}/manifests/${child}" 2>/dev/null)" || return 0
+                ;;
+            esac
+
+            cfg="$(echo "$doc" | jq -r '.config.digest // empty' 2>/dev/null)"
+            [ -n "$cfg" ] || return 0
+
+            curl -fsSL --max-time 30 -H "Authorization: Bearer ${token}" \
+              "https://registry-1.docker.io/v2/${repo}/blobs/${cfg}" 2>/dev/null \
+              | jq -r '.config.Labels["org.opencontainers.image.revision"] // empty' 2>/dev/null \
+              || true
+          }
+
+          repo_for() {
+            case "$1" in
+              backend)  echo "hitsai/millm-backend" ;;
+              admin-ui) echo "hitsai/millm-admin-ui" ;;
+              *) echo "" ;;
+            esac
+          }
+
+          # Which paths make up each image.
+          paths_for() {
+            case "$1" in
+              backend)  echo '^(millm/|Dockerfile|docker-entrypoint\.sh|pyproject\.toml|alembic)' ;;
+              admin-ui) echo '^admin-ui/' ;;
+              *) echo '^$' ;;
+            esac
+          }
+
+          OUT=()
+          for img in "${ALL[@]}"; do
+            repo="$(repo_for "$img")"
+            base="$(published_revision "$repo" || true)"
+
+            if [ -z "$base" ]; then
+              echo "$img: no published revision recorded → build"
+              OUT+=("$img"); continue
+            fi
+
+            # The mirror's main is force-pushed as an orphan, so a previous revision is an
+            # unadvertised object here. GitHub serves those by explicit SHA.
+            git cat-file -e "${base}^{commit}" 2>/dev/null \
+              || git fetch --no-tags --depth=1 origin "$base" 2>/dev/null \
+              || true
+            if ! git cat-file -e "${base}^{commit}" 2>/dev/null; then
+              echo "$img: published revision ${base} is not resolvable here → build"
+              OUT+=("$img"); continue
+            fi
+
+            if [ "$base" = "$GITHUB_SHA" ]; then
+              echo "$img: already published from this exact commit → skip"; continue
+            fi
+
+            CHANGED="$(git diff --name-only "$base" "$GITHUB_SHA" || true)"
+            if [ -z "$CHANGED" ]; then
+              echo "$img: no file changes since ${base:0:8} → skip"; continue
+            fi
+            if echo "$CHANGED" | grep -qE "$(paths_for "$img")"; then
+              echo "$img: changed since published ${base:0:8} → build"
+              OUT+=("$img")
+            else
+              echo "$img: unchanged since published ${base:0:8} → skip"
+            fi
+          done
+
+          if [ ${#OUT[@]} -eq 0 ]; then
+            echo "images=[]" >> "$GITHUB_OUTPUT"; echo "nothing to build"
+          else
+            JSON="$(printf '%s\n' "${OUT[@]}" | jq -R . | jq -cs .)"
+            echo "images=$JSON" >> "$GITHUB_OUTPUT"; echo "building: $JSON"
+          fi
+
+  # ── Test gate ────────────────────────────────────────────────────────────
+  # DO NOT PUBLISH A BACKEND IMAGE OVER A RED SUITE.
+  #
+  # This workflow used to build and push on any commit to main, independent of
+  # `Backend Tests`. On 2026-09-07 three commits shipped and deployed while the
+  # suite was failing — the images built happily beside a red X, and ArgoCD
+  # rolled them out. Nothing in the pipeline connected the two.
+  #
+  # Scoped to the BACKEND image on purpose. `backend-tests.yml` carries path
+  # filters (`millm/**`, `tests/**`, `pyproject.toml`), so an admin-ui-only push
+  # produces no Backend Tests run at all — gating every image on it would
+  # deadlock the UI image forever, waiting for a check that will never appear.
+  gate:
+    needs: detect
+    if: >-
+      (github.repository == 'hitsainet/millm' || github.repository == 'hitsainet/miLLM')
+      && contains(needs.detect.outputs.images, 'backend')
+    runs-on: ubuntu-latest
+    permissions:
+      actions: read
+      contents: read
+    steps:
+      # Needed by the fallback below, which diffs backend source between commits.
+      - name: Checkout source
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Require Backend Tests to have passed for this commit
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          # Poll rather than read once: the two workflows start together, so the
+          # suite is usually still running when this begins.
+          for attempt in $(seq 1 60); do
+            RUN="$(gh api \
+              "repos/${GITHUB_REPOSITORY}/actions/runs?head_sha=${SHA}&per_page=100" \
+              --jq '[.workflow_runs[] | select(.name=="Backend Tests")]
+                    | sort_by(.created_at) | last
+                    | if . == null then "" else "\(.status) \(.conclusion)" end' 2>/dev/null || echo "")"
+
+            # ⚠ `if . == null then ""` IS LOAD-BEARING. `last` on an empty array is `null`, and
+            # "\(.status) \(.conclusion)" renders that as the literal string "null null" — not
+            # empty. So the `""` branch below was UNREACHABLE, and had been since this gate was
+            # written: with no Backend Tests run, it polled all 60 attempts and died on the
+            # timeout instead of taking the no-run path. The original's own
+            # "No Backend Tests run found" error could never fire either. Found 2026-09-27 by
+            # reading a real run's log and seeing `waiting for Backend Tests (57/60): null null`.
+            case "$RUN" in
+              "completed success")
+                echo "Backend Tests passed for ${SHA} — publishing."; exit 0 ;;
+              "completed "*)
+                echo "::error::Backend Tests did not pass for ${SHA} (${RUN}). \
+          Refusing to publish a backend image over a red suite."; exit 1 ;;
+              "")
+                # No run yet. Early on that means it has not been created; late it
+                # means it never will be — because `backend-tests.yml` carries path
+                # filters and this push changed no backend source.
+                #
+                # ⚠ FAILING HERE WAS A DEADLOCK, and it bit on this change's own first
+                # run. `detect` builds the backend whenever the published image carries
+                # no revision label — including after a failed backend build. So: build
+                # fails -> no label -> next push picks backend again -> if that push is
+                # docs- or CI-only there is still no test run -> fails again. Forever,
+                # with the backend image never able to earn its label back.
+                #
+                # The honest rule: the path filter not firing MEANS the backend source is
+                # unchanged. So fall back to the most recent commit that does have a
+                # Backend Tests result, and require BOTH that it passed AND that no
+                # backend source has changed since — the second half is what stops a
+                # broken path filter from waving through code that was never tested.
+                if [ "$attempt" -ge 20 ]; then
+                  PREV="$(gh api \
+                    "repos/${GITHUB_REPOSITORY}/actions/runs?per_page=100" \
+                    --jq '[.workflow_runs[] | select(.name=="Backend Tests")
+                           | select(.status=="completed")]
+                          | sort_by(.created_at) | last
+                          | if . == null then "" else "\(.head_sha) \(.conclusion)" end' \
+                    2>/dev/null || echo "")"
+                  PREV_SHA="${PREV%% *}"; PREV_RESULT="${PREV##* }"
+
+                  if [ -z "$PREV_SHA" ]; then
+                    echo "::error::No Backend Tests run found for ${SHA}, and no earlier \
+          run to fall back to. Refusing to publish untested."; exit 1
+                  fi
+                  if [ "$PREV_RESULT" != "success" ]; then
+                    echo "::error::No Backend Tests run for ${SHA}; the most recent one \
+          (${PREV_SHA}) was ${PREV_RESULT}. Refusing to publish over a red suite."; exit 1
+                  fi
+
+                  git cat-file -e "${PREV_SHA}^{commit}" 2>/dev/null \
+                    || git fetch --no-tags --depth=1 origin "$PREV_SHA" 2>/dev/null || true
+                  if ! git cat-file -e "${PREV_SHA}^{commit}" 2>/dev/null; then
+                    echo "::error::Cannot resolve ${PREV_SHA} to verify the backend source \
+          is unchanged. Refusing to publish unverified."; exit 1
+                  fi
+
+                  CHANGED="$(git diff --name-only "$PREV_SHA" "$SHA" || true)"
+                  if echo "$CHANGED" | grep -qE '^(millm/|Dockerfile|docker-entrypoint\.sh|pyproject\.toml|alembic|tests/)'; then
+                    echo "::error::Backend source changed since ${PREV_SHA} but no Backend \
+          Tests run exists for ${SHA} — the path filters should have produced one. \
+          Refusing to publish untested."; exit 1
+                  fi
+
+                  echo "No Backend Tests run for ${SHA}, and no backend source changed \
+          since ${PREV_SHA} (which passed). The backend code is byte-identical to a \
+          tested commit — publishing."
+                  exit 0
+                fi ;;
+            esac
+            echo "waiting for Backend Tests (${attempt}/60): ${RUN:-not started}"
+            sleep 30
+          done
+          echo "::error::Timed out waiting for Backend Tests on ${SHA}."; exit 1
+
+  build:
+    needs: [detect, gate]
+    # `always()` because `gate` is SKIPPED for an admin-ui-only build, and a
+    # skipped dependency would otherwise skip this job too. Skipped is allowed;
+    # failed and cancelled are not.
+    # ⚠ THE GATE'S RESULT IS NOT IN THIS CONDITION, AND THAT IS THE FIX.
+    #
+    # It used to be `needs.gate.result != 'failure'`. A job-level `if` is evaluated ONCE for the
+    # whole job, not per matrix leg, so a failing backend gate skipped EVERY image — admin-ui
+    # included, which backend tests have nothing to do with. Combined with the old diff base,
+    # that stranded the UI image indefinitely: gated out once, then "unchanged" forever after.
+    #
+    # The gate is now enforced as the first STEP, scoped to the backend leg. A red suite fails
+    # the backend image and leaves the UI image free to publish, which is what the gate's own
+    # comment always said it intended ("Scoped to the BACKEND image on purpose").
+    if: >-
+      always()
+      && (github.repository == 'hitsainet/millm' || github.repository == 'hitsainet/miLLM')
+      && needs.detect.result == 'success'
+      && needs.detect.outputs.images != '[]' && needs.detect.outputs.images != ''
+      && needs.gate.result != 'cancelled'
+    runs-on: ubuntu-latest
+
+    permissions:
+      contents: read
+      id-token: write
+      attestations: write
+
+    strategy:
+      fail-fast: false
+      matrix:
+        name: ${{ fromJson(needs.detect.outputs.images) }}
+
+    steps:
+      # ⚠ THE TEST GATE, scoped to the image it is about. See the job `if` above.
+      - name: Refuse to publish a backend image over a red suite
+        if: matrix.name == 'backend' && needs.gate.result != 'success'
+        run: |
+          echo "::error::Backend Tests did not pass for ${GITHUB_SHA} (gate: ${{ needs.gate.result }})."
+          echo "::error::Refusing to publish a backend image over a red suite."
+          echo "::error::The admin-ui image is unaffected and publishes independently."
+          exit 1
+
+      - name: Checkout source
+        uses: actions/checkout@v4
+
+      - name: Resolve image build parameters
+        id: img
+        run: |
+          case "${{ matrix.name }}" in
+            backend)
+              echo "repo=hitsai/millm-backend"  >> "$GITHUB_OUTPUT"
+              echo "context=."                  >> "$GITHUB_OUTPUT"
+              echo "dockerfile=./Dockerfile"    >> "$GITHUB_OUTPUT"
+              echo "target=runtime"             >> "$GITHUB_OUTPUT"
+              ;;
+            admin-ui)
+              echo "repo=hitsai/millm-admin-ui"       >> "$GITHUB_OUTPUT"
+              echo "context=./admin-ui"               >> "$GITHUB_OUTPUT"
+              echo "dockerfile=./admin-ui/Dockerfile" >> "$GITHUB_OUTPUT"
+              echo "target="                          >> "$GITHUB_OUTPUT"
+              ;;
+            *)
+              echo "ERROR: unknown image ${{ matrix.name }}"; exit 1
+              ;;
+          esac
+
+      # The torch-based backend image is large; reclaim runner disk first.
+      - name: Free disk space
+        if: matrix.name == 'backend'
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache
+          sudo docker system prune -af
+          df -h /
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to Docker Hub
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Extract version tag
+        id: version
+        run: |
+          if [[ "${GITHUB_REF}" == refs/tags/v* ]]; then
+            VERSION="${GITHUB_REF#refs/tags/}"
+            echo "tags=${{ steps.img.outputs.repo }}:latest,${{ steps.img.outputs.repo }}:${VERSION}" >> "$GITHUB_OUTPUT"
+          else
+            SHA="${GITHUB_SHA::8}"
+            echo "tags=${{ steps.img.outputs.repo }}:latest,${{ steps.img.outputs.repo }}:${SHA}" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Build and push ${{ matrix.name }} image
+        id: build
+        uses: docker/build-push-action@v5
+        with:
+          context: ${{ steps.img.outputs.context }}
+          file: ${{ steps.img.outputs.dockerfile }}
+          target: ${{ steps.img.outputs.target }}
+          push: true
+          tags: ${{ steps.version.outputs.tags }}
+          # ⚠ THIS LABEL IS WHAT `detect` DIFFS FROM. It records the commit this image was
+          # actually built from, so change detection can ask "what has changed since the image
+          # that is PUBLISHED" instead of "what changed in this push". Removing it does not break
+          # the build — it makes `detect` fall back to building everything, forever.
+          labels: |
+            org.opencontainers.image.revision=${{ github.sha }}
+          cache-from: type=gha,scope=${{ matrix.name }}
+          cache-to: type=gha,mode=max,scope=${{ matrix.name }}
+          provenance: true
+          sbom: true
+
+      - name: Attest build provenance
+        uses: actions/attest-build-provenance@v2
+        with:
+          subject-name: index.docker.io/${{ steps.img.outputs.repo }}
+          subject-digest: ${{ steps.build.outputs.digest }}
+          push-to-registry: true

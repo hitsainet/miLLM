@@ -1,0 +1,297 @@
+[project]
+name = "millm"
+version = "0.5.0"
+description = "Mechanistic Interpretability LLM Server with SAE support"
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "Apache-2.0" }
+authors = [{ name = "miLLM Team" }]
+keywords = ["llm", "interpretability", "sae", "mechanistic", "transformers"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Science/Research",
+    "License :: OSI Approved :: Apache Software License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+]
+
+dependencies = [
+    # Web framework
+    "fastapi>=0.115.0",
+    "uvicorn[standard]>=0.34.0",
+    "python-multipart>=0.0.18",
+
+    # Configuration
+    "pydantic>=2.10.0",
+    "pydantic-settings>=2.7.0",
+
+    # Database
+    "sqlalchemy[asyncio]>=2.0.36",
+    "asyncpg>=0.30.0",
+    "alembic>=1.14.0",
+
+    # WebSocket
+    "python-socketio>=5.12.0",
+
+    # ML/AI
+    #
+    # EVERY MAJOR HERE IS CAPPED, and the floors are versions that have actually
+    # been run, not the oldest that might work. An open `>=` on a library this
+    # central means each image rebuild silently installs whatever shipped that
+    # week: this project went 4.57 -> 5.5 -> 5.15 without a commit saying so,
+    # and transformers 5 removed `output_attentions` from the decoder forward,
+    # which broke attention capture in the sibling repo with no error until a
+    # capture crashed on an empty tuple. A cap turns that into a resolver
+    # failure at build time, where it is cheap.
+    # EXACT, not a range (2026-10-17). miForge's hot-update attach (F11) refuses when the
+    # trainer's and the server's torch/CUDA builds differ — a CUDA IPC handle is a contract
+    # between matching builds — and miForge pins 2.14.1 in its image. Ours floated on
+    # ">=2.10.0,<3" and matched only by build date. 2.14.1 is what the serving image runs:
+    # measured in the pod 2026-10-16 (2.14.1+cu130, attachable_weights_hardware_2026-10-16.md
+    # §1), and it is the latest release (2026-09-30), so every build since resolved it.
+    # Bump only in lockstep with miForge's ARG TORCH_VERSION; tests/unit/test_torch_pin.py
+    # holds both this and the CI CPU pre-install to the same version.
+    "torch==2.14.1",
+    # THE SERVING STACK IS PINNED EXACTLY (2026-10-17, coordinator decision on D24's intent):
+    # torch, transformers, huggingface-hub, bitsandbytes, accelerate, safetensors, tokenizers,
+    # xgrammar and the gguf extra's llama-cpp-python are each `==` the version `pip list`
+    # reported in the live millm-backend pod on 2026-10-17. Ranges let any change to this file
+    # (it invalidates the image's cached dependency layer) silently re-resolve all of them — the
+    # dev-venv-vs-image drift that once shipped a different transformers major. The comments
+    # beside each entry below explain why its line of releases matters; the version is the
+    # pod's. Bump deliberately, one package at a time, measured; tests/unit/test_torch_pin.py
+    # holds the set.
+    # 5.15 is the floor because `gemma4_unified` (google/gemma-4-*) does not
+    # exist before it — 5.5 raises "Transformers does not recognize this
+    # architecture" on that checkpoint.
+    "transformers==5.20.1",
+    # Pinned to the 1.x line. Progress tracking no longer depends on
+    # version-sensitive tqdm/resume_download behavior, but the major is capped
+    # so a surprise 2.x bump can't silently change download semantics.
+    "huggingface-hub==1.33.0",
+    "bitsandbytes==0.50.2",
+    "accelerate==1.15.0",
+    # transformers 5.15 requires >=0.8.0; below that the resolver picks a
+    # version it cannot load safetensors checkpoints with.
+    "safetensors==0.8.0",
+    # Not used directly; pinned so a rebuild cannot move the tokenizer under transformers.
+    "tokenizers==0.23.3",
+    # Structured output (Feature 25, 025_FTDD §3.1). xgrammar compiles a JSON
+    # Schema into a token mask applied by miLLM's OWN logits processor
+    # (millm/ml/constrained_decoding.py), not xgrammar.contrib.hf, which checks
+    # acceptance with an `assert`. Capped like every ML dependency here: 0.2.8
+    # compiles `multipleOf`, `not` and `uniqueItems` WITHOUT enforcing them, and
+    # a later minor can change that list in either direction — so the allowlist
+    # in millm/api/json_schema_subset.py is pinned by a test that probes the
+    # installed library, and jsonschema validates every output.
+    "xgrammar==0.2.8",
+    "jsonschema>=4.23,<5",
+
+    # SSE for streaming
+    "sse-starlette>=2.2.0",
+
+    # Logging
+    "structlog>=25.1.0",
+
+    # Utilities
+    "httpx>=0.28.0",
+    "python-dotenv>=1.0.1",
+]
+
+[project.optional-dependencies]
+gguf = [
+    # llama.cpp bindings, for serving a single pre-quantized .gguf file.
+    #
+    # An EXTRA, never a hard dependency: a deployment that serves no GGUF must
+    # not carry it, and the CPU/test path must stay installable without a CUDA
+    # toolchain. `millm.ml.model_loader` imports it defensively and the load
+    # path raises a clear error when it is absent.
+    "llama-cpp-python==0.3.36",
+]
+cuda = [
+    # Optimized CUDA kernels for SSM/Mamba models (requires CUDA toolkit to build)
+    "mamba-ssm>=2.2.0",
+    "causal-conv1d>=1.4.0",
+]
+dev = [
+    # Testing
+    # 9.0+, which is what is actually exercised: the installed version is 9.1.1
+    # and the suite runs 3,016 passing tests on it (measured 2026-09-25). The
+    # floor said 8.3 while nobody had run 8.x for months, so it documented a
+    # configuration that was neither used nor tested.
+    #
+    # The 21 remaining non-passing tests are ENVIRONMENTAL, not version-related,
+    # and are expected to fail outside their environment: 17 in
+    # tests/e2e/test_model_workflow.py need a Postgres with this project's test
+    # credentials (they raise InvalidPasswordError otherwise), and 4 in
+    # tests/performance/test_api_performance.py expect the container's /app
+    # layout (PermissionError on a workstation checkout).
+    "pytest>=9.0",
+    "pytest-asyncio>=0.25.0",
+    "pytest-cov>=6.0.0",
+    "pytest-mock>=3.14.0",
+    "httpx>=0.28.0",
+    "aiosqlite>=0.21.0",
+
+    # ⚠ FOR THE CROSS-REPO GUARD, NOT FOR miLLM ITSELF. miLLM serves no MCP surface; the
+    # `millm_*` tools live in miStudio. `tests/unit/test_mcp_contract_consistency.py`
+    # builds miStudio's tool registry to check that every category the contract documents
+    # is really registered — and without this package it SKIPPED, reporting "10 skipped /
+    # UNVERIFIED" for the whole life of the guard. A cross-repo check that cannot run is
+    # the same shape of gap as the defect it exists to catch. Pinned `<2` to match
+    # miStudio's own pin: mcp 2.x renamed FastMCP to MCPServer, so 2.x cannot load the
+    # tool modules at all.
+    "mcp>=1.9.0,<2",
+
+    # Feature 28 (FTDD §3, PADR §5 dev-only): the CONSUMER's RFC 8941 parser, pinned as
+    # miDataworks 007 pins it, so `tests/unit/core/test_steering_state.py` checks the
+    # `X-miLLM-Steering` grammar against an independent implementation rather than a round trip
+    # through miLLM's own serialiser (which would agree with its own slip). Never a runtime dep.
+    "http-sfv==0.9.9",
+
+    # Linting and formatting
+    "ruff>=0.9.0",
+    "mypy>=1.14.0",
+
+    # Type stubs
+    "types-python-dateutil",
+]
+
+perf = [
+    # FlashAttention-2 (requires SM80+ GPU: A100, RTX 3090, etc.)
+    "flash-attn>=2.7.0",
+    # GPTQ pre-quantized model support
+    "auto-gptq>=0.7.0",
+    # AWQ pre-quantized model support + optimization utilities
+    "autoawq>=0.2.0",
+    "optimum>=1.21.0",
+]
+
+redis = [
+    "redis>=5.0.0",
+]
+
+[project.urls]
+Homepage = "https://github.com/miLLM/miLLM"
+Documentation = "https://github.com/miLLM/miLLM#readme"
+Repository = "https://github.com/miLLM/miLLM"
+Issues = "https://github.com/miLLM/miLLM/issues"
+
+[project.scripts]
+millm = "millm.main:run"
+
+[build-system]
+requires = ["setuptools>=68.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+include = ["millm*"]
+
+# =============================================================================
+# Pytest Configuration
+# =============================================================================
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"
+python_files = ["test_*.py"]
+python_functions = ["test_*"]
+python_classes = ["Test*"]
+addopts = [
+    "-v",
+    "--strict-markers",
+    "-ra",
+]
+markers = [
+    "unit: Unit tests (no external dependencies)",
+    "integration: Integration tests (requires database)",
+    "e2e: End-to-end tests (requires full stack)",
+    "slow: Slow tests (skipped by default)",
+    "gpu: Tests that require a CUDA GPU (skipped when unavailable)",
+]
+filterwarnings = [
+    "ignore::DeprecationWarning",
+    "ignore::PendingDeprecationWarning",
+]
+
+# =============================================================================
+# Coverage Configuration
+# =============================================================================
+[tool.coverage.run]
+source = ["millm"]
+branch = true
+omit = [
+    "millm/db/migrations/*",
+    "tests/*",
+]
+
+[tool.coverage.report]
+exclude_lines = [
+    "pragma: no cover",
+    "def __repr__",
+    "raise NotImplementedError",
+    "if TYPE_CHECKING:",
+    "if __name__ == .__main__.:",
+]
+show_missing = true
+skip_covered = true
+
+# =============================================================================
+# Ruff Configuration (Linting & Formatting)
+# =============================================================================
+[tool.ruff]
+target-version = "py311"
+line-length = 100
+
+[tool.ruff.lint]
+select = [
+    "E",      # pycodestyle errors
+    "W",      # pycodestyle warnings
+    "F",      # pyflakes
+    "I",      # isort
+    "B",      # flake8-bugbear
+    "C4",     # flake8-comprehensions
+    "UP",     # pyupgrade
+    "ARG",    # flake8-unused-arguments
+    "SIM",    # flake8-simplify
+]
+ignore = [
+    "E501",   # line too long (handled by formatter)
+    "B008",   # function call in default argument (needed for FastAPI Depends)
+    "B904",   # raise without from (sometimes intentional)
+]
+
+[tool.ruff.lint.isort]
+known-first-party = ["millm"]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/*" = ["ARG001"]  # Unused function arguments OK in tests
+
+# =============================================================================
+# MyPy Configuration
+# =============================================================================
+[tool.mypy]
+python_version = "3.11"
+strict = true
+warn_return_any = true
+warn_unused_ignores = true
+disallow_untyped_defs = true
+disallow_incomplete_defs = true
+check_untyped_defs = true
+no_implicit_optional = true
+warn_redundant_casts = true
+
+[[tool.mypy.overrides]]
+module = [
+    "transformers.*",
+    "huggingface_hub.*",
+    "llama_cpp.*",
+    "torch.*",
+    "bitsandbytes.*",
+    "accelerate.*",
+    "safetensors.*",
+    "socketio.*",
+    "structlog.*",
+]
+ignore_missing_imports = true

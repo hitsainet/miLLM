@@ -1,0 +1,399 @@
+"""Evidence-rung vocabulary tests (Feature 13, task 3.0).
+
+Pins the rung values and language VERBATIM against miStudio's ladder, the
+MIN-over-edges circuit rung, and — most importantly — carries the **copy-audit**
+that enforces the honesty contract: the word "causal" must never describe an
+artifact below rung 2 on any runtime or UI surface.
+"""
+
+import re
+from pathlib import Path
+
+import pytest
+
+from millm.core.circuit_evidence import (
+    CAUSAL_LANGUAGE_MIN_RUNG,
+    RUNG_LANGUAGE,
+    RUNG_NEXT_STEP,
+    EvidenceRung,
+    circuit_rung,
+    is_validated,
+    requires_unvalidated_ack,
+    rung_language,
+    rung_next_step,
+)
+
+REPO = Path(__file__).resolve().parents[3]
+
+
+class TestRungValues:
+    def test_exact_ladder_values(self):
+        """The integer values ARE the contract — a shift would silently
+        re-grade every imported circuit."""
+        assert EvidenceRung.MINED == 0
+        assert EvidenceRung.ATTRIBUTION_SUPPORTED == 1
+        assert EvidenceRung.CAUSALLY_VALIDATED == 2
+        assert EvidenceRung.FAITHFULNESS_TESTED == 3
+
+    def test_language_is_verbatim_miStudio(self):
+        """Byte-identical to miStudio's RUNG_LANGUAGE — no paraphrasing."""
+        assert RUNG_LANGUAGE[EvidenceRung.MINED] == "associated"
+        assert (
+            RUNG_LANGUAGE[EvidenceRung.ATTRIBUTION_SUPPORTED]
+            == "suggested (attribution-supported)"
+        )
+        assert (
+            RUNG_LANGUAGE[EvidenceRung.CAUSALLY_VALIDATED] == "causally validated (edge)"
+        )
+        assert (
+            RUNG_LANGUAGE[EvidenceRung.FAITHFULNESS_TESTED]
+            == "faithfulness-tested (circuit)"
+        )
+
+    def test_rung_language_accepts_int_and_enum(self):
+        assert rung_language(0) == "associated"
+        assert rung_language(EvidenceRung.MINED) == "associated"
+
+    def test_next_step_covers_every_rung(self):
+        for rung in EvidenceRung:
+            assert RUNG_NEXT_STEP[rung]
+            assert rung_next_step(int(rung))
+
+    def test_out_of_range_rung_degrades_to_mined_not_crash(self):
+        """A malformed document must not crash a render, and must never
+        degrade UPWARD into a stronger claim."""
+        assert rung_language(99) == "associated"
+        assert rung_language(-5) == "associated"
+        assert rung_language("garbage") == "associated"
+        assert is_validated(99) is False
+
+
+class TestCircuitRung:
+    def test_min_over_edges(self):
+        """A circuit is only as strong as its weakest edge."""
+        assert circuit_rung([3, 2, 1]) == EvidenceRung.ATTRIBUTION_SUPPORTED
+        assert circuit_rung([2, 2, 2]) == EvidenceRung.CAUSALLY_VALIDATED
+        assert circuit_rung([3, 3]) == EvidenceRung.FAITHFULNESS_TESTED
+
+    def test_single_unvalidated_edge_blocks_causal_language(self):
+        """One rung-0 edge keeps the WHOLE circuit out of causal language."""
+        rung = circuit_rung([3, 3, 3, 0])
+        assert rung == EvidenceRung.MINED
+        assert is_validated(rung) is False
+
+    def test_empty_edges_is_mined_not_crash(self):
+        assert circuit_rung([]) == EvidenceRung.MINED
+
+    def test_accepts_enum_members(self):
+        assert circuit_rung([EvidenceRung.FAITHFULNESS_TESTED, EvidenceRung.MINED]) == 0
+
+
+class TestValidationGate:
+    @pytest.mark.parametrize("rung,validated", [(0, False), (1, False), (2, True), (3, True)])
+    def test_is_validated_threshold(self, rung, validated):
+        assert is_validated(rung) is validated
+        assert requires_unvalidated_ack(rung) is (not validated)
+
+    def test_threshold_constant_is_rung_two(self):
+        assert CAUSAL_LANGUAGE_MIN_RUNG == EvidenceRung.CAUSALLY_VALIDATED == 2
+
+
+class TestCopyAudit:
+    """The honesty contract, enforced by grep (mirrors miStudio's guard).
+
+    Any surface that renders rung language must obtain it from RUNG_LANGUAGE.
+    The only permitted occurrences of "causal" are: rung>=2 language itself,
+    and prose that explicitly states the prohibition.
+    """
+
+    #: Files that legitimately contain the word (the vocabulary + its guards).
+    ALLOWED = {
+        "millm/core/circuit_evidence.py",
+        "tests/unit/core/test_circuit_evidence.py",
+    }
+
+    #: "causal" in an unrelated sense — the transformer architecture term and
+    #: HuggingFace class names have nothing to do with the evidence ladder.
+    #: R3-14: `architecture` was in this list and is far too broad — it is an
+    #: ordinary word in circuit copy, so
+    #:     "Circuit architecture: this edge is causally validated by observation"
+    #: was exempted by its own subject matter. Sentence-scoping cannot fix that
+    #: (the word and the claim share a sentence); the term had to go.
+    #:
+    #: What remains is anchored to the transformer/HuggingFace sense, where
+    #: "causal" is a model-architecture term with no evidential meaning. Kept
+    #: narrow deliberately: an over-broad exemption in an HONESTY audit is not
+    #: a convenience, it is a hole.
+    UNRELATED_SENSE = re.compile(
+        r"causal[- ]?lm\b|causallm|autoregressive|"
+        r"causal\s+attention|causal\s+mask|is_causal",
+        re.IGNORECASE,
+    )
+
+    #: The audit only fires when "causal" appears in an EVIDENCE-GRADING
+    #: context — a circuit/edge/rung claim — because that is where the word
+    #: asserts a validation level. ("the wrong causal influence" about steering
+    #: generally is a different, legitimate sense and is not an overclaim.)
+    EVIDENCE_CONTEXT = re.compile(
+        r"circuit|rung|edge|evidence|validated", re.IGNORECASE
+    )
+
+    @staticmethod
+    def _causal_sentence(code: str) -> str:
+        """The SENTENCE containing 'causal', not the whole line.
+
+        F20 R3-13. Every exemption below was a substring test over the entire
+        line, so a marker ANYWHERE licensed a claim ELSEWHERE:
+
+            "This circuit is causally validated; we never cut corners."
+            "Circuit architecture: this edge is causally validated by observation."
+
+        Both passed. miStudio's audit fixed exactly this in R1-09/10 by
+        requiring the denial to be in the SAME SENTENCE as the claim; miLLM's
+        never adopted it, so the honesty guarantee was materially weaker on the
+        SERVING side — the side a promoted circuit actually reaches.
+        """
+        parts = re.split(r"(?<=[.;!?])\s+", code)
+        for part in parts:
+            if re.search(r"\bcausal", part, re.IGNORECASE):
+                return part
+        return code
+
+    #: F20 R3-15. Both repos' audits keyed on the token "causal", so an
+    #: overclaim phrased in ordinary English was invisible:
+    #:
+    #:     "Ablation proves this edge causes the refusal, a confirmed mechanism."
+    #:     "Verified effect size measured on live traffic for every edge."
+    #:
+    #: Those assert rung-2/3 without the guarded word. The ladder's whole value
+    #: is that "we observed a correlation" and "we established a mechanism" stay
+    #: distinguishable, and it does not matter which vocabulary erases the
+    #: distinction.
+    PROOF_CLAIM = re.compile(
+        r"\bprove[sd]?\b|\bproof\b|\bdemonstrat(?:e|es|ed)\s+that\b|"
+        r"\bconfirmed\s+mechanism\b|\bverified\s+effect\b|"
+        r"\bestablishes?\s+(?:that\s+)?(?:the\s+)?caus",
+        re.IGNORECASE,
+    )
+
+    def _scan(self, roots: list[str], suffixes: tuple[str, ...]) -> list[tuple[str, int, str]]:
+        hits: list[tuple[str, int, str]] = []
+        for root in roots:
+            base = REPO / root
+            if not base.exists():
+                continue
+            for path in base.rglob("*"):
+                if path.suffix not in suffixes or "node_modules" in path.parts:
+                    continue
+                # F19 R3-05: TEST files are not a runtime surface.
+                #
+                # The audit exists to stop causal language reaching a USER. A
+                # test asserting the phrase is ABSENT — `expect(msg).not
+                # .toContain('causally validated')` — is the opposite of an
+                # overclaim, and it tripped this gate while pinning the very
+                # honesty rule the gate protects. Excluding tests keeps the
+                # audit aimed at copy rather than at the assertions about copy.
+                if "__tests__" in path.parts or path.name.startswith("test_"):
+                    continue
+                if path.name.endswith((".test.tsx", ".test.ts", ".spec.ts")):
+                    continue
+                rel = str(path.relative_to(REPO))
+                if rel in self.ALLOWED:
+                    continue
+                try:
+                    text = path.read_text(encoding="utf-8", errors="ignore")
+                except OSError:
+                    continue
+                for i, line in enumerate(text.splitlines(), 1):
+                    if not re.search(r"\bcausal", line, re.IGNORECASE):
+                        continue
+                    # R3-14: both of these were whole-LINE tests, so an
+                    # unrelated word anywhere on the line disarmed the check:
+                    #   "Circuit architecture: this edge is causally validated"
+                    # passed because "architecture" appeared. Scope them to the
+                    # sentence carrying the word, same as the marker list.
+                    sentence = TestCopyAudit._causal_sentence(line)
+                    if self.UNRELATED_SENSE.search(sentence):
+                        continue  # "causal LM" / CausalLMOutputWithPast etc.
+                    if not self.EVIDENCE_CONTEXT.search(sentence):
+                        continue  # not an evidence-ladder claim
+                    hits.append((rel, i, line.strip()))
+        return hits
+
+    #: Comment prefixes stripped before auditing. A marker in a COMMENT must not
+    #: exempt a claim in the code — that is how an allow-list quietly stops
+    #: guarding (R3 finding: `const m = "...causally validated"; // rung_language`
+    #: previously passed).
+    _COMMENT = re.compile(r"(//.*$)|(#.*$)|(/\*.*?\*/)")
+
+    @staticmethod
+    def _code_only(line: str) -> str:
+        """The line with trailing comments removed."""
+        return TestCopyAudit._COMMENT.sub("", line)
+
+    def test_no_handwritten_causal_language_on_runtime_surfaces(self):
+        """No runtime/UI file may hand-write 'causal' — it must come from
+        RUNG_LANGUAGE (which only yields it at rung>=2)."""
+        hits = self._scan(
+            ["millm", "admin-ui/src"], (".py", ".ts", ".tsx")
+        )
+        offenders = []
+        for rel, line_no, line in hits:
+            # Audit the CODE, not the comments: a marker in a trailing comment
+            # must never exempt a claim made in a string literal.
+            code = self._code_only(line)
+            if not re.search(r"\bcausal", code, re.IGNORECASE):
+                continue  # the only occurrence was in a comment — prose, not copy
+            # R3-13: anchored to the sentence carrying the claim.
+            sentence = self._causal_sentence(code)
+            lowered = sentence.lower()
+            # Permitted: prose that states the prohibition/contract, or a
+            # reference to the ladder constant//vocabulary function.
+            if any(
+                marker in lowered
+                for marker in (
+                    # Negations / prohibitions — these DENY a causal claim.
+                    "never",
+                    "forbid",
+                    "must not",
+                    "not causal",
+                    "no causal",
+                    "isn't causal",
+                    "is not causal",
+                    # Explicit rung-gating context.
+                    "rung >= 2",
+                    "rung>=2",
+                    "rung < 2",
+                    "rung<2",
+                    "below rung 2",
+                    # The ladder enumerated in a doc comment: the phrase is
+                    # attached to its own rung number, not to a lower one.
+                    "2 causally validated",
+                    # Copy stating the GATE ("only a causally validated circuit
+                    # activates without an acknowledgement") — that is the rule,
+                    # not a claim about a specific low-rung artifact.
+                    "only a causally validated",
+                    # References to the vocabulary itself, not hand-written copy.
+                    "causally_validated",   # the enum member name
+                    "rung_language",        # rendering through the vocabulary
+                    "causal_language_min_rung",
+                )
+            ):
+                continue
+            offenders.append(f"{rel}:{line_no}: {line}")
+        assert not offenders, (
+            "Hand-written causal language found on a runtime/UI surface — render "
+            "rung_language(rung) instead:\n" + "\n".join(offenders)
+        )
+
+    def test_rung_below_two_language_never_contains_causal(self):
+        """The vocabulary itself must never emit 'causal' below rung 2."""
+        for rung in (EvidenceRung.MINED, EvidenceRung.ATTRIBUTION_SUPPORTED):
+            assert "causal" not in rung_language(rung).lower()
+
+    def test_rung_two_and_above_may_use_causal(self):
+        assert "causally validated" in rung_language(EvidenceRung.CAUSALLY_VALIDATED)
+
+    def test_no_proof_language_on_runtime_surfaces(self):
+        """F20 R3-15. An overclaim need not use the word "causal".
+
+        "proves", "confirmed mechanism", "verified effect" all assert a
+        validated mechanism in plain English, and the audit's vocabulary saw
+        none of them. Scanned in the same evidence-grading context as the
+        causal check, so ordinary uses of "proves" elsewhere are untouched.
+        """
+        offenders = []
+        for root in ("millm", "admin-ui/src"):
+            base = REPO / root
+            if not base.exists():
+                continue
+            for path in base.rglob("*"):
+                if path.suffix not in (".py", ".ts", ".tsx"):
+                    continue
+                rel = str(path.relative_to(REPO))
+                if rel in TestCopyAudit.ALLOWED:
+                    continue
+                try:
+                    text = path.read_text(encoding="utf-8", errors="ignore")
+                except OSError:
+                    continue
+                for i, line in enumerate(text.splitlines(), 1):
+                    code = TestCopyAudit._code_only(line)
+                    if not TestCopyAudit.PROOF_CLAIM.search(code):
+                        continue
+                    sentence = TestCopyAudit._causal_sentence(code) or code
+                    if not TestCopyAudit.EVIDENCE_CONTEXT.search(sentence):
+                        continue  # not a claim about circuit evidence
+                    lowered = sentence.lower()
+                    if any(m in lowered for m in ("never", "must not", "forbid", "does not")):
+                        continue  # states the prohibition
+                    offenders.append(f"{rel}:{i}: {line.strip()}")
+        assert not offenders, (
+            "Proof language on a runtime/UI surface asserts a validated "
+            "mechanism without using the word 'causal' — the ladder's "
+            "distinction is erased either way:\n" + "\n".join(offenders)
+        )
+
+    def test_the_published_manual_is_audited_too(self):
+        """F20 R3-20. The audit scanned `millm/` and `admin-ui/src` for
+        `.py`/`.ts`/`.tsx` — so the Docusaurus manual, the most-read
+        user-facing surface in the repo, could never match any suffix in the
+        tuple.
+
+        Verified before fixing: appending
+
+            "Every mined circuit is causally validated by observation; the
+             mechanism is confirmed."
+
+        to `manual/docs/features/circuits.md` left the suite 17/17 green.
+
+        The manual is where a user forms their belief about what the evidence
+        ladder means. An overclaim there is worse than one in a log line: it is
+        edited prose, it reads as considered, and nobody grep's it.
+        """
+        offenders = []
+        base = REPO / "manual" / "docs"
+        if not base.exists():
+            pytest.skip(f"no manual at {base}")
+        pages = list(base.rglob("*.md")) + list(base.rglob("*.mdx"))
+        assert len(pages) > 5, (
+            f"only found {len(pages)} manual pages — the layout changed and "
+            "this guard is checking nothing"
+        )
+        for path in pages:
+            rel = str(path.relative_to(REPO))
+            text = path.read_text(encoding="utf-8", errors="ignore")
+            for i, line in enumerate(text.splitlines(), 1):
+                if not re.search(r"\bcausal", line, re.IGNORECASE):
+                    continue
+                sentence = TestCopyAudit._causal_sentence(line)
+                if TestCopyAudit.UNRELATED_SENSE.search(sentence):
+                    continue
+                if not TestCopyAudit.EVIDENCE_CONTEXT.search(sentence):
+                    continue
+                lowered = sentence.lower()
+                # Manual prose legitimately EXPLAINS the ladder and states the
+                # prohibition; those are the two things it is for.
+                if any(
+                    m in lowered
+                    for m in (
+                        "never", "forbid", "must not", "not causal",
+                        "no causal", "below rung 2", "rung 2",
+                        "causally validated (edge)",   # the ladder label
+                        "2 causally validated",
+                        "is forbidden",
+                        # The ENUM CONSTANT named as a threshold — "below
+                        # **CAUSALLY_VALIDATED** is refused" states the gate,
+                        # which is a denial, not a claim about an artifact.
+                        "causally_validated",
+                        "is refused",
+                        "below **causally",
+                    )
+                ):
+                    continue
+                offenders.append(f"{rel}:{i}: {line.strip()[:140]}")
+        assert not offenders, (
+            "Unqualified causal language in the published manual — the "
+            "surface where a reader forms their belief about what the "
+            "evidence ladder means:\n" + "\n".join(offenders)
+        )

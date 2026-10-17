@@ -1,0 +1,60 @@
+# Redis — cache / real-time state. hostPath storage (no PVC).
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: redis
+  namespace: millm
+  annotations:
+    argocd.argoproj.io/sync-options: Prune=false,Delete=false
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: redis
+  template:
+    metadata:
+      labels:
+        app: redis
+    spec:
+      # PINNED. This volume is a hostPath, so the data lives on ONE node's disk
+      # and the pod is only correct where that disk is. Unpinned, the scheduler
+      # may place it anywhere; `type: DirectoryOrCreate` then makes an EMPTY
+      # directory on the new node and postgres initialises a BRAND NEW EMPTY
+      # DATABASE. Nothing errors — the service comes up healthy against an empty
+      # DB while the real data sits untouched on the original node.
+      #
+      # That happened on 2026-08-30: a reboot moved this pod to mcs-lnxhost02
+      # and miLLM came back reporting 2 models where it had had 30+, because it
+      # was reading a database created minutes earlier. millm-backend was
+      # already pinned this way (it needs the GPU); postgres and redis simply
+      # never had the same treatment.
+      #
+      # Moved from mcs-lnxgpu01 to mcs-lnxhost02 on 2026-09-13 with the GPU and
+      # started fresh; the old data stayed on mcs-lnxgpu01's disk.
+      nodeSelector:
+        kubernetes.io/hostname: mcs-lnxhost02
+      containers:
+        - name: redis
+          image: redis:7
+          ports:
+            - containerPort: 6379
+          volumeMounts:
+            - name: redis-data
+              mountPath: /data
+      volumes:
+        - name: redis-data
+          hostPath:
+            path: /data/millm/redis
+            type: DirectoryOrCreate
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: redis
+  namespace: millm
+spec:
+  selector:
+    app: redis
+  ports:
+    - port: 6379
+      targetPort: 6379

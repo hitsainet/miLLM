@@ -1,0 +1,35 @@
+# miLLM Admin UI (nginx-served static build).
+# Image tag/digest managed by ArgoCD Image Updater — do not hand-edit.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: millm-frontend
+  namespace: millm
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: millm-frontend
+  template:
+    metadata:
+      labels:
+        app: millm-frontend
+    spec:
+      containers:
+        - name: frontend
+          image: hitsai/millm-admin-ui:latest
+          imagePullPolicy: Always
+          ports:
+            - containerPort: 80
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: millm-frontend
+  namespace: millm
+spec:
+  selector:
+    app: millm-frontend
+  ports:
+    - port: 80
+      targetPort: 80

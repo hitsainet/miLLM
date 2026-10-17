@@ -1,0 +1,2844 @@
+"""
+SAE service for orchestrating SAE operations.
+
+This service coordinates between the repository, downloader, loader, and hooker
+components to manage SAE lifecycle operations including download, attach, and detach.
+"""
+
+import asyncio
+import math
+import os
+import re
+import threading
+from contextlib import AsyncExitStack, asynccontextmanager
+from dataclasses import dataclass
+from typing import TYPE_CHECKING, Any, AsyncIterator, Optional
+
+if TYPE_CHECKING:
+    from millm.api.schemas.circuit import CircuitMember
+
+import structlog
+import torch
+
+from millm.core.errors import (
+    DownloadCancelledError,
+    InsufficientMemoryError,
+    ModelNotLoadedError,
+    SAEAlreadyAttachedError,
+    SAEIncompatibleError,
+    SAENotAttachedError,
+    SAENotFoundError,
+    SAESetIncompleteError,
+)
+from millm.core.steering_range import STEERING_RANGE, clamp_steering
+from millm.db.models.sae import SAE, SAEStatus
+from millm.db.repositories.sae_repository import SAERepository
+from millm.ml.model_loader import LoadedModelState
+from millm.ml.sae_config import SAEConfig
+from millm.ml.sae_downloader import SAEDownloader
+from millm.ml.sae_hooker import SAEHooker
+from millm.ml.sae_loader import SAELoader
+from millm.ml.sae_wrapper import LoadedSAE
+from millm.sockets.progress import ProgressEmitter
+
+logger = structlog.get_logger()
+
+def _note_claim_fault() -> None:
+    """Count an unrepaired claim/steering divergence (F19 R2-16).
+
+    Imported lazily and guarded: a metrics helper must never be able to break
+    the serving path it is reporting on. A lost count is preferable to a
+    request that fails because the counter was unavailable.
+    """
+    try:
+        from millm.api.routes.system.health import metrics_counter
+
+        metrics_counter.increment_circuit_claim_faults()
+    except Exception:  # pragma: no cover - counting must not fail the caller
+        pass
+
+
+
+#: How many heuristic (sign-only / weight-prior) hazards to list before
+#: collapsing the rest into a count. Validated hazards are never suppressed.
+HAZARD_HEURISTIC_CAP = 10
+
+#: Composes the multi-step attachment operations (attach_set / detach_sae /
+#: set_circuit_steering). SAEService is constructed per-request via DI, so this
+#: must be module-level to be shared. Re-entrant so a composed operation may
+#: call another guarded helper without self-deadlocking.
+_ATTACHMENT_LOCK = threading.RLock()
+
+# Attach-dtype names accepted for the multi-SAE steering weight cache.
+_ATTACH_DTYPES: dict[str, "torch.dtype"] = {
+    "float16": torch.float16,
+    "fp16": torch.float16,
+    "half": torch.float16,
+    "bfloat16": torch.bfloat16,
+    "bf16": torch.bfloat16,
+    "float32": torch.float32,
+    "fp32": torch.float32,
+}
+
+
+def _directional_budget(budget: float, sign: int) -> float:
+    """Apply the canonical member sign rule (shared with cluster_service).
+
+    A NEGATIVE budget is already directional — the ``sign`` field is redundant
+    there and must NOT be multiplied in (doing so double-negates a suppression
+    into an amplification). A non-negative budget takes its direction from
+    ``sign``. This mirrors ``cluster_service`` so circuits and clusters steer
+    identically for the same authored member.
+    """
+    b = float(budget)
+    return b if b < 0 else float(sign) * b
+
+
+def _card_room_mb(device: Any) -> int:
+    """What torch can still allocate on `device`, in MiB: free memory plus blocks it has cached and not handed out.
+
+    A finished generation's KV cache goes back to torch's caching allocator, not
+    to the card, so the driver's free memory (mem_get_info, nvidia-smi) counts it
+    as used while torch allocates from it first.
+    """
+    free_bytes = torch.cuda.mem_get_info(device)[0]
+    try:
+        cached = int(torch.cuda.memory_reserved(device)) - int(torch.cuda.memory_allocated(device))
+    except Exception:  # noqa: BLE001 - an allocator that cannot say: free memory alone
+        cached = 0
+    return int((free_bytes + max(cached, 0)) / (1024 * 1024))
+
+
+def _working_reserve_mb(model: Any, device: Any) -> int:
+    """The working memory the load's fit kept for a request on `device`, in MiB; 0 when it sized none.
+
+    The per-card fit admits each card with room, beside the KV cache, for a request's
+    prefill activations and the caching allocator's share (millm/ml/working_memory.py).
+    That room reads as free between requests, so an SAE attached there takes it and the
+    next long request runs the card out of memory (hardware acceptance, 2026-09-14). The
+    figures travel with the loaded model's placement (Placement.working_mb_by_device).
+    """
+    current = LoadedModelState().current
+    if current is None or getattr(current, "model", None) is not model:
+        return 0
+    by_device = dict((getattr(current, "placement", None) or {}).get("working_mb_by_device") or {})
+    label = f"cuda:{device}" if isinstance(device, int) and not isinstance(device, bool) else str(device)
+    return int(by_device.get(label, 0))
+
+
+
+def _file_element_bytes(sae: Any) -> float:
+    """Bytes per element of an SAE FILE, from its size and shape (W_enc + W_dec = 2·d_in·d_sae):
+    4 for a float32 file, 2 for a 16-bit one. 4 when the shape or size is unknown — the widen
+    factor is then 1, which is the old sizing."""
+    try:
+        elements = 2 * int(sae.d_in) * int(sae.d_sae)
+        size = int(sae.file_size_bytes or 0)
+    except (TypeError, ValueError):
+        return 4.0
+    if elements <= 0 or size <= 0:
+        return 4.0
+    return 4.0 if size / elements > 3.0 else 2.0
+
+def _resolve_attach_dtype(
+    name: str, model_dtype: Optional[str] = None, fallback: Optional["torch.dtype"] = None
+) -> "torch.dtype":
+    """Resolve a configured attach-dtype name to a torch dtype.
+
+    "model" (the default) is the precision the model was loaded at — `LoadedModel.dtype`, the
+    resolver's answer, NOT a parameter's dtype, which on a bitsandbytes model is int8. An unknown
+    name, or "model" with no loaded precision, falls back to the model's precision when known and
+    float16 otherwise, rather than raising: a bad config value must not block attachment.
+    """
+    key = str(name).strip().lower()
+    loaded = _ATTACH_DTYPES.get(str(model_dtype or "").strip().lower())
+    if key == "model":
+        if loaded is not None:
+            return loaded
+        # No recorded precision (a LoadedModel built outside the loader): the caller's fallback —
+        # the model's own parameter dtype on the single-SAE path — before a fixed float16, which
+        # would cast an SAE away from a bfloat16 model.
+        logger.warning("attach_dtype_model_unknown", model_dtype=model_dtype,
+                       fallback=str(fallback) if fallback is not None else "float16")
+        return fallback if fallback is not None else torch.float16
+    dtype = _ATTACH_DTYPES.get(key)
+    if dtype is None:
+        logger.warning("unknown_attach_dtype_falling_back", requested=name, model_dtype=model_dtype)
+        return loaded if loaded is not None else torch.float16
+    return dtype
+
+
+@dataclass
+class AttachmentStatus:
+    """Current SAE attachment status.
+
+    Back-compat singular view. When several SAEs are attached (Feature 12
+    multi-SAE), the singular ``sae_id``/``layer`` reflect the first attached
+    entry; callers that need the full set use ``AttachmentStatusSet`` /
+    ``SAEService.get_attachment_status_set()``.
+    """
+
+    is_attached: bool
+    sae_id: Optional[str] = None
+    layer: Optional[int] = None
+    memory_usage_mb: Optional[int] = None
+    steering_enabled: bool = False
+    monitoring_enabled: bool = False
+    # Diagnostic: number of forward passes in which the steering delta was
+    # applied.  Stays 0 if the hook never fires (e.g. compiled graph bypass).
+    steering_apply_count: int = 0
+
+
+@dataclass
+class AttachedEntry:
+    """One attached SAE, keyed by ``(sae_id, layer)`` in the registry."""
+
+    sae: LoadedSAE
+    sae_id: str
+    layer: int
+    hook_handle: Any
+
+
+@dataclass
+class AttachedEntryStatus:
+    """Serializable per-entry attachment status (no live tensors)."""
+
+    sae_id: str
+    layer: int
+    memory_usage_mb: Optional[int] = None
+    steering_enabled: bool = False
+    monitoring_enabled: bool = False
+    steering_apply_count: int = 0
+
+
+@dataclass
+class AttachmentStatusSet:
+    """Plural attachment status across all attached ``(sae_id, layer)`` entries."""
+
+    is_attached: bool
+    count: int
+    entries: list[AttachedEntryStatus]
+    total_memory_usage_mb: Optional[int] = None
+
+
+@dataclass
+class CircuitSteeringResult:
+    """Outcome of applying a circuit's members across layers (Feature 12).
+
+    ``applied_per_layer`` maps ``layer -> {feature_idx: effective_strength}``
+    actually written to each layer's SAE. ``hazards`` are cross-layer
+    compounding/cancellation warnings — SURFACED, never applied.
+    ``clamp_warnings`` note members whose ``budget·sign·λ`` exceeded ±200.
+    """
+
+    applied_per_layer: dict[int, dict[int, float]]
+    hazards: list[dict[str, Any]]
+    clamp_warnings: list[str]
+    #: Feature 16 R2: the steering epoch THIS write produced. A caller that
+    #: re-reads the counter afterwards names whoever wrote last, not itself.
+    #:
+    #: R3 finding 6: defaults to -1, NOT 0. At a fresh boot the counter IS 0,
+    #: so a default-constructed result would compare equal to a real epoch and
+    #: report a false "still current". An unset field must never be able to
+    #: alias a genuine value.
+    applied_epoch: int = -1
+    #: F18 R3-15: True when the circuit resolved to OFF — either λ=0 or every
+    #: effective strength is 0.0. `applied_per_layer` is then EMPTY, because
+    #: the docstring above promises it is what was "actually written" and in
+    #: this case nothing was: the layers are cleared and steering is left
+    #: disabled. It previously listed every member at zero strength, so the API
+    #: reported N features "active" while `is_steering_enabled` was False — a
+    #: DB/GPU divergence the `set_intensity` warnings machinery cannot see,
+    #: contradicting the intent comment at the apply site ("leave steering
+    #: disabled rather than reporting N features active").
+    #:
+    #: Callers that need to distinguish "off" from "nothing matched" read this
+    #: rather than inferring from an empty map.
+    disabled: bool = False
+
+
+@dataclass
+class DownloadResult:
+    """Result of a download request."""
+
+    sae_id: str
+    status: str  # "downloading", "cached", "attached", "already_downloading"
+    message: str
+
+
+@dataclass
+class CompatibilityResult:
+    """Result of SAE-model compatibility check."""
+
+    compatible: bool
+    errors: list[str]
+    warnings: list[str]
+
+
+class AttachedSAEState:
+    """
+    Singleton managing the currently attached SAE(s).
+
+    This persists SAE attachment state across request boundaries since
+    SAEService instances are created per-request via dependency injection.
+
+    Feature 12 (multi-SAE): state is a registry keyed by ``(sae_id, layer)``
+    so a cross-layer circuit can attach one SAE per referenced layer, each
+    steering through its own decoder. Insertion order is preserved (dict
+    ordering). The single-SAE consumers (cluster/monitoring/sensing/health)
+    use the back-compat singular properties, which reflect the FIRST attached
+    entry — byte-identical behavior when exactly one SAE is attached.
+
+    Thread-safe for access from executor threads.
+    """
+
+    _instance: Optional["AttachedSAEState"] = None
+    _lock = threading.Lock()
+
+    def __new__(cls) -> "AttachedSAEState":
+        if cls._instance is None:
+            with cls._lock:
+                if cls._instance is None:
+                    cls._instance = super().__new__(cls)
+                    cls._instance._entries: dict[tuple[str, int], AttachedEntry] = {}
+                    # Feature 16: monotonic counter of AUTHORITATIVE steering
+                    # writes. Initialised here (not __init__) because this is a
+                    # singleton constructed via __new__.
+                    cls._instance._steering_epoch: int = 0
+                    # Feature 19: per-OWNER steering provenance,
+                    # {owner_id: {(sae_id, layer): {feature_idx: strength}}}.
+                    #
+                    # Without this, releasing one circuit means clearing a
+                    # layer's whole steering dict — which tears out a
+                    # co-tenant's steering while its row still reads active.
+                    # That is the highest-consequence defect available in
+                    # concurrent serving: a circuit the operator never touched
+                    # silently stops, and nothing reports it.
+                    cls._instance._owners: dict[
+                        str, dict[tuple[str, int], dict[int, float]]
+                    ] = {}
+        return cls._instance
+
+    def reset_for_tests(self) -> None:
+        """Clear ALL singleton state. Tests only.
+
+        F19: fixtures previously cleared `_entries` by hand, so adding
+        `_owners` silently leaked owner state across tests — six unrelated
+        integration tests failed only in the full suite and passed in
+        isolation, which is the most expensive failure mode to diagnose.
+
+        Centralised here so a field added to the singleton is cleared in ONE
+        place rather than in every fixture that happens to remember.
+        """
+        self._entries.clear()
+        self._owners.clear()
+
+    # ── Feature 19: owner-scoped steering ──────────────────────────────────
+
+    def apply_owner(
+        self, owner_id: str, per_entry: dict[tuple[str, int], dict[int, float]]
+    ) -> None:
+        """Record `owner_id`'s steering and rebuild every affected layer.
+
+        Replaces the owner's previous contribution wholesale (an owner
+        re-applying at a new intensity must not accumulate its old values).
+        """
+        # Capture the PREVIOUS keys before overwriting: an owner whose new
+        # claim set covers fewer layers must stop steering the dropped ones,
+        # and after the assignment below there is no record of what they were.
+        # (Found by a surviving mutation — the original `touched` read
+        # `self._owners[owner_id]` AFTER the overwrite, so it could only ever
+        # name the NEW keys and dropped layers were never rebuilt.)
+        previous_map = self._owners.get(owner_id)
+        previous = set(previous_map or {})
+        self._owners[owner_id] = {
+            key: dict(values) for key, values in per_entry.items()
+        }
+
+        # F19 R1-12: ROLL BACK a partial rebuild. `_rebuild_layer` RAISES on a
+        # colliding owner map, and the raise can land on the third of five
+        # layers — leaving the first two written at the new values, the rest at
+        # the old, and this owner's entry already replaced. The exception then
+        # propagates out of `set_circuit_steering` into `activate`, which has
+        # no handler at that point, so the circuit is left a chimera: partial
+        # steering, a live owner entry, and a claim row it already took.
+        #
+        # That is exactly the class F18 R3-09/10 fixed for the legacy apply
+        # path, reintroduced on the owner path. Same remedy: restore the
+        # previous owner map and rebuild every touched layer from it.
+        touched = previous | set(per_entry)
+        done: list[tuple[str, int]] = []
+        try:
+            for key in touched:
+                self._rebuild_layer(key)
+                done.append(key)
+        except Exception:
+            if previous_map is None:
+                self._owners.pop(owner_id, None)
+            else:
+                self._owners[owner_id] = previous_map
+            for key in done:
+                try:
+                    self._rebuild_layer(key)
+                except Exception:
+                    # Restore what we can; a layer that cannot be rebuilt is
+                    # named rather than silently abandoned.
+                    _note_claim_fault()
+                    logger.error(
+                        "circuit_owner_rollback_failed",
+                        owner_id=owner_id,
+                        layer=key[1],
+                        exc_info=True,
+                    )
+            raise
+
+    def release_owner(self, owner_id: str) -> list[tuple[str, int]]:
+        """Drop `owner_id`'s contribution and rebuild. Returns affected keys.
+
+        A co-tenant's keys SURVIVE, because the rebuild recomputes each layer
+        from the remaining owners rather than clearing it.
+        """
+        contrib = self._owners.pop(owner_id, None)
+        if not contrib:
+            return []
+        keys = sorted(contrib)
+        for key in keys:
+            self._rebuild_layer(key)
+        return keys
+
+    def owner_keys(self, owner_id: str) -> dict[int, list[int]]:
+        """`{layer: [feature_idx, ...]}` this owner currently steers."""
+        out: dict[int, list[int]] = {}
+        for (_sae_id, layer), values in self._owners.get(owner_id, {}).items():
+            out.setdefault(layer, []).extend(sorted(values))
+        return {layer: sorted(idxs) for layer, idxs in out.items()}
+
+    def _rebuild_layer(self, key: tuple[str, int]) -> None:
+        """Recompute one SAE's steering from ALL owners, then write it once.
+
+        RAISES on a colliding owner map: two owners naming the same
+        `(layer, feature_idx)` have no honest composition — one strength would
+        silently win and the served value would belong to neither author. The
+        claim registry refuses that case up front; reaching it here means the
+        gate was bypassed, so this fails loudly rather than picking a winner.
+        """
+        entry = self._entries.get(key)
+        if entry is None or entry.sae is None:
+            # F19 R1-13: DROP the contributions for a layer that is gone.
+            #
+            # Skipping alone left the owner map desynchronised: after a detach
+            # and re-attach (a reload), the new entry has empty steering while
+            # `_owners` still recorded the old contribution. The circuit read
+            # as serving that layer while steering nothing — and a LATER
+            # rebuild triggered by a co-tenant would include the stale
+            # contribution and RESURRECT steering the operator believed had
+            # stopped.
+            #
+            # The map is the record of what each owner is steering; a layer
+            # that no longer exists is not being steered by anyone.
+            stale = [o for o, contrib in self._owners.items() if key in contrib]
+            for owner_id in stale:
+                self._owners[owner_id].pop(key, None)
+                if not self._owners[owner_id]:
+                    self._owners.pop(owner_id, None)
+            if stale:
+                logger.info(
+                    "circuit_owner_contribution_dropped_detached_layer",
+                    layer=key[1],
+                    sae_id=key[0],
+                    owners=sorted(stale),
+                )
+            return
+
+        merged: dict[int, float] = {}
+        seen: dict[int, str] = {}
+        for owner_id, contrib in self._owners.items():
+            for feature_idx, strength in contrib.get(key, {}).items():
+                if feature_idx in seen:
+                    raise ValueError(
+                        f"steering collision on L{key[1]} feature "
+                        f"{feature_idx}: owners {seen[feature_idx]!r} and "
+                        f"{owner_id!r} both set it — no honest composition "
+                        "exists, so the claim gate must refuse this before it "
+                        "reaches the apply"
+                    )
+                seen[feature_idx] = owner_id
+                merged[feature_idx] = strength
+
+        entry.sae.clear_steering()
+        if merged:
+            entry.sae.set_steering_batch(merged)
+            entry.sae.enable_steering(True)
+        else:
+            entry.sae.enable_steering(False)
+
+    @property
+    def steering_epoch(self) -> int:
+        """Monotonic count of authoritative steering writes (Feature 16).
+
+        A per-request steering override reads this when it SAVES and compares
+        at RESTORE. If it advanced in between, an operator (or an attach/detach)
+        wrote authoritatively while the request was generating, and restoring
+        the pre-request snapshot would silently undo them — so the restore is
+        skipped instead. Last authoritative writer wins.
+        """
+        with _ATTACHMENT_LOCK:
+            return self._steering_epoch
+
+    def bump_steering_epoch(self, reason: str) -> int:
+        """Record an authoritative steering write.
+
+        NEVER call this from ``set_steering_batch`` or any other low-level
+        write used BY the per-request apply path: a per-request apply that
+        bumped would make every request supersede its own restore, silently
+        disabling per-request isolation entirely.
+        """
+        with _ATTACHMENT_LOCK:
+            self._steering_epoch += 1
+            logger.debug(
+                "steering_epoch_bumped", epoch=self._steering_epoch, reason=reason
+            )
+            return self._steering_epoch
+
+    def _first(self) -> Optional[AttachedEntry]:
+        """First attached entry (insertion order), or None. Locked so the
+        back-compat singular properties never race a concurrent set/clear."""
+        with self._lock:
+            return next(iter(self._entries.values()), None)
+
+    @property
+    def attached_sae(self) -> Optional[LoadedSAE]:
+        """Get the first attached SAE (back-compat singular view)."""
+        entry = self._first()
+        return entry.sae if entry else None
+
+    @property
+    def attached_sae_id(self) -> Optional[str]:
+        """Get the ID of the first attached SAE (back-compat singular view)."""
+        entry = self._first()
+        return entry.sae_id if entry else None
+
+    @property
+    def attached_layer(self) -> Optional[int]:
+        """Get the layer of the first attached SAE (back-compat singular view)."""
+        entry = self._first()
+        return entry.layer if entry else None
+
+    @property
+    def hook_handle(self) -> Optional[Any]:
+        """Get the hook handle of the first attached SAE (back-compat)."""
+        entry = self._first()
+        return entry.hook_handle if entry else None
+
+    @property
+    def is_attached(self) -> bool:
+        """Check if at least one SAE is currently attached."""
+        with self._lock:
+            return bool(self._entries)
+
+    @property
+    def count(self) -> int:
+        """Number of attached ``(sae_id, layer)`` entries."""
+        with self._lock:
+            return len(self._entries)
+
+    def entries(self) -> list[AttachedEntry]:
+        """Snapshot list of all attached entries, in insertion order."""
+        with self._lock:
+            return list(self._entries.values())
+
+    def get(self, sae_id: str, layer: int) -> Optional[AttachedEntry]:
+        """Fetch the entry attached at ``(sae_id, layer)``, or None."""
+        with self._lock:
+            return self._entries.get((sae_id, int(layer)))
+
+    def by_layer(self, layer: int) -> Optional[AttachedEntry]:
+        """Fetch the unique entry attached at ``layer``.
+
+        Returns None when no SAE — or *more than one* SAE — is attached to
+        that layer, so a caller can never silently pick the wrong basis when
+        the layer is ambiguous. The scan runs under the registry lock so a
+        concurrent attach/detach cannot raise "dict changed size" here.
+        """
+        layer = int(layer)
+        with self._lock:
+            matches = [e for e in self._entries.values() if e.layer == layer]
+        return matches[0] if len(matches) == 1 else None
+
+    def set(
+        self,
+        sae: LoadedSAE,
+        sae_id: str,
+        layer: int,
+        hook_handle: Any,
+    ) -> None:
+        """Attach (or re-attach) the SAE at ``(sae_id, layer)``.
+
+        Removes any existing hook for that SAME key before overwriting so a
+        re-attach — or a race that bypasses the is_attached guard — never
+        leaves an orphaned hook firing on every forward pass. Other keys are
+        untouched.
+        """
+        key = (sae_id, int(layer))
+        with self._lock:
+            existing = self._entries.get(key)
+            if existing is not None and existing.hook_handle is not None:
+                try:
+                    existing.hook_handle.remove()
+                    logger.warning(
+                        "orphaned_hook_removed_before_overwrite",
+                        previous_sae_id=sae_id,
+                        layer=int(layer),
+                    )
+                except Exception as e:
+                    logger.warning("error_removing_orphaned_hook", error=str(e))
+            self._entries[key] = AttachedEntry(
+                sae=sae, sae_id=sae_id, layer=int(layer), hook_handle=hook_handle
+            )
+
+    def clear(self, sae_id: Optional[str] = None, layer: Optional[int] = None) -> None:
+        """Detach attached SAEs.
+
+        With no arguments, detaches ALL entries (back-compat with the
+        single-SAE ``clear()``). With both ``sae_id`` and ``layer``, detaches
+        only that one entry. Each removed entry's hook is removed first.
+        """
+        with self._lock:
+            if sae_id is not None and layer is not None:
+                keys = [(sae_id, int(layer))]
+            elif sae_id is not None or layer is not None:
+                # Partial key: match all entries with that sae_id OR layer.
+                keys = [
+                    k
+                    for k in self._entries
+                    if (sae_id is None or k[0] == sae_id)
+                    and (layer is None or k[1] == int(layer))
+                ]
+            else:
+                keys = list(self._entries.keys())
+            for key in keys:
+                entry = self._entries.pop(key, None)
+                if entry is not None and entry.hook_handle is not None:
+                    try:
+                        entry.hook_handle.remove()
+                    except Exception as e:
+                        logger.warning("error_removing_hook", error=str(e))
+
+
+class SAEService:
+    """
+    Orchestration layer for SAE operations.
+
+    Coordinates between repository, downloader, loader, and hooker components.
+    Manages SAE lifecycle: download, attach, steer, monitor, detach.
+
+    Thread Safety:
+        Multi-step attachment operations (attach_set / detach_sae / circuit
+        serving) hold the process-wide ``_ATTACHMENT_LOCK`` so a check-then-act
+        window cannot interleave: e.g. a concurrent detach between resolving a
+        circuit's SAEs and applying its steering would otherwise write into a
+        just-detached SAE. ``AttachedSAEState._lock`` only guards individual
+        registry operations; this lock composes them.
+        Forward pass through SAE is thread-safe.
+    """
+
+    def __init__(
+        self,
+        repository: SAERepository,
+        cache_dir: str,
+        emitter: Optional[ProgressEmitter] = None,
+        inference_service: Optional[Any] = None,
+    ) -> None:
+        """
+        Initialize the SAE service.
+
+        Args:
+            repository: SAE database repository.
+            cache_dir: Directory for SAE cache.
+            emitter: Progress event emitter for WebSocket updates.
+            inference_service: Optional InferenceService ref used during detach
+                to wait for in-flight requests.  When provided, avoids the
+                import of millm.api.dependencies (layer violation).
+        """
+        self.repository = repository
+        self.emitter = emitter
+        self._inference_service = inference_service
+
+        # Initialize components
+        self._downloader = SAEDownloader(cache_dir)
+        self._loader = SAELoader()
+        self._hooker = SAEHooker()
+
+        # Attachment state singleton (persists across requests)
+        self._sae_state = AttachedSAEState()
+
+        # Track active downloads for cancellation
+        self._active_downloads: dict[str, asyncio.Task] = {}
+        self._cancelled_downloads: set[str] = set()
+
+        logger.debug("SAEService initialized", cache_dir=cache_dir)
+
+    @classmethod
+    def for_registry(cls) -> "SAEService":
+        """A service bound only to the attachment registry, TOTALLY constructed.
+
+        `set_circuit_steering` touches nothing but the singleton registry and
+        the attached SAEs, so a repository-free instance is sufficient — and
+        avoids pulling request-scoped DI onto the inference hot path.
+
+        F18: this replaces `SAEService.__new__(SAEService)`, which bypassed
+        `__init__` and left FOUR fields unset (`_downloader`, `_loader`,
+        `_hooker`, `_inference_service`) plus two collections. That worked only
+        because the dial path happened to touch none of them — a
+        partially-constructed object on the hot path, one refactor away from an
+        AttributeError in production, and invisible to every test because the
+        methods that would trip it were never called.
+
+        Every field `__init__` sets is set here.
+
+        R2-09: an earlier version of this docstring claimed that made a reach
+        "fail on a VALUE rather than on a missing attribute". That distinction
+        does not exist — `await self.repository.get(x)` on a None raises
+        `AttributeError: 'NoneType' object has no attribute 'get'`, the same
+        exception class, differing only in message. `repository` has 19 reads
+        across 8 methods and none are None-guarded.
+        
+        What totality actually buys is narrower and still worth having: the
+        failure names the METHOD that was misused rather than the construction
+        that was incomplete, and a field added to `__init__` cannot silently go
+        missing here. `emitter=None` IS genuinely safe — all 12 of its reads are
+        `if self.emitter:` guarded.
+
+        F18 R1-A: the first version got this wrong in both directions. It set
+        `_repository`, `_emitter` and `_cache_dir`, none of which exist —
+        `__init__` sets `self.repository` and `self.emitter` WITHOUT the
+        underscore — so the two fields that are actually read across this class
+        were left ABSENT, reproducing the exact AttributeError hazard the
+        `__new__` bypass was replaced to eliminate, under a docstring asserting
+        it was fixed. The totality test could not catch it: its regex required a
+        leading underscore, so the two real names were invisible to the guard.
+
+        Derived from `__init__` rather than hand-listed, so a field added there
+        cannot be forgotten here.
+        """
+        svc = cls.__new__(cls)
+        svc.repository = None
+        svc.emitter = None
+        svc._inference_service = None
+        svc._downloader = None
+        svc._loader = None
+        svc._hooker = None
+        svc._sae_state = AttachedSAEState()
+        svc._active_downloads = {}
+        svc._cancelled_downloads = set()
+        return svc
+
+    # =========================================================================
+    # Listing Methods
+    # =========================================================================
+
+    async def list_saes(self) -> list[SAE]:
+        """
+        Get all SAEs from the database.
+
+        Returns:
+            List of all SAEs ordered by creation date descending.
+        """
+        return await self.repository.get_all()
+
+    async def get_sae(self, sae_id: str) -> SAE:
+        """
+        Get a single SAE by ID.
+
+        Args:
+            sae_id: The SAE's database ID.
+
+        Returns:
+            The SAE if found.
+
+        Raises:
+            SAENotFoundError: If SAE doesn't exist.
+        """
+        sae = await self.repository.get(sae_id)
+        if not sae:
+            raise SAENotFoundError(
+                f"SAE with ID '{sae_id}' not found",
+                details={"sae_id": sae_id},
+            )
+        return sae
+
+    def get_attachment_status(self) -> AttachmentStatus:
+        """
+        Get current SAE attachment status.
+
+        Returns:
+            AttachmentStatus with current state.
+        """
+        if not self._sae_state.is_attached:
+            return AttachmentStatus(is_attached=False)
+
+        sae = self._sae_state.attached_sae
+        return AttachmentStatus(
+            is_attached=True,
+            sae_id=self._sae_state.attached_sae_id,
+            layer=self._sae_state.attached_layer,
+            memory_usage_mb=int(sae.estimate_memory_mb()) if sae else None,
+            steering_enabled=sae.is_steering_enabled if sae else False,
+            monitoring_enabled=sae.is_monitoring_enabled if sae else False,
+            steering_apply_count=sae.steering_apply_count if sae else 0,
+        )
+
+    def get_attachment_status_set(self) -> AttachmentStatusSet:
+        """
+        Get the plural attachment status across all attached ``(sae_id, layer)``
+        entries (Feature 12 multi-SAE).
+
+        Returns:
+            AttachmentStatusSet with one AttachedEntryStatus per attached SAE
+            and the summed memory footprint.
+        """
+        entries = self._sae_state.entries()
+        if not entries:
+            return AttachmentStatusSet(
+                is_attached=False, count=0, entries=[], total_memory_usage_mb=None
+            )
+        statuses: list[AttachedEntryStatus] = []
+        total_mb = 0
+        for entry in entries:
+            sae = entry.sae
+            mb = int(sae.estimate_memory_mb()) if sae else None
+            if mb is not None:
+                total_mb += mb
+            statuses.append(
+                AttachedEntryStatus(
+                    sae_id=entry.sae_id,
+                    layer=entry.layer,
+                    memory_usage_mb=mb,
+                    steering_enabled=sae.is_steering_enabled if sae else False,
+                    monitoring_enabled=sae.is_monitoring_enabled if sae else False,
+                    steering_apply_count=sae.steering_apply_count if sae else 0,
+                )
+            )
+        return AttachmentStatusSet(
+            is_attached=True,
+            count=len(statuses),
+            entries=statuses,
+            total_memory_usage_mb=total_mb,
+        )
+
+    # =========================================================================
+    # Circuit serving (Feature 12): apply members across layers under one λ
+    # =========================================================================
+
+    def set_circuit_steering(
+        self,
+        members: list["CircuitMember"],
+        intensity: float,
+        *,
+        edges: Optional[list[dict[str, Any]]] = None,
+        authoritative: bool = True,
+        owner_id: Optional[str] = None,
+    ) -> CircuitSteeringResult:
+        """Serve a circuit: apply every member through ITS OWN layer's SAE at
+        the member's frozen budget scaled by one global intensity (λ).
+
+        Each member's layer must resolve to exactly one attached SAE (via
+        ``by_layer``); otherwise ``SAESetIncompleteError`` (422) is raised with
+        the full offender list and NOTHING is applied — a member is never
+        steered through a mismatched SAE. Effective strengths are clamped
+        through the shared ±200 gate. Cross-layer hazards are detected and
+        returned but never applied (detection, not correction).
+
+        Args:
+            members: circuit members to serve.
+            intensity: global λ (dial); typically clamped to [0, 2] upstream.
+            edges: optional circuit edges carrying validated effect sizes /
+                weight priors, used to quantify hazards (Feature 13 supplies
+                these; absent here means heuristic sign-only hazards).
+
+        Returns:
+            CircuitSteeringResult with per-layer applied strengths, hazards,
+            and clamp warnings.
+        """
+        # Hold the composing lock across resolve→apply: a concurrent
+        # detach/attach between the two would otherwise write steering into a
+        # just-detached SAE (or resolve a basis that no longer exists).
+        with _ATTACHMENT_LOCK:
+            outcome = self._set_circuit_steering_locked(
+                members, intensity, edges=edges, owner_id=owner_id
+            )
+            # Feature 16: bump ONLY for an authoritative write. The
+            # per-request dial passes authoritative=False, because a
+            # per-request apply that bumped would make every request supersede
+            # its OWN restore — silently disabling per-request isolation
+            # entirely (TID pitfall 2). Bumped INSIDE the lock so a concurrent
+            # restore cannot read a stale epoch between the write landing and
+            # the counter advancing.
+            # R2: return the epoch OUR write produced ON THE OUTCOME. A caller
+            # that re-reads `steering_epoch` afterwards names whoever wrote
+            # LAST, not itself. Storing it on the service does not work either:
+            # SAEService is constructed per request (Depends), so per-write
+            # state on it is stale for every caller.
+            if authoritative:
+                outcome.applied_epoch = self._sae_state.bump_steering_epoch(
+                    "set_circuit_steering"
+                )
+            else:
+                outcome.applied_epoch = self._sae_state.steering_epoch
+            return outcome
+
+    def _set_circuit_steering_locked(
+        self,
+        members: list["CircuitMember"],
+        intensity: float,
+        *,
+        edges: Optional[list[dict[str, Any]]] = None,
+        owner_id: Optional[str] = None,
+    ) -> CircuitSteeringResult:
+        """Body of :meth:`set_circuit_steering`; call only with the lock held."""
+        from millm.core.config import settings
+
+        # 0. Clamp the global λ to the configured circuit-intensity envelope so a
+        #    rogue value can neither invert the circuit (negative) nor blow past
+        #    the dial ceiling. The apply-time ±200 clamp is a separate gate.
+        lo = float(settings.CIRCUIT_INTENSITY_MIN)
+        hi = float(settings.CIRCUIT_INTENSITY_MAX)
+        if lo > hi:
+            # Misconfigured envelope — fall back to the safe [0, 2] default
+            # rather than silently pinning every serve to `lo`.
+            logger.warning("circuit_intensity_bounds_inverted", min=lo, max=hi)
+            lo, hi = 0.0, 2.0
+        # F18 R3-02: THE SINK. `max(lo, min(hi, nan))` returns `hi` — a
+        # non-finite intensity resolves to the CEILING, i.e. maximum-aggression
+        # steering, silently. R2-04 guarded `plan_for`'s override path; that is
+        # one of FOUR paths into this line. The other three — plan_for's DERIVED
+        # branch, `_serve_full`, and `set_intensity` (which never builds a plan
+        # at all) — were unguarded, and an authored `intensity_range` of "NaN"
+        # reaches here from any imported document with no privileged access.
+        #
+        # So the guard lives at the single point of convergence, not at a
+        # subset of the sources. Fail CLOSED: refuse to steer rather than steer
+        # at the ceiling, because the failure mode of guessing here is the most
+        # aggressive intervention the envelope permits.
+        intensity = float(intensity)
+        if not math.isfinite(intensity):
+            raise ValueError(
+                f"circuit intensity must be finite, got {intensity!r} — "
+                "refusing to steer (a non-finite value clamps to the maximum)"
+            )
+        intensity = max(lo, min(hi, intensity))
+
+        # 1. Resolve every member's layer to a UNIQUE attached SAE ONCE, under a
+        #    single consistent snapshot, and collect all offenders first so the
+        #    error reports the complete set (fail-closed) — never re-resolve
+        #    by_layer in the apply loop (that would be a TOCTOU wrong-basis risk).
+        # An empty member set means the circuit is OFF — clear + disable every
+        # attached layer rather than silently leaving the PREVIOUS circuit armed.
+        if not members:
+            # Internal: the OUTER set_circuit_steering owns the bump for this
+            # logical action, and a dial passing authoritative=False must not
+            # bump through this back door.
+            cleared = self.clear_circuit_steering(authoritative=False)
+            logger.info("circuit_steering_cleared_empty_members", layers=cleared)
+            return CircuitSteeringResult(
+                applied_per_layer={}, hazards=[], clamp_warnings=[]
+            )
+
+        # Resolution cache keyed by the RESOLUTION IDENTITY (declared sae_id +
+        # layer), NOT by layer alone: two SAEs may be attached on one layer, and
+        # keying by layer would let the first member's SAE capture every later
+        # member on that layer (a wrong-basis serve).
+        resolved_cache: dict[tuple[Optional[str], int], "AttachedEntry"] = {}
+        validated: list[tuple["CircuitMember", "AttachedEntry"]] = []
+        offenders: list[dict[str, Any]] = []
+        substitutions: list[str] = []
+        seen_members: set[tuple[int, int]] = set()
+        for m in members:
+            # Duplicate (layer, feature_idx) members would silently last-write-
+            # win — reject them instead.
+            mkey = (m.layer, m.feature_idx)
+            if mkey in seen_members:
+                offenders.append(
+                    {
+                        "feature_idx": m.feature_idx,
+                        "layer": m.layer,
+                        "reason": "duplicate_member",
+                    }
+                )
+                continue
+            seen_members.add(mkey)
+
+            ckey = (m.sae_id or None, m.layer)
+            entry = resolved_cache.get(ckey)
+            if entry is None:
+                # Prefer an exact (sae_id, layer) match when the member names
+                # its SAE — this disambiguates a layer with two attached SAEs
+                # AND serves the member through the basis it was authored
+                # against.
+                if m.sae_id:
+                    entry = self._sae_state.get(m.sae_id, m.layer)
+                    if entry is None:
+                        # The declared SAE is not attached at this layer. Fall
+                        # back to the layer's unique SAE if there is one, but
+                        # record the substitution — a different SAE means a
+                        # different feature basis, which the caller must see.
+                        entry = self._sae_state.by_layer(m.layer)
+                        if entry is not None:
+                            substitutions.append(
+                                f"feature {m.feature_idx}@L{m.layer}: declared SAE "
+                                f"'{m.sae_id}' not attached; served through "
+                                f"'{entry.sae_id}' (different feature basis)"
+                            )
+                else:
+                    entry = self._sae_state.by_layer(m.layer)
+            if entry is None:
+                offenders.append(
+                    {
+                        "feature_idx": m.feature_idx,
+                        "layer": m.layer,
+                        "sae_id": m.sae_id,
+                        "reason": "missing_or_ambiguous_sae",
+                    }
+                )
+                continue
+            resolved_cache[ckey] = entry
+            if not (0 <= m.feature_idx < entry.sae.d_sae):
+                offenders.append(
+                    {
+                        "feature_idx": m.feature_idx,
+                        "layer": m.layer,
+                        "sae_id": entry.sae_id,
+                        "reason": "index_out_of_bounds",
+                        "d_sae": entry.sae.d_sae,
+                    }
+                )
+                continue
+            validated.append((m, entry))
+        if offenders:
+            raise SAESetIncompleteError(offenders)
+
+        # 2. Group by the RESOLVED SAE (sae_id, layer) so two SAEs on one layer
+        #    each get their own batch. Compute effective (clamped) strengths
+        #    under one λ; γ=0 ⇒ B = B_dir. Iterate the VALIDATED list so the
+        #    dedup/bounds guarantees are carried in the data, not in a
+        #    raise-before-reach argument.
+        per_entry: dict[tuple[str, int], dict[int, float]] = {}
+        entry_by_key: dict[tuple[str, int], "AttachedEntry"] = {}
+        clamp_warnings: list[str] = []
+        for m, entry in validated:
+            raw = _directional_budget(m.budget, m.sign) * intensity
+            eff = clamp_steering(raw)
+            if abs(raw) > STEERING_RANGE:
+                clamp_warnings.append(
+                    f"feature {m.feature_idx}@L{m.layer} clamped "
+                    f"{raw:+.3g}→{eff:+.3g} (±{STEERING_RANGE:g})"
+                )
+            key = (entry.sae_id, entry.layer)
+            entry_by_key[key] = entry
+            per_entry.setdefault(key, {})[m.feature_idx] = eff
+
+        # 3. Apply each group through ITS OWN resolved SAE (never a second
+        #    by_layer call). Clear that SAE's prior steering first so each serve
+        #    is authoritative and no stale features from a previous
+        #    circuit/cluster/manual set leak in. At λ=0 the circuit is OFF —
+        #    clear and leave steering disabled rather than reporting N features
+        #    "active" at zero strength.
+        disabled = intensity == 0 or all(
+            v == 0 for s in per_entry.values() for v in s.values()
+        )
+        # F19 task 3.2: when an OWNER is named, route through the owner map.
+        # The legacy path below clears each target SAE before writing, which is
+        # correct when one circuit can serve and CATASTROPHIC when two can — it
+        # tears out a co-tenant's steering while its row still reads active.
+        # `apply_owner` recomputes each layer from all surviving owners
+        # instead, so a co-tenant's keys survive by construction.
+        #
+        # `owner_id=None` keeps the pre-F19 behaviour verbatim for callers that
+        # have not been migrated (and for the per-request dial, which is
+        # request-scoped rather than an owner).
+        if owner_id is not None:
+            if disabled:
+                # An OFF circuit owns nothing — release rather than writing
+                # zeros, so its layers fall back to whatever other owners hold
+                # rather than being pinned at zero by a departed circuit.
+                self._sae_state.release_owner(owner_id)
+            else:
+                self._sae_state.apply_owner(owner_id, per_entry)
+
+            per_layer_owned: dict[int, dict[int, float]] = {}
+            for (_sid, layer), steering in per_entry.items():
+                per_layer_owned.setdefault(layer, {}).update(steering)
+            hazards = self._cross_layer_hazards(members, intensity, edges=edges)
+            logger.info(
+                "circuit_steering_applied_owned",
+                owner_id=owner_id,
+                layers=sorted(per_layer_owned),
+                member_count=len(members),
+                intensity=intensity,
+                disabled=disabled,
+            )
+            return CircuitSteeringResult(
+                applied_per_layer={} if disabled else per_layer_owned,
+                disabled=disabled,
+                hazards=hazards,
+                clamp_warnings=clamp_warnings,
+            )
+
+        # F18 R3-09: ROLL BACK a partial apply. Steps 1-2 are fail-closed (all
+        # offenders collected, SAESetIncompleteError raised before anything is
+        # written), but this loop writes SAE-by-SAE. A raise on the third of
+        # five layers left layers 1-2 at the NEW intensity, layer 3 cleared but
+        # not set (the clear precedes the raise, so it is silently zeroed), and
+        # 4-5 at the OLD values — the circuit running as a chimera of two
+        # intensities with a hole in the middle, which is a wrong-basis
+        # intervention rather than a failed one.
+        #
+        # `circuit_sensing_service._arm_targets` already does exactly this for
+        # ARMING. The serving path — the one that changes what the model says —
+        # had no equivalent. Same shape, so the two paths fail the same way.
+        undo: list[tuple[Any, dict[int, float], bool]] = []
+        try:
+            for key, steering in per_entry.items():
+                sae = entry_by_key[key].sae
+                # Capture BEFORE mutating: on a later failure this is the only
+                # record of what this layer held.
+                undo.append(
+                    (sae, dict(sae.get_steering_values()), sae.is_steering_enabled)
+                )
+                sae.clear_steering()
+                if disabled:
+                    sae.enable_steering(False)
+                else:
+                    sae.set_steering_batch(steering)  # bounds gated in step 1
+                    sae.enable_steering(True)
+        except Exception:
+            failed_layers: list[int] = []
+            for sae, prior_values, prior_enabled in reversed(undo):
+                try:
+                    sae.clear_steering()
+                    if prior_values:
+                        sae.set_steering_batch(prior_values)
+                    sae.enable_steering(prior_enabled)
+                except Exception:
+                    # Roll back every layer we can. One unrecoverable layer
+                    # must not abandon the rest still holding the new values —
+                    # the same independence rule the request restore follows.
+                    #
+                    # This is REACHABLE, not defensive: the layer that raised
+                    # during the apply is the most likely to raise again here,
+                    # because its restore calls the same `set_steering_batch`
+                    # that just failed. Caught by the R3-09 test, which found
+                    # this exact hole in the FIRST version of this rollback —
+                    # the failing layer stayed silently zeroed while every
+                    # other layer restored cleanly.
+                    failed_layers.append(getattr(sae, "layer", -1))
+            if failed_layers:
+                # Loud, and naming the layers, because the model is now in a
+                # state nobody authored and only an operator can resolve it.
+                logger.error(
+                    "circuit_steering_rollback_failed",
+                    layers=failed_layers,
+                    detail=(
+                        "these layers could not be restored after a partial "
+                        "apply and may hold cleared or stale steering"
+                    ),
+                    exc_info=True,
+                )
+            raise
+
+        # Report per-LAYER for the caller-facing result (merging any same-layer
+        # groups), preserving the documented applied_per_layer shape.
+        per_layer: dict[int, dict[int, float]] = {}
+        for (_sid, layer), steering in per_entry.items():
+            per_layer.setdefault(layer, {}).update(steering)
+
+        hazards = self._cross_layer_hazards(members, intensity, edges=edges)
+        if substitutions:
+            for note in substitutions:
+                logger.warning("circuit_member_sae_substituted", detail=note)
+            clamp_warnings.extend(substitutions)
+        logger.info(
+            "circuit_steering_applied",
+            layers=sorted(per_layer.keys()),
+            member_count=len(members),
+            intensity=intensity,
+            hazard_count=len(hazards),
+            clamped=len(clamp_warnings),
+        )
+        return CircuitSteeringResult(
+            # R3-15: empty when disabled — nothing was written.
+            applied_per_layer={} if disabled else per_layer,
+            disabled=disabled,
+            hazards=hazards,
+            clamp_warnings=clamp_warnings,
+        )
+
+    def clear_circuit_steering(
+        self,
+        layers: Optional[list[int]] = None,
+        *,
+        authoritative: bool = True,
+    ) -> list[int]:
+        """Clear steering on every participating layer (or all attached layers).
+
+        Returns the list of layers actually cleared.
+        """
+        if layers is None:
+            targets = [e.layer for e in self._sae_state.entries()]
+        else:
+            targets = list(dict.fromkeys(int(l) for l in layers))
+        cleared: list[int] = []
+        for layer in targets:
+            entry = self._sae_state.by_layer(layer)
+            if entry is not None:
+                entry.sae.clear_steering()
+                entry.sae.enable_steering(False)
+                cleared.append(layer)
+        # Feature 16: clearing is authoritative — a request must not restore
+        # steering over a deliberate clear. R1: bump ONLY if something was
+        # actually cleared. An unconditional bump made every no-op clear
+        # supersede all in-flight restores, stranding their transient values
+        # in global state with no compensating write.
+        # R2: bump INSIDE the lock, matching set_circuit_steering. Its own
+        # comment says a bump outside lets "a concurrent restore read a stale
+        # epoch between the write landing and the counter advancing" — this
+        # path had the identical race.
+        # R2: `authoritative=False` for the internal call inside
+        # _set_circuit_steering_locked — it double-bumped one logical action
+        # AND bumped unconditionally, defeating the dial's authoritative=False.
+        if cleared and authoritative:
+            with _ATTACHMENT_LOCK:
+                self._sae_state.bump_steering_epoch("clear_circuit_steering")
+        return cleared
+
+    def _cross_layer_hazards(
+        self,
+        members: list["CircuitMember"],
+        intensity: float,
+        *,
+        edges: Optional[list[dict[str, Any]]] = None,
+    ) -> list[dict[str, Any]]:
+        """Detect cross-layer compounding/cancellation hazards.
+
+        For every upstream→downstream feature-member pair (up.layer <
+        down.layer) that is co-steered, emit a hazard: same effective sign ⇒
+        compounding, opposite ⇒ cancellation. When a matching circuit edge at
+        rung ≥ 2 with an effect_size is supplied, the hazard is QUANTIFIED and
+        labeled ``validated:ES=…`` (a validated negative edge flips
+        compounding↔cancellation); otherwise it is labeled ``heuristic`` from
+        the edge weight_prior if present, else a plain sign heuristic. Warnings
+        are SURFACED only — the steering config is never mutated here.
+        """
+        if intensity == 0:
+            return []
+        # Index edges by (up_layer, up_idx, down_layer, down_idx) for lookup.
+        edge_index: dict[tuple, dict[str, Any]] = {}
+        for e in edges or []:
+            try:
+                up = e["up"]
+                down = e["down"]
+                key = (
+                    int(up["layer"]),
+                    int(up["feature_idx"]),
+                    int(down["layer"]),
+                    int(down["feature_idx"]),
+                )
+            except (KeyError, TypeError, ValueError):
+                continue
+            edge_index[key] = e
+
+        hazards: list[dict[str, Any]] = []
+        seen: set[tuple] = set()
+        for up in members:
+            for down in members:
+                if up.layer >= down.layer:
+                    continue
+                pair = (up.layer, up.feature_idx, down.layer, down.feature_idx)
+                if pair in seen:
+                    continue
+                seen.add(pair)
+
+                up_sign = 1 if _directional_budget(up.budget, up.sign) >= 0 else -1
+                down_sign = 1 if _directional_budget(down.budget, down.sign) >= 0 else -1
+                same_sign = up_sign == down_sign
+
+                edge = edge_index.get(pair)
+                es = None
+                weight_prior = None
+                rung = 0
+                if edge is not None:
+                    es = edge.get("effect_size")
+                    weight_prior = edge.get("weight_prior")
+                    rung = int(edge.get("rung", 0) or 0)
+
+                if es is not None and rung >= 2:
+                    # A validated NEGATIVE edge flips the interaction sense.
+                    effective_same = same_sign if es >= 0 else (not same_sign)
+                    label = f"validated:ES={float(es):.3g}"
+                    hazard_rung = rung
+                elif weight_prior is not None:
+                    effective_same = same_sign
+                    label = f"heuristic:weight_prior={float(weight_prior):.3g}"
+                    hazard_rung = rung
+                else:
+                    effective_same = same_sign
+                    label = "heuristic:co-steer-sign"
+                    hazard_rung = 0
+
+                kind = "compounding" if effective_same else "cancellation"
+                hazards.append(
+                    {
+                        "kind": kind,
+                        "up": {"layer": up.layer, "feature_idx": up.feature_idx},
+                        "down": {"layer": down.layer, "feature_idx": down.feature_idx},
+                        "label": label,
+                        "rung": hazard_rung,
+                        "quantified_effect": float(es) if (es is not None and rung >= 2) else None,
+                    }
+                )
+
+        # Rank so the INFORMATIVE hazards survive truncation: validated
+        # (rung>=2, quantified) first, ordered by |effect size|, then the
+        # heuristic tail. Pairwise detection is O(n²) — a 6/6 two-layer circuit
+        # emits 36 warnings, nearly all "heuristic:co-steer-sign", which buries
+        # the real signal. Cap the heuristic tail and report the remainder as a
+        # count rather than dropping it silently.
+        validated = [h for h in hazards if h["rung"] >= 2 and h["quantified_effect"] is not None]
+        heuristic = [h for h in hazards if h not in validated]
+        validated.sort(key=lambda h: abs(h["quantified_effect"]), reverse=True)
+
+        kept_heuristic = heuristic[:HAZARD_HEURISTIC_CAP]
+        suppressed = len(heuristic) - len(kept_heuristic)
+        ranked = validated + kept_heuristic
+        if suppressed > 0:
+            ranked.append(
+                {
+                    "kind": "summary",
+                    "label": f"heuristic:suppressed={suppressed}",
+                    "rung": 0,
+                    "quantified_effect": None,
+                    "message": (
+                        f"{suppressed} further heuristic sign-only hazard(s) not listed "
+                        "— validated hazards are shown first"
+                    ),
+                }
+            )
+        return ranked
+
+    async def preview_repository(
+        self,
+        repository_id: str,
+        revision: str = "main",
+        token: str | None = None,
+    ) -> dict:
+        """
+        Preview SAE files in a HuggingFace repository without downloading.
+
+        Args:
+            repository_id: HuggingFace repo (e.g., "google/gemma-scope-2b-pt-res").
+            revision: Git revision (branch, tag, commit).
+            token: HuggingFace access token for gated repositories.
+
+        Returns:
+            Dictionary with repository info and available SAE files.
+        """
+        return await self._downloader.list_repository_files(repository_id, revision, token)
+
+    # =========================================================================
+    # Download Methods
+    # =========================================================================
+
+    async def start_download(
+        self,
+        repository_id: str,
+        revision: str = "main",
+        file_path: str | None = None,
+        token: str | None = None,
+    ) -> DownloadResult:
+        """
+        Start downloading an SAE from HuggingFace.
+
+        Creates a database record and starts the download asynchronously.
+
+        Args:
+            repository_id: HuggingFace repo (e.g., "jbloom/gemma-2-2b-res-jb").
+            revision: Git revision (branch, tag, commit).
+            file_path: Specific SAE file to download (e.g., "layer_12/width_16k/average_l0_50/params.npz").
+                       If provided, only downloads that specific SAE directory.
+
+        Returns:
+            DownloadResult with SAE ID, status, and message.
+
+        Raises:
+            ValueError: If SAE already exists with same repo/revision.
+        """
+        # Generate SAE ID first (includes file_path for uniqueness)
+        sae_id = self._downloader.generate_sae_id(repository_id, revision, file_path)
+
+        # Check for existing SAE with this specific ID
+        existing = await self.repository.get(sae_id)
+        if existing:
+            if existing.status == SAEStatus.CACHED:
+                logger.info(
+                    "sae_already_cached",
+                    sae_id=existing.id,
+                    repository_id=repository_id,
+                )
+                return DownloadResult(
+                    sae_id=existing.id,
+                    status="cached",
+                    message="SAE is already downloaded and cached",
+                )
+            elif existing.status == SAEStatus.ATTACHED:
+                logger.info(
+                    "sae_already_attached",
+                    sae_id=existing.id,
+                    repository_id=repository_id,
+                )
+                return DownloadResult(
+                    sae_id=existing.id,
+                    status="attached",
+                    message="SAE is already downloaded and attached to model",
+                )
+            elif existing.status == SAEStatus.DOWNLOADING:
+                logger.info(
+                    "sae_already_downloading",
+                    sae_id=existing.id,
+                    repository_id=repository_id,
+                )
+                return DownloadResult(
+                    sae_id=existing.id,
+                    status="already_downloading",
+                    message="SAE download is already in progress",
+                )
+            elif existing.status == SAEStatus.ERROR:
+                # Delete the failed SAE and retry download
+                logger.info(
+                    "sae_retrying_failed_download",
+                    sae_id=existing.id,
+                    repository_id=repository_id,
+                )
+                await self.repository.delete(existing.id)
+
+        # Create database record in downloading state
+        await self.repository.create_downloading(
+            sae_id=sae_id,
+            repository_id=repository_id,
+            revision=revision,
+            cache_path="",  # Updated after download
+        )
+
+        logger.info(
+            "sae_download_started",
+            sae_id=sae_id,
+            repository_id=repository_id,
+            revision=revision,
+        )
+
+        # Start background download and track it
+        task = asyncio.create_task(self._download_task(sae_id, repository_id, revision, file_path, token))
+        self._active_downloads[sae_id] = task
+
+        return DownloadResult(
+            sae_id=sae_id,
+            status="downloading",
+            message=f"Download started for {repository_id}",
+        )
+
+    async def _download_task(
+        self,
+        sae_id: str,
+        repository_id: str,
+        revision: str,
+        file_path: str | None = None,
+        token: str | None = None,
+    ) -> None:
+        """
+        Background task for downloading SAE.
+
+        Updates database on completion or error.
+        """
+        try:
+            # Check if cancelled before starting
+            if sae_id in self._cancelled_downloads:
+                self._cancelled_downloads.discard(sae_id)
+                raise DownloadCancelledError("Download was cancelled")
+
+            # Download SAE
+            cache_path = await self._downloader.download(
+                repository_id=repository_id,
+                revision=revision,
+                file_path=file_path,
+                progress_callback=self._make_progress_callback(sae_id),
+                token=token,
+            )
+
+            # Check if cancelled after download
+            if sae_id in self._cancelled_downloads:
+                self._cancelled_downloads.discard(sae_id)
+                raise DownloadCancelledError("Download was cancelled")
+
+            # When downloading a specific file, the actual SAE is in a subdirectory
+            # e.g., file_path="layer_20/width_16k/average_l0_71/params.npz"
+            # cache_path is the root snapshot, but SAE files are in the subdirectory
+            if file_path:
+                # Extract directory from file path (e.g., "layer_20/width_16k/average_l0_71")
+                sae_subdir = os.path.dirname(file_path)
+                if sae_subdir:
+                    cache_path = os.path.join(cache_path, sae_subdir)
+                    logger.debug(
+                        "sae_download_adjusted_path",
+                        sae_id=sae_id,
+                        file_path=file_path,
+                        adjusted_cache_path=cache_path,
+                    )
+
+            # Load config to get dimensions
+            config = self._loader.load_config(cache_path)
+
+            # Calculate file size
+            file_size = sum(
+                os.path.getsize(os.path.join(cache_path, f))
+                for f in os.listdir(cache_path)
+                if os.path.isfile(os.path.join(cache_path, f))
+            )
+
+            # Extract width and average_l0 from file_path
+            width = None
+            average_l0 = None
+            if file_path:
+                width, average_l0 = self._parse_sae_path_metadata(file_path)
+
+            # Update database with downloaded info
+            await self.repository.update_downloaded(
+                sae_id=sae_id,
+                cache_path=cache_path,
+                d_in=config.d_in,
+                d_sae=config.d_sae,
+                trained_on=config.model_name,
+                trained_layer=config.hook_layer,
+                file_size_bytes=file_size,
+                width=width,
+                average_l0=average_l0,
+            )
+
+            logger.info(
+                "sae_download_complete",
+                sae_id=sae_id,
+                cache_path=cache_path,
+                d_in=config.d_in,
+                d_sae=config.d_sae,
+            )
+
+            # Emit completion event
+            if self.emitter:
+                await self.emitter.emit_sae_download_complete(sae_id=sae_id)
+
+        except DownloadCancelledError:
+            logger.info("sae_download_cancelled", sae_id=sae_id)
+            await self.repository.update_status(
+                sae_id=sae_id,
+                status=SAEStatus.ERROR,
+                error_message="Download cancelled by user",
+            )
+            if self.emitter:
+                await self.emitter.emit_sae_download_error(
+                    sae_id=sae_id,
+                    error="Download cancelled by user",
+                )
+
+        except asyncio.CancelledError:
+            logger.info("sae_download_cancelled", sae_id=sae_id)
+            await self.repository.update_status(
+                sae_id=sae_id,
+                status=SAEStatus.ERROR,
+                error_message="Download cancelled by user",
+            )
+            if self.emitter:
+                await self.emitter.emit_sae_download_error(
+                    sae_id=sae_id,
+                    error="Download cancelled by user",
+                )
+
+        except Exception as e:
+            logger.error(
+                "sae_download_failed",
+                sae_id=sae_id,
+                error=str(e),
+            )
+
+            await self.repository.update_status(
+                sae_id=sae_id,
+                status=SAEStatus.ERROR,
+                error_message=str(e),
+            )
+
+            if self.emitter:
+                await self.emitter.emit_sae_download_error(
+                    sae_id=sae_id,
+                    error=str(e),
+                )
+
+        finally:
+            # Clean up tracking
+            self._active_downloads.pop(sae_id, None)
+            self._cancelled_downloads.discard(sae_id)
+
+    def _parse_sae_path_metadata(self, file_path: str) -> tuple[str | None, int | None]:
+        """
+        Extract width and average_l0 from SAE file path.
+
+        Args:
+            file_path: Path like "layer_20/width_16k/average_l0_38/params.npz"
+
+        Returns:
+            Tuple of (width, average_l0). E.g., ("16k", 38)
+        """
+        width = None
+        average_l0 = None
+
+        # Match width pattern: width_16k, width_65k, etc.
+        width_match = re.search(r"width[_-]?(\d+k?)", file_path, re.IGNORECASE)
+        if width_match:
+            width = width_match.group(1)
+
+        # Match average_l0 pattern: average_l0_38, l0_38, etc.
+        l0_match = re.search(r"(?:average_)?l0[_-]?(\d+)", file_path, re.IGNORECASE)
+        if l0_match:
+            average_l0 = int(l0_match.group(1))
+
+        return width, average_l0
+
+    def _make_progress_callback(self, sae_id: str):
+        """
+        Create progress callback for download.
+
+        The callback may be called from a thread executor, so we use
+        run_coroutine_threadsafe to safely schedule async operations.
+        """
+        # Capture the event loop at callback creation time (when we're in async context)
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            loop = None
+
+        def callback(progress: dict[str, Any]) -> None:
+            if self.emitter and progress.get("status") == "downloading":
+                coro = self.emitter.emit_sae_download_progress(
+                    sae_id=sae_id,
+                    percent=progress.get("percent", 0),
+                )
+                if loop and loop.is_running():
+                    # Schedule from thread to main event loop
+                    asyncio.run_coroutine_threadsafe(coro, loop)
+                else:
+                    # Fallback: try to create task if we're in async context
+                    try:
+                        asyncio.create_task(coro)
+                    except RuntimeError:
+                        # No event loop available, skip progress emission
+                        logger.debug(
+                            "skipping_progress_emit",
+                            reason="no_event_loop",
+                            sae_id=sae_id,
+                        )
+        return callback
+
+    async def cancel_download(self, sae_id: str) -> SAE:
+        """
+        Cancel an in-progress SAE download.
+
+        Args:
+            sae_id: The SAE's ID.
+
+        Returns:
+            The SAE with updated status.
+
+        Raises:
+            SAENotFoundError: If SAE doesn't exist.
+        """
+        sae = await self.get_sae(sae_id)
+
+        # Only cancel if actually downloading
+        if sae.status != SAEStatus.DOWNLOADING:
+            return sae
+
+        # Mark as cancelled
+        self._cancelled_downloads.add(sae_id)
+
+        # Cancel the task if it exists
+        task = self._active_downloads.get(sae_id)
+        if task and not task.done():
+            task.cancel()
+
+        # Update database status
+        await self.repository.update_status(
+            sae_id=sae_id,
+            status=SAEStatus.ERROR,
+            error_message="Download cancelled by user",
+        )
+
+        logger.info("sae_download_cancelled", sae_id=sae_id)
+
+        # Return updated SAE
+        return await self.get_sae(sae_id)
+
+    # =========================================================================
+    # Compatibility Methods
+    # =========================================================================
+
+    async def check_compatibility(
+        self,
+        sae_id: str,
+        layer: int,
+    ) -> CompatibilityResult:
+        """
+        Check if SAE is compatible with currently loaded model.
+
+        Args:
+            sae_id: The SAE's ID.
+            layer: Target layer to attach.
+
+        Returns:
+            CompatibilityResult with compatibility status and any issues.
+
+        Raises:
+            SAENotFoundError: If SAE doesn't exist.
+            ModelNotLoadedError: If no model is loaded.
+        """
+        sae = await self.get_sae(sae_id)
+
+        # Check model is loaded
+        model_state = LoadedModelState()
+        if not model_state.is_loaded:
+            raise ModelNotLoadedError(
+                "No model loaded. Load a model before checking SAE compatibility.",
+            )
+
+        errors: list[str] = []
+        warnings: list[str] = []
+
+        # The engine, before anything else. This is not a policy choice: an SAE
+        # is attached with register_forward_hook on a resolved nn.Module, and a
+        # llama.cpp model is a ctypes handle onto a C++ graph with no module
+        # tree and no per-layer residual reachable from Python. Checked HERE
+        # because attach_sae, attach_set and GET /saes/{id}/compatibility all
+        # come through this one function — a guard at each call site would be
+        # three chances to forget one.
+        #
+        # Without it the failure is `_get_layer` exhausting six attribute paths
+        # and raising "Could not find layer N. Model architecture may not be
+        # supported" — a 500 that blames the architecture rather than naming the
+        # runtime that cannot do this at all.
+        if not model_state.current.supports_hooks:
+            errors.append(
+                f"The loaded model is served by {model_state.current.engine}, which "
+                "cannot host an SAE: it exposes no PyTorch module tree, so there is "
+                "nothing to attach a forward hook to. Load a transformers-served "
+                "model to use SAEs, steering or sensing."
+            )
+            # RETURN, do not merely record. Every check below reaches into the
+            # model as a torch object, and `get_layer_count` ends in
+            # `model.named_modules()` — an AttributeError on a llama.cpp handle,
+            # which this function only catches as ValueError. Falling through
+            # would raise a 500 out of the very function that exists to answer
+            # "no, and here is why".
+            return CompatibilityResult(
+                compatible=False, errors=errors, warnings=warnings
+            )
+
+        # Check SAE status
+        if sae.status != SAEStatus.CACHED:
+            errors.append(f"SAE is not ready (status: {sae.status.value})")
+
+        # Check dimension compatibility
+        model = model_state.current.model
+        if hasattr(model, "config"):
+            hidden_size = getattr(model.config, "hidden_size", None)
+            if hidden_size and sae.d_in != hidden_size:
+                errors.append(
+                    f"Dimension mismatch: SAE d_in={sae.d_in}, "
+                    f"model hidden_size={hidden_size}"
+                )
+
+        # Check layer range
+        try:
+            num_layers = self._hooker.get_layer_count(model)
+            if not 0 <= layer < num_layers:
+                errors.append(
+                    f"Layer {layer} out of range [0, {num_layers-1}]"
+                )
+        except ValueError as e:
+            warnings.append(f"Could not verify layer count: {e}")
+
+        # Check trained layer match
+        if sae.trained_layer is not None and sae.trained_layer != layer:
+            warnings.append(
+                f"SAE was trained on layer {sae.trained_layer}, "
+                f"but attaching to layer {layer}"
+            )
+
+        # Check trained model match
+        if sae.trained_on:
+            model_name = getattr(model.config, "name_or_path", "") if hasattr(model, "config") else ""
+            if model_name and sae.trained_on not in model_name and model_name not in sae.trained_on:
+                warnings.append(
+                    f"SAE was trained on '{sae.trained_on}', "
+                    f"current model is '{model_name}'"
+                )
+
+        return CompatibilityResult(
+            compatible=len(errors) == 0,
+            errors=errors,
+            warnings=warnings,
+        )
+
+    # =========================================================================
+    # Attachment Methods
+    # =========================================================================
+
+    async def attach_sae(
+        self,
+        sae_id: str,
+        layer: int,
+    ) -> dict[str, Any]:
+        """
+        Attach an SAE to the loaded model.
+
+        Args:
+            sae_id: The SAE's ID.
+            layer: Layer to attach SAE to.
+
+        Returns:
+            Dict with attachment status and memory info.
+
+        Raises:
+            SAENotFoundError: If SAE doesn't exist.
+            SAEAlreadyAttachedError: If an SAE is already attached.
+            SAEIncompatibleError: If SAE is incompatible with model.
+            ModelNotLoadedError: If no model is loaded.
+        """
+        sae = await self.get_sae(sae_id)
+
+        # Check model is loaded
+        model_state = LoadedModelState()
+        if not model_state.is_loaded:
+            raise ModelNotLoadedError(
+                "No model loaded. Load a model before attaching SAE.",
+            )
+
+        # Reject only re-attaching THIS exact (sae_id, layer). Multi-SAE
+        # circuit serving (attach_set) legitimately populates the registry with
+        # SAEs on other layers; the single-attach path must not treat "some SAE
+        # is attached somewhere" as "already attached" (that wrongly blocked a
+        # standalone attach on a different layer once a circuit was served).
+        if self._sae_state.get(sae_id, layer) is not None:
+            raise SAEAlreadyAttachedError(
+                f"SAE '{sae_id}' is already attached at layer {layer}. "
+                "Detach it first before re-attaching.",
+                details={"sae_id": sae_id, "layer": layer},
+            )
+
+        # Check compatibility
+        compat = await self.check_compatibility(sae_id, layer)
+        if not compat.compatible:
+            raise SAEIncompatibleError(
+                f"SAE incompatible with model: {compat.errors[0]}",
+                details={"errors": compat.errors, "warnings": compat.warnings},
+            )
+
+        # Log warnings
+        for warning in compat.warnings:
+            logger.warning("sae_compatibility_warning", warning=warning)
+
+        # Put the SAE on the device of the layer it hooks. A model spread across
+        # GPUs keeps later layers on another card, and an SAE loaded on bare
+        # "cuda" (GPU 0) made monitoring raise a device mismatch inside the
+        # forward pass whenever its layer lived elsewhere.
+        target_device = self._sae_device_for_layer(model_state.current.model, layer)
+
+        # Check the card BEFORE loading, and refuse what does not fit. This only
+        # logged a warning and loaded anyway, and it did not keep the room the
+        # load was admitted with for the model's KV cache (review round 5,
+        # 2026-09-14): see _refuse_without_room.
+        if self._is_gpu_device(target_device):
+            # The SAE is cast to the model's precision below; a 16-bit file attached to an FP32
+            # model doubles in memory, so size for the wider of the two (conservative for an FP32
+            # file, which is already 4 bytes an element).
+            target_bytes = torch.finfo(
+                _resolve_attach_dtype("model", model_state.current.dtype)).bits / 8
+            widen = max(1.0, target_bytes / _file_element_bytes(sae))
+            estimated_mb = (sae.file_size_bytes or 0) / (1024 * 1024) * 1.2 * widen  # 20% overhead
+            if estimated_mb > 0:
+                self._refuse_without_room(
+                    model_state.current.model,
+                    target_device,
+                    int(estimated_mb),
+                    f"Attaching SAE '{sae_id}' at layer {layer}",
+                )
+
+        # Load SAE weights
+        logger.info(
+            "loading_sae", sae_id=sae_id, cache_path=sae.cache_path, device=str(target_device)
+        )
+        loaded_sae = self._loader.load(
+            cache_path=sae.cache_path,
+            device=str(target_device),
+        )
+
+        # Match SAE dtype to the precision the model was LOADED at (`LoadedModel.dtype`, the
+        # resolver's answer). Not `model.dtype`: on a bitsandbytes model that is whichever
+        # parameter transformers checks first, which can be a module it keeps in float32.
+        model = model_state.current.model
+        model_dtype = _resolve_attach_dtype(
+            "model", model_state.current.dtype, fallback=getattr(model, "dtype", None)
+        )
+        if loaded_sae.W_enc.dtype != model_dtype:
+            logger.info(
+                "sae_dtype_cast",
+                from_dtype=str(loaded_sae.W_enc.dtype),
+                to_dtype=str(model_dtype),
+            )
+            loaded_sae.W_enc = loaded_sae.W_enc.to(model_dtype)
+            loaded_sae.b_enc = loaded_sae.b_enc.to(model_dtype)
+            loaded_sae.W_dec = loaded_sae.W_dec.to(model_dtype)
+            loaded_sae.b_dec = loaded_sae.b_dec.to(model_dtype)
+
+        # Install hook
+        model = model_state.current.model
+        handle = self._hooker.install(model, layer, loaded_sae)
+
+        # Defense-in-depth against torch.compile bypassing the freshly-installed
+        # hook.  model_loader sets skip_nnmodule_hook_guards=False before
+        # compiling, which should already invalidate the cached graph on hook
+        # registration; resetting Dynamo here guarantees the next forward pass
+        # re-traces with the hook present even if that config was not applied
+        # (e.g. compile disabled, or a future torch version changes semantics).
+        self._reset_dynamo_for_hook_change()
+
+        # Update state in singleton
+        self._sae_state.set(loaded_sae, sae_id, layer, handle)
+
+        # Update database
+        await self.repository.update_status(sae_id, SAEStatus.ATTACHED)
+        await self.repository.create_attachment(
+            sae_id=sae_id,
+            model_id=model_state.loaded_model_id,
+            layer=layer,
+            memory_usage_mb=int(loaded_sae.estimate_memory_mb()),
+        )
+
+        memory_mb = int(loaded_sae.estimate_memory_mb())
+
+        # Auto-lock the model for steering
+        try:
+            from millm.db.base import async_session_factory
+            from millm.db.repositories.model_repository import ModelRepository
+
+            async with async_session_factory() as session:
+                model_repo = ModelRepository(session)
+                await model_repo.set_exclusive_lock(model_state.loaded_model_id)
+                logger.info("model_auto_locked", model_id=model_state.loaded_model_id, sae_id=sae_id)
+        except Exception as e:
+            logger.warning("model_auto_lock_failed", error=str(e))
+
+        # Sensing lifecycle (011 R1): re-arm when the ACTIVE profile has
+        # sensing enabled — activate-then-attach (and detach/re-attach
+        # cycles) previously left sensing silently dark while the UI toggle
+        # showed it on. Best-effort: never fails the attach.
+        try:
+            import millm.api.dependencies as deps
+            from millm.db.base import async_session_factory
+            from millm.db.repositories.profile_repository import ProfileRepository
+
+            async with async_session_factory() as session:
+                active = await ProfileRepository(session).get_active()
+            if (active is not None
+                    and getattr(active, "source_kind", None) == "cluster"
+                    and bool(getattr(active, "sensing_enabled", False))):
+                try:
+                    # 028 FU-1: the active cluster's OWN SAE — attaching an unrelated SAE
+                    # must not arm it on whichever entry is first.
+                    from millm.services.profile_targeting import profile_sae_or_none
+
+                    target_sae = profile_sae_or_none(active, self._sae_state.entries())
+                    if target_sae is None:
+                        raise ValueError(
+                            "its SAE is not the one attached (or the choice is ambiguous)"
+                        )
+                    deps.get_sensing_service().arm_for_profile(active, target_sae)
+                    logger.info("sensing_rearmed_on_attach",
+                                profile_id=active.id)
+                except ValueError as arm_error:
+                    # Surface the refusal in the attach response (011 R3:
+                    # log-only left the toggle on with sensing silently
+                    # dark — the same class R2 fixed for activation).
+                    compat.warnings.append(
+                        f"sensing enabled for '{active.name}' but could not "
+                        f"arm: {arm_error}"
+                    )
+                    logger.warning("sensing_rearm_on_attach_refused",
+                                   profile_id=active.id, error=str(arm_error))
+        except Exception as e:
+            logger.warning("sensing_rearm_on_attach_failed", error=str(e))
+
+        logger.info(
+            "sae_attached",
+            sae_id=sae_id,
+            layer=layer,
+            memory_mb=memory_mb,
+        )
+
+        return {
+            "status": "attached",
+            "sae_id": sae_id,
+            "layer": layer,
+            "memory_usage_mb": memory_mb,
+            "warnings": compat.warnings,
+            "layer_module_path": getattr(
+                self._hooker, "last_resolved_module_path", None
+            ),
+        }
+
+    def _kv_reserve_mb(self, model: Any, device: Any) -> tuple[int, Optional[int]]:
+        """(MiB, tokens): the KV cache the model was admitted with, over its layers on `device`.
+
+        The per-card fit accepted the load only with room on each card for its
+        layers' cache at the admitted context (model_loader.admitted_context:
+        TRANSFORMERS_MIN_CONTEXT, or the model's own limit if shorter). The cache
+        is not allocated until generation, so that room still reads as free when
+        an SAE attaches. (0, None) for a model whose cache cannot be sized — it
+        was admitted by the 20% slack instead.
+        """
+        from millm.core.config import settings
+        from millm.ml.model_loader import admitted_context, kv_bytes_for, kv_cache_spec
+
+        config = getattr(model, "config", None)
+        spec = None
+        if config is not None:
+            try:
+                # At the precision the model was LOADED at: the fit admitted an FP32 model with a
+                # 4-byte cache, and a 2-byte reserve here would let an SAE take half of that room.
+                # Only the RECORD of this same model: the reserve belongs to the model it was
+                # planned for (as `_working_reserve_mb` already guards).
+                current = LoadedModelState().current
+                loaded_dtype = (
+                    current.dtype
+                    if current is not None and getattr(current, "model", None) is model
+                    else "bfloat16"
+                )
+                spec, _ = kv_cache_spec(config, kv_bytes=kv_bytes_for(loaded_dtype))
+            except Exception:  # noqa: BLE001 - an odd config: no reserve, as for the slack
+                spec = None
+        if spec is None:
+            return 0, None
+        tokens = admitted_context(spec, int(settings.TRANSFORMERS_MIN_CONTEXT))
+        target = str(device)
+        on_card = []
+        for index in range(spec.num_layers):
+            try:
+                here = str(self._hooker.layer_device(model, index)) == target
+            except Exception:  # noqa: BLE001 - a layer that cannot be placed is counted here
+                here = True
+            if here:
+                on_card.append(index)
+        return spec.mb(on_card, tokens), tokens
+
+    def _refuse_without_room(
+        self, model: Any, device: Any, projected_mb: int, what: str
+    ) -> None:
+        """Refuse an attach whose SAE weights and the model's KV cache on that card do not both fit.
+
+        Review round 5, 2026-09-14. Both attach paths compared an SAE with the
+        card's free memory alone, so an attach could take the room the per-card
+        fit had kept for the KV cache, and generation then ran out of memory at a
+        context the load had accepted. OLMo-2-13B split on 11,500 / 23,500 MB
+        free leaves cuda:0 about 1,550 MiB, 1,120 of it for a 4,096-token cache.
+
+        Raises:
+            InsufficientMemoryError: naming the card, the SAE's projected MB, the
+                KV reserve and its context, and what torch can still allocate there.
+        """
+        room = _card_room_mb(device)
+        reserve, tokens = self._kv_reserve_mb(model, device)
+        working = _working_reserve_mb(model, device)
+        if projected_mb + reserve + working <= room:
+            return
+        cache = (
+            f" and the model's KV cache for {tokens} tokens over its layers there needs "
+            f"{reserve} MB" if tokens else ""
+        )
+        activations = (
+            f", and a request's working memory there {working} MB" if working else ""
+        )
+        raise InsufficientMemoryError(
+            f"{what} needs ~{projected_mb} MB on {device}{cache}{activations}, but only {room} MB "
+            "is free there. Detach an SAE on that card, lower TRANSFORMERS_MIN_CONTEXT and reload "
+            "the model, or free memory on the card.",
+            details={
+                "device": str(device),
+                "projected_mb": projected_mb,
+                "kv_reserve_mb": reserve,
+                "kv_context_tokens": tokens,
+                "working_reserve_mb": working,
+                "available_mb": room,
+                "free_mb": room,
+            },
+        )
+
+    def _sae_device_for_layer(self, model: Any, layer: int) -> "torch.device":
+        """
+        The device an SAE hooked at `layer` must live on: that layer's own device.
+
+        CPU when CUDA is unavailable. A model spread across GPUs keeps later
+        layers on another card; loading every SAE on bare "cuda" put them all
+        on GPU 0.
+        """
+        if not torch.cuda.is_available():
+            return torch.device("cpu")
+        return self._hooker.layer_device(model, layer)
+
+    @staticmethod
+    def _is_gpu_device(device: Any) -> bool:
+        """Whether a free-GPU-memory check applies to `device`."""
+        return torch.cuda.is_available() and getattr(device, "type", None) not in (
+            "cpu",
+            "meta",
+        )
+
+    async def attach_set(
+        self,
+        sae_layers: list[tuple[str, int]],
+    ) -> dict[str, Any]:
+        """Attach several SAEs at once for multi-SAE circuit serving (Feature 12).
+
+        Loads ONLY the referenced SAEs (referenced-only loading), each in the
+        configured attach dtype (fp16 by default — the measured ~64 MB/SAE
+        footprint), and installs one forward hook per ``(sae_id, layer)`` bound
+        to that SAE's own decoder. Idempotent per key: re-attaching a
+        ``(sae_id, layer)`` already present is skipped. Reports the total
+        attached-set VRAM and a warning when it exceeds the configured
+        envelope.
+
+        Unlike ``attach_sae`` this does NOT enforce the single-attach guard —
+        it is the deliberate multi-SAE path. It coexists with a previously
+        single-attached SAE (that SAE stays in the registry).
+
+        Args:
+            sae_layers: list of ``(sae_id, layer)`` pairs to attach.
+
+        Returns:
+            Dict with per-entry status, total_memory_usage_mb, the envelope,
+            and a vram_warning flag.
+
+        Raises:
+            ModelNotLoadedError: If no model is loaded.
+            SAENotFoundError: If a referenced SAE does not exist.
+            SAEIncompatibleError: If a referenced SAE is incompatible.
+        """
+        from millm.core.config import settings
+
+        model_state = LoadedModelState()
+        if not model_state.is_loaded:
+            raise ModelNotLoadedError(
+                "No model loaded. Load a model before attaching SAEs.",
+            )
+
+        # Dedup requested keys, preserving order.
+        requested: list[tuple[str, int]] = list(
+            dict.fromkeys((sid, int(layer)) for sid, layer in sae_layers)
+        )
+        attach_dtype = _resolve_attach_dtype(
+            settings.MULTISAE_ATTACH_DTYPE, model_state.current.dtype
+        )
+        model = model_state.current.model
+
+        # Split into to-attach (new keys) and already-attached (idempotent skip).
+        to_attach: list[tuple[str, int]] = []
+        results: list[dict[str, Any]] = []
+        for sae_id, layer in requested:
+            if self._sae_state.get(sae_id, layer) is not None:
+                results.append(
+                    {"sae_id": sae_id, "layer": layer, "status": "already_attached"}
+                )
+            else:
+                to_attach.append((sae_id, layer))
+
+        # PRE-VALIDATE every new key (existence + compatibility) BEFORE loading
+        # anything, so a bad key fails the whole call without a partial attach.
+        prepared: list[tuple[str, int, Any, "CompatibilityResult"]] = []
+        for sae_id, layer in to_attach:
+            sae = await self.get_sae(sae_id)  # raises SAENotFoundError
+            compat = await self.check_compatibility(sae_id, layer)
+            if not compat.compatible:
+                raise SAEIncompatibleError(
+                    f"SAE '{sae_id}' incompatible with model: {compat.errors[0]}",
+                    details={"errors": compat.errors, "warnings": compat.warnings},
+                )
+            for warning in compat.warnings:
+                logger.warning("sae_compatibility_warning", sae_id=sae_id, warning=warning)
+            prepared.append((sae_id, layer, sae, compat))
+
+        # Free-VRAM pre-check: refuse the whole set if the projected cumulative
+        # footprint would not fit, rather than OOM'ing mid-load. Estimate each
+        # SAE's fp16 steering-weight footprint from its dimensions (W_enc+W_dec
+        # = 2·d_in·d_sae params × 2 bytes) — robust to a NULL file_size_bytes,
+        # which would otherwise collapse the projection to 0 and defeat the gate.
+        attach_bytes = torch.finfo(attach_dtype).bits // 8
+        # Each SAE goes on the device of the layer it hooks (see attach_sae), so
+        # the footprint is projected and gated PER DEVICE. A set spread over two
+        # cards has to fit each card; comparing its total against GPU 0's free
+        # memory refused sets that fit and admitted sets that did not.
+        devices = {
+            (sae_id, layer): self._sae_device_for_layer(model, layer)
+            for sae_id, layer, _, _ in prepared
+        }
+        if prepared:
+
+            def _projected_mb(sae) -> float:
+                by_dims = 2 * int(sae.d_in) * int(sae.d_sae) * attach_bytes / (1024 * 1024)
+                by_file = ((sae.file_size_bytes or 0) / (1024 * 1024)) * 0.6
+                # Use the larger of the dim-based and file-based estimates so an
+                # unknown/under-reported file size never under-projects.
+                return max(by_dims, by_file) * 1.1  # 10% headroom for buffers
+
+            projected_by_device: dict[str, tuple[Any, float]] = {}
+            for sae_id, layer, sae, _ in prepared:
+                device = devices[(sae_id, layer)]
+                if not self._is_gpu_device(device):
+                    continue
+                _, so_far = projected_by_device.get(str(device), (device, 0.0))
+                projected_by_device[str(device)] = (device, so_far + _projected_mb(sae))
+
+            for device_name, (device, projected_mb) in projected_by_device.items():
+                self._refuse_without_room(
+                    model, device, int(projected_mb), f"Attaching {len(prepared)} SAE(s)"
+                )
+
+        # Attach, tracking keys added in THIS call so we can roll them all back
+        # if a later load/install throws — never leave a partial attach or a
+        # loaded-but-unregistered SAE leaking on the GPU.
+        attached_keys: list[tuple[str, int]] = []
+        try:
+            for sae_id, layer, sae, compat in prepared:
+                loaded_sae = self._loader.load(
+                    cache_path=sae.cache_path,
+                    device=str(devices[(sae_id, layer)]),
+                    dtype=attach_dtype,
+                )
+                try:
+                    handle = self._hooker.install(model, layer, loaded_sae)
+                except Exception:
+                    # The SAE loaded but the hook failed — free it before it leaks.
+                    try:
+                        loaded_sae.to_cpu()
+                    except Exception:
+                        pass
+                    raise
+                self._reset_dynamo_for_hook_change()
+                self._sae_state.set(loaded_sae, sae_id, layer, handle)
+                attached_keys.append((sae_id, layer))
+                results.append(
+                    {
+                        "sae_id": sae_id,
+                        "layer": layer,
+                        "status": "attached",
+                        "memory_usage_mb": int(loaded_sae.estimate_memory_mb()),
+                        "warnings": compat.warnings,
+                    }
+                )
+        except Exception:
+            # Roll back everything attached in THIS call (leave pre-existing
+            # attachments untouched).
+            for sae_id, layer in attached_keys:
+                entry = self._sae_state.get(sae_id, layer)
+                if entry is not None and entry.sae is not None:
+                    try:
+                        entry.sae.to_cpu()
+                    except Exception:
+                        pass
+                self._sae_state.clear(sae_id=sae_id, layer=layer)
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+            logger.warning("attach_set_rolled_back", rolled_back=len(attached_keys))
+            raise
+
+        status_set = self.get_attachment_status_set()
+        envelope = int(settings.MULTISAE_VRAM_ENVELOPE_MB)
+        total_mb = status_set.total_memory_usage_mb or 0
+        vram_warning = total_mb > envelope
+        if vram_warning:
+            # Advisory only — the attach SUCCEEDED. Real capacity was already
+            # enforced against live free VRAM above.
+            logger.info(
+                "multisae_vram_over_advisory_budget",
+                total_mb=total_mb,
+                advisory_budget_mb=envelope,
+                attached=status_set.count,
+            )
+        # Side-effect parity with attach_sae (F12 R3 finding): record the
+        # attachment in the DB and LOCK the model. Without the lock a concurrent
+        # unload could tear out live hooks mid-generation; without the status,
+        # delete_sae's "cannot delete an attached SAE" guard (which reads the DB)
+        # would happily delete files out from under a hooked SAE.
+        for sae_id, layer in attached_keys:
+            try:
+                await self.repository.update_status(sae_id, SAEStatus.ATTACHED)
+                await self.repository.create_attachment(
+                    sae_id=sae_id,
+                    model_id=model_state.loaded_model_id,
+                    layer=layer,
+                    memory_usage_mb=next(
+                        (
+                            r.get("memory_usage_mb", 0) or 0
+                            for r in results
+                            if r.get("sae_id") == sae_id and r.get("layer") == layer
+                        ),
+                        0,
+                    ),
+                )
+            except Exception as e:  # pragma: no cover - best effort, never fails attach
+                logger.warning(
+                    "attach_set_db_record_failed", sae_id=sae_id, layer=layer, error=str(e)
+                )
+        if attached_keys and model_state.loaded_model_id:
+            try:
+                from millm.db.base import async_session_factory
+                from millm.db.repositories.model_repository import ModelRepository
+
+                async with async_session_factory() as session:
+                    await ModelRepository(session).set_exclusive_lock(
+                        model_state.loaded_model_id
+                    )
+                logger.info("model_auto_locked", model_id=model_state.loaded_model_id)
+            except Exception as e:
+                logger.warning("attach_set_model_lock_failed", error=str(e))
+
+        logger.info(
+            "sae_set_attached",
+            requested=len(requested),
+            attached=status_set.count,
+            total_mb=total_mb,
+        )
+        # Feature 16: attachment changes invalidate a per-request snapshot
+        # taken against the previous set.
+        self._sae_state.bump_steering_epoch('attach_set')
+        return {
+            "status": "attached",
+            "entries": results,
+            "attached_count": status_set.count,
+            "total_memory_usage_mb": total_mb,
+            "vram_envelope_mb": envelope,
+            "vram_warning": vram_warning,
+        }
+
+    async def detach_sae(self, sae_id: str) -> dict[str, Any]:
+        """
+        Detach an SAE from the model.
+
+        Args:
+            sae_id: The SAE's ID.
+
+        Returns:
+            Dict with detachment status and freed memory info.
+
+        Raises:
+            SAENotFoundError: If SAE doesn't exist.
+            SAENotAttachedError: If SAE is not attached.
+        """
+        await self.get_sae(sae_id)  # raises SAENotFoundError
+
+        # Multi-SAE aware: the SAE is attached if ANY registry entry carries
+        # this sae_id (not only when it is the first/singular entry).
+        attached_ids = {e.sae_id for e in self._sae_state.entries()}
+        if sae_id not in attached_ids:
+            raise SAENotAttachedError(
+                f"SAE '{sae_id}' is not attached",
+                details={"attached_sae_ids": sorted(attached_ids)},
+            )
+
+        # 026 F-2 (suite tracker 4.13): TAKE THE ADMISSION SLOT for the whole detach instead of
+        # polling counters. The poll left a window between "count reached 0" and the hook
+        # removal in which an arriving request — or the next chunk of a continuously running
+        # batch, which never stops making the count non-zero for long — could start a forward
+        # pass through a hook being torn out (a call into a freed closure, or stale steering).
+        # Holding the slot, no request, batch chunk or model work is admitted until the
+        # detach is done. Falls back to the old bounded poll when the slot cannot be taken.
+        async with self._detach_admission():
+            return await self._detach_sae_admitted(sae_id)
+
+    @asynccontextmanager
+    async def _detach_admission(self) -> AsyncIterator[None]:
+        """Hold the inference admission slot for a detach (026 F-2); drain what bypasses it.
+
+        `InferenceService.hold_admission` queues as an interactive waiter, waits for in-flight
+        serial work AND a running batch chunk to finish, and admits nothing else until released.
+        Continuous-batching requests never take that slot, so they are still drained by a
+        bounded poll once the slot is held. When the slot cannot be taken — the model is
+        unloading, the weights are torn, the queue is full, or there is no inference service —
+        the detach falls back to the previous bounded poll of every counter, so a detach is
+        never blocked outright (the pre-F-2 behaviour, with its window, logged).
+        """
+        try:
+            inference_svc = self._inference_service
+            if inference_svc is None:
+                from millm.api.dependencies import get_inference_service
+
+                inference_svc = get_inference_service()
+        except Exception:  # noqa: BLE001 - no inference service: nothing can be in flight
+            yield
+            return
+
+        async with AsyncExitStack() as stack:
+            held = False
+            try:
+                await stack.enter_async_context(inference_svc.hold_admission())
+                held = True
+            except Exception as exc:  # noqa: BLE001 - never block a detach on admission
+                logger.warning(
+                    "detach_admission_slot_unavailable",
+                    error=str(exc)[:200],
+                    detail="falling back to polling the request counters (026 F-2's window)",
+                )
+            await self._drain_requests(inference_svc, cbm_only=held)
+            yield
+
+    @staticmethod
+    async def _drain_requests(inference_svc: Any, *, cbm_only: bool) -> None:
+        """Wait up to 30 s (300 x 0.1 s) for in-flight work to finish; log and go on after that.
+
+        With the admission slot held only continuous-batching requests can still be running
+        (they bypass the queue). Without it, every counter is polled as before F-2.
+        """
+        try:
+            def _active_count() -> int:
+                count = 0
+                if not cbm_only:
+                    # Serial requests wait in the RequestQueue; a batch chunk (Feature 26)
+                    # holds the slot OUTSIDE pending_count.
+                    queue = inference_svc.request_queue
+                    count += queue.pending_count + queue.background_holding_count
+                cbm = getattr(inference_svc, "_cbm_backend", None)
+                if cbm is not None:
+                    count += int(getattr(cbm, "inflight_count", 0) or 0)
+                return count
+
+            active = _active_count()
+            if active > 0:
+                logger.info("detach_waiting_for_pending_requests", pending=active,
+                            slot_held=cbm_only)
+                for _ in range(300):  # Wait up to 30 seconds
+                    if _active_count() == 0:
+                        break
+                    await asyncio.sleep(0.1)
+                remaining = _active_count()
+                if remaining > 0:
+                    logger.error(
+                        "detach_timeout_with_active_requests",
+                        pending=remaining,
+                        hint="Detaching anyway — hook removed while generation may be in progress. "
+                             "Restart the server if inference behaves unexpectedly.",
+                    )
+        except Exception:  # noqa: BLE001
+            pass  # Don't block detach if the counters cannot be read
+
+    async def _detach_sae_admitted(self, sae_id: str) -> dict[str, Any]:
+        """The detach itself; runs inside `_detach_admission` (026 F-2)."""
+        # Resolve THIS sae_id's registry entries (multi-SAE aware — a sae_id
+        # may be attached on more than one layer). ALL of them must be cleaned
+        # up, not just the first.
+        own_entries = [e for e in self._sae_state.entries() if e.sae_id == sae_id]
+
+        # Get memory before cleanup (sum across this sae_id's layers). Use an
+        # explicit branch (not `or`) so a genuine 0-MB sum isn't overridden by
+        # the singular fallback.
+        if own_entries:
+            memory_freed_mb = sum(
+                int(e.sae.estimate_memory_mb()) for e in own_entries if e.sae
+            )
+        else:
+            fallback = self._sae_state.attached_sae
+            memory_freed_mb = int(fallback.estimate_memory_mb()) if fallback else 0
+
+        # Remove this sae_id's hook(s).
+        for e in own_entries:
+            if e.hook_handle:
+                self._hooker.remove(e.hook_handle)
+
+        # Reset Dynamo so any compiled graph that captured the hooked path is
+        # invalidated — otherwise a stale cached graph could keep applying the
+        # (now removed) steering after detach.
+        self._reset_dynamo_for_hook_change()
+
+        # Clear steering + monitoring + sensing and move to CPU for EVERY SAE
+        # this sae_id owns (a multi-layer sae_id has one LoadedSAE per layer);
+        # cleaning only the first would leave the rest armed and resident.
+        detach_saes = [e.sae for e in own_entries if e.sae]
+        if not detach_saes and self._sae_state.attached_sae is not None:
+            detach_saes = [self._sae_state.attached_sae]
+        for detach_sae in detach_saes:
+            detach_sae.clear_steering()
+            detach_sae.enable_monitoring(False)
+            # Sensing lifecycle (Feature 11): detaching the SAE disarms —
+            # the cached encoder slice is about to move to CPU with the SAE.
+            try:
+                import millm.api.dependencies as deps
+
+                deps.get_sensing_service().disarm(detach_sae)
+            except Exception:
+                logger.warning("sensing_disarm_on_detach_failed", exc_info=False)
+
+            # Edge sensing lifecycle (Feature 15): same reason, and it must be
+            # reached even when F11 sensing is not armed. Detaching one SAE of
+            # an armed CIRCUIT would otherwise leave the service believing it
+            # is armed on a layer whose SAE is gone — status() only repairs
+            # that if somebody happens to call it with the layer map.
+            try:
+                import millm.api.dependencies as deps
+
+                circuit_sensing = deps._circuit_sensing_service
+                if circuit_sensing is not None and circuit_sensing.is_armed:
+                    # disarm() unions its argument with what it armed, so a
+                    # bare layer key is enough to reach this SAE.
+                    layer = getattr(
+                        getattr(detach_sae, "_edge_sensing", None), "layer", -1
+                    )
+                    circuit_sensing.disarm({layer: detach_sae})
+            except Exception:
+                logger.warning(
+                    "circuit_sensing_disarm_on_detach_failed", exc_info=False
+                )
+            detach_sae.to_cpu()
+
+        # Clear CUDA cache
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+
+        # Clear this sae_id's entries in the singleton (also removes any hook
+        # not already removed above). Other attached SAEs are untouched.
+        self._sae_state.clear(sae_id=sae_id)
+
+        # Capture model_id before clearing state
+        model_state = LoadedModelState()
+        locked_model_id = model_state.loaded_model_id if model_state.is_loaded else None
+
+        # Update database
+        await self.repository.update_status(sae_id, SAEStatus.CACHED)
+        await self.repository.deactivate_attachment(sae_id)
+
+        # Auto-unlock the model ONLY when no SAEs remain attached. In a
+        # multi-SAE circuit, detaching one SAE must not unlock the model while
+        # others are still hooked and steering (a concurrent unload would tear
+        # them out mid-generation).
+        if locked_model_id and not self._sae_state.is_attached:
+            try:
+                from millm.db.base import async_session_factory
+                from millm.db.repositories.model_repository import ModelRepository
+
+                async with async_session_factory() as session:
+                    model_repo = ModelRepository(session)
+                    # CLEAR THE LOCK THAT IS HELD, not the model that happens to
+                    # be loaded. These are the same row in the normal case and
+                    # diverge in exactly the case that matters: when an earlier
+                    # lock leaked, `loaded_model_id` points at the model being
+                    # detached and the stale flag sits on a different row, so
+                    # the targeted unlock wrote `locked=False` over a `False`
+                    # and reported success while the real lock survived. That is
+                    # why detaching and unloading did not restore the listing.
+                    cleared = await model_repo.clear_locks()
+                    # ⚠ COMMIT IT (028 FU-2, suite tracker 1.1). `clear_locks` only EXECUTES its
+                    # UPDATE — `set_exclusive_lock` composes it with a committing write — and this
+                    # session closed without a commit, so the unlock was rolled back on every
+                    # detach while the log below said `model_auto_unlocked`. Observed on hardware
+                    # 2026-10-06/07: the next model swap was refused `model_locked` until a manual
+                    # `POST /api/models/{id}/unlock`. The unit test mocked the session and could
+                    # not see it; `TestDetachReleasesTheLockThatIsHeld` now runs a real one.
+                    await session.commit()
+                    logger.info(
+                        "model_auto_unlocked",
+                        model_id=locked_model_id,
+                        sae_id=sae_id,
+                        locks_cleared=cleared,
+                    )
+            except Exception as e:
+                logger.warning("model_auto_unlock_failed", error=str(e))
+
+        logger.info(
+            "sae_detached",
+            sae_id=sae_id,
+            memory_freed_mb=memory_freed_mb,
+        )
+
+        # Feature 16: attachment changes invalidate a per-request snapshot
+        # taken against the previous set.
+        self._sae_state.bump_steering_epoch('detach_sae')
+        return {
+            "status": "detached",
+            "sae_id": sae_id,
+            "memory_freed_mb": memory_freed_mb,
+        }
+
+    @staticmethod
+    def _reset_dynamo_for_hook_change() -> None:
+        """Reset TorchDynamo after a hook change.
+
+        Delegates to `millm.ml.layer_resolution` (024 task 1.3) so probe code can reach it without
+        importing this service — and therefore without importing `AttachedSAEState`.
+        """
+        from millm.ml.layer_resolution import reset_dynamo_for_hook_change
+
+        reset_dynamo_for_hook_change()
+
+    # =========================================================================
+    # Steering Methods
+    # =========================================================================
+
+    def _check_feature_idx(self, feature_idx: int, sae: Any) -> None:
+        """Validate a feature index against the attached SAE's dimension.
+
+        Raises InvalidFeatureIndexError (400) instead of ValueError (500) so the
+        client gets a meaningful error response rather than an internal server error.
+        """
+        from millm.core.errors import InvalidFeatureIndexError
+        if not 0 <= feature_idx < sae.d_sae:
+            raise InvalidFeatureIndexError(
+                f"Feature index {feature_idx} is out of range [0, {sae.d_sae}) "
+                f"for the attached SAE.",
+                details={"feature_idx": feature_idx, "d_sae": sae.d_sae},
+            )
+
+    def set_steering(self, feature_idx: int, value: float) -> None:
+        """
+        Set steering value for a feature.
+
+        Args:
+            feature_idx: Feature index (validated against attached SAE's d_sae).
+            value: Steering strength.
+
+        Raises:
+            SAENotAttachedError: If no SAE is attached.
+            InvalidFeatureIndexError: If feature index is out of range (returns 400).
+        """
+        if not self._sae_state.is_attached:
+            raise SAENotAttachedError("No SAE attached")
+        sae = self._sae_state.attached_sae
+        self._check_feature_idx(feature_idx, sae)
+        sae.set_steering(feature_idx, value)
+        # Feature 16 R1: these are the OPERATOR-facing steering routes —
+        # the exact actor in the feature's own narrative. Their windows
+        # were left open by the original nine-writer enumeration.
+        self._sae_state.bump_steering_epoch("operator_set_steering")
+
+    def profile_target(self, profile: Any) -> Optional[AttachedEntry]:
+        """The attached entry `profile` steers — its own SAE, never the first one (028 FU-1).
+
+        `None` when nothing is attached; refuses (`SAENotAttachedError` / `InvalidParameterError`)
+        when the profile's SAE is not attached or the choice is ambiguous. The one rule is
+        `profile_targeting.select_profile_entry`, shared with the per-request path.
+        """
+        from millm.services.profile_targeting import select_profile_entry
+
+        return select_profile_entry(profile, self._sae_state.entries())
+
+    def steer_entry(self, entry: AttachedEntry, steering: Optional[dict[int, float]]) -> None:
+        """Replace `entry`'s steering with exactly `steering` and enable it; `None` clears and
+        disables. Validates every index against THIS entry's SAE before touching anything."""
+        sae = entry.sae
+        if steering is None:
+            sae.clear_steering()
+            sae.enable_steering(False)
+        else:
+            for idx in steering:
+                self._check_feature_idx(idx, sae)
+            sae.clear_steering()
+            sae.set_steering_batch(steering)
+            sae.enable_steering(True)
+        self._sae_state.bump_steering_epoch("operator_steer_entry")
+
+    def set_steering_batch(self, steering: dict[int, float]) -> None:
+        """
+        Set multiple steering values at once.
+
+        Args:
+            steering: Dict mapping feature indices to values.
+
+        Raises:
+            SAENotAttachedError: If no SAE is attached.
+            InvalidFeatureIndexError: If any feature index is out of range (returns 400).
+        """
+        if not self._sae_state.is_attached:
+            raise SAENotAttachedError("No SAE attached")
+        sae = self._sae_state.attached_sae
+        for idx in steering:
+            self._check_feature_idx(idx, sae)
+        sae.set_steering_batch(steering)
+        # Feature 16 R1: these are the OPERATOR-facing steering routes —
+        # the exact actor in the feature's own narrative. Their windows
+        # were left open by the original nine-writer enumeration.
+        self._sae_state.bump_steering_epoch("operator_set_steering_batch")
+
+    def clear_steering(self, feature_idx: Optional[int] = None) -> None:
+        """
+        Clear steering for one or all features.
+
+        Args:
+            feature_idx: Specific feature to clear (None = clear all).
+
+        Raises:
+            SAENotAttachedError: If no SAE is attached.
+        """
+        if not self._sae_state.is_attached:
+            raise SAENotAttachedError("No SAE attached")
+        self._sae_state.attached_sae.clear_steering(feature_idx)
+        # Feature 16 R1: these are the OPERATOR-facing steering routes —
+        # the exact actor in the feature's own narrative. Their windows
+        # were left open by the original nine-writer enumeration.
+        self._sae_state.bump_steering_epoch("operator_clear_steering")
+
+    def enable_steering(self, enabled: bool = True) -> None:
+        """
+        Enable or disable steering.
+
+        Args:
+            enabled: Whether to enable steering.
+
+        Raises:
+            SAENotAttachedError: If no SAE is attached.
+        """
+        if not self._sae_state.is_attached:
+            raise SAENotAttachedError("No SAE attached")
+        self._sae_state.attached_sae.enable_steering(enabled)
+        # Feature 16 R1: these are the OPERATOR-facing steering routes —
+        # the exact actor in the feature's own narrative. Their windows
+        # were left open by the original nine-writer enumeration.
+        self._sae_state.bump_steering_epoch("operator_enable_steering")
+
+    def get_steering_values(self) -> dict[int, float]:
+        """
+        Get current steering values.
+
+        Returns:
+            Dict mapping feature indices to steering values.
+
+        Raises:
+            SAENotAttachedError: If no SAE is attached.
+        """
+        if not self._sae_state.is_attached:
+            raise SAENotAttachedError("No SAE attached")
+        return self._sae_state.attached_sae.get_steering_values()
+
+    # =========================================================================
+    # Monitoring Methods
+    # =========================================================================
+
+    def enable_monitoring(
+        self,
+        enabled: bool = True,
+        features: Optional[list[int]] = None,
+    ) -> None:
+        """
+        Enable or disable feature monitoring.
+
+        Args:
+            enabled: Whether to capture activations.
+            features: Specific features to monitor (None = all). Each index is
+                validated against the attached SAE's d_sae.
+
+        Raises:
+            SAENotAttachedError: If no SAE is attached.
+            InvalidFeatureIndexError: If any feature index is out of range (400).
+        """
+        if not self._sae_state.is_attached:
+            raise SAENotAttachedError("No SAE attached")
+        sae = self._sae_state.attached_sae
+        # Validate indices before enabling: an out-of-range index would raise
+        # inside the forward hook on *every* forward pass (feature_acts[..., idx]),
+        # breaking all inference until monitoring is reconfigured.  Reject up
+        # front with a 400 instead.
+        if enabled and features is not None:
+            for idx in features:
+                self._check_feature_idx(idx, sae)
+        sae.enable_monitoring(enabled, features)
+
+    def get_last_activations(self) -> Optional[Any]:
+        """
+        Get feature activations from last forward pass.
+
+        Returns:
+            Activations tensor or None.
+
+        Raises:
+            SAENotAttachedError: If no SAE is attached.
+        """
+        if not self._sae_state.is_attached:
+            raise SAENotAttachedError("No SAE attached")
+        return self._sae_state.attached_sae.get_last_feature_activations()
+
+    # =========================================================================
+    # Delete Methods
+    # =========================================================================
+
+    async def delete_sae(self, sae_id: str) -> dict[str, Any]:
+        """
+        Delete an SAE from database and disk.
+
+        Args:
+            sae_id: The SAE's ID.
+
+        Returns:
+            Dict with deletion status and freed disk space.
+
+        Raises:
+            SAENotFoundError: If SAE doesn't exist.
+            SAEAlreadyAttachedError: If SAE is currently attached.
+        """
+        sae = await self.get_sae(sae_id)
+
+        # Check SAE is not attached
+        if self._sae_state.attached_sae_id == sae_id:
+            raise SAEAlreadyAttachedError(
+                f"Cannot delete SAE '{sae_id}' while it is attached. "
+                "Detach it first.",
+                details={"sae_id": sae_id},
+            )
+
+        # Delete cache files
+        freed_mb = 0.0
+        if sae.cache_path:
+            freed_mb = await self._downloader.delete(sae.cache_path)
+
+        # Delete from database
+        await self.repository.delete(sae_id)
+
+        logger.info(
+            "sae_deleted",
+            sae_id=sae_id,
+            freed_mb=freed_mb,
+        )
+
+        return {
+            "status": "deleted",
+            "sae_id": sae_id,
+            "freed_disk_mb": freed_mb,
+        }
+
+    # =========================================================================
+    # Cleanup
+    # =========================================================================
+
+    def shutdown(self) -> None:
+        """Clean up resources on application shutdown."""
+        if self._sae_state.is_attached:
+            # Detach every attached SAE (multi-SAE aware), each hook removed and
+            # each SAE moved to CPU before the registry is cleared.
+            for entry in self._sae_state.entries():
+                if entry.hook_handle:
+                    self._hooker.remove(entry.hook_handle)
+                if entry.sae:
+                    entry.sae.to_cpu()
+            self._sae_state.clear()
+
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+
+        logger.info("SAEService shutdown complete")

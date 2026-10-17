@@ -1,0 +1,1107 @@
+"""Unit tests for SAEService."""
+
+import asyncio
+from unittest.mock import AsyncMock, MagicMock, patch
+
+import pytest
+
+from millm.core.errors import (
+    ModelNotLoadedError,
+    SAEAlreadyAttachedError,
+    SAEIncompatibleError,
+    SAENotAttachedError,
+    SAENotFoundError,
+)
+from millm.db.models.sae import SAE, SAEStatus
+from millm.ml.model_loader import LoadedModelState
+from millm.services.sae_service import (
+    AttachedSAEState,
+    AttachmentStatus,
+    CompatibilityResult,
+    DownloadResult,
+    SAEService,
+)
+
+
+# =============================================================================
+# Fixtures
+# =============================================================================
+
+
+@pytest.fixture
+def mock_repository():
+    """Create a mock SAE repository."""
+    repo = MagicMock()
+    repo.get = AsyncMock(return_value=None)
+    repo.get_all = AsyncMock(return_value=[])
+    repo.create = AsyncMock()
+    repo.create_downloading = AsyncMock()
+    repo.update = AsyncMock()
+    repo.update_status = AsyncMock()
+    repo.update_downloaded = AsyncMock()
+    repo.delete = AsyncMock(return_value=True)
+    repo.create_attachment = AsyncMock()
+    repo.deactivate_attachment = AsyncMock()
+    return repo
+
+
+@pytest.fixture
+def mock_emitter():
+    """Create a mock progress emitter."""
+    emitter = MagicMock()
+    emitter.emit_sae_download_progress = AsyncMock()
+    emitter.emit_sae_download_complete = AsyncMock()
+    emitter.emit_sae_download_error = AsyncMock()
+    return emitter
+
+
+@pytest.fixture
+def mock_loaded_sae():
+    """Create a mock LoadedSAE instance."""
+    sae = MagicMock()
+    sae.d_sae = 16384  # integer, needed by _check_feature_idx
+    sae.estimate_memory_mb.return_value = 256.0
+    sae.is_steering_enabled = False
+    sae.is_monitoring_enabled = False
+    sae.set_steering = MagicMock()
+    sae.set_steering_batch = MagicMock()
+    sae.clear_steering = MagicMock()
+    sae.enable_steering = MagicMock()
+    sae.get_steering_values = MagicMock(return_value={1234: 5.0})
+    sae.enable_monitoring = MagicMock()
+    sae.get_last_feature_activations = MagicMock(return_value=None)
+    sae.to_cpu = MagicMock()
+    return sae
+
+
+@pytest.fixture
+def sample_sae():
+    """Create a sample SAE ORM object for testing."""
+    sae = MagicMock(spec=SAE)
+    sae.id = "jbloom--gemma-2-2b-res-jb"
+    sae.repository_id = "jbloom/gemma-2-2b-res-jb"
+    sae.revision = "main"
+    sae.name = "gemma-2-2b-res-jb"
+    sae.format = "saelens"
+    sae.d_in = 2304
+    sae.d_sae = 16384
+    sae.trained_on = "google/gemma-2-2b"
+    sae.trained_layer = 12
+    sae.file_size_bytes = 268_435_456
+    sae.cache_path = "/data/saes/jbloom--gemma-2-2b-res-jb"
+    sae.status = SAEStatus.CACHED
+    sae.error_message = None
+    return sae
+
+
+@pytest.fixture(autouse=True)
+def reset_sae_state():
+    """Reset the AttachedSAEState singleton before each test."""
+    state = AttachedSAEState()
+    # Force clear without calling hook_handle.remove() on mock handles
+    state.reset_for_tests()
+    yield
+    # Cleanup after test
+    state.reset_for_tests()
+
+
+@pytest.fixture
+def service(mock_repository, mock_emitter):
+    """Create an SAEService with mock dependencies."""
+    with patch("millm.services.sae_service.SAEDownloader") as MockDownloader, \
+         patch("millm.services.sae_service.SAELoader") as MockLoader, \
+         patch("millm.services.sae_service.SAEHooker") as MockHooker:
+
+        mock_downloader_instance = MagicMock()
+        mock_downloader_instance.generate_sae_id = MagicMock(
+            return_value="jbloom--gemma-2-2b-res-jb"
+        )
+        mock_downloader_instance.download = AsyncMock(
+            return_value="/data/saes/jbloom--gemma-2-2b-res-jb"
+        )
+        mock_downloader_instance.list_repository_files = AsyncMock(
+            return_value={"files": []}
+        )
+        mock_downloader_instance.delete = AsyncMock(return_value=256.0)
+        MockDownloader.return_value = mock_downloader_instance
+
+        mock_loader_instance = MagicMock()
+        MockLoader.return_value = mock_loader_instance
+
+        mock_hooker_instance = MagicMock()
+        mock_hooker_instance.get_layer_count = MagicMock(return_value=26)
+        MockHooker.return_value = mock_hooker_instance
+
+        svc = SAEService(
+            repository=mock_repository,
+            cache_dir="/data/saes",
+            emitter=mock_emitter,
+        )
+
+        # Expose internal mocks for assertions
+        svc._mock_downloader = mock_downloader_instance
+        svc._mock_loader = mock_loader_instance
+        svc._mock_hooker = mock_hooker_instance
+
+        yield svc
+
+
+# =============================================================================
+# AttachedSAEState Tests
+# =============================================================================
+
+
+class TestAttachedSAEState:
+    """Tests for the AttachedSAEState singleton."""
+
+    def test_singleton_pattern(self, reset_sae_state):
+        """Test that AttachedSAEState follows singleton pattern."""
+        state1 = AttachedSAEState()
+        state2 = AttachedSAEState()
+        assert state1 is state2
+
+    def test_initial_state_not_attached(self, reset_sae_state):
+        """Test that initial state has no SAE attached."""
+        state = AttachedSAEState()
+        assert state.is_attached is False
+        assert state.attached_sae is None
+        assert state.attached_sae_id is None
+        assert state.attached_layer is None
+        assert state.hook_handle is None
+
+    def test_set_and_read_properties(self, reset_sae_state, mock_loaded_sae):
+        """Test setting and reading attached SAE state."""
+        state = AttachedSAEState()
+        mock_handle = MagicMock()
+
+        state.set(mock_loaded_sae, "test-sae-id", 12, mock_handle)
+
+        assert state.is_attached is True
+        assert state.attached_sae is mock_loaded_sae
+        assert state.attached_sae_id == "test-sae-id"
+        assert state.attached_layer == 12
+        assert state.hook_handle is mock_handle
+
+    def test_clear_resets_state(self, reset_sae_state, mock_loaded_sae):
+        """Test that clear resets all state to None and removes hook."""
+        state = AttachedSAEState()
+        mock_handle = MagicMock()
+        state.set(mock_loaded_sae, "test-sae-id", 12, mock_handle)
+
+        state.clear()
+
+        assert state.is_attached is False
+        assert state.attached_sae is None
+        assert state.attached_sae_id is None
+        assert state.attached_layer is None
+        assert state.hook_handle is None
+        mock_handle.remove.assert_called_once()
+
+    def test_clear_handles_hook_remove_error(self, reset_sae_state, mock_loaded_sae):
+        """Test that clear gracefully handles errors when removing hook."""
+        state = AttachedSAEState()
+        mock_handle = MagicMock()
+        mock_handle.remove.side_effect = RuntimeError("Hook already removed")
+        state.set(mock_loaded_sae, "test-sae-id", 12, mock_handle)
+
+        # Should not raise
+        state.clear()
+
+        assert state.is_attached is False
+
+
+# =============================================================================
+# Listing Tests
+# =============================================================================
+
+
+class TestSAEServiceListing:
+    """Tests for list_saes and get_sae methods."""
+
+    @pytest.mark.asyncio
+    async def test_list_saes_returns_all(self, service, mock_repository, sample_sae):
+        """Test that list_saes returns all SAEs from repository."""
+        mock_repository.get_all.return_value = [sample_sae]
+
+        result = await service.list_saes()
+
+        assert len(result) == 1
+        assert result[0].id == "jbloom--gemma-2-2b-res-jb"
+        mock_repository.get_all.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_list_saes_returns_empty_list(self, service, mock_repository):
+        """Test that list_saes returns empty list when no SAEs exist."""
+        mock_repository.get_all.return_value = []
+
+        result = await service.list_saes()
+
+        assert result == []
+
+    @pytest.mark.asyncio
+    async def test_get_sae_found(self, service, mock_repository, sample_sae):
+        """Test that get_sae returns SAE when found."""
+        mock_repository.get.return_value = sample_sae
+
+        result = await service.get_sae("jbloom--gemma-2-2b-res-jb")
+
+        assert result.id == "jbloom--gemma-2-2b-res-jb"
+        mock_repository.get.assert_called_once_with("jbloom--gemma-2-2b-res-jb")
+
+    @pytest.mark.asyncio
+    async def test_get_sae_not_found_raises(self, service, mock_repository):
+        """Test that get_sae raises SAENotFoundError when not found."""
+        mock_repository.get.return_value = None
+
+        with pytest.raises(SAENotFoundError) as exc_info:
+            await service.get_sae("nonexistent-id")
+
+        assert "nonexistent-id" in str(exc_info.value.message)
+        assert exc_info.value.details["sae_id"] == "nonexistent-id"
+
+
+# =============================================================================
+# Compatibility Tests
+# =============================================================================
+
+
+class TestSAEServiceCompatibility:
+    """Tests for check_compatibility method."""
+
+    @pytest.mark.asyncio
+    async def test_compatible_sae(self, service, mock_repository, sample_sae):
+        """Test check_compatibility returns compatible for matching SAE."""
+        mock_repository.get.return_value = sample_sae
+
+        mock_model = MagicMock()
+        mock_model.config.hidden_size = 2304
+        mock_model.config.name_or_path = "google/gemma-2-2b"
+
+        mock_loaded = MagicMock()
+        mock_loaded.model = mock_model
+
+        with patch("millm.services.sae_service.LoadedModelState") as MockModelState:
+            mock_state = MagicMock()
+            mock_state.is_loaded = True
+            mock_state.current = mock_loaded
+            MockModelState.return_value = mock_state
+
+            result = await service.check_compatibility(sample_sae.id, 12)
+
+        assert result.compatible is True
+        assert len(result.errors) == 0
+
+    @pytest.mark.asyncio
+    async def test_incompatible_dimensions(self, service, mock_repository, sample_sae):
+        """Test check_compatibility detects dimension mismatch."""
+        mock_repository.get.return_value = sample_sae
+
+        mock_model = MagicMock()
+        mock_model.config.hidden_size = 4096  # Mismatch: SAE d_in is 2304
+        mock_model.config.name_or_path = "google/gemma-2-2b"
+
+        mock_loaded = MagicMock()
+        mock_loaded.model = mock_model
+
+        with patch("millm.services.sae_service.LoadedModelState") as MockModelState:
+            mock_state = MagicMock()
+            mock_state.is_loaded = True
+            mock_state.current = mock_loaded
+            MockModelState.return_value = mock_state
+
+            result = await service.check_compatibility(sample_sae.id, 12)
+
+        assert result.compatible is False
+        assert any("Dimension mismatch" in err for err in result.errors)
+
+    @pytest.mark.asyncio
+    async def test_layer_out_of_range(self, service, mock_repository, sample_sae):
+        """Test check_compatibility detects layer out of range."""
+        mock_repository.get.return_value = sample_sae
+
+        mock_model = MagicMock()
+        mock_model.config.hidden_size = 2304
+        mock_model.config.name_or_path = "google/gemma-2-2b"
+
+        mock_loaded = MagicMock()
+        mock_loaded.model = mock_model
+
+        # Hooker returns 26 layers by default, so layer 30 is out of range
+        with patch("millm.services.sae_service.LoadedModelState") as MockModelState:
+            mock_state = MagicMock()
+            mock_state.is_loaded = True
+            mock_state.current = mock_loaded
+            MockModelState.return_value = mock_state
+
+            result = await service.check_compatibility(sample_sae.id, 30)
+
+        assert result.compatible is False
+        assert any("out of range" in err for err in result.errors)
+
+    @pytest.mark.asyncio
+    async def test_compatibility_no_model_loaded(self, service, mock_repository, sample_sae):
+        """Test check_compatibility raises when no model is loaded."""
+        mock_repository.get.return_value = sample_sae
+
+        with patch("millm.services.sae_service.LoadedModelState") as MockModelState:
+            mock_state = MagicMock()
+            mock_state.is_loaded = False
+            MockModelState.return_value = mock_state
+
+            with pytest.raises(ModelNotLoadedError):
+                await service.check_compatibility(sample_sae.id, 12)
+
+
+# =============================================================================
+# Attachment Tests
+# =============================================================================
+
+
+class TestSAEServiceAttachment:
+    """Tests for attach_sae method."""
+
+    @pytest.mark.asyncio
+    async def test_attach_sae_success(
+        self, service, mock_repository, sample_sae, mock_loaded_sae
+    ):
+        """Test successful SAE attachment to loaded model."""
+        mock_repository.get.return_value = sample_sae
+
+        mock_model = MagicMock()
+        mock_model.config.hidden_size = 2304
+        mock_model.config.name_or_path = "google/gemma-2-2b"
+        mock_loaded = MagicMock()
+        mock_loaded.model = mock_model
+
+        mock_handle = MagicMock()
+        service._mock_hooker.install.return_value = mock_handle
+        service._mock_loader.load.return_value = mock_loaded_sae
+
+        with patch("millm.services.sae_service.LoadedModelState") as MockModelState, \
+             patch("millm.services.sae_service.torch") as mock_torch:
+            mock_state = MagicMock()
+            mock_state.is_loaded = True
+            mock_state.current = mock_loaded
+            mock_state.loaded_model_id = 1
+            MockModelState.return_value = mock_state
+            mock_torch.cuda.is_available.return_value = False
+
+            result = await service.attach_sae(sample_sae.id, 12)
+
+        assert result["status"] == "attached"
+        assert result["sae_id"] == sample_sae.id
+        assert result["layer"] == 12
+        assert result["memory_usage_mb"] == 256
+
+        service._mock_loader.load.assert_called_once()
+        service._mock_hooker.install.assert_called_once_with(
+            mock_model, 12, mock_loaded_sae
+        )
+        mock_repository.update_status.assert_called_once_with(
+            sample_sae.id, SAEStatus.ATTACHED
+        )
+        mock_repository.create_attachment.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_attach_rearms_sensing_on_the_active_clusters_OWN_sae(
+        self, service, mock_repository, sample_sae, mock_loaded_sae
+    ):
+        """028 FU-1: with another SAE attached FIRST, attaching the active cluster's SAE must arm
+        sensing on the SAE just attached (the cluster's own), not on the first entry."""
+        mock_repository.get.return_value = sample_sae
+        mock_loaded = MagicMock()
+        mock_loaded.model.config.hidden_size = 2304
+        mock_loaded.model.config.name_or_path = "google/gemma-2-2b"
+        service._mock_hooker.install.return_value = MagicMock()
+        service._mock_loader.load.return_value = mock_loaded_sae
+
+        other_sae = MagicMock(name="first_entry_sae")
+        state = AttachedSAEState()
+        state.set(other_sae, "sae-first", 3, MagicMock())
+        active = MagicMock(
+            id="prof_c", source_kind="cluster", sensing_enabled=True,
+            sae_id=sample_sae.id, layer=12,
+        )
+        active.name = "calm"
+        sensing = MagicMock()
+        session = MagicMock()
+        session.__aenter__ = AsyncMock(return_value=session)
+        session.__aexit__ = AsyncMock(return_value=False)
+        try:
+            with patch("millm.services.sae_service.LoadedModelState") as MockModelState, \
+                 patch("millm.services.sae_service.torch") as mock_torch, \
+                 patch("millm.db.base.async_session_factory", return_value=session), \
+                 patch("millm.db.repositories.model_repository.ModelRepository"), \
+                 patch("millm.db.repositories.profile_repository.ProfileRepository") as Repo, \
+                 patch("millm.api.dependencies.get_sensing_service", return_value=sensing):
+                Repo.return_value.get_active = AsyncMock(return_value=active)
+                mock_state = MagicMock(is_loaded=True, current=mock_loaded, loaded_model_id=1)
+                MockModelState.return_value = mock_state
+                mock_torch.cuda.is_available.return_value = False
+                await service.attach_sae(sample_sae.id, 12)
+        finally:
+            state.clear()
+        sensing.arm_for_profile.assert_called_once_with(active, mock_loaded_sae)
+
+    @pytest.mark.asyncio
+    async def test_attach_sae_no_model_loaded(self, service, mock_repository, sample_sae):
+        """Test attach_sae raises when no model is loaded."""
+        mock_repository.get.return_value = sample_sae
+
+        with patch("millm.services.sae_service.LoadedModelState") as MockModelState:
+            mock_state = MagicMock()
+            mock_state.is_loaded = False
+            MockModelState.return_value = mock_state
+
+            with pytest.raises(ModelNotLoadedError):
+                await service.attach_sae(sample_sae.id, 12)
+
+    @pytest.mark.asyncio
+    async def test_attach_sae_already_attached(
+        self, service, mock_repository, sample_sae, mock_loaded_sae
+    ):
+        """attach_sae raises when THIS exact (sae_id, layer) is already
+        attached (Feature 12: key-aware guard — a different layer or a
+        multi-SAE circuit on other layers must NOT block this)."""
+        mock_repository.get.return_value = sample_sae
+
+        # Pre-attach the SAME key we will try to attach.
+        state = AttachedSAEState()
+        state.set(mock_loaded_sae, sample_sae.id, 12, MagicMock())
+
+        with patch("millm.services.sae_service.LoadedModelState") as MockModelState:
+            mock_state = MagicMock()
+            mock_state.is_loaded = True
+            MockModelState.return_value = mock_state
+
+            with pytest.raises(SAEAlreadyAttachedError) as exc_info:
+                await service.attach_sae(sample_sae.id, 12)
+
+        assert sample_sae.id in str(exc_info.value.message)
+        assert "layer 12" in str(exc_info.value.message)
+
+    @pytest.mark.asyncio
+    async def test_attach_sae_different_layer_not_blocked_by_registry(
+        self, service, mock_repository, sample_sae, mock_loaded_sae
+    ):
+        """A circuit attached on other layers (registry non-empty) must NOT
+        make a standalone single-attach on a DIFFERENT key raise 'already
+        attached' — it should proceed past the guard (R1 fix)."""
+        mock_repository.get.return_value = sample_sae
+
+        state = AttachedSAEState()
+        state.set(mock_loaded_sae, "circuit-sae-on-L6", 6, MagicMock())
+
+        with patch("millm.services.sae_service.LoadedModelState") as MockModelState:
+            mock_state = MagicMock()
+            mock_state.is_loaded = True
+            MockModelState.return_value = mock_state
+            # It must get PAST the already-attached guard; it may then fail
+            # later (compat/load) — but NOT with SAEAlreadyAttachedError.
+            with pytest.raises(Exception) as exc_info:
+                await service.attach_sae(sample_sae.id, 20)
+        assert not isinstance(exc_info.value, SAEAlreadyAttachedError)
+
+    @pytest.mark.asyncio
+    async def test_attach_sae_incompatible(self, service, mock_repository, sample_sae):
+        """Test attach_sae raises when SAE is incompatible with model."""
+        mock_repository.get.return_value = sample_sae
+
+        mock_model = MagicMock()
+        mock_model.config.hidden_size = 4096  # Dimension mismatch
+        mock_model.config.name_or_path = "different/model"
+        mock_loaded = MagicMock()
+        mock_loaded.model = mock_model
+
+        with patch("millm.services.sae_service.LoadedModelState") as MockModelState:
+            mock_state = MagicMock()
+            mock_state.is_loaded = True
+            mock_state.current = mock_loaded
+            MockModelState.return_value = mock_state
+
+            with pytest.raises(SAEIncompatibleError):
+                await service.attach_sae(sample_sae.id, 12)
+
+
+# =============================================================================
+# Detachment Tests
+# =============================================================================
+
+
+class TestSAEServiceDetachment:
+    """Tests for detach_sae method."""
+
+    @pytest.mark.asyncio
+    async def test_detach_sae_success(
+        self, service, mock_repository, sample_sae, mock_loaded_sae
+    ):
+        """Test successful SAE detachment."""
+        mock_repository.get.return_value = sample_sae
+        mock_handle = MagicMock()
+
+        # Pre-attach the SAE
+        state = AttachedSAEState()
+        state.set(mock_loaded_sae, sample_sae.id, 12, mock_handle)
+
+        with patch("millm.services.sae_service.torch") as mock_torch, \
+             patch("millm.api.dependencies.get_inference_service", side_effect=Exception("not available")):
+            mock_torch.cuda.is_available.return_value = False
+
+            result = await service.detach_sae(sample_sae.id)
+
+        assert result["status"] == "detached"
+        assert result["sae_id"] == sample_sae.id
+        assert result["memory_freed_mb"] == 256
+
+        service._mock_hooker.remove.assert_called_once_with(mock_handle)
+        mock_loaded_sae.to_cpu.assert_called_once()
+        mock_repository.update_status.assert_called_once_with(
+            sample_sae.id, SAEStatus.CACHED
+        )
+        mock_repository.deactivate_attachment.assert_called_once_with(sample_sae.id)
+
+        # Verify singleton is cleared
+        assert state.is_attached is False
+
+    @pytest.mark.asyncio
+    async def test_detach_sae_not_attached_raises(
+        self, service, mock_repository, sample_sae
+    ):
+        """Test detach_sae raises when SAE is not attached."""
+        mock_repository.get.return_value = sample_sae
+
+        with pytest.raises(SAENotAttachedError) as exc_info:
+            await service.detach_sae(sample_sae.id)
+
+        assert sample_sae.id in str(exc_info.value.message)
+
+
+# =============================================================================
+# Steering Tests
+# =============================================================================
+
+
+class TestSAEServiceSteering:
+    """Tests for steering delegation methods."""
+
+    def test_set_steering_delegates(self, service, mock_loaded_sae):
+        """Test set_steering delegates to LoadedSAE."""
+        state = AttachedSAEState()
+        state.set(mock_loaded_sae, "sae-id", 12, MagicMock())
+
+        service.set_steering(1234, 5.0)
+
+        mock_loaded_sae.set_steering.assert_called_once_with(1234, 5.0)
+
+    def test_set_steering_not_attached_raises(self, service):
+        """Test set_steering raises when no SAE attached."""
+        with pytest.raises(SAENotAttachedError):
+            service.set_steering(1234, 5.0)
+
+    def test_set_steering_batch_delegates(self, service, mock_loaded_sae):
+        """Test set_steering_batch delegates to LoadedSAE."""
+        state = AttachedSAEState()
+        state.set(mock_loaded_sae, "sae-id", 12, MagicMock())
+
+        batch = {1234: 5.0, 892: -2.0}
+        service.set_steering_batch(batch)
+
+        mock_loaded_sae.set_steering_batch.assert_called_once_with(batch)
+
+    def test_get_steering_values_returns_dict(self, service, mock_loaded_sae):
+        """Test get_steering_values returns steering dict from LoadedSAE."""
+        state = AttachedSAEState()
+        state.set(mock_loaded_sae, "sae-id", 12, MagicMock())
+
+        result = service.get_steering_values()
+
+        assert result == {1234: 5.0}
+        mock_loaded_sae.get_steering_values.assert_called_once()
+
+    def test_enable_steering_delegates(self, service, mock_loaded_sae):
+        """Test enable_steering delegates to LoadedSAE."""
+        state = AttachedSAEState()
+        state.set(mock_loaded_sae, "sae-id", 12, MagicMock())
+
+        service.enable_steering(True)
+        mock_loaded_sae.enable_steering.assert_called_with(True)
+
+        service.enable_steering(False)
+        mock_loaded_sae.enable_steering.assert_called_with(False)
+
+    def test_clear_steering_specific_feature(self, service, mock_loaded_sae):
+        """Test clear_steering with specific feature index."""
+        state = AttachedSAEState()
+        state.set(mock_loaded_sae, "sae-id", 12, MagicMock())
+
+        service.clear_steering(1234)
+
+        mock_loaded_sae.clear_steering.assert_called_once_with(1234)
+
+    def test_clear_steering_all(self, service, mock_loaded_sae):
+        """Test clear_steering clears all when no index given."""
+        state = AttachedSAEState()
+        state.set(mock_loaded_sae, "sae-id", 12, MagicMock())
+
+        service.clear_steering()
+
+        mock_loaded_sae.clear_steering.assert_called_once_with(None)
+
+
+# =============================================================================
+# Download Tests
+# =============================================================================
+
+
+class TestSAEServiceDownload:
+    """Tests for start_download and cancel_download methods."""
+
+    @pytest.mark.asyncio
+    async def test_start_download_creates_record(self, service, mock_repository):
+        """Test start_download creates DB record and starts task."""
+        mock_repository.get.return_value = None  # No existing SAE
+
+        result = await service.start_download(
+            repository_id="jbloom/gemma-2-2b-res-jb",
+            revision="main",
+        )
+
+        assert result.status == "downloading"
+        assert result.sae_id == "jbloom--gemma-2-2b-res-jb"
+        assert "Download started" in result.message
+        mock_repository.create_downloading.assert_called_once_with(
+            sae_id="jbloom--gemma-2-2b-res-jb",
+            repository_id="jbloom/gemma-2-2b-res-jb",
+            revision="main",
+            cache_path="",
+        )
+        # Task should be tracked
+        assert "jbloom--gemma-2-2b-res-jb" in service._active_downloads
+
+    @pytest.mark.asyncio
+    async def test_start_download_returns_cached(self, service, mock_repository, sample_sae):
+        """Test start_download returns early for already-cached SAE."""
+        sample_sae.status = SAEStatus.CACHED
+        mock_repository.get.return_value = sample_sae
+
+        result = await service.start_download(
+            repository_id="jbloom/gemma-2-2b-res-jb",
+        )
+
+        assert result.status == "cached"
+        assert "already downloaded" in result.message
+        mock_repository.create_downloading.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_start_download_returns_already_downloading(
+        self, service, mock_repository, sample_sae
+    ):
+        """Test start_download returns early for in-progress download."""
+        sample_sae.status = SAEStatus.DOWNLOADING
+        mock_repository.get.return_value = sample_sae
+
+        result = await service.start_download(
+            repository_id="jbloom/gemma-2-2b-res-jb",
+        )
+
+        assert result.status == "already_downloading"
+        mock_repository.create_downloading.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_cancel_download_cancels_task(
+        self, service, mock_repository, sample_sae
+    ):
+        """Test cancel_download cancels an active download."""
+        sample_sae.status = SAEStatus.DOWNLOADING
+        # First call returns downloading, second call returns updated SAE
+        cancelled_sae = MagicMock(spec=SAE)
+        cancelled_sae.id = sample_sae.id
+        cancelled_sae.status = SAEStatus.ERROR
+        mock_repository.get.side_effect = [sample_sae, cancelled_sae]
+
+        # Add a mock task
+        mock_task = MagicMock()
+        mock_task.done.return_value = False
+        service._active_downloads[sample_sae.id] = mock_task
+
+        result = await service.cancel_download(sample_sae.id)
+
+        mock_task.cancel.assert_called_once()
+        mock_repository.update_status.assert_called_once_with(
+            sae_id=sample_sae.id,
+            status=SAEStatus.ERROR,
+            error_message="Download cancelled by user",
+        )
+        assert sample_sae.id in service._cancelled_downloads
+
+
+# =============================================================================
+# Monitoring Tests
+# =============================================================================
+
+
+class TestSAEServiceMonitoring:
+    """Tests for monitoring delegation methods."""
+
+    def test_enable_monitoring_delegates(self, service, mock_loaded_sae):
+        """Test enable_monitoring delegates to LoadedSAE."""
+        state = AttachedSAEState()
+        state.set(mock_loaded_sae, "sae-id", 12, MagicMock())
+
+        service.enable_monitoring(True, [1234, 892])
+
+        mock_loaded_sae.enable_monitoring.assert_called_once_with(True, [1234, 892])
+
+    def test_enable_monitoring_not_attached_raises(self, service):
+        """Test enable_monitoring raises when no SAE attached."""
+        with pytest.raises(SAENotAttachedError):
+            service.enable_monitoring(True)
+
+    def test_enable_monitoring_out_of_range_feature_raises(self, service, mock_loaded_sae):
+        """Monitoring an out-of-range feature is rejected up front (H3).
+
+        Without this, feature_acts[..., idx] would raise inside the forward
+        hook on every forward pass, breaking all inference.
+        """
+        from millm.core.errors import InvalidFeatureIndexError
+
+        state = AttachedSAEState()
+        state.set(mock_loaded_sae, "sae-id", 12, MagicMock())
+
+        # mock_loaded_sae.d_sae == 16384; 99999 is out of range.
+        with pytest.raises(InvalidFeatureIndexError):
+            service.enable_monitoring(True, [10, 99999])
+        mock_loaded_sae.enable_monitoring.assert_not_called()
+
+
+# =============================================================================
+# Attachment Status Tests
+# =============================================================================
+
+
+class TestSAEServiceAttachmentStatus:
+    """Tests for get_attachment_status method."""
+
+    def test_status_when_not_attached(self, service):
+        """Test get_attachment_status when no SAE is attached."""
+        status = service.get_attachment_status()
+
+        assert status.is_attached is False
+        assert status.sae_id is None
+        assert status.layer is None
+
+    def test_status_when_attached(self, service, mock_loaded_sae):
+        """Test get_attachment_status when SAE is attached."""
+        state = AttachedSAEState()
+        state.set(mock_loaded_sae, "sae-id", 12, MagicMock())
+
+        status = service.get_attachment_status()
+
+        assert status.is_attached is True
+        assert status.sae_id == "sae-id"
+        assert status.layer == 12
+        assert status.memory_usage_mb == 256
+
+
+# =============================================================================
+# Parse Path Metadata Tests
+# =============================================================================
+
+
+class TestSAEServiceParsePathMetadata:
+    """Tests for _parse_sae_path_metadata helper."""
+
+    def test_parses_standard_path(self, service):
+        """Test parsing a standard Gemma-Scope style path."""
+        width, average_l0 = service._parse_sae_path_metadata(
+            "layer_20/width_16k/average_l0_38/params.npz"
+        )
+
+        assert width == "16k"
+        assert average_l0 == 38
+
+    def test_parses_path_without_metadata(self, service):
+        """Test parsing a path with no width or l0 info."""
+        width, average_l0 = service._parse_sae_path_metadata("some/other/path.npz")
+
+        assert width is None
+        assert average_l0 is None
+
+
+# =============================================================================
+# Tests: orphaned hook prevention (Fix 2)
+# =============================================================================
+
+
+class TestAttachedSAEStateDoubleAttachProtection:
+    """Verify AttachedSAEState.set() removes the old hook before overwriting."""
+
+    def test_set_removes_existing_hook(self, reset_sae_state):
+        """A second set() call removes the first hook before installing the new one."""
+        from millm.services.sae_service import AttachedSAEState
+        from unittest.mock import MagicMock
+
+        state = AttachedSAEState()
+        old_handle = MagicMock()
+        new_handle = MagicMock()
+        sae = MagicMock()
+
+        # Re-attaching the SAME (sae_id, layer) key must remove the old hook
+        # before overwriting — the genuine double-attach protection.
+        state.set(sae, "sae-1", 5, old_handle)
+        assert state.get("sae-1", 5).hook_handle is old_handle
+
+        state.set(sae, "sae-1", 5, new_handle)
+        old_handle.remove.assert_called_once()
+        assert state.get("sae-1", 5).hook_handle is new_handle
+        assert state.count == 1  # still one entry — same key overwritten
+
+    def test_set_different_keys_coexist(self, reset_sae_state):
+        """Distinct (sae_id, layer) keys attach side-by-side (multi-SAE); one
+        key's hook is never removed by attaching a different key."""
+        from millm.services.sae_service import AttachedSAEState
+        from unittest.mock import MagicMock
+
+        state = AttachedSAEState()
+        h1, h2 = MagicMock(), MagicMock()
+        sae = MagicMock()
+
+        state.set(sae, "sae-1", 5, h1)
+        state.set(sae, "sae-2", 8, h2)
+        h1.remove.assert_not_called()
+        assert state.count == 2
+        assert state.get("sae-1", 5).hook_handle is h1
+        assert state.get("sae-2", 8).hook_handle is h2
+
+    def test_set_on_empty_state_does_not_crash(self, reset_sae_state):
+        """First set() with no existing hook runs cleanly."""
+        from millm.services.sae_service import AttachedSAEState
+        from unittest.mock import MagicMock
+
+        state = AttachedSAEState()
+        handle = MagicMock()
+        sae = MagicMock()
+
+        state.set(sae, "sae-1", 3, handle)  # must not raise
+        assert state.is_attached
+
+
+# =============================================================================
+# Tests: feature index validated against d_sae (Fix 4)
+# =============================================================================
+
+
+class TestSteeringFeatureIndexValidation:
+    """Verify out-of-range feature indices return 400, not 500."""
+
+    @pytest.fixture
+    def service_with_sae(self, service, reset_sae_state):
+        """Service with a mock SAE attached (d_sae=128)."""
+        from millm.services.sae_service import AttachedSAEState
+        from unittest.mock import MagicMock
+        import torch
+
+        mock_sae = MagicMock()
+        mock_sae.d_sae = 128
+        mock_sae.set_steering = MagicMock(side_effect=ValueError("out of range"))
+        mock_sae.set_steering_batch = MagicMock()
+
+        state = AttachedSAEState()
+        state.set(mock_sae, "test-sae", 5, MagicMock())
+        return service
+
+    def test_out_of_range_index_raises_invalid_feature_index_error(
+        self, service_with_sae
+    ):
+        """Feature index >= d_sae raises InvalidFeatureIndexError (400)."""
+        from millm.core.errors import InvalidFeatureIndexError
+
+        with pytest.raises(InvalidFeatureIndexError):
+            service_with_sae.set_steering(9999, 1.0)
+
+    def test_batch_out_of_range_raises_invalid_feature_index_error(
+        self, service_with_sae
+    ):
+        """Batch with any out-of-range index raises InvalidFeatureIndexError."""
+        from millm.core.errors import InvalidFeatureIndexError
+
+        with pytest.raises(InvalidFeatureIndexError):
+            service_with_sae.set_steering_batch({0: 1.0, 9999: 2.0})
+
+    def test_valid_index_does_not_raise(self, service_with_sae):
+        """Index within [0, d_sae) does not raise InvalidFeatureIndexError."""
+        from millm.core.errors import InvalidFeatureIndexError
+        from unittest.mock import MagicMock
+
+        # Patch set_steering to not raise
+        from millm.services.sae_service import AttachedSAEState
+        sae = AttachedSAEState().attached_sae
+        sae.set_steering = MagicMock()
+
+        try:
+            service_with_sae.set_steering(0, 1.0)
+        except InvalidFeatureIndexError:
+            pytest.fail("Valid index raised InvalidFeatureIndexError")
+
+
+class TestDetachTakesTheAdmissionSlot:
+    """026 F-2 (suite tracker 4.13): the detach HOLDS the inference admission slot while the hooks
+    come off, so no request or batch chunk can start a forward pass through a hook being torn
+    out. The old code polled counters, leaving a window between "0 in flight" and the removal.
+    Runs against a REAL InferenceService and RequestQueue."""
+
+    @pytest.mark.asyncio
+    async def test_hooks_come_off_while_the_slot_is_held_and_a_request_waits(
+        self, service, mock_repository, sample_sae, mock_loaded_sae
+    ):
+        from millm.services.inference_service import InferenceService
+
+        inference = InferenceService(model_service=MagicMock())
+        service._inference_service = inference
+        mock_repository.get.return_value = sample_sae
+        order: list[str] = []
+
+        def remove(_handle):
+            # The slot is held by the detach, and the request below has not run.
+            order.append(f"remove(holding={inference.request_queue.holding_count})")
+
+        service._hooker.remove = MagicMock(side_effect=remove)
+        AttachedSAEState().set(mock_loaded_sae, sample_sae.id, 12, MagicMock())
+
+        async def a_request():
+            await asyncio.sleep(0)  # arrive while the detach holds the slot
+            async with inference._admit():
+                order.append("request")
+
+        try:
+            with patch("millm.services.sae_service.torch") as mock_torch, \
+                 patch("millm.db.base.async_session_factory", side_effect=Exception("no db")):
+                mock_torch.cuda.is_available.return_value = False
+                await asyncio.gather(service.detach_sae(sample_sae.id), a_request())
+        finally:
+            AttachedSAEState().clear()
+        assert order == ["remove(holding=1)", "request"], order
+        assert inference.request_queue.holding_count == 0
+
+    @pytest.mark.asyncio
+    async def test_falls_back_to_polling_when_the_slot_is_refused(
+        self, service, mock_repository, sample_sae, mock_loaded_sae
+    ):
+        """An unloading model refuses admission; the detach must still complete."""
+        inference = MagicMock()
+        inference.hold_admission = MagicMock(side_effect=RuntimeError("unloading"))
+        inference.request_queue.pending_count = 0
+        inference.request_queue.background_holding_count = 0
+        inference._cbm_backend = None
+        service._inference_service = inference
+        mock_repository.get.return_value = sample_sae
+        AttachedSAEState().set(mock_loaded_sae, sample_sae.id, 12, MagicMock())
+        try:
+            with patch("millm.services.sae_service.torch") as mock_torch, \
+                 patch("millm.db.base.async_session_factory", side_effect=Exception("no db")):
+                mock_torch.cuda.is_available.return_value = False
+                result = await service.detach_sae(sample_sae.id)
+        finally:
+            AttachedSAEState().clear()
+        assert result["status"] == "detached"
+
+
+class TestDetachReleasesTheLockThatIsHeld:
+    """Detaching the last SAE must clear the lock, not the loaded model's row.
+
+    These are the same row whenever nothing has gone wrong, and they diverge in
+    the one case that matters. When an earlier lock has leaked, `loaded_model_id`
+    names the model being detached while the stale flag sits on a different row,
+    so a targeted `update(loaded_model_id, locked=False)` wrote False over False,
+    logged success, and left the real lock standing. That is why detaching the
+    SAE and unloading the model did not bring the other models back.
+    """
+
+    @pytest.mark.asyncio
+    async def test_detach_clears_every_lock_rather_than_one_row(
+        self, service, mock_repository, sample_sae, mock_loaded_sae
+    ):
+        mock_repository.get.return_value = sample_sae
+        mock_handle = MagicMock()
+
+        state = AttachedSAEState()
+        state.set(mock_loaded_sae, sample_sae.id, 12, mock_handle)
+
+        # LFM (31) is the loaded model; the stale lock sits on gemma (24).
+        model_state = LoadedModelState()
+        model_state.set(MagicMock(model_id=31))
+
+        model_repo = MagicMock()
+        model_repo.clear_locks = AsyncMock(return_value=1)
+        model_repo.update = AsyncMock()
+
+        session = MagicMock()
+        session.__aenter__ = AsyncMock(return_value=session)
+        session.__aexit__ = AsyncMock(return_value=False)
+
+        with patch("millm.services.sae_service.torch") as mock_torch, \
+             patch("millm.api.dependencies.get_inference_service", side_effect=Exception("na")), \
+             patch("millm.db.base.async_session_factory", return_value=session), \
+             patch(
+                 "millm.db.repositories.model_repository.ModelRepository",
+                 return_value=model_repo,
+             ):
+            mock_torch.cuda.is_available.return_value = False
+            await service.detach_sae(sample_sae.id)
+
+        model_repo.clear_locks.assert_called_once_with()
+        # And NOT the targeted write that let the stale row survive.
+        unlock_writes = [
+            c for c in model_repo.update.call_args_list
+            if c.kwargs.get("locked") is False
+        ]
+        assert unlock_writes == [], (
+            "detach wrote locked=False at a specific row; it must clear whatever "
+            f"lock is held: {unlock_writes}"
+        )
+        model_state.clear()
+
+    @pytest.mark.asyncio
+    async def test_the_unlock_is_COMMITTED_against_a_real_database(
+        self, service, mock_repository, sample_sae, mock_loaded_sae, test_engine
+    ):
+        """028 FU-2: the test above mocks the session, so it passed while the unlock was rolled
+        back. Here the lock is set the way attach sets it, detach runs with REAL sessions, and the
+        row is read back from a FRESH session — what the next model swap will see."""
+        from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+
+        from millm.db.models.model import Model, ModelSource, ModelStatus, QuantizationType
+        from millm.db.repositories.model_repository import ModelRepository
+
+        factory = async_sessionmaker(test_engine, class_=AsyncSession, expire_on_commit=False)
+        async with factory() as s:
+            row = Model(
+                name="lfm", source=ModelSource.HUGGINGFACE, repo_id="vendor/lfm",
+                quantization=QuantizationType.Q4, cache_path="/data/models/lfm",
+                status=ModelStatus.LOADED, locked=False,
+            )
+            s.add(row)
+            await s.commit()
+            model_id = row.id
+        async with factory() as s:
+            await ModelRepository(s).set_exclusive_lock(model_id)  # what attach does
+
+        mock_repository.get.return_value = sample_sae
+        state = AttachedSAEState()
+        state.set(mock_loaded_sae, sample_sae.id, 12, MagicMock())
+        model_state = LoadedModelState()
+        model_state.set(MagicMock(model_id=model_id))
+        try:
+            with patch("millm.services.sae_service.torch") as mock_torch, \
+                 patch("millm.api.dependencies.get_inference_service", side_effect=Exception("na")), \
+                 patch("millm.db.base.async_session_factory", factory):
+                mock_torch.cuda.is_available.return_value = False
+                await service.detach_sae(sample_sae.id)
+        finally:
+            model_state.clear()
+
+        async with factory() as fresh:
+            assert (await ModelRepository(fresh).get_by_id(model_id)).locked is False, (
+                "detach logged model_auto_unlocked but the lock survived in the database: the "
+                "next model swap is refused model_locked"
+            )

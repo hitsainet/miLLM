@@ -1,0 +1,62 @@
+# OPT-IN: share the host's IPC namespace with the miLLM backend pod.
+#
+# Operator decision D1 (suite tracker 0xcc/outstanding_2026-10-16.md, 2026-10-16):
+# miForge's hot-update (F11) attaches a trainer to the weights miLLM is serving
+# through CUDA IPC handles (Feature 31, FPRD §"two pods with hostIPC"). CUDA IPC
+# between two pods needs both to share one IPC namespace, so BOTH pods set
+# `hostIPC: true` — this component is miLLM's half; miForge ships its own in its
+# gitops/ tree. The sidecar topology stays closed (BRD-02).
+#
+# NOT PART OF THE DEFAULT DEPLOYMENT. ArgoCD deploys `k8s/base`, which does not
+# reference this component, so nothing changes until an operator opts in.
+# `tests/unit/test_k8s_hostipc_component.py` fails if the default build ever
+# gains hostIPC, or if this component stops setting it.
+#
+# Why opt-in: hostIPC lets the pod see every SysV/POSIX IPC object on the GPU
+# node (shared memory, semaphores, message queues) — a real widening of the
+# pod's reach, worth paying only while hot-update is in use.
+#
+# HOW TO ENABLE (operator, per D16 a push is its own approval) - as done for D38, 2026-10-17:
+#   1. Render and inspect:   kubectl kustomize k8s/overlays/hostipc | grep -n -E "hostIPC|runAs"
+#   2. Add `components: [../components/hostipc]` to k8s/base/kustomization.yaml (the path ArgoCD
+#      deploys) and change tests/unit/test_k8s_hostipc_component.py in the same commit. Do NOT
+#      repoint the ArgoCD Application: Image Updater keys its digest pins on the Application's
+#      path, so a repointed one serves the `latest` default until its first write.
+#   3. The Recreate strategy restarts the pod: check for in-flight GPU work first.
+#   4. Enable miForge's half too (its gitops/components/hostipc): one side alone does nothing.
+# HOW TO DISABLE: revert that commit (the components line and the test).
+apiVersion: kustomize.config.k8s.io/v1alpha1
+kind: Component
+
+#
+# ── SECURITY NOTE: THE UID PAIRING (operator-approved step 2, 2026-10-17) ────────────────────
+# hostIPC alone is NOT enough. The first live attempt (F11 14.3, 2026-10-17) shared one IPC
+# namespace and one /dev/shm across both pods and still failed: CUDA and torch create their
+# IPC files (`/dev/shm/cuda.shm.*`, `torch_*`) owner-only, 0600, even under umask 0022, so
+# only a process with the SAME uid can open them. miLLM runs as uid/gid 1000 (pinned in the
+# Dockerfile); miForge's component therefore runs its `worker-train` container as uid 1000
+# while it is on. This component states miLLM's uid on the backend container explicitly so
+# the pairing is declared on both sides and a test (here and in miForge) can compare them.
+# What it grants: a process in the miForge pod with miLLM's uid can open miLLM's /dev/shm
+# files (and miLLM's can open its) - which is exactly the access CUDA IPC needs and the
+# reason this is opt-in and reverted when the session ends.
+patches:
+  - target:
+      group: apps
+      version: v1
+      kind: Deployment
+      name: millm-backend
+    patch: |-
+      apiVersion: apps/v1
+      kind: Deployment
+      metadata:
+        name: millm-backend
+      spec:
+        template:
+          spec:
+            hostIPC: true
+            containers:
+              - name: backend
+                securityContext:
+                  runAsUser: 1000
+                  runAsGroup: 1000

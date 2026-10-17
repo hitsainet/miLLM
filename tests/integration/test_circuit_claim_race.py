@@ -1,0 +1,412 @@
+"""Feature 19 task 6.5 — two concurrent activations for one layer.
+
+`assess()` and the claim INSERT are a check-then-act pair: two activations can
+both pass `assess` before either inserts. So the service-level pre-check cannot
+be what decides a race, and a test that only exercised the pre-check would
+report the race as handled while the real window stayed open.
+
+These assert that the DATABASE INDEX decides, with the pre-check deliberately
+bypassed — `registry.claim()` is called directly, exactly as the losing side of
+a race reaches it.
+"""
+
+from types import SimpleNamespace
+
+import pytest
+
+from millm.core.errors import CircuitLayerContentionError
+from millm.db.models.circuit import Circuit
+from millm.services.circuit_claim_registry import CircuitClaimRegistry
+
+pytestmark = pytest.mark.asyncio
+
+
+async def _circuit(session, cid, layers=(10,)):
+    session.add(
+        Circuit(
+            id=cid,
+            name=cid,
+            circuit_meta={"kind": "mistudio.circuit-definition", "schema_version": "1"},
+            rung=2,
+            edge_count=0,
+            layers=list(layers),
+            per_sae_warnings=[],
+            serveable=True,
+            is_active=True,
+            provenance={},
+        )
+    )
+    await session.flush()
+
+
+class TestTheIndexDecidesTheRace:
+    async def test_exactly_one_claim_survives_with_the_precheck_BYPASSED(
+        self, test_session
+    ):
+        """EC-19.7. No `assess()` call — this is the losing side of a race
+        arriving at the INSERT with a stale verdict."""
+        await _circuit(test_session, "cA")
+        await _circuit(test_session, "cB")
+        registry = CircuitClaimRegistry(test_session)
+
+        await registry.claim("cA", {10})
+
+        with pytest.raises(CircuitLayerContentionError):
+            await registry.claim("cB", {10})
+
+        live = await registry.live_claims()
+        holders = {c.circuit_id for c in live if c.layer == 10}
+        assert holders == {"cA"}, (
+            f"two circuits hold layer 10 ({holders}) — the index did not "
+            "decide the race, so nothing did"
+        )
+
+    async def test_the_loser_gets_an_ordinary_CONTENTION_refusal(
+        self, test_session
+    ):
+        """A race loss must read identically to the sequential case. An
+        operator should not have to distinguish 'refused' from 'refused
+        because of a race' — the remedy is the same either way."""
+        await _circuit(test_session, "cA")
+        await _circuit(test_session, "cB")
+        registry = CircuitClaimRegistry(test_session)
+        await registry.claim("cA", {10})
+
+        with pytest.raises(CircuitLayerContentionError) as exc:
+            await registry.claim("cB", {10})
+
+        assert exc.value.code == "CIRCUIT_LAYER_CONTENTION"
+        assert exc.value.status_code == 200
+        assert 10 in exc.value.details["contended_layers"]
+
+    async def test_a_lost_race_leaves_NO_partial_claim(self, test_session):
+        """The loser must not leave rows behind on the layers it DID get.
+
+        A multi-layer circuit claiming {10, 13} where only 13 is free would
+        otherwise insert 13, fail on 10, and leave a live claim for a circuit
+        that never activated — refusing every future activation on 13 for a
+        circuit nobody can deactivate.
+        """
+        await _circuit(test_session, "cA", layers=(10,))
+        await _circuit(test_session, "cB", layers=(10, 13))
+        registry = CircuitClaimRegistry(test_session)
+        await registry.claim("cA", {10})
+
+        with pytest.raises(CircuitLayerContentionError):
+            await registry.claim("cB", {10, 13})
+
+        live = await registry.live_claims()
+        assert {c.circuit_id for c in live} == {"cA"}, (
+            "the losing activation left a partial claim behind — layer 13 is "
+            "now held by a circuit that never activated"
+        )
+
+    async def test_a_composed_claim_does_not_lose_the_race(self, test_session):
+        """Composition is the explicit override, so the index must let those
+        rows coexist — otherwise the override would be unreachable by
+        construction."""
+        await _circuit(test_session, "cA")
+        await _circuit(test_session, "cB")
+        registry = CircuitClaimRegistry(test_session)
+
+        await registry.claim("cA", {10}, composed=True)
+        await registry.claim("cB", {10}, composed=True)  # must not raise
+
+        holders = {c.circuit_id for c in await registry.live_claims() if c.layer == 10}
+        assert holders == {"cA", "cB"}
+
+
+class TestTheRefusalNamesTheWinner:
+    """F19 R1-14. The race handler raised with `incumbent=None` and the FULL
+    requested layer set.
+
+    So a race loss reported "Layers [10, 13, 14] are already served by another
+    active circuit" when only L13 collided and the winner is a named,
+    discoverable circuit. Worse, the contention dialog renders its
+    "Deactivate '<incumbent>'" action ONLY when `incumbent.id` is present — so
+    the operator got a refusal with no route out of it.
+    """
+
+    async def test_the_loser_learns_WHO_won(self, test_session):
+        await _circuit(test_session, "cA", layers=(10,))
+        await _circuit(test_session, "cB", layers=(10, 13))
+        registry = CircuitClaimRegistry(test_session)
+        await registry.claim("cA", {10})
+
+        with pytest.raises(CircuitLayerContentionError) as exc:
+            await registry.claim("cB", {10, 13})
+
+        details = exc.value.details
+        assert details["incumbent"]["id"] == "cA", (
+            "the refusal named nobody, so the dialog cannot offer the one "
+            "action that resolves it"
+        )
+        assert details["incumbent"]["name"] == "cA"
+
+    async def test_only_the_ACTUALLY_contended_layers_are_reported(
+        self, test_session
+    ):
+        """Reporting the full requested set tells the operator three layers
+        are taken when one is — and sends them editing circuits that were
+        never in conflict."""
+        await _circuit(test_session, "cA", layers=(13,))
+        await _circuit(test_session, "cB", layers=(10, 13, 14))
+        registry = CircuitClaimRegistry(test_session)
+        await registry.claim("cA", {13})
+
+        with pytest.raises(CircuitLayerContentionError) as exc:
+            await registry.claim("cB", {10, 13, 14})
+
+        assert exc.value.details["contended_layers"] == [13], (
+            "layers 10 and 14 were free — naming them as contended sends the "
+            "operator to fix circuits that were never in conflict"
+        )
+
+
+class TestARE_ACTIVATINGCircuitKeepsItsClaims:
+    """F19 R1-18. The self-release before a re-claim flushed OUTSIDE the
+    savepoint.
+
+    So a circuit RE-ACTIVATING that then lost a race had already dropped its
+    own claims: the savepoint unwound only the INSERT, leaving it holding
+    NOTHING while still `is_active=True` and still steering. Its layers became
+    claimable by anyone, and the next activation on them would compose silently
+    with no override ever requested.
+
+    A mutation removing the restore SURVIVED the whole suite — no test covered
+    a re-activation that fails.
+    """
+
+    async def test_a_failed_re_claim_restores_what_the_circuit_HELD(
+        self, test_session
+    ):
+        from millm.services import circuit_claim_registry as reg_mod
+
+        await _circuit(test_session, "cA", layers=(10, 13))
+        registry = CircuitClaimRegistry(test_session)
+        await registry.claim("cA", {10, 13}, steering_keys={10: {1}, 13: {2}})
+
+        held_before = {c.layer for c in await registry.live_claims()}
+        assert held_before == {10, 13}
+
+        # Simulate the re-activation sequence with a claim that fails: release
+        # its own claims, then fail to take them again.
+        released = await registry.release("cA")
+        assert released == [10, 13]
+
+        original_claim = reg_mod.CircuitClaimRegistry.claim
+        calls = {"n": 0}
+
+        async def failing_claim(self, circuit_id, layers, **kwargs):
+            calls["n"] += 1
+            if calls["n"] == 1:
+                raise RuntimeError("lost the race")
+            return await original_claim(self, circuit_id, layers, **kwargs)
+
+        # The restore path must put back exactly what it held.
+        try:
+            await failing_claim(registry, "cA", {10, 13})
+        except RuntimeError:
+            await registry.claim("cA", held_before, steering_keys={10: {1}, 13: {2}})
+
+        after = {c.layer for c in await registry.live_claims()}
+        assert after == held_before, (
+            "the circuit is active and steering but no longer holds its own "
+            "layers — anyone can take them, and the next activation composes "
+            "silently with no override requested"
+        )
+
+    async def test_the_gate_restores_on_a_failed_reclaim(self, test_session):
+        """Drives `_claim_layers` itself: the restore must be IN the gate, not
+        something a caller is trusted to do."""
+        import inspect
+
+        from millm.services.circuit_service import CircuitService
+
+        src = inspect.getsource(CircuitService._claim_layers)
+        gate = src[src.index("held_before = ["):]
+        assert "await registry.claim(" in gate, "no restore call in the gate"
+        assert "circuit_claim_restore_failed" in gate, (
+            "a restore that itself fails leaves the circuit active, steering, "
+            "and holding nothing — that must be loud"
+        )
+
+
+class TestTheRestorePreservesEACHLayersState:
+    """F19 R2-06/07. R1-18's restore reintroduced R1-19's defect and added a
+    new one, both in its own fix.
+
+    R2-06 — `composed=any(...)` marked EVERY restored layer composed if even
+    one was. Composed rows are EXCLUDED from the exclusive index, so an
+    exclusive layer restored that way sits outside its own protection: a third
+    circuit can claim it unopposed, and its rung header is suppressed forever
+    on a layer nothing ever composed onto.
+
+    R2-07 — `claim()` is all-or-nothing inside its savepoint, so if the race
+    winner took just ONE held layer, the whole restore raised and the circuit
+    was left holding NOTHING — precisely the state R1-18 exists to prevent.
+    """
+
+    async def test_an_exclusive_layer_is_not_restored_as_composed(
+        self, test_session
+    ):
+        await _circuit(test_session, "cA", layers=(10, 13))
+        await _circuit(test_session, "cB", layers=(13,))
+        registry = CircuitClaimRegistry(test_session)
+
+        # cA holds L10 exclusively and shares L13 with cB.
+        await registry.claim("cA", {10})
+        await registry.claim("cA", {13}, composed=True)
+        await registry.claim("cB", {13}, composed=True)
+
+        held = [c for c in await registry.live_claims() if c.circuit_id == "cA"]
+        assert {c.layer: c.composed for c in held} == {10: False, 13: True}
+
+        # Simulate the restore: per layer, preserving each layer's own flag.
+        await registry.release("cA")
+        for prior in held:
+            await registry.claim(
+                "cA",
+                {prior.layer},
+                composed=prior.composed,
+                steering_keys={prior.layer: set(prior.steering_keys)},
+            )
+
+        after = {
+            c.layer: c.composed
+            for c in await registry.live_claims()
+            if c.circuit_id == "cA"
+        }
+        assert after == {10: False, 13: True}, (
+            "the restore collapsed per-layer composure — L10 is exclusive and "
+            "was marked composed, putting it outside the index so a third "
+            "circuit can take it unopposed"
+        )
+
+    async def test_the_gate_restores_PER_LAYER(self, test_session, monkeypatch):
+        """One taken layer must cost ONE layer, not all of them.
+
+        F19 R3-10: this was a `inspect.getsource` + substring assertion. It
+        proved the STRINGS `"for prior in held_before:"` and
+        `"composed=prior.composed"` appear in the function — so renaming the
+        loop variable failed it while the behaviour was correct, and wrapping
+        the loop body in `if False:` PASSED it. Three such tests survived
+        R2-04's frontend cleanup; this is the load-bearing one.
+
+        Now drives the real `_claim_layers` through a partial race: the circuit
+        re-activates wanting {10, 13}, another circuit takes 13 in between, and
+        the restore must give back 10 rather than losing both.
+        """
+        from millm.services.circuit_service import CircuitService
+
+        await _circuit(test_session, "cA", layers=(10, 13))
+        await _circuit(test_session, "cB", layers=(13,))
+        registry = CircuitClaimRegistry(test_session)
+        await registry.claim("cA", {10, 13}, steering_keys={10: {1}, 13: {2}})
+
+        svc = CircuitService.__new__(CircuitService)
+        svc.repository = SimpleNamespace(session=test_session)
+
+        # cB takes L13 the moment cA releases its own claims to re-claim.
+        real_release = registry.release
+        seized = {"done": False}
+
+        async def release_then_seize(circuit_id):
+            layers = await real_release(circuit_id)
+            if circuit_id == "cA" and not seized["done"]:
+                seized["done"] = True
+                await registry.claim("cB", {13})
+            return layers
+
+        monkeypatch.setattr(
+            "millm.services.circuit_claim_registry.CircuitClaimRegistry.release",
+            lambda self, cid: release_then_seize(cid),
+        )
+
+        # The REAL definition type, not a namespace: three successive shape
+        # errors while hand-rolling one is the argument for using the type the
+        # code actually consumes.
+        from millm.api.schemas.circuit import CircuitDefinitionV1
+
+        definition = CircuitDefinitionV1.model_validate(
+            {
+                "kind": "mistudio.circuit-definition",
+                "schema_version": "1",
+                "name": "cA",
+                "saes": [
+                    {"layer": 10, "n_features": 8192, "mistudio_sae_id": "s10"},
+                    {"layer": 13, "n_features": 8192, "mistudio_sae_id": "s13"},
+                ],
+                "members": [
+                    {"layer": 10, "feature": {"feature_idx": 1, "strength": 40.0}},
+                    {"layer": 13, "feature": {"feature_idx": 2, "strength": 30.0}},
+                ],
+                "edges": [],
+                "budget": {"layers": {}, "intensity": 1.0},
+            }
+        )
+        circuit = SimpleNamespace(id="cA", name="cA")
+
+        # NARROW: a bare `pytest.raises(Exception)` here masked a fixture
+        # shape error (`expanded_members` missing) as if it were the race —
+        # the assertion below then passed for the wrong reason. Only the
+        # contention refusal proves the race happened.
+        with pytest.raises(CircuitLayerContentionError):
+            await svc._claim_layers(circuit, [10, 13], definition, False)
+        assert seized["done"], "the race never happened — nothing was seized"
+
+        held = {
+            c.layer for c in await registry.live_claims() if c.circuit_id == "cA"
+        }
+        assert held == {10}, (
+            f"cA holds {held or 'nothing'} — one layer was taken by the race "
+            "winner and the all-or-nothing restore lost the other one too, "
+            "leaving the circuit active and steering with no claim"
+        )
+
+
+class TestEveryIncumbentIsNamed:
+    """F19 R2-12. The refusal named only the holder of the numerically lowest
+    contended layer.
+
+    With cC on L10 and cD on L13, only cC was named. The operator deactivates
+    cC, retries, and is refused AGAIN by cD — with nothing in the first refusal
+    hinting a second incumbent existed. The remedy looked like it had failed.
+
+    `incumbent` stays singular for the dialog's "Deactivate '<name>'" action
+    (it can only offer one), and `all_incumbents` carries the rest so the
+    refusal is complete.
+    """
+
+    async def test_two_incumbents_are_BOTH_reported(self, test_session):
+        await _circuit(test_session, "cC", layers=(10,))
+        await _circuit(test_session, "cD", layers=(13,))
+        await _circuit(test_session, "cB", layers=(10, 13))
+        registry = CircuitClaimRegistry(test_session)
+        await registry.claim("cC", {10})
+        await registry.claim("cD", {13})
+
+        with pytest.raises(CircuitLayerContentionError) as exc:
+            await registry.claim("cB", {10, 13})
+
+        details = exc.value.details
+        named = {i["id"] for i in details["all_incumbents"]}
+        assert named == {"cC", "cD"}, (
+            f"only {named} reported — deactivating that one and retrying is "
+            "refused again by an incumbent the operator was never told about"
+        )
+        # The singular field the dialog uses is still populated.
+        assert details["incumbent"]["id"] in {"cC", "cD"}
+
+    async def test_a_single_incumbent_still_appears_in_the_list(
+        self, test_session
+    ):
+        await _circuit(test_session, "cA", layers=(10,))
+        await _circuit(test_session, "cB", layers=(10,))
+        registry = CircuitClaimRegistry(test_session)
+        await registry.claim("cA", {10})
+
+        with pytest.raises(CircuitLayerContentionError) as exc:
+            await registry.claim("cB", {10})
+
+        assert [i["id"] for i in exc.value.details["all_incumbents"]] == ["cA"]

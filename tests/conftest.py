@@ -1,0 +1,113 @@
+"""
+Shared pytest fixtures for miLLM tests.
+"""
+
+import asyncio
+from collections.abc import AsyncGenerator
+from typing import Generator
+
+import pytest
+import pytest_asyncio
+from sqlalchemy.dialects.postgresql import JSONB
+from sqlalchemy.ext.compiler import compiles
+from sqlalchemy import event
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
+
+from millm.db.base import Base
+
+
+# Tests run against in-memory SQLite, which has no JSONB type.  Several models
+# (models.config_json, profiles.steering) use PostgreSQL JSONB; without this
+# compiler override, Base.metadata.create_all() fails on SQLite with
+# "SQLiteTypeCompiler has no attribute visit_JSONB".  Render JSONB as plain
+# JSON when compiling for SQLite — production (PostgreSQL) still uses native
+# JSONB.  Registered once at import time; harmless if already registered.
+@compiles(JSONB, "sqlite")
+def _compile_jsonb_as_json_on_sqlite(element, compiler, **kw):  # noqa: ANN001
+    return "JSON"
+
+
+@pytest.fixture(autouse=True)
+def _release_model_load_slot() -> Generator[None, None, None]:
+    """The one-load-at-a-time slot is process-wide, so a test that leaves a
+    load 'in progress' (a stubbed executor never runs the worker's finally)
+    must not make every later test's load busy."""
+    from millm.services import model_service
+
+    model_service._LOAD_SLOT["model_id"] = None
+    yield
+    model_service._LOAD_SLOT["model_id"] = None
+
+
+@pytest.fixture(autouse=True)
+def _fresh_lease_registry() -> Generator[None, None, None]:
+    """The lease registry is process-wide (Feature 29). A lease one test takes must not
+    refuse the next test's load, so every test starts and ends with a fresh registry."""
+    from millm.services.model_lease import set_lease_registry
+
+    set_lease_registry(None)
+    yield
+    set_lease_registry(None)
+
+
+@pytest.fixture(autouse=True)
+def _fresh_weight_barrier_and_service() -> Generator[None, None, None]:
+    """The weight barrier and the weight service are process-wide (Feature 31). A barrier one
+    test leaves `torn` would refuse every later test's request, and an attachment would refuse
+    every later load, so both are dropped after every test (addendum §8)."""
+    yield
+    from millm.services.weight_attachment import set_weight_service
+    from millm.services.weight_barrier import set_weight_barrier
+
+    set_weight_barrier(None)
+    set_weight_service(None)
+
+
+@pytest.fixture(scope="session")
+def event_loop() -> Generator[asyncio.AbstractEventLoop, None, None]:
+    """Create an event loop for the test session."""
+    loop = asyncio.new_event_loop()
+    yield loop
+    loop.close()
+
+
+@pytest_asyncio.fixture
+async def test_engine():
+    """Create a test database engine using SQLite."""
+    engine = create_async_engine(
+        "sqlite+aiosqlite:///:memory:",
+        echo=False,
+    )
+
+    # ⚠ SQLite ignores FOREIGN KEY constraints unless this pragma is set PER CONNECTION, so
+    # without it every `ondelete="CASCADE"` in the repo is untested — a broken one passes the
+    # whole suite and only fails in production, where PostgreSQL does enforce it. Added
+    # 2026-09-27 while building Feature 024, when a probe cascade test passed against a cascade
+    # that had never run.
+    @event.listens_for(engine.sync_engine, "connect")
+    def _enforce_sqlite_foreign_keys(dbapi_connection, _record):  # noqa: ANN001
+        cursor = dbapi_connection.cursor()
+        cursor.execute("PRAGMA foreign_keys=ON")
+        cursor.close()
+
+    async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.create_all)
+
+    yield engine
+
+    await engine.dispose()
+
+
+@pytest_asyncio.fixture
+async def test_session(test_engine) -> AsyncGenerator[AsyncSession, None]:
+    """Create a test database session."""
+    async_session_factory = async_sessionmaker(
+        test_engine,
+        class_=AsyncSession,
+        expire_on_commit=False,
+    )
+
+    async with async_session_factory() as session:
+        yield session
+        await session.rollback()
+

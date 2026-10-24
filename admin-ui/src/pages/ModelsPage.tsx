@@ -1,0 +1,374 @@
+import { useState } from 'react';
+import { useHfTokenStatus } from '@/hooks/useHfTokenStatus';
+import { modelApi } from '@services/api';
+import { Server, Info, Play, Lock } from 'lucide-react';
+import { useModels } from '@hooks/useModels';
+import { useServerStore } from '@stores/serverStore';
+import { ModelLoadForm, LoadedModelCard, ModelDetailsModal, LeaseBadge } from '@components/models';
+import { displayQuantization } from '@components/models/displayQuantization';
+import type { ModelLoadFormData } from '@components/models';
+import { Card, CardHeader, Spinner, EmptyState, Badge, Select } from '@components/common';
+import { gpuOptions, resolveGpuSelection } from '@components/models/gpuOptions';
+import type { GGUFQuantInfo, ModelInfo } from '@/types';
+
+export function ModelsPage() {
+  const hfToken = useHfTokenStatus();
+  const { loadedModel, gpus, loadGpu, setLoadGpu } = useServerStore();
+  const {
+    models,
+    isLoading,
+    downloadModel,
+    isDownloading,
+    load,
+    isLoadingModel,
+    unloadModel,
+    isUnloading,
+    delete: deleteModel,
+    isDeleting,
+    previewModel,
+    isPreviewingModel,
+    previewData,
+    clearPreview,
+    lockModel,
+    unlockModel,
+    isLocking,
+    isUnlockingModel,
+  } = useModels();
+
+  // State for selected model in modal
+  const [selectedModel, setSelectedModel] = useState<ModelInfo | null>(null);
+  const [isModalOpen, setIsModalOpen] = useState(false);
+  const [previewRepoId, setPreviewRepoId] = useState<string | null>(null);
+  const [previewHfToken, setPreviewHfToken] = useState<string | undefined>(undefined);
+
+  const handleLoadModel = async (data: ModelLoadFormData) => {
+    // The download does not load; the chosen card is remembered and sent by
+    // the Load / Switch buttons.
+    setLoadGpu(data.gpu);
+    await downloadModel({
+      source: 'huggingface',
+      repo_id: data.repo_id,
+      quantization: data.quantization,
+      trust_remote_code: data.trust_remote_code,
+      hf_token: data.hf_token,
+      // Present only when a GGUF quantization was chosen. Without these the
+      // form would download the ENTIRE repository — every quantization — which
+      // is what this path did before the picker existed.
+      ...(data.gguf_files?.length ? { gguf_files: data.gguf_files } : {}),
+      ...(data.gguf_label ? { gguf_label: data.gguf_label } : {}),
+      ...(previewData?.revision ? { revision: previewData.revision } : {}),
+    });
+  };
+
+  const handlePreview = async (repo_id: string, hf_token?: string) => {
+    setPreviewRepoId(repo_id); // Track the repo_id for download-from-preview
+    setPreviewHfToken(hf_token); // Preserve token for download-from-preview
+    await previewModel(repo_id, hf_token);
+    setSelectedModel(null); // Clear any selected model
+    setIsModalOpen(true);
+  };
+
+  /**
+   * Quantizations for whatever repo is currently in the form's box.
+   *
+   * DELIBERATELY SEPARATE from `previewData`, which drives the details modal.
+   * Sharing that state would mean the dropdown emptied whenever the modal was
+   * closed (`handleCloseModal` clears the preview), and — worse — that a
+   * background lookup opened the modal on every keystroke.
+   */
+  const [formPreview, setFormPreview] = useState<{
+    repoId: string;
+    quants: GGUFQuantInfo[] | null;
+  } | null>(null);
+
+  /**
+   * Look up a repo's quantizations without opening anything.
+   *
+   * Failures are swallowed on purpose: this fires while someone is still
+   * typing, so a half-written repo id 404s constantly and none of those are
+   * worth reporting. The dropdown simply stays on the runtime levels.
+   */
+  const handleRepoIdSettled = async (repo_id: string, hf_token?: string) => {
+    try {
+      const info = await modelApi.preview(repo_id, hf_token);
+      setFormPreview({ repoId: repo_id, quants: info.gguf_quants ?? null });
+    } catch {
+      setFormPreview({ repoId: repo_id, quants: null });
+    }
+  };
+
+  const handleUnload = async () => {
+    if (loadedModel && loadedModel.id !== undefined) {
+      await unloadModel(loadedModel.id);
+    }
+  };
+
+  const handleModelClick = (model: ModelInfo) => {
+    setSelectedModel(model);
+    clearPreview(); // Clear any preview data
+    setIsModalOpen(true);
+  };
+
+  const handleCloseModal = () => {
+    setIsModalOpen(false);
+    setSelectedModel(null);
+    setPreviewRepoId(null);
+    setPreviewHfToken(undefined);
+    clearPreview();
+  };
+
+  const handleDownloadFromPreview = async (
+    quantization: string,
+    trustRemoteCode: boolean,
+    gguf?: { files?: string[]; label?: string; revision?: string },
+  ) => {
+    if (!previewRepoId) return;
+    await downloadModel({
+      source: 'huggingface',
+      repo_id: previewRepoId,
+      quantization: quantization as 'FP32' | 'FP16' | 'Q8' | 'Q4' | 'Q2',
+      trust_remote_code: trustRemoteCode,
+      hf_token: previewHfToken,
+      // Only sent for a GGUF selection. Absent means "the whole repository",
+      // which is correct for an ordinary safetensors model — an empty list
+      // would match nothing and download an empty directory.
+      ...(gguf?.files?.length ? { gguf_files: gguf.files } : {}),
+      ...(gguf?.label ? { gguf_label: gguf.label } : {}),
+      ...(gguf?.revision ? { revision: gguf.revision } : {}),
+    });
+    handleCloseModal();
+  };
+
+  const handleLoadFromModal = (id: number) => {
+    load(id);
+  };
+
+  const handleUnloadFromModal = (id: number) => {
+    if (id === undefined || id === null) {
+      console.error('Cannot unload: model ID is undefined');
+      return;
+    }
+    unloadModel(id).then(() => {
+      // Refresh selected model state
+      setSelectedModel(null);
+    });
+  };
+
+  const handleDeleteFromModal = (id: number) => {
+    deleteModel(id);
+    handleCloseModal();
+  };
+
+  const getStatusBadge = (status: ModelInfo['status']) => {
+    switch (status) {
+      case 'loaded':
+        return <Badge variant="success">Loaded</Badge>;
+      case 'ready':
+        return <Badge variant="primary">Ready</Badge>;
+      case 'downloading':
+        return <Badge variant="warning">Downloading</Badge>;
+      case 'loading':
+        return <Badge variant="warning">Loading</Badge>;
+      case 'error':
+        return <Badge variant="danger">Error</Badge>;
+      default:
+        return <Badge>{status}</Badge>;
+    }
+  };
+
+  if (isLoading) {
+    return (
+      <div className="flex items-center justify-center h-64">
+        <Spinner size="lg" />
+      </div>
+    );
+  }
+
+  return (
+    <div className="stack-y-6">
+      {/* Loaded Model Section */}
+      {loadedModel ? (
+        <LoadedModelCard
+          model={loadedModel}
+          onUnload={handleUnload}
+          isUnloading={isUnloading}
+        />
+      ) : (
+        <ModelLoadForm
+          tokenStatus={hfToken.status}
+          onSubmit={handleLoadModel}
+          onPreview={handlePreview}
+          isLoading={isDownloading || isLoadingModel}
+          isPreviewLoading={isPreviewingModel}
+          ggufQuants={formPreview?.quants ?? null}
+          previewedRepoId={formPreview?.repoId ?? null}
+          onRepoIdSettled={handleRepoIdSettled}
+          gpus={gpus}
+          gpu={loadGpu}
+          onGpuChange={setLoadGpu}
+        />
+      )}
+
+      {/* Downloaded Models List */}
+      <Card>
+        <CardHeader
+          title="Downloaded Models"
+          subtitle="Click on a model to view details and actions"
+          icon={<Server className="w-5 h-5 text-slate-400" />}
+          action={
+            // Here as well as in the form: the form is hidden while a model
+            // is loaded, and Switch still needs to know which card.
+            <div className="w-72">
+              <Select
+                aria-label="GPU for loading"
+                value={resolveGpuSelection(loadGpu, gpus)}
+                onChange={(e) => setLoadGpu(e.target.value)}
+                options={gpuOptions(gpus)}
+              />
+            </div>
+          }
+        />
+
+        {models && models.length > 0 ? (
+          <div className="stack-y-3">
+            {models.map((model) => (
+              <div
+                key={model.id}
+                onClick={() => handleModelClick(model)}
+                className={`
+                  flex items-center justify-between p-3 rounded-lg border cursor-pointer
+                  transition-all duration-150
+                  ${model.status === 'loaded'
+                    ? 'bg-green-500/5 border-green-500/20 hover:bg-green-500/10'
+                    : model.status === 'error'
+                    ? 'bg-red-500/5 border-red-500/20 hover:bg-red-500/10'
+                    : 'bg-slate-800/30 border-slate-700/50 hover:bg-slate-800/50 hover:border-slate-600/50'
+                  }
+                `}
+              >
+                <div className="flex items-center gap-3">
+                  <div className={`
+                    p-2 rounded-lg
+                    ${model.status === 'loaded'
+                      ? 'bg-green-500/10 text-green-400'
+                      : model.status === 'error'
+                      ? 'bg-red-500/10 text-red-400'
+                      : 'bg-slate-700/50 text-slate-400'
+                    }
+                  `}>
+                    <Server className="w-4 h-4" />
+                  </div>
+                  <div>
+                    <h4 className="text-sm font-medium text-slate-200">{model.name}</h4>
+                    <p className="text-xs text-slate-500">
+                      {model.repo_id}
+                      {model.params && ` • ${model.params}`}
+                      {displayQuantization(model) && ` • ${displayQuantization(model)}`}
+                    </p>
+                  </div>
+                </div>
+                <div className="flex items-center gap-3">
+                  {/* Download Progress */}
+                  {model.status === 'downloading' && (
+                    <div className="flex items-center gap-3">
+                      <div className="w-24 bg-slate-700/50 rounded-full h-2 overflow-hidden">
+                        <div
+                          className="bg-primary-500 h-full rounded-full transition-all duration-300"
+                          style={{ width: `${model.download_progress || 0}%` }}
+                        />
+                      </div>
+                      <span className="text-xs text-primary-400 font-medium min-w-12">
+                        {model.download_progress ? `${model.download_progress}%` : '0%'}
+                      </span>
+                      <Spinner size="sm" />
+                    </div>
+                  )}
+
+                  {/* Loading indicator */}
+                  {model.status === 'loading' && (
+                    <div className="flex items-center gap-2">
+                      <Spinner size="sm" />
+                      <span className="text-xs text-yellow-400">Loading...</span>
+                    </div>
+                  )}
+
+                  {/* Lease indicator (Feature 29): who pinned the model, and until when */}
+                  {model.lease && <LeaseBadge lease={model.lease} />}
+
+                  {/* Lock indicator */}
+                  {model.locked && (
+                    <span title="Locked for steering">
+                      <Lock className="w-3.5 h-3.5 text-yellow-400" />
+                    </span>
+                  )}
+
+                  {/* Status Badge */}
+                  {getStatusBadge(model.status)}
+
+                  {/* Quick actions */}
+                  {(model.status === 'ready' || model.status === 'error') && (
+                    <button
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        load(model.id);
+                      }}
+                      disabled={isLoadingModel}
+                      className="flex items-center gap-1 px-2 py-1 rounded-sm text-xs font-medium transition-colors text-primary-400 hover:text-primary-300 hover:bg-primary-500/10 disabled:text-slate-500 disabled:cursor-not-allowed"
+                      title={loadedModel ? 'Switch to this model' : 'Load model'}
+                    >
+                      <Play className="w-3 h-3" />
+                      {loadedModel ? 'Switch' : 'Load'}
+                    </button>
+                  )}
+                </div>
+              </div>
+            ))}
+          </div>
+        ) : (
+          <EmptyState
+            icon={<Server className="w-8 h-8" />}
+            title="No models downloaded"
+            description="Download a model from Hugging Face to get started"
+          />
+        )}
+      </Card>
+
+      {/* Info Section */}
+      <Card padding="sm">
+        <div className="flex items-start gap-3">
+          <Info className="w-5 h-5 text-primary-400 shrink-0 mt-0.5" />
+          <div className="text-sm text-slate-400">
+            <p className="mb-2">
+              <strong className="text-slate-300">Supported Models:</strong> Any model compatible with Hugging Face Transformers library.
+            </p>
+            <p>
+              <strong className="text-slate-300">Tip:</strong> Any of the latest popular offline models work — pick one that has a published SAE (matched model + SAE pairs give the best steering results).
+            </p>
+          </div>
+        </div>
+      </Card>
+
+      {/* Model Details Modal */}
+      <ModelDetailsModal
+        model={selectedModel}
+        previewData={previewData}
+        isOpen={isModalOpen}
+        onClose={handleCloseModal}
+        onLoad={handleLoadFromModal}
+        onUnload={handleUnloadFromModal}
+        onDelete={handleDeleteFromModal}
+        onDownloadFromPreview={handleDownloadFromPreview}
+        onLock={(id) => lockModel(id)}
+        onUnlock={(id) => unlockModel(id)}
+        isLoadingModel={isLoadingModel}
+        isUnloading={isUnloading}
+        isDeleting={isDeleting}
+        isLocking={isLocking}
+        isUnlockingModel={isUnlockingModel}
+        loadedModel={loadedModel}
+      />
+    </div>
+  );
+}
+
+export default ModelsPage;

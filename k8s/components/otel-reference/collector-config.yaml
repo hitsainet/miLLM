@@ -1,0 +1,71 @@
+# The reference OpenTelemetry Collector's configuration (Feature 038, FR-38.25; FTDD §11.3).
+#
+# ONE FILE FOR BOTH EXAMPLES. Kustomize mounts it from a generated ConfigMap and
+# docker-compose.otel.yml mounts this same path; tests/unit/test_k8s_otel_reference.py fails if
+# either stops pointing here. The backend is reached by its short name `otel-lgtm`, which resolves
+# in both: the Service in the millm-otel namespace, and the Compose service.
+#
+# Pipeline, every signal: OTLP/HTTP receiver → memory_limiter → batch → otlp_http exporter to the
+# backend (grafana/otel-lgtm, whose own bundled collector routes traces to Tempo, logs to Loki and
+# metrics to Prometheus).
+#
+# What it does NOT do: no gRPC receiver (miLLM exports OTLP/HTTP protobuf only), no attribute
+# processing (miLLM's allowlist runs BEFORE anything is queued, so there is nothing here to
+# scrub), no auth extension (operator decision: no login in the suite; the receiver is reachable
+# only inside the cluster, through the ClusterIP Service).
+extensions:
+  health_check:
+    endpoint: 0.0.0.0:13133
+
+receivers:
+  otlp:
+    protocols:
+      http:
+        endpoint: 0.0.0.0:4318
+
+processors:
+  # First in every pipeline: refuses data (the sender sees a retryable 503/429 and backs off)
+  # before the process runs out of memory. Sized under the 512 Mi container limit.
+  memory_limiter:
+    check_interval: 1s
+    limit_mib: 400
+    spike_limit_mib: 100
+  batch:
+    timeout: 5s
+    send_batch_size: 1024
+
+exporters:
+  otlp_http:
+    endpoint: http://otel-lgtm:4318
+    tls:
+      insecure: true
+
+service:
+  extensions: [health_check]
+  # The Collector's own counters (accepted / refused / send-failed records, per signal) go to the
+  # same backend, so the dashboard's export-health row shows the RECEIVER's side of the loss.
+  # miLLM's side (exported / failed / dropped per signal) is its `GET /api/health/detailed`
+  # telemetry block: a receiver cannot count what never reached it.
+  telemetry:
+    metrics:
+      level: normal
+      readers:
+        - periodic:
+            interval: 15000
+            exporter:
+              otlp:
+                protocol: http/protobuf
+                endpoint: http://otel-lgtm:4318/v1/metrics
+  pipelines:
+    traces:
+      receivers: [otlp]
+      processors: [memory_limiter, batch]
+      exporters: [otlp_http]
+    metrics:
+      receivers: [otlp]
+      processors: [memory_limiter, batch]
+      exporters: [otlp_http]
+    logs:
+      receivers: [otlp]
+      processors: [memory_limiter, batch]
+      exporters: [otlp_http]

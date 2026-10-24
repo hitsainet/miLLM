@@ -1,0 +1,58 @@
+# THE SWITCH-ON (Feature 038, FTASKS 14.0; FTDD §11.3): point miLLM's probe telemetry at the
+# reference Collector. NOT REFERENCED BY ANYTHING YET — telemetry export stays OFF in the live pod
+# until this component is added to k8s/base, in its own commit and its own push, after the GPU
+# benchmark (13.0) passes and the operator has decided every unmet target.
+#
+# It patches the millm-backend container's environment:
+#   - the three switches on (traces, metrics, logs);
+#   - the endpoint http://otel-collector.millm-otel.svc:4318 — the reference Collector's ClusterIP
+#     Service, in-cluster only;
+#   - TELEMETRY_ALLOW_PLAINTEXT=true: the one recorded trusted-local choice (D26 OQ-16), because
+#     the path never leaves the cluster network;
+#   - TELEMETRY_STATELESS_EXPORT_PERMITTED=false: results of the stateless score route never leave,
+#     whatever a request asks.
+# No credentials: the reference Collector takes none. A receiver that does takes them in
+# TELEMETRY_HEADERS (from a Secret), never in the endpoint's path or query.
+#
+# HOW TO SWITCH ON (operator, 14.1 – 14.2; a push is its own approval):
+#   1. Render and inspect:  kubectl kustomize k8s/overlays/otel-export | grep -n -A1 TELEMETRY_
+#   2. Add `components: [../components/otel-export]` to k8s/base/kustomization.yaml and change
+#      tests/unit/test_k8s_otel_reference.py's base-render test in the same commit (the assertion
+#      moves to "otel-export present, stateless off"). Do NOT repoint the ArgoCD Application:
+#      Image Updater keys its digest pins on the Application's path.
+#   3. The pod restarts (Recreate): check for in-flight GPU work first.
+#   4. After the rollout, GET /api/health/detailed: all three signals `healthy`,
+#      `stateless_export_permitted: false`.
+# HOW TO SWITCH OFF: revert that commit (the pod restarts with export off).
+apiVersion: kustomize.config.k8s.io/v1alpha1
+kind: Component
+
+patches:
+  - target:
+      group: apps
+      version: v1
+      kind: Deployment
+      name: millm-backend
+    patch: |-
+      apiVersion: apps/v1
+      kind: Deployment
+      metadata:
+        name: millm-backend
+      spec:
+        template:
+          spec:
+            containers:
+              - name: backend
+                env:
+                  - name: TELEMETRY_TRACES_ENABLED
+                    value: "true"
+                  - name: TELEMETRY_METRICS_ENABLED
+                    value: "true"
+                  - name: TELEMETRY_LOGS_ENABLED
+                    value: "true"
+                  - name: TELEMETRY_ENDPOINT
+                    value: http://otel-collector.millm-otel.svc:4318
+                  - name: TELEMETRY_ALLOW_PLAINTEXT
+                    value: "true"
+                  - name: TELEMETRY_STATELESS_EXPORT_PERMITTED
+                    value: "false"

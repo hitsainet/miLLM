@@ -1,0 +1,185 @@
+import { useState } from 'react';
+import { AlertCircle, Info } from 'lucide-react';
+import { useHfTokenStatus } from '@/hooks/useHfTokenStatus';
+import { useSAE } from '@hooks/useSAE';
+import { useServerStore } from '@stores/serverStore';
+import {
+  SAEDownloadForm,
+  SAEList,
+  AttachedSAECard,
+} from '@components/sae';
+import { AttachmentPanel } from '@components/circuits';
+import { Card, Spinner } from '@components/common';
+import type { DownloadSAERequest, SAEInfo } from '@/types';
+
+export function SAEPage() {
+  const hfToken = useHfTokenStatus();
+  const { loadedModel, attachedSAE } = useServerStore();
+  const {
+    saes,
+    isLoading,
+    downloadSAE,
+    isDownloading,
+    attachSAE,
+    detachSAE,
+    isDetaching,
+    deleteSAE,
+    cancelSAE,
+  } = useSAE();
+
+  const [attachingId, setAttachingId] = useState<string | undefined>();
+  const [deletingId, setDeletingId] = useState<string | undefined>();
+  const [cancellingId, setCancellingId] = useState<string | undefined>();
+
+  const handleDownload = async (data: DownloadSAERequest) => {
+    await downloadSAE(data);
+  };
+
+  const handleAttach = async (sae: SAEInfo) => {
+    setAttachingId(sae.id);
+    try {
+      // Use trained_layer if available, default to layer 0
+      const layer = sae.trained_layer ?? 0;
+      await attachSAE({ sae_id: sae.id, layer });
+    } finally {
+      setAttachingId(undefined);
+    }
+  };
+
+  const handleDetach = async () => {
+    if (attachedSAE) {
+      await detachSAE(attachedSAE.id);
+    }
+  };
+
+  const handleDelete = async (saeId: string) => {
+    setDeletingId(saeId);
+    try {
+      await deleteSAE(saeId);
+    } finally {
+      setDeletingId(undefined);
+    }
+  };
+
+  const handleCancel = async (saeId: string) => {
+    setCancellingId(saeId);
+    try {
+      await cancelSAE(saeId);
+    } finally {
+      setCancellingId(undefined);
+    }
+  };
+
+  // Model not loaded warning
+  if (!loadedModel) {
+    return (
+      <div className="stack-y-6">
+        <Card className="border-yellow-500/30 bg-yellow-500/5">
+          <div className="flex items-start gap-3">
+            <AlertCircle className="w-5 h-5 text-yellow-400 shrink-0 mt-0.5" />
+            <div>
+              <h3 className="text-sm font-medium text-yellow-400">No Model Loaded</h3>
+              <p className="text-sm text-slate-400 mt-1">
+                You need to load a model before you can attach an SAE.
+                Go to the Models page to load a model first.
+              </p>
+            </div>
+          </div>
+        </Card>
+
+        <SAEDownloadForm
+          tokenStatus={hfToken.status}
+          onSubmit={handleDownload}
+          isLoading={isDownloading}
+        />
+
+        {isLoading ? (
+          <div className="flex items-center justify-center h-32">
+            <Spinner size="lg" />
+          </div>
+        ) : (
+          <SAEList
+            saes={saes || []}
+            attachedSAEId={attachedSAE?.id}
+            onAttach={handleAttach}
+            onDetach={handleDetach}
+            onDelete={handleDelete}
+            onCancel={handleCancel}
+            attachingId={attachingId}
+            isDetaching={isDetaching}
+            deletingId={deletingId}
+            cancellingId={cancellingId}
+            canAttach={false}
+          />
+        )}
+      </div>
+    );
+  }
+
+  if (isLoading) {
+    return (
+      <div className="flex items-center justify-center h-64">
+        <Spinner size="lg" />
+      </div>
+    );
+  }
+
+  return (
+    <div className="stack-y-6">
+      {/* Attached SAE Card */}
+      {attachedSAE && (
+        <AttachedSAECard
+          sae={attachedSAE}
+          onDetach={handleDetach}
+          isDetaching={isDetaching}
+        />
+      )}
+
+      {/* Multi-SAE circuit attachment set (Feature 12) — renders only when more
+          than one SAE is attached (a cross-layer circuit); the singular card
+          above covers the common single-SAE case, so nothing is shown twice.
+          AttachmentPanel returns null below the threshold. */}
+      <AttachmentPanel minCount={1} />
+
+      {/* Download Form */}
+      <SAEDownloadForm
+        tokenStatus={hfToken.status}
+        onSubmit={handleDownload}
+        isLoading={isDownloading}
+      />
+
+      {/* SAE List */}
+      <SAEList
+        saes={saes || []}
+        attachedSAEId={attachedSAE?.id}
+        onAttach={handleAttach}
+        onDetach={handleDetach}
+        onDelete={handleDelete}
+        onCancel={handleCancel}
+        attachingId={attachingId}
+        isDetaching={isDetaching}
+        deletingId={deletingId}
+        cancellingId={cancellingId}
+        canAttach={!attachedSAE}
+      />
+
+      {/* Info Section */}
+      <Card padding="sm">
+        <div className="flex items-start gap-3">
+          <Info className="w-5 h-5 text-primary-400 shrink-0 mt-0.5" />
+          <div className="text-sm text-slate-400">
+            <p className="mb-2">
+              <strong className="text-slate-300">Supported Formats:</strong> SAELens format from Hugging Face.
+            </p>
+            <p>
+              <strong className="text-slate-300">Tip:</strong> Use an SAE trained for your loaded model — community SAE releases for the latest popular offline models are published on Hugging Face.
+              Match the SAE layer to the model architecture.
+            </p>
+          </div>
+        </div>
+      </Card>
+    </div>
+  );
+}
+
+export default SAEPage;

@@ -1,0 +1,527 @@
+"""
+Circuit layer claim registry (Feature 19: Concurrent Circuit Serving).
+
+Two circuits may serve at once IFF their claim sets are disjoint. This module
+owns that decision and the bookkeeping behind it.
+
+The central distinction — kept structurally separate here because collapsing it
+is the defect this design most wants to avoid:
+
+  * CONTENTION — two circuits want the same LAYER. Overridable, because
+    additive composition on a layer is a coherent thing an operator might
+    intend (a compounding study). It is refused BY DEFAULT because the GPU
+    close-out measured two steered layers at strength 5 destroying generation,
+    two orders of magnitude below the per-member clamp.
+
+  * COLLISION — two circuits name the same (LAYER, FEATURE_IDX). NEVER
+    overridable. `set_steering_batch` merges into one dict, so one strength
+    silently overwrites the other and the served value belongs to NEITHER
+    author. There is no honest composition of that case, so it has no override
+    — and the check for it must run FIRST and UNCONDITIONALLY, before any
+    `allow_layer_overlap` branch, or the override becomes a way to reach it.
+
+Release is per-owner: deactivating a circuit clears exactly the
+`(layer, feature_idx)` keys IT wrote, never the whole layer dict, which would
+tear out a co-tenant's steering while its row still reads active.
+"""
+
+from dataclasses import dataclass, field
+from datetime import datetime, timezone
+from typing import Any, Optional
+
+import sqlalchemy as sa
+import structlog
+from sqlalchemy.exc import IntegrityError
+
+from millm.db.models.circuit_layer_claim import CircuitLayerClaim
+
+logger = structlog.get_logger()
+
+
+@dataclass(frozen=True)
+class LayerClaim:
+    """One live claim, as the registry reports it."""
+
+    circuit_id: str
+    layer: int
+    composed: bool = False
+    steering_keys: tuple[int, ...] = ()
+    circuit_name: Optional[str] = None
+
+
+@dataclass(frozen=True)
+class ContentionVerdict:
+    """The outcome of assessing a proposed claim set against what is live.
+
+    `has_contention` and `has_collision` are DELIBERATELY separate properties
+    rather than one severity field. One is overridable and one is never, and a
+    single field invites a caller to compare it with `>=` and accidentally let
+    a collision through an override branch.
+    """
+
+    #: Layers wanted by the requester that an incumbent already holds.
+    contended_layers: tuple[int, ...] = ()
+    #: Incumbents on those layers: {circuit_id: (name, layers)}.
+    incumbents: dict[str, tuple[Optional[str], tuple[int, ...]]] = field(
+        default_factory=dict
+    )
+    #: (layer, feature_idx, incumbent_circuit_id) triples named by BOTH.
+    colliding_keys: tuple[tuple[int, int, str], ...] = ()
+
+    @property
+    def has_contention(self) -> bool:
+        return bool(self.contended_layers)
+
+    @property
+    def has_collision(self) -> bool:
+        """Never overridable. See the module docstring."""
+        return bool(self.colliding_keys)
+
+    @property
+    def is_clear(self) -> bool:
+        return not self.has_contention and not self.has_collision
+
+
+class CircuitClaimRegistry:
+    """Assess, take and release per-layer claims."""
+
+    def __init__(self, session: Any) -> None:
+        self._session = session
+
+    # ── Reads ──────────────────────────────────────────────────────────────
+
+    async def live_claims(self) -> list[LayerClaim]:
+        """Every claim not yet released."""
+        rows = (
+            await self._session.execute(
+                sa.select(CircuitLayerClaim).where(
+                    CircuitLayerClaim.released_at.is_(None)
+                )
+            )
+        ).scalars().all()
+
+        # F19 R1-20: POPULATE `circuit_name`. The field was declared on
+        # `LayerClaim` and never filled, so every consumer got claims
+        # identifiable only by opaque id — and the one place that needed names
+        # (the /claims route) reached through the API boundary to call the
+        # PRIVATE `_names_for`. The one field that makes a claim intelligible
+        # to an operator was declared and left empty.
+        names = await self._names_for({r.circuit_id for r in rows})
+        return [
+            LayerClaim(
+                circuit_id=r.circuit_id,
+                layer=r.layer,
+                composed=bool(r.composed),
+                steering_keys=tuple(r.steering_keys or ()),
+                circuit_name=names.get(r.circuit_id),
+            )
+            for r in rows
+        ]
+
+    async def assess(
+        self,
+        circuit_id: str,
+        layers: set[int],
+        *,
+        steering_keys: Optional[dict[int, set[int]]] = None,
+    ) -> ContentionVerdict:
+        """Would claiming `layers` for `circuit_id` conflict with what is live?
+
+        SELF-EXCLUDING (EC-19.3): a circuit re-activating, or extending its own
+        claim set, does not contend with itself. Without this an idempotent
+        re-activation would refuse against its own incumbent claim, which is
+        both wrong and extremely confusing to debug.
+        """
+        live = [c for c in await self.live_claims() if c.circuit_id != circuit_id]
+        if not live:
+            return ContentionVerdict()
+
+        names = await self._names_for({c.circuit_id for c in live})
+
+        contended = sorted({c.layer for c in live if c.layer in layers})
+
+        incumbents: dict[str, tuple[Optional[str], tuple[int, ...]]] = {}
+        for claim in live:
+            if claim.layer not in layers:
+                continue
+            name, held = incumbents.get(
+                claim.circuit_id, (names.get(claim.circuit_id), ())
+            )
+            incumbents[claim.circuit_id] = (name, tuple(sorted(set(held) | {claim.layer})))
+
+        # Collisions are computed PER HOLDER, and independently of contention:
+        # a collision is still a collision on a layer the requester is being
+        # allowed to compose onto.
+        colliding: list[tuple[int, int, str]] = []
+        if steering_keys:
+            for claim in live:
+                wanted = steering_keys.get(claim.layer)
+                if not wanted:
+                    continue
+                for idx in sorted(wanted & set(claim.steering_keys)):
+                    colliding.append((claim.layer, int(idx), claim.circuit_id))
+
+        return ContentionVerdict(
+            contended_layers=tuple(contended),
+            incumbents=incumbents,
+            colliding_keys=tuple(colliding),
+        )
+
+    async def _names_for(self, circuit_ids: set[str]) -> dict[str, Optional[str]]:
+        if not circuit_ids:
+            return {}
+        from millm.db.models.circuit import Circuit
+
+        rows = (
+            await self._session.execute(
+                sa.select(Circuit.id, Circuit.name).where(Circuit.id.in_(circuit_ids))
+            )
+        ).all()
+        return {r[0]: r[1] for r in rows}
+
+    # ── Writes ─────────────────────────────────────────────────────────────
+
+    async def claim(
+        self,
+        circuit_id: str,
+        layers: set[int],
+        *,
+        composed: bool = False,
+        steering_keys: Optional[dict[int, set[int]]] = None,
+    ) -> list[int]:
+        """Take claims. Returns the layers claimed.
+
+        The `IntegrityError` catch is the RACE HANDLER (EC-19.7), not
+        defensive padding: `assess()` and this INSERT are a check-then-act
+        pair, and two concurrent activations can both pass `assess` before
+        either inserts. The partial unique index is what actually decides, and
+        the loser is converted into an ordinary contention refusal so it reads
+        identically to the sequential case.
+        """
+        keys = steering_keys or {}
+
+        # SAVEPOINT, not a bare flush. A plain `session.rollback()` in the
+        # handler below discards the WHOLE transaction — including the
+        # INCUMBENT's claim, which was already written in this session. The
+        # loser of a race would take the winner down with it and leave the
+        # layer held by nobody.
+        #
+        # Found by the race test: after the losing claim raised, the winner's
+        # claim had vanished and the assertion read `set() == {'cA'}`.
+        #
+        # The nested transaction scopes the rollback to THIS attempt, so a
+        # partial multi-layer claim also unwinds cleanly (a circuit claiming
+        # {10, 13} where only 13 is free must not leave 13 held by a circuit
+        # that never activated).
+        try:
+            async with self._session.begin_nested():
+                for layer in sorted(layers):
+                    self._session.add(
+                        CircuitLayerClaim(
+                            circuit_id=circuit_id,
+                            layer=int(layer),
+                            composed=composed,
+                            steering_keys=sorted(keys.get(layer, set())) or None,
+                        )
+                    )
+                await self._session.flush()
+        except IntegrityError as exc:
+            logger.warning(
+                "circuit_claim_race_lost",
+                circuit_id=circuit_id,
+                layers=sorted(layers),
+                detail=(
+                    "another activation claimed one of these layers between "
+                    "the assessment and the insert — the database index "
+                    "decided, as designed"
+                ),
+            )
+            from millm.core.errors import CircuitLayerContentionError
+
+            # F19 R1-14: NAME THE WINNER. This raised with `incumbent=None` and
+            # the FULL requested layer set, so a race loss reported "Layers
+            # [10, 13, 14] are already served by another active circuit" when
+            # only L13 actually collided and the winner is a named,
+            # discoverable circuit.
+            #
+            # The design requires a refusal to name the incumbent so the
+            # operator's next action is obvious; with None the dialog's
+            # "Deactivate '<incumbent>'" action disappears entirely (it is
+            # rendered only when `incumbent.id` is present), leaving the
+            # operator a refusal with no route out. Re-read the live claims
+            # after the rollback to find who actually won.
+            actual: tuple[int, ...] = tuple(sorted(layers))
+            winner_id: Optional[str] = None
+            winner_name: Optional[str] = None
+            extra_incumbents: list[dict[str, Any]] = []
+            try:
+                live = await self.live_claims()
+                held = {
+                    c.layer: c.circuit_id
+                    for c in live
+                    if c.circuit_id != circuit_id and c.layer in layers
+                }
+                if held:
+                    actual = tuple(sorted(held))
+                    # F19 R2-12: name EVERY incumbent, not just the holder of
+                    # the numerically lowest layer.
+                    #
+                    # With cC on L10 and cD on L13, only cC was named. The
+                    # operator deactivates cC, retries, and is refused AGAIN by
+                    # cD — with nothing in the first refusal hinting a second
+                    # incumbent existed. The remedy looked like it failed.
+                    #
+                    # `incumbent` stays singular for the dialog's
+                    # "Deactivate '<name>'" action (it can only offer one), but
+                    # `all_incumbents` carries the rest so the refusal is
+                    # complete.
+                    winner_id = held[actual[0]]
+                    all_names = await self._names_for(set(held.values()))
+                    winner_name = all_names.get(winner_id)
+                    extra_incumbents = [
+                        {"id": cid, "name": all_names.get(cid)}
+                        for cid in sorted(set(held.values()))
+                    ]
+            except Exception:
+                # Naming is a courtesy; the refusal itself must still happen.
+                logger.warning(
+                    "circuit_claim_race_winner_unidentified",
+                    circuit_id=circuit_id,
+                    exc_info=True,
+                )
+
+            raise CircuitLayerContentionError(
+                contended_layers=list(actual),
+                incumbent_id=winner_id,
+                incumbent_name=winner_name,
+                requested_id=circuit_id,
+                requested_name=None,
+                all_incumbents=extra_incumbents,
+                detail="lost a concurrent race for these layers",
+            ) from exc
+        return sorted(layers)
+
+    async def release(self, circuit_id: str) -> list[int]:
+        """Release THIS circuit's live claims. Returns the layers released.
+
+        Scoped to one circuit_id on purpose. A blanket release is the
+        highest-consequence defect available in this feature: a circuit the
+        operator never touched silently stops steering while its row still
+        reports active.
+        """
+        rows = (
+            await self._session.execute(
+                sa.select(CircuitLayerClaim).where(
+                    CircuitLayerClaim.circuit_id == circuit_id,
+                    CircuitLayerClaim.released_at.is_(None),
+                )
+            )
+        ).scalars().all()
+        now = datetime.now(timezone.utc)
+        released = []
+        for row in rows:
+            row.released_at = now
+            released.append(row.layer)
+        await self._session.flush()
+
+        # F19 R1-08: UN-FLIP `composed` on layers that are no longer shared.
+        #
+        # `mark_composed` flips every live row on a composed layer — correct,
+        # because the rung header must be suppressed for BOTH sides. But
+        # nothing ever cleared it, so when the composing circuit left, the
+        # incumbent's row stayed `composed=True` forever: a validated rung-2
+        # circuit serving alone, permanently badged composed in the UI and
+        # permanently stripped of its `X-miLLM-Circuit-Rung` disclosure because
+        # something once composed onto it.
+        #
+        # That under-claims rather than over-claims, so no honesty test would
+        # have caught it — it just quietly deletes a disclosure the feature
+        # exists to protect. It also leaves those rows outside the exclusive
+        # index, so a third circuit could claim the layer unopposed.
+        for layer in set(released):
+            survivors = (
+                await self._session.execute(
+                    sa.select(CircuitLayerClaim).where(
+                        CircuitLayerClaim.layer == layer,
+                        CircuitLayerClaim.released_at.is_(None),
+                    )
+                )
+            ).scalars().all()
+            if len(survivors) == 1:
+                survivors[0].composed = False
+        await self._session.flush()
+        return sorted(released)
+
+    async def mark_composed(self, circuit_id: str, layers: set[int]) -> None:
+        """Flip the requester's AND the incumbents' rows on `layers`.
+
+        Both sides must be marked. The exclusive partial index only tolerates
+        the co-tenancy if NEITHER row is exclusive, and — more importantly for
+        honesty — the rung header is suppressed for any circuit sitting on a
+        composed layer, which cannot be determined from the requester's rows
+        alone.
+        """
+        if not layers:
+            return
+        # F19 R1-19: mark ONLY layers this circuit actually shares.
+        #
+        # This updated every live claim on every layer passed in, with no
+        # circuit predicate and no check that the layer is genuinely shared.
+        # Composed rows are EXCLUDED from the partial unique index, so marking
+        # a row composed permanently removes its exclusivity protection — a
+        # circuit that never consented to composition could lose its exclusive
+        # hold and a third circuit could then claim its layer unopposed.
+        #
+        # The gate only ever passes contended layers today, so this was safe by
+        # the CALLER's discipline rather than by construction. Make it
+        # structural: a layer with one holder is not composed, whatever the
+        # caller asks.
+        # F19 R2-08: ONE query, not one per layer. The first version issued a
+        # SELECT per layer inside a loop on the ACTIVATION HOT PATH — a circuit
+        # composing onto 8 layers made 8 round-trips where 1 suffices. Counted
+        # in SQL instead.
+        counts = dict(
+            (
+                await self._session.execute(
+                    sa.select(
+                        CircuitLayerClaim.layer, sa.func.count()
+                    )
+                    .where(
+                        CircuitLayerClaim.layer.in_(sorted(layers)),
+                        CircuitLayerClaim.released_at.is_(None),
+                    )
+                    .group_by(CircuitLayerClaim.layer)
+                )
+            ).all()
+        )
+
+        shared: list[int] = []
+        for layer in sorted(layers):
+            if counts.get(layer, 0) > 1:
+                shared.append(layer)
+            else:
+                logger.warning(
+                    "circuit_mark_composed_skipped_unshared_layer",
+                    circuit_id=circuit_id,
+                    layer=layer,
+                    detail=(
+                        "only one circuit holds this layer, so marking it "
+                        "composed would strip its exclusivity protection for "
+                        "no reason"
+                    ),
+                )
+
+        if not shared:
+            return
+
+        await self._session.execute(
+            sa.update(CircuitLayerClaim)
+            .where(
+                CircuitLayerClaim.layer.in_(shared),
+                CircuitLayerClaim.released_at.is_(None),
+            )
+            .values(composed=True)
+        )
+        await self._session.flush()
+
+    async def reconcile(
+        self, *, allow_concurrent: bool, at_startup: bool = True
+    ) -> dict[str, Any]:
+        """Startup reconciliation.
+
+        F19 R2-18: `at_startup` is a REQUIRED acknowledgement, not a
+        convenience flag. This method demotes circuits in the DATABASE without
+        touching the in-memory owner map — safe at startup, where nothing is
+        attached and nothing is steering, and actively harmful at runtime,
+        where it would mark a circuit inactive while its SAEs keep steering it.
+        That is the "row inactive, model still steering" divergence F19 exists
+        to remove, produced by the very method meant to repair it.
+
+        The only guard was convention: the method is public and its docstring
+        said "runs UNCONDITIONALLY". A future caller reading that would have no
+        reason to hesitate. Calling it with `at_startup=False` now refuses
+        rather than silently doing the wrong thing.
+
+        Two jobs:
+
+        * Drop ORPHAN claims (EC-19.4) — claims whose circuit is no longer
+          active. A stale claim refuses activations forever for a circuit
+          nobody can deactivate, because deactivating an inactive circuit is a
+          no-op.
+        * With the flag FALSE, demote to a single active circuit (EC-19.5).
+          A database written while the flag was true must not keep serving two
+          circuits after an operator turns it off — the flag would be a lie.
+
+        Every demotion is logged. A silent demotion is indistinguishable from
+        the single-active disarm this feature exists to replace.
+        """
+        from millm.db.models.circuit import Circuit
+
+        if not at_startup:
+            raise RuntimeError(
+                "reconcile() demotes circuits without clearing their live "
+                "steering, so it is safe only at startup where nothing is "
+                "attached. Calling it at runtime would leave a circuit "
+                "inactive in the database while its SAEs keep steering — the "
+                "exact divergence this feature exists to remove. Deactivate "
+                "the circuit through CircuitService instead."
+            )
+
+        result: dict[str, Any] = {"orphans_released": [], "demoted": []}
+
+        live = await self.live_claims()
+        if live:
+            active_ids = set(
+                (
+                    await self._session.execute(
+                        sa.select(Circuit.id).where(Circuit.is_active.is_(True))
+                    )
+                ).scalars().all()
+            )
+            orphan_ids = {c.circuit_id for c in live} - active_ids
+            for circuit_id in sorted(orphan_ids):
+                layers = await self.release(circuit_id)
+                result["orphans_released"].append(
+                    {"circuit_id": circuit_id, "layers": layers}
+                )
+                logger.warning(
+                    "circuit_claim_orphan_released",
+                    circuit_id=circuit_id,
+                    layers=layers,
+                    detail=(
+                        "claims outlived their circuit's activation — they "
+                        "would have refused every future activation on these "
+                        "layers"
+                    ),
+                )
+
+        if not allow_concurrent:
+            actives = (
+                await self._session.execute(
+                    sa.select(Circuit.id, Circuit.name)
+                    .where(Circuit.is_active.is_(True))
+                    .order_by(Circuit.updated_at.desc(), Circuit.id.desc())
+                )
+            ).all()
+            for circuit_id, name in actives[1:]:
+                await self.release(circuit_id)
+                await self._session.execute(
+                    sa.update(Circuit)
+                    .where(Circuit.id == circuit_id)
+                    .values(is_active=False)
+                )
+                result["demoted"].append({"circuit_id": circuit_id, "name": name})
+                logger.warning(
+                    "circuit_demoted_by_flag",
+                    circuit_id=circuit_id,
+                    name=name,
+                    detail=(
+                        "CIRCUIT_ALLOW_CONCURRENT is false but this database "
+                        "had several active circuits — demoted all but the "
+                        "most recently updated"
+                    ),
+                )
+            if result["demoted"]:
+                await self._session.flush()
+
+        return result

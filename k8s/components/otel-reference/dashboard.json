@@ -1,0 +1,550 @@
+{
+  "uid": "millm-probes",
+  "title": "miLLM probes (reference)",
+  "tags": [
+    "millm",
+    "probes",
+    "otel"
+  ],
+  "description": "miLLM Feature 038 reference dashboard: coverage, crossings by decision revision, skips and failures by reason, export health and loss. Provisioned from k8s/components/otel-reference/dashboard.json; edit there, not in the UI.",
+  "editable": false,
+  "schemaVersion": 41,
+  "version": 1,
+  "time": {
+    "from": "now-6h",
+    "to": "now"
+  },
+  "refresh": "1m",
+  "timezone": "browser",
+  "panels": [
+    {
+      "type": "row",
+      "title": "Coverage — completed ÷ expected (metrics)",
+      "collapsed": false,
+      "id": 1,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 0
+      },
+      "panels": []
+    },
+    {
+      "id": 2,
+      "type": "timeseries",
+      "title": "Coverage by behaviour and probe",
+      "description": "Share of minted results (one per armed probe and window per request) that completed. Live and batch traffic; the stateless score route has its own counter. A probe that stops being evaluated shows a falling line, not a missing one.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 16,
+        "x": 0,
+        "y": 1
+      },
+      "targets": [
+        {
+          "expr": "sum by (behaviour, probe_id) (rate(millm_probe_evaluations_total{service_name=\"millm\", outcome=\"completed\"}[$__rate_interval]))\n/\nsum by (behaviour, probe_id) (rate(millm_probe_evaluations_expected_total{service_name=\"millm\"}[$__rate_interval]))",
+          "legendFormat": "{{behaviour}} / {{probe_id}}",
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          }
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percentunit"
+        },
+        "overrides": []
+      },
+      "options": {}
+    },
+    {
+      "id": 3,
+      "type": "piechart",
+      "title": "Results by outcome",
+      "description": "",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 8,
+        "x": 16,
+        "y": 1
+      },
+      "targets": [
+        {
+          "expr": "sum by (outcome) (increase(millm_probe_evaluations_total{service_name=\"millm\"}[$__range]))",
+          "legendFormat": "{{outcome}}",
+          "instant": true,
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          }
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {},
+        "overrides": []
+      },
+      "options": {}
+    },
+    {
+      "type": "row",
+      "title": "Threshold crossings by decision revision (result records)",
+      "collapsed": false,
+      "id": 4,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 9
+      },
+      "panels": []
+    },
+    {
+      "id": 5,
+      "type": "timeseries",
+      "title": "Crossings by behaviour and revision",
+      "description": "Revision is not a metric dimension (FR-38.18), so crossings by revision come from the mi.probe.result log records. A record carries no sampled flag; every recorded live or batch result is sent.",
+      "datasource": {
+        "type": "loki",
+        "uid": "loki"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 16,
+        "x": 0,
+        "y": 10
+      },
+      "targets": [
+        {
+          "expr": "sum by (mi_probe_behaviour_key, mi_probe_threshold_revision, mi_probe_decision_revision) (count_over_time({service_name=\"millm\"} | mi_probe_schema=\"mi.probe.result/v1\" | mi_probe_outcome=\"completed\" | mi_probe_verdict=\"true\" [$__auto]))",
+          "legendFormat": "{{mi_probe_behaviour_key}} thr r{{mi_probe_threshold_revision}} dec r{{mi_probe_decision_revision}}",
+          "refId": "A",
+          "datasource": {
+            "type": "loki",
+            "uid": "loki"
+          }
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {},
+        "overrides": []
+      },
+      "options": {}
+    },
+    {
+      "id": 6,
+      "type": "stat",
+      "title": "Crossings (counter, all revisions)",
+      "description": "",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 8,
+        "x": 16,
+        "y": 10
+      },
+      "targets": [
+        {
+          "expr": "sum(increase(millm_probe_threshold_crossings_total{service_name=\"millm\"}[$__range]))",
+          "instant": true,
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          }
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {},
+        "overrides": []
+      },
+      "options": {}
+    },
+    {
+      "type": "row",
+      "title": "Skips and failures by reason",
+      "collapsed": false,
+      "id": 7,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 18
+      },
+      "panels": []
+    },
+    {
+      "id": 8,
+      "type": "timeseries",
+      "title": "Not completed, by outcome and reason",
+      "description": "",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 19
+      },
+      "targets": [
+        {
+          "expr": "sum by (outcome, reason) (rate(millm_probe_evaluations_total{service_name=\"millm\", outcome=~\"skipped|failed|interrupted\"}[$__rate_interval]))",
+          "legendFormat": "{{outcome}}: {{reason}}",
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          }
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ops"
+        },
+        "overrides": []
+      },
+      "options": {}
+    },
+    {
+      "id": 9,
+      "type": "timeseries",
+      "title": "Stateless score route, by outcome and reason",
+      "description": "",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 19
+      },
+      "targets": [
+        {
+          "expr": "sum by (outcome, reason) (rate(millm_probe_stateless_evaluations_total{service_name=\"millm\"}[$__rate_interval]))",
+          "legendFormat": "{{outcome}}: {{reason}}",
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          }
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ops"
+        },
+        "overrides": []
+      },
+      "options": {}
+    },
+    {
+      "type": "row",
+      "title": "Evaluation cost and margin",
+      "collapsed": false,
+      "id": 10,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 27
+      },
+      "panels": []
+    },
+    {
+      "id": 11,
+      "type": "timeseries",
+      "title": "Evaluation duration p95 by probe",
+      "description": "",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 28
+      },
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.95, sum by (le, probe_id) (rate(millm_probe_evaluation_duration_milliseconds_bucket{service_name=\"millm\"}[$__rate_interval])))",
+          "legendFormat": "{{probe_id}}",
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          }
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ms"
+        },
+        "overrides": []
+      },
+      "options": {}
+    },
+    {
+      "id": 12,
+      "type": "timeseries",
+      "title": "Score margin (score − threshold) median by probe",
+      "description": "A native (exponential) histogram; negative values are below the threshold.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 28
+      },
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.5, sum by (probe_id) (rate(millm_probe_score_margin{service_name=\"millm\"}[$__rate_interval])))",
+          "legendFormat": "{{probe_id}}",
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          }
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {},
+        "overrides": []
+      },
+      "options": {}
+    },
+    {
+      "type": "row",
+      "title": "Export health and loss",
+      "collapsed": false,
+      "id": 13,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 36
+      },
+      "panels": []
+    },
+    {
+      "id": 14,
+      "type": "stat",
+      "title": "Results expected vs result records received",
+      "description": "Compare with the next panel: records received below expected means results were dropped, failed, filtered by TELEMETRY_RESULT_LOG_ORIGINS, or not yet sent. miLLM's own exported / failed / dropped counts are in GET /api/health/detailed.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 6,
+        "x": 0,
+        "y": 37
+      },
+      "targets": [
+        {
+          "expr": "sum(increase(millm_probe_evaluations_expected_total{service_name=\"millm\"}[$__range]))",
+          "legendFormat": "expected (counter)",
+          "instant": true,
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          }
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {},
+        "overrides": []
+      },
+      "options": {}
+    },
+    {
+      "id": 15,
+      "type": "stat",
+      "title": "Result records received",
+      "description": "",
+      "datasource": {
+        "type": "loki",
+        "uid": "loki"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 6,
+        "x": 6,
+        "y": 37
+      },
+      "targets": [
+        {
+          "expr": "sum(count_over_time({service_name=\"millm\"} | mi_probe_schema=\"mi.probe.result/v1\" | mi_probe_origin=~\"live|batch\" [$__range]))",
+          "instant": true,
+          "queryType": "instant",
+          "refId": "A",
+          "datasource": {
+            "type": "loki",
+            "uid": "loki"
+          }
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {},
+        "overrides": []
+      },
+      "options": {}
+    },
+    {
+      "id": 16,
+      "type": "stat",
+      "title": "Series folded into overflow",
+      "description": "Probe measurements folded into the overflow series (TELEMETRY_SERIES_CAP reached, or an identifier that was not armed).",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 6,
+        "x": 12,
+        "y": 37
+      },
+      "targets": [
+        {
+          "expr": "max(millm_probe_series_overflow_total{service_name=\"millm\"})",
+          "instant": true,
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          }
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {},
+        "overrides": []
+      },
+      "options": {}
+    },
+    {
+      "id": 17,
+      "type": "stat",
+      "title": "Collector: refused or failed records",
+      "description": "The reference Collector's own counters (memory_limiter refusals, failed sends to the backend). Empty means none happened.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 6,
+        "x": 18,
+        "y": 37
+      },
+      "targets": [
+        {
+          "expr": "sum(increase(otelcol_receiver_refused_log_records_total{service_name=\"otelcol\"}[$__range])) + sum(increase(otelcol_receiver_refused_spans_total{service_name=\"otelcol\"}[$__range])) + sum(increase(otelcol_receiver_refused_metric_points_total{service_name=\"otelcol\"}[$__range]))",
+          "instant": true,
+          "legendFormat": "refused",
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          }
+        },
+        {
+          "expr": "sum(increase(otelcol_exporter_send_failed_log_records_total{service_name=\"otelcol\"}[$__range])) + sum(increase(otelcol_exporter_send_failed_spans_total{service_name=\"otelcol\"}[$__range])) + sum(increase(otelcol_exporter_send_failed_metric_points_total{service_name=\"otelcol\"}[$__range]))",
+          "instant": true,
+          "legendFormat": "send failed",
+          "refId": "B",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          }
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {},
+        "overrides": []
+      },
+      "options": {}
+    },
+    {
+      "id": 18,
+      "type": "timeseries",
+      "title": "Collector: accepted per signal",
+      "description": "",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 24,
+        "x": 0,
+        "y": 45
+      },
+      "targets": [
+        {
+          "expr": "sum(rate(otelcol_receiver_accepted_spans_total{service_name=\"otelcol\"}[$__rate_interval]))",
+          "legendFormat": "spans",
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          }
+        },
+        {
+          "expr": "sum(rate(otelcol_receiver_accepted_metric_points_total{service_name=\"otelcol\"}[$__rate_interval]))",
+          "legendFormat": "metric points",
+          "refId": "B",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          }
+        },
+        {
+          "expr": "sum(rate(otelcol_receiver_accepted_log_records_total{service_name=\"otelcol\"}[$__rate_interval]))",
+          "legendFormat": "log records",
+          "refId": "C",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          }
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ops"
+        },
+        "overrides": []
+      },
+      "options": {}
+    }
+  ],
+  "templating": {
+    "list": []
+  },
+  "annotations": {
+    "list": []
+  }
+}

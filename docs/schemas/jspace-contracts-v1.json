@@ -1,0 +1,334 @@
+{
+  "$defs": {
+    "JLensArtifactDocument": {
+      "description": "Track A: the artifact a consumer MOUNTS (BR-022, PADR IDL-46).\n\nDescribes a directory rather than carrying weights. There is no ingestion\nAPI upstream \u2014 J-lens is compute-on-demand from a mounted artifact \u2014 so a\ndocument that embedded the tensors would be describing a transfer nobody\nperforms.",
+      "properties": {
+        "d_model": {
+          "exclusiveMinimum": 0,
+          "title": "D Model",
+          "type": "integer"
+        },
+        "kind": {
+          "const": "mistudio.jlens-artifact/v1",
+          "default": "mistudio.jlens-artifact/v1",
+          "title": "Kind",
+          "type": "string"
+        },
+        "layers": {
+          "items": {
+            "type": "integer"
+          },
+          "title": "Layers",
+          "type": "array"
+        },
+        "n_layers": {
+          "exclusiveMinimum": 0,
+          "title": "N Layers",
+          "type": "integer"
+        },
+        "n_vocab": {
+          "exclusiveMinimum": 0,
+          "title": "N Vocab",
+          "type": "integer"
+        },
+        "recipe": {
+          "$ref": "#/$defs/RecipeProvenance"
+        },
+        "size_bytes": {
+          "exclusiveMinimum": 0,
+          "title": "Size Bytes",
+          "type": "integer"
+        },
+        "slug": {
+          "title": "Slug",
+          "type": "string"
+        },
+        "validation": {
+          "additionalProperties": {
+            "type": "string"
+          },
+          "title": "Validation",
+          "type": "object"
+        }
+      },
+      "required": [
+        "slug",
+        "d_model",
+        "n_layers",
+        "n_vocab",
+        "layers",
+        "size_bytes",
+        "recipe"
+      ],
+      "title": "JLensArtifactDocument",
+      "type": "object"
+    },
+    "ReadoutRecordDocument": {
+      "description": "A position x layer readout, in the upstream wire format (PADR IDL-45).",
+      "properties": {
+        "evidence_rung": {
+          "default": 0,
+          "title": "Evidence Rung",
+          "type": "integer"
+        },
+        "kind": {
+          "const": "mistudio.jlens-readout/v1",
+          "default": "mistudio.jlens-readout/v1",
+          "title": "Kind",
+          "type": "string"
+        },
+        "meta": {
+          "additionalProperties": true,
+          "title": "Meta",
+          "type": "object"
+        },
+        "model": {
+          "title": "Model",
+          "type": "string"
+        },
+        "prompt": {
+          "title": "Prompt",
+          "type": "string"
+        },
+        "tokens": {
+          "items": {
+            "additionalProperties": true,
+            "type": "object"
+          },
+          "title": "Tokens",
+          "type": "array"
+        }
+      },
+      "required": [
+        "model",
+        "prompt",
+        "meta",
+        "tokens"
+      ],
+      "title": "ReadoutRecordDocument",
+      "type": "object"
+    },
+    "RecipeProvenance": {
+      "description": "How an artifact was built (BR-007), carried by every J-space kind.\n\nA document without its recipe cannot be rebuilt or compared, which makes it\nan assertion rather than a result.",
+      "properties": {
+        "aggregation": {
+          "default": "mean",
+          "title": "Aggregation",
+          "type": "string"
+        },
+        "attention_gradients": {
+          "default": "full",
+          "title": "Attention Gradients",
+          "type": "string"
+        },
+        "corpus": {
+          "title": "Corpus",
+          "type": "string"
+        },
+        "dtype": {
+          "default": "fp16",
+          "title": "Dtype",
+          "type": "string"
+        },
+        "library_versions": {
+          "additionalProperties": {
+            "type": "string"
+          },
+          "title": "Library Versions",
+          "type": "object"
+        },
+        "model_id": {
+          "title": "Model Id",
+          "type": "string"
+        },
+        "n_prompts": {
+          "minimum": 0,
+          "title": "N Prompts",
+          "type": "integer"
+        },
+        "per_layer_applicability": {
+          "items": {
+            "additionalProperties": true,
+            "type": "object"
+          },
+          "title": "Per Layer Applicability",
+          "type": "array"
+        },
+        "seq_len": {
+          "exclusiveMinimum": 0,
+          "title": "Seq Len",
+          "type": "integer"
+        },
+        "target_layer": {
+          "default": "penultimate",
+          "title": "Target Layer",
+          "type": "string"
+        }
+      },
+      "required": [
+        "model_id",
+        "corpus",
+        "n_prompts",
+        "seq_len"
+      ],
+      "title": "RecipeProvenance",
+      "type": "object"
+    },
+    "TemplateLensSpec": {
+      "description": "Multi-token concepts (BR-023). FIELDS DAY-ONE, compute optional.\n\nThe compute path may be a fast-follow; the fields are not. Adding a field to\na shipped kind later is precisely the change BR-021 forbids, so they exist\nnow and are ABSENT when the path has not run \u2014 which is different from zero\nand different from unsupported.",
+      "properties": {
+        "baseline_set": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Baseline Set"
+        },
+        "direction_available": {
+          "anyOf": [
+            {
+              "type": "boolean"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Direction Available"
+        },
+        "n_contexts": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "N Contexts"
+        },
+        "phrase": {
+          "title": "Phrase",
+          "type": "string"
+        },
+        "whitening": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Whitening"
+        }
+      },
+      "required": [
+        "phrase"
+      ],
+      "title": "TemplateLensSpec",
+      "type": "object"
+    },
+    "WatchlistDocument": {
+      "description": "A named concept set for per-token evaluation at inference (BR-025).",
+      "properties": {
+        "concepts": {
+          "items": {
+            "additionalProperties": true,
+            "type": "object"
+          },
+          "title": "Concepts",
+          "type": "array"
+        },
+        "kind": {
+          "const": "mistudio.jspace-watchlist/v1",
+          "default": "mistudio.jspace-watchlist/v1",
+          "title": "Kind",
+          "type": "string"
+        },
+        "name": {
+          "title": "Name",
+          "type": "string"
+        },
+        "recipe": {
+          "$ref": "#/$defs/RecipeProvenance"
+        },
+        "scoring_definition": {
+          "title": "Scoring Definition",
+          "type": "string"
+        },
+        "templates": {
+          "items": {
+            "$ref": "#/$defs/TemplateLensSpec"
+          },
+          "title": "Templates",
+          "type": "array"
+        }
+      },
+      "required": [
+        "name",
+        "recipe",
+        "scoring_definition"
+      ],
+      "title": "WatchlistDocument",
+      "type": "object"
+    },
+    "WorkspaceAnnotationDocument": {
+      "description": "Track B: per-feature annotation, exported via the EXISTING upload path.",
+      "properties": {
+        "features": {
+          "items": {
+            "additionalProperties": true,
+            "type": "object"
+          },
+          "title": "Features",
+          "type": "array"
+        },
+        "kind": {
+          "const": "mistudio.workspace-annotation/v1",
+          "default": "mistudio.workspace-annotation/v1",
+          "title": "Kind",
+          "type": "string"
+        },
+        "recipe": {
+          "$ref": "#/$defs/RecipeProvenance"
+        },
+        "sae_id": {
+          "title": "Sae Id",
+          "type": "string"
+        }
+      },
+      "required": [
+        "sae_id",
+        "recipe"
+      ],
+      "title": "WorkspaceAnnotationDocument",
+      "type": "object"
+    }
+  },
+  "$id": "https://raw.githubusercontent.com/hitsainet/miStudio/main/docs/schemas/jspace-contracts-v1.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "description": "The four J-space kinds (BR-021/BR-022): jlens-artifact/v1 (Track A, describes a mounted directory, no weights), workspace-annotation/v1 (Track B), jlens-readout/v1 and jspace-watchlist/v1. The version lives in each `kind` identifier: a consumer must REJECT an unknown kind rather than read a newer version as this one. Generated from src/schemas/jspace_contracts.py.",
+  "oneOf": [
+    {
+      "$ref": "#/$defs/JLensArtifactDocument"
+    },
+    {
+      "$ref": "#/$defs/WorkspaceAnnotationDocument"
+    },
+    {
+      "$ref": "#/$defs/ReadoutRecordDocument"
+    },
+    {
+      "$ref": "#/$defs/WatchlistDocument"
+    }
+  ],
+  "title": "miStudio J-space interchange kinds v1"
+}

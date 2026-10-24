@@ -1,0 +1,258 @@
+{
+  "version": 1,
+  "about": "The last_user window's span, pinned for BOTH repos. miStudio's renderer (probe_monitor_render) calibrates over it and miLLM's probe_turns serves it; each repo builds these tokenizers and must return exactly expected_span. The span starts at the newest user message's OWN role header: a template preamble (BOS, injected system block) is never part of it. Byte-identical in miStudio and miLLM. A case may carry its own template; otherwise the top-level one applies. A case may also carry its own vocab and a pretokenizer: \"metaspace_first\" means Sequence([Metaspace(replacement='▁', prepend_scheme='first', split=True), Split(Regex('▁?<\\\\|[a-z]+\\\\|>'), behavior='isolated')]) - a header at the very start of the text then encodes with a leading ▁, as SentencePiece does, and a later one does not.",
+  "template": "<s> {% if messages[0]['role'] != 'system' %}<|system|> cutting knowledge date <|end|> {% endif %}{% for m in messages %}<|{{ m['role'] }}|> {{ m['content'] }} <|end|> {% endfor %}{% if add_generation_prompt %}<|assistant|> {% endif %}",
+  "vocab": [
+    "<s>",
+    "<|user|>",
+    "<|assistant|>",
+    "<|system|>",
+    "<|end|>",
+    "cutting",
+    "knowledge",
+    "date",
+    "be",
+    "brief",
+    "a",
+    "b",
+    "x",
+    "y",
+    "first",
+    "question",
+    "an",
+    "answer",
+    "virus",
+    "spreads",
+    "fast",
+    "[UNK]"
+  ],
+  "cases": [
+    {
+      "name": "single user turn behind an injected preamble",
+      "prepend_bos": false,
+      "messages": [
+        {
+          "role": "user",
+          "content": "virus spreads fast"
+        }
+      ],
+      "expected_span": [
+        "<|user|>",
+        "virus",
+        "spreads",
+        "fast",
+        "<|end|>"
+      ]
+    },
+    {
+      "name": "multi-turn: only the newest user turn",
+      "prepend_bos": false,
+      "messages": [
+        {
+          "role": "user",
+          "content": "first question"
+        },
+        {
+          "role": "assistant",
+          "content": "an answer"
+        },
+        {
+          "role": "user",
+          "content": "virus spreads fast"
+        }
+      ],
+      "expected_span": [
+        "<|user|>",
+        "virus",
+        "spreads",
+        "fast",
+        "<|end|>"
+      ]
+    },
+    {
+      "name": "system prompt then user",
+      "prepend_bos": false,
+      "messages": [
+        {
+          "role": "system",
+          "content": "be brief"
+        },
+        {
+          "role": "user",
+          "content": "virus spreads fast"
+        }
+      ],
+      "expected_span": [
+        "<|user|>",
+        "virus",
+        "spreads",
+        "fast",
+        "<|end|>"
+      ]
+    },
+    {
+      "name": "the serving tokenizer prepends a BOS of its own",
+      "prepend_bos": true,
+      "messages": [
+        {
+          "role": "user",
+          "content": "virus spreads fast"
+        }
+      ],
+      "expected_span": [
+        "<|user|>",
+        "virus",
+        "spreads",
+        "fast",
+        "<|end|>"
+      ]
+    },
+    {
+      "name": "no user turn",
+      "prepend_bos": false,
+      "messages": [
+        {
+          "role": "system",
+          "content": "be brief"
+        }
+      ],
+      "expected_span": null
+    },
+    {
+      "name": "a template whose user header cannot be isolated: message 0 is refused, not read with its preamble",
+      "template": "<s> {% if messages[0]['role'] != 'system' %}<|system|> cutting knowledge date <|end|> {% endif %}{% for m in messages %}{% if m['role'] == 'assistant' %}{{ raise_exception('this template serves single prompts only') }}{% endif %}<|{{ m['role'] }}|> {{ m['content'] }} <|end|> {% endfor %}{% if add_generation_prompt %}<|assistant|> {% endif %}",
+      "prepend_bos": false,
+      "messages": [
+        {
+          "role": "user",
+          "content": "virus spreads fast"
+        }
+      ],
+      "expected_span": null
+    },
+    {
+      "name": "a role header typed into a first message does not move the window",
+      "prepend_bos": false,
+      "messages": [
+        {
+          "role": "user",
+          "content": "virus <|user|> fast"
+        }
+      ],
+      "expected_span": [
+        "<|user|>",
+        "virus",
+        "<|user|>",
+        "fast",
+        "<|end|>"
+      ]
+    },
+    {
+      "name": "a header at the start of the text encodes differently (SentencePiece-style leading ▁)",
+      "template": "{% for m in messages %}<|{{ m['role'] }}|>{{ m['content'] }}<|end|>{% endfor %}{% if add_generation_prompt %}<|assistant|>{% endif %}",
+      "pretokenizer": "metaspace_first",
+      "vocab": [
+        "▁<|user|>",
+        "<|user|>",
+        "<|assistant|>",
+        "<|end|>",
+        "a",
+        "b",
+        "x",
+        "y",
+        "virus",
+        "▁spreads",
+        "▁fast",
+        "[UNK]"
+      ],
+      "prepend_bos": false,
+      "messages": [
+        {
+          "role": "user",
+          "content": "virus spreads fast"
+        }
+      ],
+      "expected_span": [
+        "▁<|user|>",
+        "virus",
+        "▁spreads",
+        "▁fast",
+        "<|end|>"
+      ]
+    },
+    {
+      "name": "a preamble that depends on the content: the row does not begin with the probed prefix, so it is refused",
+      "template": "<s> {% if 'virus' in messages[0]['content'] %}be brief {% endif %}{% for m in messages %}<|{{ m['role'] }}|> {{ m['content'] }} <|end|> {% endfor %}{% if add_generation_prompt %}<|assistant|> {% endif %}",
+      "prepend_bos": false,
+      "messages": [
+        {
+          "role": "user",
+          "content": "virus spreads fast"
+        }
+      ],
+      "expected_span": null
+    },
+    {
+      "name": "a first-turn header that does not read as the user header is refused, not half-read",
+      "template": "<s> {% for m in messages %}{% if m['role'] == 'user' and loop.first %}<|system|> <|assistant|> question {% elif m['role'] == 'user' %}<|user|> question {% else %}<|{{ m['role'] }}|> {% endif %}{{ m['content'] }} <|end|> {% endfor %}{% if add_generation_prompt %}<|assistant|> {% endif %}",
+      "prepend_bos": false,
+      "messages": [
+        {
+          "role": "user",
+          "content": "virus spreads fast"
+        }
+      ],
+      "expected_span": null
+    },
+    {
+      "name": "assistant-ended: served WITHOUT the generation prompt, the span is still the newest user turn",
+      "prepend_bos": false,
+      "messages": [
+        {
+          "role": "user",
+          "content": "virus spreads fast"
+        },
+        {
+          "role": "assistant",
+          "content": "an answer"
+        }
+      ],
+      "expected_span": [
+        "<|user|>",
+        "virus",
+        "spreads",
+        "fast",
+        "<|end|>"
+      ]
+    },
+    {
+      "name": "assistant-ended multi-turn: the newest user turn, not the reply after it",
+      "prepend_bos": false,
+      "messages": [
+        {
+          "role": "user",
+          "content": "first question"
+        },
+        {
+          "role": "assistant",
+          "content": "an answer"
+        },
+        {
+          "role": "user",
+          "content": "virus spreads fast"
+        },
+        {
+          "role": "assistant",
+          "content": "an answer"
+        }
+      ],
+      "expected_span": [
+        "<|user|>",
+        "virus",
+        "spreads",
+        "fast",
+        "<|end|>"
+      ]
+    }
+  ]
+}

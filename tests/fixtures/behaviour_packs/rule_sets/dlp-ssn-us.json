@@ -1,0 +1,218 @@
+{
+  "behaviour_key": "dlp-ssn-us",
+  "cases": [
+    {
+      "expect": {
+        "outputs": {
+          "ssn_cued": true,
+          "ssn_hit": true,
+          "ssn_reason": "ok"
+        },
+        "vetoed": false
+      },
+      "id": "cued_valid",
+      "input": {
+        "text": "Social security: 078-05-1120."
+      },
+      "note": "the voided wallet-card number, cued",
+      "source": {
+        "citation": "Social Security Administration history page 'Social Security Numbers: Misused SSNs' (ssa.gov/history/ssn/misused.html): 078-05-1120, the voided wallet-card number; retrieval refused HTTP 403 on 2026-10-23, pending (OI-1)",
+        "kind": "published_test_value"
+      }
+    },
+    {
+      "expect": {
+        "outputs": {
+          "ssn_cued": false,
+          "ssn_hit": true,
+          "ssn_reason": "ok"
+        },
+        "vetoed": false
+      },
+      "id": "uncued_valid",
+      "input": {
+        "text": "Reference 078-05-1120 was printed on the sample card."
+      },
+      "note": "valid, no cue word before it",
+      "source": {
+        "citation": "Social Security Administration history page 'Social Security Numbers: Misused SSNs' (ssa.gov/history/ssn/misused.html): 078-05-1120, the voided wallet-card number; retrieval refused HTTP 403 on 2026-10-23, pending (OI-1)",
+        "kind": "published_test_value"
+      }
+    },
+    {
+      "expect": {
+        "outputs": {
+          "ssn_cued": false,
+          "ssn_hit": false,
+          "ssn_reason": "bad_range"
+        },
+        "vetoed": false
+      },
+      "id": "bad_range",
+      "input": {
+        "text": "Taxpayer 923-45-6789 listed."
+      },
+      "note": "area 9xx is never issued: no hit",
+      "source": {
+        "kind": "constructed"
+      }
+    },
+    {
+      "expect": {
+        "outputs": {
+          "ssn_cued": false,
+          "ssn_hit": false,
+          "ssn_reason": null
+        },
+        "vetoed": true
+      },
+      "id": "masked_vetoed",
+      "input": {
+        "text": "SSN XXX-XX-1120 on record."
+      },
+      "note": "the masked candidate is vetoed",
+      "source": {
+        "kind": "constructed"
+      }
+    },
+    {
+      "expect": {
+        "outputs": {
+          "ssn_cued": true,
+          "ssn_hit": true,
+          "ssn_reason": "ok"
+        },
+        "vetoed": true
+      },
+      "id": "masked_plus_real",
+      "input": {
+        "text": "SSN XXX-XX-1120, then SSN 078-05-1120."
+      },
+      "note": "masked one vetoed, the real one still fires",
+      "source": {
+        "citation": "Social Security Administration history page 'Social Security Numbers: Misused SSNs' (ssa.gov/history/ssn/misused.html): 078-05-1120, the voided wallet-card number; retrieval refused HTTP 403 on 2026-10-23, pending (OI-1)",
+        "kind": "published_test_value"
+      }
+    },
+    {
+      "expect": {
+        "outputs": {
+          "ssn_cued": false,
+          "ssn_hit": false,
+          "ssn_reason": null
+        },
+        "vetoed": false
+      },
+      "id": "no_number",
+      "input": {
+        "text": "No number in this sentence."
+      },
+      "note": "nothing to read",
+      "source": {
+        "kind": "constructed"
+      }
+    }
+  ],
+  "description": "Pilot: a US Social Security number that checks out under the issuance rules, cued by a nearby word; masked values vetoed per candidate.",
+  "expressions": {
+    "cued": {
+      "signal": "cue"
+    },
+    "is_masked": {
+      "signal": "masked"
+    },
+    "valid_ssn": {
+      "signal": "ssn"
+    }
+  },
+  "format": "midataworks.rule-set/v1",
+  "name": "dlp-ssn-us-elements",
+  "outputs": [
+    {
+      "column": "ssn_hit",
+      "type": "bool",
+      "value": {
+        "fired": "valid_ssn"
+      }
+    },
+    {
+      "column": "ssn_cued",
+      "type": "bool",
+      "value": {
+        "fired": "cued"
+      }
+    },
+    {
+      "column": "ssn_reason",
+      "type": "string",
+      "value": {
+        "field": [
+          "ssn",
+          "reason"
+        ]
+      }
+    }
+  ],
+  "signals": [
+    {
+      "fold_fullwidth_ascii": false,
+      "id": "num",
+      "ignore_case": false,
+      "kind": "pattern",
+      "pattern": "\\b[0-9X]{3}[- ][0-9X]{2}[- ][0-9]{4}\\b",
+      "reads": "text"
+    },
+    {
+      "candidates": {
+        "span_of": "num"
+      },
+      "id": "masked",
+      "kind": "validator",
+      "params": {
+        "format": "ssn_us"
+      },
+      "validator": {
+        "id": "masked",
+        "version": 1
+      }
+    },
+    {
+      "candidates": {
+        "span_of": "num"
+      },
+      "id": "ssn",
+      "kind": "validator",
+      "params": {},
+      "validator": {
+        "id": "ssn_us",
+        "version": 1
+      }
+    },
+    {
+      "anchor": "ssn",
+      "fold_fullwidth_ascii": false,
+      "id": "cue",
+      "ignore_case": true,
+      "kind": "proximity",
+      "max_distance": 24,
+      "phrases": [
+        "social security",
+        "ssn",
+        "taxpayer"
+      ],
+      "side": "before",
+      "unit": "code_points",
+      "word_boundary": true
+    }
+  ],
+  "vetoes": [
+    {
+      "id": "masked_value",
+      "removes": [
+        "num",
+        "ssn"
+      ],
+      "when": "is_masked"
+    }
+  ]
+}

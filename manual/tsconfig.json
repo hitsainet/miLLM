@@ -1,0 +1,12 @@
+{
+  "extends": "@docusaurus/tsconfig",
+  "compilerOptions": {
+    // TypeScript 7 removed `baseUrl` (TS5102), and @docusaurus/tsconfig 3.10.2 still sets it:
+    // null clears the inherited value. `paths` is restated relative to this file, which is what
+    // the preset's `"@site/*": ["./*"]` meant with baseUrl ".".
+    "baseUrl": null,
+    "paths": {
+      "@site/*": ["./*"]
+    }
+  }
+}

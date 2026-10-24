@@ -1,0 +1,43 @@
+name: Create GitHub Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+# Least privilege for every job (CodeQL actions/missing-workflow-permissions, mirror alert 7,
+# 2026-10-17): the default GITHUB_TOKEN may be read-write. Jobs that need more grant it
+# themselves below; a job that declares nothing gets read-only contents.
+permissions:
+  contents: read
+
+jobs:
+  release:
+    # HARD STOP: only run in hitsainet/millm (public repo)
+    if: github.repository == 'hitsainet/millm'
+
+    runs-on: ubuntu-latest
+
+    permissions:
+      contents: write
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          generate_release_notes: true
+          make_latest: true
+          body: |
+            ## Docker Images
+
+            ```
+            docker pull hitsai/millm-backend:${{ github.ref_name }}
+            docker pull hitsai/millm-admin-ui:${{ github.ref_name }}
+            ```
+
+            ## Changelog

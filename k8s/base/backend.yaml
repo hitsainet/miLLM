@@ -1,0 +1,218 @@
+# miLLM backend — GPU inference server.
+# The image tag/digest is managed by ArgoCD Image Updater (kustomize images
+# transform + .argocd-source-millm.yaml pin file); do not hand-edit tags here.
+#
+# DATABASE_URL comes from the `millm-secrets` Secret (see postgres.yaml header).
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: millm-backend
+  namespace: millm
+spec:
+  replicas: 1
+  # Recreate: the old pod must release VRAM before the new one loads the model.
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: millm-backend
+  template:
+    metadata:
+      labels:
+        app: millm-backend
+    spec:
+      # Pin to the GPU node. Moved from mcs-lnxgpu01 to mcs-lnxhost02 on
+      # 2026-09-13 with the RTX 3090 and started fresh.
+      nodeSelector:
+        kubernetes.io/hostname: mcs-lnxhost02
+      # Cluster nodes cannot resolve the .local ingress hostname via DNS.
+      hostAliases:
+        - ip: "192.168.244.52"
+          hostnames:
+            - "k8s-millm.hitsai.local"
+      initContainers:
+        - name: fix-permissions
+          image: busybox:latest
+          command: ["sh", "-c", "mkdir -p /data/model_cache /data/sae_cache /data/hf_cache /data/batch_files /data/checkpoints && chown -R 1000:1000 /data"]
+          volumeMounts:
+            - name: millm-data
+              mountPath: /data
+      containers:
+        - name: backend
+          image: hitsai/millm-backend:latest
+          imagePullPolicy: Always
+          ports:
+            - containerPort: 8000
+          env:
+            - name: DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: millm-secrets
+                  key: DATABASE_URL
+            # Features 31-33: bearer-token digests for the gated /api/weights routes. OPTIONAL:
+            # with the key absent the pod still starts (a required secretKeyRef would block it
+            # with CreateContainerConfigError) and every gated call is refused, failing closed.
+            - name: WEIGHTS_TOKENS
+              valueFrom:
+                secretKeyRef:
+                  name: millm-secrets
+                  key: WEIGHTS_TOKENS
+                  optional: true
+            # Server-wide HuggingFace token for gated/private models and SAEs (configuration.md).
+            # OPTIONAL, like WEIGHTS_TOKENS: absent → anonymous Hub access, the pod still starts.
+            # A per-request `hf_token` and a token saved on the Settings page both outrank it.
+            # Set it without putting the value in git:
+            #   kubectl -n millm patch secret millm-secrets --type merge -p '{"stringData":{"HF_TOKEN":"<token>"}}'
+            - name: HF_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: millm-secrets
+                  key: HF_TOKEN
+                  optional: true
+            # Feature 34: the key that encrypts the Hugging Face token saved on the Settings page.
+            # OPTIONAL: absent → the pod starts, and saving a token is refused (never stored in
+            # plaintext). Create it once, keep it (a saved token is unreadable without it):
+            #   KEY=$(openssl rand -base64 32)
+            #   kubectl -n millm patch secret millm-secrets --type merge -p "{\"stringData\":{\"SETTINGS_ENCRYPTION_KEY\":\"$KEY\"}}"
+            - name: SETTINGS_ENCRYPTION_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: millm-secrets
+                  key: SETTINGS_ENCRYPTION_KEY
+                  optional: true
+            - name: MODEL_CACHE_DIR
+              value: "/data/model_cache"
+            - name: SAE_CACHE_DIR
+              value: "/data/sae_cache"
+            # Feature 26: batch file bytes on the data volume, so they survive a pod restart.
+            - name: BATCH_FILES_DIR
+              value: "/data/batch_files"
+            - name: HF_HOME
+              value: "/data/hf_cache"
+            # Feature 32: checkpoints miLLM saves (and loads), on the data volume so they survive a
+            # pod restart. Adapters (Feature 33) are loaded from under the checkpoint roots too.
+            - name: WEIGHTS_CHECKPOINT_DIR
+              value: "/data/checkpoints"
+            # Further checkpoint roots, READ ONLY (addendum D-21): miForge's own checkpoint volume.
+            - name: WEIGHTS_CHECKPOINT_READ_ROOTS
+              value: "/mnt/miforge-checkpoints"
+            - name: CORS_ORIGINS
+              value: "https://millm.hitsai.net,http://k8s-millm.hitsai.local,http://k8s-millm.hitsai.net,http://localhost:3000"
+            - name: LOG_LEVEL
+              value: "INFO"
+            - name: LOG_FORMAT
+              value: "json"
+            - name: DEBUG
+              value: "false"
+            - name: TORCH_COMPILE
+              # OFF until the image carrying the compile-safety code is LIVE.
+              #
+              # SEQUENCING, learned the hard way: the manifest and the image
+              # deploy on DIFFERENT timelines. A gitops sync lands in seconds;
+              # the image takes ~12 minutes to build. Enabling this in the same
+              # commit as the code that makes it safe ran the OLD code with the
+              # flag on — which is exactly the outage combination. Re-enable in
+              # a SEPARATE commit, after confirming the running image contains
+              # the soak and the revert-to-eager.
+              #
+              # WHY IT NEEDS THAT CODE: model_loader used to compile with
+              # mode="reduce-overhead", which enables CUDA Graphs. Compilation
+              # and warmup both succeeded, then every subsequent request died
+              # with "accessing tensor output of CUDAGraphs that has been
+              # overwritten by a subsequent run". The fault only shows on the
+              # SECOND cached generate, so nothing at startup revealed it.
+              # The fix is three parts: mode="default", a multi-pass soak
+              # through cached generate() that reads its output, and a revert
+              # to the uncompiled forward when that soak fails.
+              #
+              # ALSO: this is silently skipped under bitsandbytes quantization
+              # (model_loader guards it separately), so it only ever takes
+              # effect on fp16/bf16 loads — it was a no-op the whole time
+              # granite ran in Q4.
+              value: "false"
+            # DISABLED 2026-07-27 after measuring it on hardware. It was
+            # enabled on a prediction; the measurement did not support it.
+            #
+            # Once actually running (the manager had never started before —
+            # see the signature fix), on an idle box, fp16 granite-4.1-8b:
+            #
+            #   single-stream    30.6 tok/s   vs 33.8 serial  (-9.5%)
+            #   concurrency 2-4  RuntimeError: Generation timed out after 300s
+            #   after a timeout  EVERY request fails instantly — the manager
+            #                    wedges and does not recover
+            #
+            # So it costs throughput on the common case, fails the case it
+            # exists for, and turns a slow request into a total outage. The
+            # serial queue is slower in theory and correct in practice.
+            #
+            # The integration itself is now sound (adaptive signature, sampling
+            # aligned to temperature 0). What is not sound is transformers
+            # 5.14.1's ContinuousBatchingManager under concurrent load on this
+            # hardware. Re-enabling needs that timeout root-caused first, and a
+            # concurrency soak before it goes anywhere near production.
+            - name: ENABLE_CONTINUOUS_BATCHING
+              value: "false"
+            # EVERY GPU ON THE NODE, NOT ONE.
+            #
+            # This container used to request `nvidia.com/gpu: 1`, which makes the
+            # device plugin hand it exactly one card by UUID. When mcs-lnxhost02
+            # gained a second GPU (RTX 3080 Ti beside the 3090, 2026-09-13) miLLM
+            # saw only the 3080 Ti. Visibility now comes from the node's default
+            # nvidia runtime; the nodeSelector keeps the pod on the GPU node.
+            - name: NVIDIA_VISIBLE_DEVICES
+              value: all
+            - name: NVIDIA_DRIVER_CAPABILITIES
+              value: compute,utility
+            # cuda:N must be the card nvidia-smi calls N. CUDA's default order is
+            # FASTEST_FIRST, which can disagree with NVML's PCI-bus numbering.
+            - name: CUDA_DEVICE_ORDER
+              value: PCI_BUS_ID
+            # AUTO_LOAD_MODEL is deliberately UNSET.
+            #
+            # It existed because the OpenAI endpoints refused any model that was
+            # not already loaded, so a restart left inference dead until someone
+            # loaded one by hand. Pinning a model here papered over that: the pod
+            # came back serving granite-4.1-8b regardless of what the operator
+            # actually wanted, and selecting anything else in a client did
+            # nothing.
+            #
+            # The endpoints now load on demand (load_model_and_wait, which had
+            # been written for this and never called), so the first request
+            # brings up the model it names. That is strictly better than a fixed
+            # default: no wrong model resident, no 12 GB of VRAM held by
+            # something nobody asked for, and client-side model selection works.
+            #
+            # Set it only if you want a specific model warm before first request.
+          volumeMounts:
+            - name: millm-data
+              mountPath: /data
+            # miForge's checkpoints, mounted read-only (see WEIGHTS_CHECKPOINT_READ_ROOTS above).
+            # miLLM never writes there.
+            - name: miforge-checkpoints
+              mountPath: /mnt/miforge-checkpoints
+              readOnly: true
+      volumes:
+        - name: millm-data
+          hostPath:
+            path: /data/millm/data
+            type: DirectoryOrCreate
+        # miForge's checkpoints. Its claim `miforge-checkpoints` lives in the `miforge` namespace and
+        # cannot be mounted from here, so mount the node path its local PersistentVolume
+        # (`miforge-checkpoints-pv`, Retain) is backed by. Read-only on the mount; DirectoryOrCreate so
+        # miLLM still starts if miForge is not installed (an empty root lists nothing).
+        - name: miforge-checkpoints
+          hostPath:
+            path: /data/miforge/checkpoints
+            type: DirectoryOrCreate
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: millm-backend
+  namespace: millm
+spec:
+  selector:
+    app: millm-backend
+  ports:
+    - port: 8000
+      targetPort: 8000

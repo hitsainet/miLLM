@@ -1,0 +1,101 @@
+import { useEffect } from 'react';
+import { BrowserRouter, Routes, Route, Navigate } from 'react-router-dom';
+import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
+import { Layout } from '@components/layout';
+import ErrorBoundary from '@components/common/ErrorBoundary';
+import {
+  DashboardPage,
+  ModelsPage,
+  SAEPage,
+  SteeringPage,
+  MonitoringPage,
+  ProbeMonitorsPage,
+  SessionsPage,
+  ProfilesPage,
+  ClustersPage,
+  CircuitsPage,
+  SettingsPage,
+  HelpPage,
+} from '@pages/index';
+import { useUIStore } from '@stores/uiStore';
+import { socketClient } from '@services/socket';
+
+// Create React Query client with defaults
+const queryClient = new QueryClient({
+  defaultOptions: {
+    queries: {
+      staleTime: 10 * 1000, // 10 seconds
+      retry: 2,
+      refetchOnWindowFocus: false,
+    },
+    mutations: {
+      retry: 1,
+    },
+  },
+});
+
+function AppContent() {
+  const { theme } = useUIStore();
+
+  // Apply theme to document
+  useEffect(() => {
+    document.documentElement.classList.remove('light', 'dark');
+    document.documentElement.classList.add(theme);
+  }, [theme]);
+
+  // Connect WebSocket on mount
+  useEffect(() => {
+    socketClient.connect();
+
+    return () => {
+      socketClient.disconnect();
+    };
+  }, []);
+
+  return (
+    <BrowserRouter>
+      <Routes>
+        <Route element={<Layout />}>
+          <Route index element={<Navigate to="/dashboard" replace />} />
+          <Route path="/dashboard" element={<DashboardPage />} />
+          <Route path="/models" element={<ModelsPage />} />
+          <Route path="/sae" element={<SAEPage />} />
+          <Route path="/steering" element={<SteeringPage />} />
+          <Route path="/monitoring" element={<MonitoringPage />} />
+          <Route path="/probe-monitors" element={<ProbeMonitorsPage />} />
+          {/* Feature 36: each monitored conversation as a timeline of behaviours. */}
+          <Route path="/sessions" element={<SessionsPage />} />
+          <Route path="/profiles" element={<ProfilesPage />} />
+          <Route path="/clusters" element={<ClustersPage />} />
+          <Route path="/circuits" element={<CircuitsPage />} />
+          <Route path="/settings" element={<SettingsPage />} />
+          {/* ENH-004: Help, and one topic of it at a linkable address. */}
+          <Route path="/help" element={<HelpPage />} />
+          <Route path="/help/:topic" element={<HelpPage />} />
+          <Route path="*" element={<Navigate to="/dashboard" replace />} />
+        </Route>
+      </Routes>
+    </BrowserRouter>
+  );
+}
+
+/**
+ * Root application component.
+ *
+ * Wraps the application with:
+ * - ErrorBoundary for catching and displaying errors
+ * - QueryClientProvider for React Query data fetching
+ *
+ * @returns The root application component
+ */
+function App() {
+  return (
+    <ErrorBoundary>
+      <QueryClientProvider client={queryClient}>
+        <AppContent />
+      </QueryClientProvider>
+    </ErrorBoundary>
+  );
+}
+
+export default App;

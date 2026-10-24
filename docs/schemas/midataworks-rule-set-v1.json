@@ -1,0 +1,1547 @@
+{
+  "$comment": "Semantics every app implements (feature 016; the cases in rule-signal-cases-v1.json pin each rule). UNITS: every span and offset is in Unicode code points; spans are half-open [start, end); a signal that reads the element has spans in the element. PATTERN DIALECT: RE2 syntax on a subset, RE2 default options: case-sensitive unless ignore_case (Unicode simple case folding: k matches U+212A); '.' does not match newline; ^ and $ match only at the start and end of the text ($ never before a final newline); \\d \\w \\s \\b are ASCII and \\s is [\\t\\n\\f\\r ] (no \\v). Refused, naming the rule and the code-point position of the construct: backreference, lookaround, conditional, atomic, possessive, inline_flag, unicode_property, any_byte (\\C), repeat_too_large (a count over 1000, or nested counted repeats multiplying past 1000), too_long (over 2000 code points; position 2000), syntax (also: escapes outside \\d \\D \\s \\S \\w \\W \\b \\B \\A \\z \\a \\f \\t \\n \\r \\v \\0 \\xHH and escaped ASCII punctuation; a quantified anchor or boundary; {,n}; (?<name>; repeated group names; '[' inside a class; a class escape or reversed range as a range endpoint). NORMALISATION: text is matched as given; only declared options apply: ignore_case, and fold_fullwidth_ascii (U+FF01-U+FF5E to U+0021-U+007E, U+3000 to U+0020, one to one, applied before matching; substrings come from the original text). SIGNALS: pattern = every non-overlapping match left to right (after a match ending at e the search resumes at e, one code point later when the match was empty). proximity = for each anchor span, the nearest phrase occurrence (literal; word_boundary = ASCII \\b on both sides; each phrase matched on its own, so phrases may overlap each other) on the declared side, ignoring a phrase that overlaps the anchor; gap edge to edge (phrase end to anchor start, or anchor end to phrase start) in the declared unit (utf8_bytes = UTF-8 length of the ORIGINAL text between the two spans); ties: smaller gap, then earlier phrase in phrases, then before over after; yields the anchor span with outputs distance, phrase (as written in the text) and side when gap <= max_distance. validator = candidates from the validator's scan, from each span of an earlier signal (value = the span's text, neighbouring text on each side), or from the element; each candidate carries the validator's outputs; the signal FIRES on a candidate only when valid is true, invalid candidates stay readable by field outputs. lexical_weights = one match pass over all terms (longest term first at a position; word_boundary wraps them in ASCII \\b); score = sum of the weights of matched terms in text order, each term once under presence and once per match under occurrences; fires when score >= cut; its spans are the first match of each distinct matched term, so count is the number of distinct terms. code_rule = declared only (feature 018). A signal may refer (anchor, span_of) only to an earlier signal. EVALUATION of one row: (1) every signal's spans; (2) vetoes per candidate: each veto's 'when' expression is evaluated on the step-1 spans, then every span of each signal in 'removes' that overlaps a 'when' span (half-open: s1 < e2 and s2 < e1) is removed; vetoed is true when any span was removed; (3) expressions on the remaining spans: signal = true when it has a span, carrying its spans; all = true when every member is true, carrying every member's spans; any = true when some member is true, carrying the true members' spans; not = true when its member is false; within_n(a, b, n, unit) = true when some pair of spans of a and b has gap <= n (edge to edge; overlap is 0), carrying the contributing spans; a false expression and a not carry no spans; carried spans are sorted by start then end without duplicates; (4) outputs: fired = the expression's truth; count = number of carried spans; first = text of the first carried span, else null; spans = canonical JSON [[start, end], ...]; field = the named output of the first remaining candidate of a signal, else null. RENDERINGS, DECOYS, SUBSTITUTIONS are declared and structurally checked here; feature 017 executes renderings and decoys; substitutions are clone parameters (JSON Pointers). RENDERING SEMANTICS (every rendering has normalise(render(v)) == v cases): render builtin spaced = the value's characters joined by one space; split_lines = joined by one newline (U+000A); spelled_out_digits = each ASCII digit 0-9 written as its lower-case English word (zero one two three four five six seven eight nine), every other character kept as itself, the resulting tokens joined by one space; mapping = left to right, at each position the LONGEST key that matches there is replaced by its value, a character no key matches is kept. Normaliser builtin digits_only = keep the ASCII digits 0-9 only; strip_delimiters = remove exactly U+0020 space, U+000A newline, '-' and '.'; words_to_digits = the inverse of spelled_out_digits: read the text as tokens separated by exactly one space, a token that is a digit word becomes its digit and any other token is one kept character; mapping_inverse = the mapping inverted (its values must be distinct), applied the same way (longest key first). IDENTITY: sha256 of the RFC 8785 (JCS) canonical JSON of the document as received (the parsed JSON values before any default; never a re-dump of a model): keys sorted by UTF-16 code units, no whitespace, numbers as values in ECMAScript form (1 and 1.0 are the same number, 1e21 is 1e+21), strings UTF-8 with only the quote, backslash and U+0000-U+001F escaped. An ABSENT list and an EMPTY list differ: an omitted vetoes and vetoes: [] are different documents with different digests. An integer outside +/-(2^53 - 1) is refused (unsafe_integer, naming its JSON Pointer). Strings must be NFC. BOUNDS (settings, refused naming the setting, never truncated): RULE_SET_MAX_SIGNALS, RULE_SET_MAX_CASES, RULE_SET_MAX_DOCUMENT_BYTES, RULE_SET_MAX_TERMS (lexical terms, default 2000), RULE_SET_MAX_CODE_PARAMS_BYTES (code_rule params, default 16 KiB).",
+  "$defs": {
+    "AllExpr": {
+      "additionalProperties": false,
+      "properties": {
+        "all": {
+          "items": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/SignalExpr"
+              },
+              {
+                "$ref": "#/$defs/AllExpr"
+              },
+              {
+                "$ref": "#/$defs/AnyExpr"
+              },
+              {
+                "$ref": "#/$defs/NotExpr"
+              },
+              {
+                "$ref": "#/$defs/WithinNExpr"
+              }
+            ]
+          },
+          "minItems": 1,
+          "title": "All",
+          "type": "array"
+        }
+      },
+      "required": [
+        "all"
+      ],
+      "title": "AllExpr",
+      "type": "object"
+    },
+    "AnyExpr": {
+      "additionalProperties": false,
+      "properties": {
+        "any": {
+          "items": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/SignalExpr"
+              },
+              {
+                "$ref": "#/$defs/AllExpr"
+              },
+              {
+                "$ref": "#/$defs/AnyExpr"
+              },
+              {
+                "$ref": "#/$defs/NotExpr"
+              },
+              {
+                "$ref": "#/$defs/WithinNExpr"
+              }
+            ]
+          },
+          "minItems": 1,
+          "title": "Any",
+          "type": "array"
+        }
+      },
+      "required": [
+        "any"
+      ],
+      "title": "AnyExpr",
+      "type": "object"
+    },
+    "Case": {
+      "additionalProperties": false,
+      "properties": {
+        "expect": {
+          "$ref": "#/$defs/Expect"
+        },
+        "id": {
+          "pattern": "^[a-z0-9][a-z0-9_.-]{0,95}$",
+          "title": "Id",
+          "type": "string"
+        },
+        "input": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/TextInput"
+            },
+            {
+              "$ref": "#/$defs/ValueInput"
+            }
+          ],
+          "title": "Input"
+        },
+        "note": {
+          "title": "Note",
+          "type": "string"
+        },
+        "source": {
+          "$ref": "#/$defs/CaseSource"
+        }
+      },
+      "required": [
+        "id",
+        "input",
+        "expect",
+        "source",
+        "note"
+      ],
+      "title": "Case",
+      "type": "object"
+    },
+    "CaseSource": {
+      "additionalProperties": false,
+      "properties": {
+        "citation": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Citation"
+        },
+        "kind": {
+          "enum": [
+            "published_test_value",
+            "published_reference_value",
+            "unissuable",
+            "constructed"
+          ],
+          "title": "Kind",
+          "type": "string"
+        },
+        "retrieved": {
+          "anyOf": [
+            {
+              "format": "date",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Retrieved"
+        }
+      },
+      "required": [
+        "kind"
+      ],
+      "title": "CaseSource",
+      "type": "object"
+    },
+    "CodeRuleOutput": {
+      "additionalProperties": false,
+      "properties": {
+        "name": {
+          "pattern": "^[a-z][a-z0-9_]{0,47}$",
+          "title": "Name",
+          "type": "string"
+        },
+        "type": {
+          "enum": [
+            "bool",
+            "int",
+            "string"
+          ],
+          "title": "Type",
+          "type": "string"
+        }
+      },
+      "required": [
+        "name",
+        "type"
+      ],
+      "title": "CodeRuleOutput",
+      "type": "object"
+    },
+    "CodeRuleSignal": {
+      "additionalProperties": false,
+      "description": "Declared by reference only; save refuses it until feature 018 (``code_rule_not_available``).",
+      "properties": {
+        "code_sha256": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Code Sha256",
+          "type": "string"
+        },
+        "function": {
+          "pattern": "^[a-z_][a-z0-9_]{0,63}$",
+          "title": "Function",
+          "type": "string"
+        },
+        "id": {
+          "pattern": "^[a-z][a-z0-9_]{0,47}$",
+          "title": "Id",
+          "type": "string"
+        },
+        "kind": {
+          "const": "code_rule",
+          "title": "Kind",
+          "type": "string"
+        },
+        "outputs": {
+          "items": {
+            "$ref": "#/$defs/CodeRuleOutput"
+          },
+          "minItems": 1,
+          "title": "Outputs",
+          "type": "array"
+        },
+        "params": {
+          "additionalProperties": true,
+          "title": "Params",
+          "type": "object"
+        },
+        "runner_contract": {
+          "maxLength": 200,
+          "minLength": 1,
+          "title": "Runner Contract",
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "kind",
+        "code_sha256",
+        "runner_contract",
+        "function",
+        "params",
+        "outputs"
+      ],
+      "title": "CodeRuleSignal",
+      "type": "object"
+    },
+    "CountValue": {
+      "additionalProperties": false,
+      "properties": {
+        "count": {
+          "pattern": "^[a-z][a-z0-9_]{0,47}$",
+          "title": "Count",
+          "type": "string"
+        }
+      },
+      "required": [
+        "count"
+      ],
+      "title": "CountValue",
+      "type": "object"
+    },
+    "Decoy": {
+      "additionalProperties": false,
+      "properties": {
+        "description": {
+          "maxLength": 2000,
+          "minLength": 1,
+          "title": "Description",
+          "type": "string"
+        },
+        "generator": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/GenerateValidator"
+            },
+            {
+              "$ref": "#/$defs/GenerateRuleSet"
+            },
+            {
+              "$ref": "#/$defs/GenerateList"
+            }
+          ],
+          "title": "Generator"
+        },
+        "id": {
+          "pattern": "^[a-z][a-z0-9_]{0,47}$",
+          "title": "Id",
+          "type": "string"
+        },
+        "must_not_fire": {
+          "items": {
+            "pattern": "^[a-z][a-z0-9_]{0,47}$",
+            "type": "string"
+          },
+          "minItems": 1,
+          "title": "Must Not Fire",
+          "type": "array"
+        }
+      },
+      "required": [
+        "id",
+        "description",
+        "must_not_fire",
+        "generator"
+      ],
+      "title": "Decoy",
+      "type": "object"
+    },
+    "ElementCandidates": {
+      "additionalProperties": false,
+      "properties": {
+        "element": {
+          "const": true,
+          "title": "Element",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "element"
+      ],
+      "title": "ElementCandidates",
+      "type": "object"
+    },
+    "Expect": {
+      "additionalProperties": false,
+      "properties": {
+        "outputs": {
+          "additionalProperties": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "integer"
+              },
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "title": "Outputs",
+          "type": "object"
+        },
+        "spans": {
+          "anyOf": [
+            {
+              "additionalProperties": {
+                "items": {
+                  "maxItems": 2,
+                  "minItems": 2,
+                  "prefixItems": [
+                    {
+                      "type": "integer"
+                    },
+                    {
+                      "type": "integer"
+                    }
+                  ],
+                  "type": "array"
+                },
+                "type": "array"
+              },
+              "type": "object"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Spans"
+        },
+        "vetoed": {
+          "title": "Vetoed",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "outputs",
+        "vetoed"
+      ],
+      "title": "Expect",
+      "type": "object"
+    },
+    "FieldValue": {
+      "additionalProperties": false,
+      "properties": {
+        "field": {
+          "maxItems": 2,
+          "minItems": 2,
+          "prefixItems": [
+            {
+              "pattern": "^[a-z][a-z0-9_]{0,47}$",
+              "type": "string"
+            },
+            {
+              "pattern": "^[a-z][a-z0-9_]{0,47}$",
+              "type": "string"
+            }
+          ],
+          "title": "Field",
+          "type": "array"
+        }
+      },
+      "required": [
+        "field"
+      ],
+      "title": "FieldValue",
+      "type": "object"
+    },
+    "FiredValue": {
+      "additionalProperties": false,
+      "properties": {
+        "fired": {
+          "pattern": "^[a-z][a-z0-9_]{0,47}$",
+          "title": "Fired",
+          "type": "string"
+        }
+      },
+      "required": [
+        "fired"
+      ],
+      "title": "FiredValue",
+      "type": "object"
+    },
+    "FirstValue": {
+      "additionalProperties": false,
+      "properties": {
+        "first": {
+          "pattern": "^[a-z][a-z0-9_]{0,47}$",
+          "title": "First",
+          "type": "string"
+        }
+      },
+      "required": [
+        "first"
+      ],
+      "title": "FirstValue",
+      "type": "object"
+    },
+    "GenerateList": {
+      "additionalProperties": false,
+      "properties": {
+        "list": {
+          "items": {
+            "type": "string"
+          },
+          "maxItems": 1000,
+          "minItems": 1,
+          "title": "List",
+          "type": "array"
+        }
+      },
+      "required": [
+        "list"
+      ],
+      "title": "GenerateList",
+      "type": "object"
+    },
+    "GenerateRuleSet": {
+      "additionalProperties": false,
+      "properties": {
+        "rule_set": {
+          "$ref": "#/$defs/RuleSetDecoyRef"
+        }
+      },
+      "required": [
+        "rule_set"
+      ],
+      "title": "GenerateRuleSet",
+      "type": "object"
+    },
+    "GenerateValidator": {
+      "additionalProperties": false,
+      "properties": {
+        "validator": {
+          "additionalProperties": true,
+          "title": "Validator",
+          "type": "object"
+        }
+      },
+      "required": [
+        "validator"
+      ],
+      "title": "GenerateValidator",
+      "type": "object"
+    },
+    "LexicalWeightsSignal": {
+      "additionalProperties": false,
+      "description": "Fires when the summed weight of matched terms is at least ``cut``.",
+      "properties": {
+        "counting": {
+          "enum": [
+            "presence",
+            "occurrences"
+          ],
+          "title": "Counting",
+          "type": "string"
+        },
+        "cut": {
+          "title": "Cut",
+          "type": "number"
+        },
+        "fold_fullwidth_ascii": {
+          "title": "Fold Fullwidth Ascii",
+          "type": "boolean"
+        },
+        "id": {
+          "pattern": "^[a-z][a-z0-9_]{0,47}$",
+          "title": "Id",
+          "type": "string"
+        },
+        "ignore_case": {
+          "title": "Ignore Case",
+          "type": "boolean"
+        },
+        "kind": {
+          "const": "lexical_weights",
+          "title": "Kind",
+          "type": "string"
+        },
+        "terms": {
+          "items": {
+            "$ref": "#/$defs/Term"
+          },
+          "minItems": 1,
+          "title": "Terms",
+          "type": "array"
+        },
+        "word_boundary": {
+          "title": "Word Boundary",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "id",
+        "kind",
+        "terms",
+        "cut",
+        "counting",
+        "ignore_case",
+        "fold_fullwidth_ascii",
+        "word_boundary"
+      ],
+      "title": "LexicalWeightsSignal",
+      "type": "object"
+    },
+    "NormaliseBuiltin": {
+      "additionalProperties": false,
+      "properties": {
+        "builtin": {
+          "enum": [
+            "digits_only",
+            "strip_delimiters",
+            "words_to_digits"
+          ],
+          "title": "Builtin",
+          "type": "string"
+        }
+      },
+      "required": [
+        "builtin"
+      ],
+      "title": "NormaliseBuiltin",
+      "type": "object"
+    },
+    "NormaliseMappingInverse": {
+      "additionalProperties": false,
+      "properties": {
+        "mapping_inverse": {
+          "const": true,
+          "title": "Mapping Inverse",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "mapping_inverse"
+      ],
+      "title": "NormaliseMappingInverse",
+      "type": "object"
+    },
+    "NormaliseValidator": {
+      "additionalProperties": false,
+      "properties": {
+        "validator": {
+          "$ref": "#/$defs/ValidatorRef"
+        }
+      },
+      "required": [
+        "validator"
+      ],
+      "title": "NormaliseValidator",
+      "type": "object"
+    },
+    "NotExpr": {
+      "additionalProperties": false,
+      "properties": {
+        "not": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/SignalExpr"
+            },
+            {
+              "$ref": "#/$defs/AllExpr"
+            },
+            {
+              "$ref": "#/$defs/AnyExpr"
+            },
+            {
+              "$ref": "#/$defs/NotExpr"
+            },
+            {
+              "$ref": "#/$defs/WithinNExpr"
+            }
+          ],
+          "title": "Not"
+        }
+      },
+      "required": [
+        "not"
+      ],
+      "title": "NotExpr",
+      "type": "object"
+    },
+    "Output": {
+      "additionalProperties": false,
+      "properties": {
+        "column": {
+          "pattern": "^[a-z][a-z0-9_]{0,47}$",
+          "title": "Column",
+          "type": "string"
+        },
+        "type": {
+          "enum": [
+            "bool",
+            "int",
+            "string"
+          ],
+          "title": "Type",
+          "type": "string"
+        },
+        "value": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/FiredValue"
+            },
+            {
+              "$ref": "#/$defs/CountValue"
+            },
+            {
+              "$ref": "#/$defs/FirstValue"
+            },
+            {
+              "$ref": "#/$defs/SpansValue"
+            },
+            {
+              "$ref": "#/$defs/FieldValue"
+            }
+          ],
+          "title": "Value"
+        }
+      },
+      "required": [
+        "column",
+        "type",
+        "value"
+      ],
+      "title": "Output",
+      "type": "object"
+    },
+    "PatternSignal": {
+      "additionalProperties": false,
+      "description": "Every non-overlapping match of ``pattern``, left to right; each match is a span.",
+      "properties": {
+        "fold_fullwidth_ascii": {
+          "title": "Fold Fullwidth Ascii",
+          "type": "boolean"
+        },
+        "id": {
+          "pattern": "^[a-z][a-z0-9_]{0,47}$",
+          "title": "Id",
+          "type": "string"
+        },
+        "ignore_case": {
+          "title": "Ignore Case",
+          "type": "boolean"
+        },
+        "kind": {
+          "const": "pattern",
+          "title": "Kind",
+          "type": "string"
+        },
+        "pattern": {
+          "maxLength": 2000,
+          "minLength": 1,
+          "title": "Pattern",
+          "type": "string"
+        },
+        "reads": {
+          "description": "text: the row's text; element: the element column (spans are then offsets in the element).",
+          "enum": [
+            "text",
+            "element"
+          ],
+          "title": "Reads",
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "kind",
+        "pattern",
+        "ignore_case",
+        "fold_fullwidth_ascii",
+        "reads"
+      ],
+      "title": "PatternSignal",
+      "type": "object"
+    },
+    "Provenance": {
+      "additionalProperties": false,
+      "properties": {
+        "derivation_id": {
+          "maxLength": 64,
+          "minLength": 1,
+          "title": "Derivation Id",
+          "type": "string"
+        },
+        "kind": {
+          "const": "derived",
+          "title": "Kind",
+          "type": "string"
+        },
+        "label_column": {
+          "maxLength": 256,
+          "minLength": 1,
+          "title": "Label Column",
+          "type": "string"
+        },
+        "method": {
+          "maxLength": 64,
+          "minLength": 1,
+          "title": "Method",
+          "type": "string"
+        },
+        "method_version": {
+          "minimum": 1,
+          "title": "Method Version",
+          "type": "integer"
+        },
+        "params_sha256": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Params Sha256",
+          "type": "string"
+        },
+        "seed": {
+          "title": "Seed",
+          "type": "integer"
+        },
+        "source_version_id": {
+          "maxLength": 64,
+          "minLength": 1,
+          "title": "Source Version Id",
+          "type": "string"
+        }
+      },
+      "required": [
+        "kind",
+        "derivation_id",
+        "method",
+        "method_version",
+        "source_version_id",
+        "label_column",
+        "seed",
+        "params_sha256"
+      ],
+      "title": "Provenance",
+      "type": "object"
+    },
+    "ProximitySignal": {
+      "additionalProperties": false,
+      "description": "For each span of ``anchor``, the nearest listed phrase on ``side``; yields the anchor span\nwhen the edge-to-edge gap is at most ``max_distance`` ``unit``s.",
+      "properties": {
+        "anchor": {
+          "pattern": "^[a-z][a-z0-9_]{0,47}$",
+          "title": "Anchor",
+          "type": "string"
+        },
+        "fold_fullwidth_ascii": {
+          "title": "Fold Fullwidth Ascii",
+          "type": "boolean"
+        },
+        "id": {
+          "pattern": "^[a-z][a-z0-9_]{0,47}$",
+          "title": "Id",
+          "type": "string"
+        },
+        "ignore_case": {
+          "title": "Ignore Case",
+          "type": "boolean"
+        },
+        "kind": {
+          "const": "proximity",
+          "title": "Kind",
+          "type": "string"
+        },
+        "max_distance": {
+          "minimum": 0,
+          "title": "Max Distance",
+          "type": "integer"
+        },
+        "phrases": {
+          "items": {
+            "maxLength": 200,
+            "minLength": 1,
+            "type": "string"
+          },
+          "maxItems": 512,
+          "minItems": 1,
+          "title": "Phrases",
+          "type": "array"
+        },
+        "side": {
+          "enum": [
+            "before",
+            "after",
+            "either"
+          ],
+          "title": "Side",
+          "type": "string"
+        },
+        "unit": {
+          "enum": [
+            "code_points",
+            "utf8_bytes"
+          ],
+          "title": "Unit",
+          "type": "string"
+        },
+        "word_boundary": {
+          "title": "Word Boundary",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "id",
+        "kind",
+        "anchor",
+        "phrases",
+        "word_boundary",
+        "max_distance",
+        "unit",
+        "side",
+        "ignore_case",
+        "fold_fullwidth_ascii"
+      ],
+      "title": "ProximitySignal",
+      "type": "object"
+    },
+    "RenderBuiltin": {
+      "additionalProperties": false,
+      "properties": {
+        "builtin": {
+          "enum": [
+            "spaced",
+            "split_lines",
+            "spelled_out_digits"
+          ],
+          "title": "Builtin",
+          "type": "string"
+        }
+      },
+      "required": [
+        "builtin"
+      ],
+      "title": "RenderBuiltin",
+      "type": "object"
+    },
+    "RenderMapping": {
+      "additionalProperties": false,
+      "properties": {
+        "mapping": {
+          "additionalProperties": {
+            "type": "string"
+          },
+          "minProperties": 1,
+          "title": "Mapping",
+          "type": "object"
+        }
+      },
+      "required": [
+        "mapping"
+      ],
+      "title": "RenderMapping",
+      "type": "object"
+    },
+    "RenderValidator": {
+      "additionalProperties": false,
+      "properties": {
+        "validator": {
+          "additionalProperties": true,
+          "title": "Validator",
+          "type": "object"
+        }
+      },
+      "required": [
+        "validator"
+      ],
+      "title": "RenderValidator",
+      "type": "object"
+    },
+    "Rendering": {
+      "additionalProperties": false,
+      "properties": {
+        "invisible_to": {
+          "items": {
+            "pattern": "^[a-z][a-z0-9_]{0,47}$",
+            "type": "string"
+          },
+          "title": "Invisible To",
+          "type": "array"
+        },
+        "normaliser": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/NormaliseValidator"
+            },
+            {
+              "$ref": "#/$defs/NormaliseMappingInverse"
+            },
+            {
+              "$ref": "#/$defs/NormaliseBuiltin"
+            }
+          ],
+          "title": "Normaliser"
+        },
+        "render": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/RenderValidator"
+            },
+            {
+              "$ref": "#/$defs/RenderMapping"
+            },
+            {
+              "$ref": "#/$defs/RenderBuiltin"
+            }
+          ],
+          "title": "Render"
+        },
+        "rendering": {
+          "pattern": "^[a-z0-9][a-z0-9_-]{0,47}$",
+          "title": "Rendering",
+          "type": "string"
+        }
+      },
+      "required": [
+        "rendering",
+        "render",
+        "normaliser",
+        "invisible_to"
+      ],
+      "title": "Rendering",
+      "type": "object"
+    },
+    "RuleSetDecoyRef": {
+      "additionalProperties": false,
+      "properties": {
+        "decoy_id": {
+          "pattern": "^[a-z][a-z0-9_]{0,47}$",
+          "title": "Decoy Id",
+          "type": "string"
+        },
+        "name": {
+          "pattern": "^[a-z0-9][a-z0-9-]{0,63}$",
+          "title": "Name",
+          "type": "string"
+        },
+        "version": {
+          "minimum": 1,
+          "title": "Version",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "name",
+        "version",
+        "decoy_id"
+      ],
+      "title": "RuleSetDecoyRef",
+      "type": "object"
+    },
+    "RuleSetListed": {
+      "additionalProperties": false,
+      "properties": {
+        "behaviour_key": {
+          "pattern": "^[a-z0-9][a-z0-9-]{0,62}[a-z0-9]$",
+          "title": "Behaviour Key",
+          "type": "string"
+        },
+        "name": {
+          "pattern": "^[a-z0-9][a-z0-9-]{0,63}$",
+          "title": "Name",
+          "type": "string"
+        },
+        "path": {
+          "pattern": "^rule_sets/[a-z0-9][a-z0-9-]{0,63}@[1-9][0-9]*\\.json$",
+          "title": "Path",
+          "type": "string"
+        },
+        "sha256": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Sha256",
+          "type": "string"
+        },
+        "use": {
+          "enum": [
+            "label",
+            "veto",
+            "screen",
+            "decoy_check",
+            "conflict_scan"
+          ],
+          "title": "Use",
+          "type": "string"
+        },
+        "version": {
+          "minimum": 1,
+          "title": "Version",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "name",
+        "version",
+        "sha256",
+        "behaviour_key",
+        "use",
+        "path"
+      ],
+      "title": "RuleSetListed",
+      "type": "object"
+    },
+    "RuleSetListing": {
+      "additionalProperties": false,
+      "description": "``extensions[\"midataworks.rule-sets/v1\"]`` of a dataset-version manifest (slice 3).",
+      "properties": {
+        "recorded": {
+          "const": true,
+          "title": "Recorded",
+          "type": "boolean"
+        },
+        "rule_sets": {
+          "items": {
+            "$ref": "#/$defs/RuleSetListed"
+          },
+          "title": "Rule Sets",
+          "type": "array"
+        }
+      },
+      "required": [
+        "recorded",
+        "rule_sets"
+      ],
+      "title": "RuleSetListing",
+      "type": "object"
+    },
+    "RuleSetUse": {
+      "description": "The rule_set@1 step parameter 'use': why a build ran the rule set.",
+      "enum": [
+        "label",
+        "veto",
+        "screen",
+        "decoy_check",
+        "conflict_scan"
+      ],
+      "type": "string"
+    },
+    "ScanCandidates": {
+      "additionalProperties": false,
+      "properties": {
+        "scan": {
+          "const": true,
+          "title": "Scan",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "scan"
+      ],
+      "title": "ScanCandidates",
+      "type": "object"
+    },
+    "SignalExpr": {
+      "additionalProperties": false,
+      "properties": {
+        "signal": {
+          "pattern": "^[a-z][a-z0-9_]{0,47}$",
+          "title": "Signal",
+          "type": "string"
+        }
+      },
+      "required": [
+        "signal"
+      ],
+      "title": "SignalExpr",
+      "type": "object"
+    },
+    "SpanOfCandidates": {
+      "additionalProperties": false,
+      "properties": {
+        "span_of": {
+          "pattern": "^[a-z][a-z0-9_]{0,47}$",
+          "title": "Span Of",
+          "type": "string"
+        }
+      },
+      "required": [
+        "span_of"
+      ],
+      "title": "SpanOfCandidates",
+      "type": "object"
+    },
+    "SpansValue": {
+      "additionalProperties": false,
+      "properties": {
+        "spans": {
+          "pattern": "^[a-z][a-z0-9_]{0,47}$",
+          "title": "Spans",
+          "type": "string"
+        }
+      },
+      "required": [
+        "spans"
+      ],
+      "title": "SpansValue",
+      "type": "object"
+    },
+    "Substitution": {
+      "additionalProperties": false,
+      "properties": {
+        "description": {
+          "maxLength": 2000,
+          "minLength": 1,
+          "title": "Description",
+          "type": "string"
+        },
+        "id": {
+          "pattern": "^[a-z][a-z0-9_]{0,47}$",
+          "title": "Id",
+          "type": "string"
+        },
+        "pointer": {
+          "pattern": "^(/([^~/]|~[01])*)*$",
+          "title": "Pointer",
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "pointer",
+        "description"
+      ],
+      "title": "Substitution",
+      "type": "object"
+    },
+    "Term": {
+      "additionalProperties": false,
+      "properties": {
+        "term": {
+          "maxLength": 200,
+          "minLength": 1,
+          "title": "Term",
+          "type": "string"
+        },
+        "weight": {
+          "title": "Weight",
+          "type": "number"
+        }
+      },
+      "required": [
+        "term",
+        "weight"
+      ],
+      "title": "Term",
+      "type": "object"
+    },
+    "TextInput": {
+      "additionalProperties": false,
+      "properties": {
+        "text": {
+          "title": "Text",
+          "type": "string"
+        }
+      },
+      "required": [
+        "text"
+      ],
+      "title": "TextInput",
+      "type": "object"
+    },
+    "ValidatorRef": {
+      "additionalProperties": false,
+      "properties": {
+        "id": {
+          "pattern": "^[a-z][a-z0-9_]{0,47}$",
+          "title": "Id",
+          "type": "string"
+        },
+        "version": {
+          "minimum": 1,
+          "title": "Version",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "id",
+        "version"
+      ],
+      "title": "ValidatorRef",
+      "type": "object"
+    },
+    "ValidatorSignal": {
+      "additionalProperties": false,
+      "description": "Candidates from the validator's all-candidates scan, from each span of another signal, or\nfrom the element column; fires on a candidate only when ``valid`` is true.",
+      "properties": {
+        "candidates": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ScanCandidates"
+            },
+            {
+              "$ref": "#/$defs/SpanOfCandidates"
+            },
+            {
+              "$ref": "#/$defs/ElementCandidates"
+            }
+          ],
+          "title": "Candidates"
+        },
+        "id": {
+          "pattern": "^[a-z][a-z0-9_]{0,47}$",
+          "title": "Id",
+          "type": "string"
+        },
+        "kind": {
+          "const": "validator",
+          "title": "Kind",
+          "type": "string"
+        },
+        "params": {
+          "additionalProperties": true,
+          "description": "Per the validator's params_schema.",
+          "title": "Params",
+          "type": "object"
+        },
+        "validator": {
+          "$ref": "#/$defs/ValidatorRef"
+        }
+      },
+      "required": [
+        "id",
+        "kind",
+        "validator",
+        "params",
+        "candidates"
+      ],
+      "title": "ValidatorSignal",
+      "type": "object"
+    },
+    "ValueInput": {
+      "additionalProperties": false,
+      "description": "The element inserted into text: the row's text is ``before + value + after`` and its\nelement is ``value``.",
+      "properties": {
+        "after": {
+          "default": "",
+          "title": "After",
+          "type": "string"
+        },
+        "before": {
+          "default": "",
+          "title": "Before",
+          "type": "string"
+        },
+        "value": {
+          "title": "Value",
+          "type": "string"
+        }
+      },
+      "required": [
+        "value"
+      ],
+      "title": "ValueInput",
+      "type": "object"
+    },
+    "Veto": {
+      "additionalProperties": false,
+      "properties": {
+        "id": {
+          "pattern": "^[a-z][a-z0-9_]{0,47}$",
+          "title": "Id",
+          "type": "string"
+        },
+        "removes": {
+          "items": {
+            "pattern": "^[a-z][a-z0-9_]{0,47}$",
+            "type": "string"
+          },
+          "minItems": 1,
+          "title": "Removes",
+          "type": "array"
+        },
+        "when": {
+          "pattern": "^[a-z][a-z0-9_]{0,47}$",
+          "title": "When",
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "when",
+        "removes"
+      ],
+      "title": "Veto",
+      "type": "object"
+    },
+    "WithinN": {
+      "additionalProperties": false,
+      "properties": {
+        "a": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/SignalExpr"
+            },
+            {
+              "$ref": "#/$defs/AllExpr"
+            },
+            {
+              "$ref": "#/$defs/AnyExpr"
+            },
+            {
+              "$ref": "#/$defs/NotExpr"
+            },
+            {
+              "$ref": "#/$defs/WithinNExpr"
+            }
+          ],
+          "title": "A"
+        },
+        "b": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/SignalExpr"
+            },
+            {
+              "$ref": "#/$defs/AllExpr"
+            },
+            {
+              "$ref": "#/$defs/AnyExpr"
+            },
+            {
+              "$ref": "#/$defs/NotExpr"
+            },
+            {
+              "$ref": "#/$defs/WithinNExpr"
+            }
+          ],
+          "title": "B"
+        },
+        "n": {
+          "minimum": 0,
+          "title": "N",
+          "type": "integer"
+        },
+        "unit": {
+          "enum": [
+            "code_points",
+            "utf8_bytes"
+          ],
+          "title": "Unit",
+          "type": "string"
+        }
+      },
+      "required": [
+        "a",
+        "b",
+        "n",
+        "unit"
+      ],
+      "title": "WithinN",
+      "type": "object"
+    },
+    "WithinNExpr": {
+      "additionalProperties": false,
+      "properties": {
+        "within_n": {
+          "$ref": "#/$defs/WithinN"
+        }
+      },
+      "required": [
+        "within_n"
+      ],
+      "title": "WithinNExpr",
+      "type": "object"
+    }
+  },
+  "$id": "https://raw.githubusercontent.com/hitsainet/miDataworks/main/docs/schemas/midataworks-rule-set-v1.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "description": "A rule set (format midataworks.rule-set/v1). GENERATED from backend/src/rules/rule_set.py (RuleSetDocument) by backend/scripts/write_rule_set_schema.py; do not edit by hand. Consumers vendor this file byte-identical. Changes within v1 are additive only.",
+  "properties": {
+    "behaviour_key": {
+      "pattern": "^[a-z0-9][a-z0-9-]{0,62}[a-z0-9]$",
+      "title": "Behaviour Key",
+      "type": "string"
+    },
+    "cases": {
+      "items": {
+        "$ref": "#/$defs/Case"
+      },
+      "title": "Cases",
+      "type": "array"
+    },
+    "decoys": {
+      "items": {
+        "$ref": "#/$defs/Decoy"
+      },
+      "title": "Decoys",
+      "type": "array"
+    },
+    "description": {
+      "maxLength": 2000,
+      "minLength": 1,
+      "title": "Description",
+      "type": "string"
+    },
+    "expressions": {
+      "minProperties": 1,
+      "patternProperties": {
+        "^[a-z][a-z0-9_]{0,47}$": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/SignalExpr"
+            },
+            {
+              "$ref": "#/$defs/AllExpr"
+            },
+            {
+              "$ref": "#/$defs/AnyExpr"
+            },
+            {
+              "$ref": "#/$defs/NotExpr"
+            },
+            {
+              "$ref": "#/$defs/WithinNExpr"
+            }
+          ]
+        }
+      },
+      "title": "Expressions",
+      "type": "object"
+    },
+    "format": {
+      "const": "midataworks.rule-set/v1",
+      "title": "Format",
+      "type": "string"
+    },
+    "name": {
+      "pattern": "^[a-z0-9][a-z0-9-]{0,63}$",
+      "title": "Name",
+      "type": "string"
+    },
+    "outputs": {
+      "items": {
+        "$ref": "#/$defs/Output"
+      },
+      "maxItems": 64,
+      "minItems": 1,
+      "title": "Outputs",
+      "type": "array"
+    },
+    "provenance": {
+      "$ref": "#/$defs/Provenance",
+      "default": null
+    },
+    "renderings": {
+      "items": {
+        "$ref": "#/$defs/Rendering"
+      },
+      "title": "Renderings",
+      "type": "array"
+    },
+    "signals": {
+      "items": {
+        "discriminator": {
+          "mapping": {
+            "code_rule": "#/$defs/CodeRuleSignal",
+            "lexical_weights": "#/$defs/LexicalWeightsSignal",
+            "pattern": "#/$defs/PatternSignal",
+            "proximity": "#/$defs/ProximitySignal",
+            "validator": "#/$defs/ValidatorSignal"
+          },
+          "propertyName": "kind"
+        },
+        "oneOf": [
+          {
+            "$ref": "#/$defs/PatternSignal"
+          },
+          {
+            "$ref": "#/$defs/ProximitySignal"
+          },
+          {
+            "$ref": "#/$defs/ValidatorSignal"
+          },
+          {
+            "$ref": "#/$defs/LexicalWeightsSignal"
+          },
+          {
+            "$ref": "#/$defs/CodeRuleSignal"
+          }
+        ]
+      },
+      "minItems": 1,
+      "title": "Signals",
+      "type": "array"
+    },
+    "substitutions": {
+      "items": {
+        "$ref": "#/$defs/Substitution"
+      },
+      "title": "Substitutions",
+      "type": "array"
+    },
+    "vetoes": {
+      "items": {
+        "$ref": "#/$defs/Veto"
+      },
+      "title": "Vetoes",
+      "type": "array"
+    }
+  },
+  "required": [
+    "format",
+    "name",
+    "behaviour_key",
+    "description",
+    "signals",
+    "expressions",
+    "outputs",
+    "cases"
+  ],
+  "title": "miDataworks Rule Set v1",
+  "type": "object"
+}

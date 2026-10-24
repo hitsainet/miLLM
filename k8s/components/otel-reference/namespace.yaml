@@ -1,0 +1,8 @@
+# The reference receiver's own namespace (FR-38.25). The `millm` AppProject cannot deploy here
+# and the `millm-otel` AppProject can deploy nowhere else (k8s/argocd/millm-otel-app.yaml).
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: millm-otel
+  labels:
+    app.kubernetes.io/part-of: millm-otel

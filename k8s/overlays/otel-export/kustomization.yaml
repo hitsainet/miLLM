@@ -1,0 +1,11 @@
+# The default deployment (k8s/base) PLUS the telemetry switch-on component, for inspection and
+# for the render test only. Not deployed: the switch-on adds the component to k8s/base itself
+# (see k8s/components/otel-export/kustomization.yaml).
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+resources:
+  - ../../base
+
+components:
+  - ../../components/otel-export

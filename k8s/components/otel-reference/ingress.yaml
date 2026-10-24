@@ -1,0 +1,21 @@
+# The query UI (Grafana) on the INTERNAL host only (FR-38.25): a k8s-*.hitsai.local name, never
+# a public one. The Collector has no Ingress at all. tests/unit/test_k8s_otel_reference.py fails
+# on any host outside *.hitsai.local and on any Ingress that routes to the Collector.
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: otel-lgtm-ingress
+  namespace: millm-otel
+spec:
+  ingressClassName: public
+  rules:
+    - host: k8s-millm-otel.hitsai.local
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: otel-lgtm
+                port:
+                  number: 3000

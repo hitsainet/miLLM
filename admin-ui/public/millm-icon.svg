@@ -1,0 +1,20 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32" fill="none">
+  <defs>
+    <linearGradient id="gradient" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" style="stop-color:#06b6d4"/>
+      <stop offset="100%" style="stop-color:#0891b2"/>
+    </linearGradient>
+  </defs>
+  <rect width="32" height="32" rx="6" fill="url(#gradient)"/>
+  <!-- Neural network / brain icon -->
+  <circle cx="16" cy="10" r="3" fill="white"/>
+  <circle cx="10" cy="18" r="3" fill="white"/>
+  <circle cx="22" cy="18" r="3" fill="white"/>
+  <circle cx="16" cy="24" r="2.5" fill="white"/>
+  <!-- Connections -->
+  <line x1="16" y1="13" x2="12" y2="16" stroke="white" stroke-width="1.5" opacity="0.8"/>
+  <line x1="16" y1="13" x2="20" y2="16" stroke="white" stroke-width="1.5" opacity="0.8"/>
+  <line x1="12" y1="20" x2="16" y2="22" stroke="white" stroke-width="1.5" opacity="0.8"/>
+  <line x1="20" y1="20" x2="16" y2="22" stroke="white" stroke-width="1.5" opacity="0.8"/>
+  <line x1="10" y1="18" x2="22" y2="18" stroke="white" stroke-width="1.5" opacity="0.5"/>
+</svg>

@@ -1,0 +1,664 @@
+{
+  "batch_line": {
+    "custom_id": "golden-1",
+    "error": null,
+    "id": "<batch_req>",
+    "response": {
+      "body": {
+        "choices": [
+          {
+            "finish_reason": "length",
+            "index": 0,
+            "message": {
+              "content": "w27 user w10",
+              "reasoning_content": null,
+              "role": "assistant"
+            }
+          }
+        ],
+        "created": "<created>",
+        "id": "<completion_id>",
+        "model": "tiny",
+        "object": "chat.completion",
+        "system_fingerprint": "millm:tiny@abc123:float32/FP16:transformers",
+        "usage": {
+          "completion_tokens": 3,
+          "prompt_tokens": 6,
+          "total_tokens": 9
+        }
+      },
+      "millm": {
+        "headers": {
+          "X-miLLM-Backend": "serial",
+          "X-miLLM-Batch": "1",
+          "X-miLLM-Model": "\"tiny\";origin=model;commits=0",
+          "X-miLLM-Probe-Verdicts": "\"probe-alpha\";score=-0.0105608;threshold=0;verdict=?0;rung=2;window=all, \"probe-beta\";score=0.0176615;rung=2;window=all, \"probe-beta\";score=-0.0135438;rung=2;window=response;provisional=?1",
+          "X-miLLM-Steering": "none"
+        },
+        "packed": false
+      },
+      "request_id": "<req>",
+      "status_code": 200
+    }
+  },
+  "body": {
+    "choices": [
+      {
+        "finish_reason": "length",
+        "index": 0,
+        "message": {
+          "content": "w27 user w10",
+          "reasoning_content": null,
+          "role": "assistant"
+        }
+      }
+    ],
+    "created": "<created>",
+    "id": "<completion_id>",
+    "model": "tiny",
+    "object": "chat.completion",
+    "system_fingerprint": "millm:tiny@abc123:float32/FP16:transformers",
+    "usage": {
+      "completion_tokens": 3,
+      "prompt_tokens": 6,
+      "total_tokens": 9
+    }
+  },
+  "event_detail": [
+    {
+      "context_text": "user w1 w2 w3 assistant w27 user w10",
+      "context_token_ids": [
+        0,
+        2,
+        7,
+        8,
+        9,
+        3,
+        33,
+        2,
+        16
+      ],
+      "created_at": "<created_at>",
+      "id": "<row_id>",
+      "n_scored_tokens": 8,
+      "not_scored_reason": null,
+      "probe_id": "<probe:probe-alpha>",
+      "provisional": false,
+      "request_id": "<completion_id>",
+      "rung": 2,
+      "score": -0.010560755617916584,
+      "scored": true,
+      "served_model": "tiny",
+      "session_id": "<session>",
+      "summary": "score -0.0106 below threshold",
+      "threshold": 0.0,
+      "threshold_revision": 1,
+      "top_positions": [
+        6,
+        0,
+        5,
+        7,
+        1
+      ],
+      "turn_index": 1,
+      "verdict": false,
+      "window": "all"
+    },
+    {
+      "context_text": "user w1 w2 w3 assistant w27 user w10",
+      "context_token_ids": [
+        0,
+        2,
+        7,
+        8,
+        9,
+        3,
+        33,
+        2,
+        16
+      ],
+      "created_at": "<created_at>",
+      "id": "<row_id>",
+      "n_scored_tokens": 8,
+      "not_scored_reason": null,
+      "probe_id": "<probe:probe-beta>",
+      "provisional": false,
+      "request_id": "<completion_id>",
+      "rung": 2,
+      "score": 0.017661450430750847,
+      "scored": true,
+      "served_model": "tiny",
+      "session_id": "<session>",
+      "summary": "score 0.0177 (no threshold placed \u2014 ranks, does not decide)",
+      "threshold": null,
+      "threshold_revision": 1,
+      "top_positions": [
+        4,
+        2,
+        3,
+        7,
+        1
+      ],
+      "turn_index": 1,
+      "verdict": null,
+      "window": "all"
+    },
+    {
+      "context_text": "w27 user w10",
+      "context_token_ids": [
+        33,
+        2,
+        16
+      ],
+      "created_at": "<created_at>",
+      "id": "<row_id>",
+      "n_scored_tokens": 2,
+      "not_scored_reason": null,
+      "probe_id": "<probe:probe-beta>",
+      "provisional": true,
+      "request_id": "<completion_id>",
+      "rung": 2,
+      "score": -0.013543752953410149,
+      "scored": true,
+      "served_model": "tiny",
+      "session_id": "<session>",
+      "summary": "score -0.0135 (no threshold placed \u2014 ranks, does not decide)",
+      "threshold": null,
+      "threshold_revision": 1,
+      "top_positions": [
+        7,
+        6
+      ],
+      "turn_index": 1,
+      "verdict": null,
+      "window": "response"
+    }
+  ],
+  "event_rows": [
+    {
+      "batch_id": null,
+      "batch_line": null,
+      "context_text": "user w1 w2 w3 assistant w27 user w10",
+      "context_token_ids": [
+        0,
+        2,
+        7,
+        8,
+        9,
+        3,
+        33,
+        2,
+        16
+      ],
+      "created_at": "<created_at>",
+      "id": "<row_id>",
+      "n_scored_tokens": 8,
+      "not_scored_reason": null,
+      "origin": "live",
+      "probe_id": "<probe:probe-alpha>",
+      "provisional": false,
+      "request_id": "<completion_id>",
+      "rung": 2,
+      "score": -0.010560755617916584,
+      "scored": true,
+      "served_model": "tiny",
+      "session_id": "<session>",
+      "summary": "score -0.0106 below threshold",
+      "threshold": 0.0,
+      "threshold_revision": 1,
+      "top_positions": [
+        6,
+        0,
+        5,
+        7,
+        1
+      ],
+      "turn_index": 1,
+      "verdict": false,
+      "window": "all"
+    },
+    {
+      "batch_id": null,
+      "batch_line": null,
+      "context_text": "user w1 w2 w3 assistant w27 user w10",
+      "context_token_ids": [
+        0,
+        2,
+        7,
+        8,
+        9,
+        3,
+        33,
+        2,
+        16
+      ],
+      "created_at": "<created_at>",
+      "id": "<row_id>",
+      "n_scored_tokens": 8,
+      "not_scored_reason": null,
+      "origin": "live",
+      "probe_id": "<probe:probe-beta>",
+      "provisional": false,
+      "request_id": "<completion_id>",
+      "rung": 2,
+      "score": 0.017661450430750847,
+      "scored": true,
+      "served_model": "tiny",
+      "session_id": "<session>",
+      "summary": "score 0.0177 (no threshold placed \u2014 ranks, does not decide)",
+      "threshold": null,
+      "threshold_revision": 1,
+      "top_positions": [
+        4,
+        2,
+        3,
+        7,
+        1
+      ],
+      "turn_index": 1,
+      "verdict": null,
+      "window": "all"
+    },
+    {
+      "batch_id": null,
+      "batch_line": null,
+      "context_text": "w27 user w10",
+      "context_token_ids": [
+        33,
+        2,
+        16
+      ],
+      "created_at": "<created_at>",
+      "id": "<row_id>",
+      "n_scored_tokens": 2,
+      "not_scored_reason": null,
+      "origin": "live",
+      "probe_id": "<probe:probe-beta>",
+      "provisional": true,
+      "request_id": "<completion_id>",
+      "rung": 2,
+      "score": -0.013543752953410149,
+      "scored": true,
+      "served_model": "tiny",
+      "session_id": "<session>",
+      "summary": "score -0.0135 (no threshold placed \u2014 ranks, does not decide)",
+      "threshold": null,
+      "threshold_revision": 1,
+      "top_positions": [
+        7,
+        6
+      ],
+      "turn_index": 1,
+      "verdict": null,
+      "window": "response"
+    }
+  ],
+  "events_list": [
+    {
+      "behaviour": {
+        "key": "b-beta",
+        "name": "b beta",
+        "version": null
+      },
+      "created_at": "<created_at>",
+      "id": "<row_id>",
+      "n_scored_tokens": 2,
+      "not_scored_reason": null,
+      "probe_id": "<probe:probe-beta>",
+      "provisional": true,
+      "request_id": "<completion_id>",
+      "rung": 2,
+      "score": -0.013543752953410149,
+      "scored": true,
+      "served_model": "tiny",
+      "session_id": "<session>",
+      "summary": "score -0.0135 (no threshold placed \u2014 ranks, does not decide)",
+      "threshold": null,
+      "threshold_revision": 1,
+      "top_positions": [
+        7,
+        6
+      ],
+      "turn_index": 1,
+      "verdict": null,
+      "window": "response"
+    },
+    {
+      "behaviour": {
+        "key": "b-beta",
+        "name": "b beta",
+        "version": null
+      },
+      "created_at": "<created_at>",
+      "id": "<row_id>",
+      "n_scored_tokens": 8,
+      "not_scored_reason": null,
+      "probe_id": "<probe:probe-beta>",
+      "provisional": false,
+      "request_id": "<completion_id>",
+      "rung": 2,
+      "score": 0.017661450430750847,
+      "scored": true,
+      "served_model": "tiny",
+      "session_id": "<session>",
+      "summary": "score 0.0177 (no threshold placed \u2014 ranks, does not decide)",
+      "threshold": null,
+      "threshold_revision": 1,
+      "top_positions": [
+        4,
+        2,
+        3,
+        7,
+        1
+      ],
+      "turn_index": 1,
+      "verdict": null,
+      "window": "all"
+    },
+    {
+      "behaviour": {
+        "key": "b-alpha",
+        "name": "b alpha",
+        "version": null
+      },
+      "created_at": "<created_at>",
+      "id": "<row_id>",
+      "n_scored_tokens": 8,
+      "not_scored_reason": null,
+      "probe_id": "<probe:probe-alpha>",
+      "provisional": false,
+      "request_id": "<completion_id>",
+      "rung": 2,
+      "score": -0.010560755617916584,
+      "scored": true,
+      "served_model": "tiny",
+      "session_id": "<session>",
+      "summary": "score -0.0106 below threshold",
+      "threshold": 0.0,
+      "threshold_revision": 1,
+      "top_positions": [
+        6,
+        0,
+        5,
+        7,
+        1
+      ],
+      "turn_index": 1,
+      "verdict": false,
+      "window": "all"
+    }
+  ],
+  "header": "\"probe-alpha\";score=-0.0105608;threshold=0;verdict=?0;rung=2;window=all, \"probe-beta\";score=0.0176615;rung=2;window=all, \"probe-beta\";score=-0.0135438;rung=2;window=response;provisional=?1",
+  "score": {
+    "model": {
+      "dtype": null,
+      "hf_id": "tiny/llama",
+      "quantization": null,
+      "revision": "0000000000000000000000000000000000000000"
+    },
+    "probes": [
+      {
+        "layer": 0,
+        "name": "probe-alpha",
+        "parity": {
+          "checked_against": null,
+          "checked_at": null,
+          "status": "never_run"
+        },
+        "probe_id": "<probe:probe-alpha>"
+      },
+      {
+        "layer": 1,
+        "name": "probe-beta",
+        "parity": {
+          "checked_against": null,
+          "checked_at": null,
+          "status": "never_run"
+        },
+        "probe_id": "<probe:probe-beta>"
+      }
+    ],
+    "results": [
+      {
+        "error": null,
+        "index": 0,
+        "input_kind": "token_ids",
+        "n_tokens": 5,
+        "prompt_tokens": 3,
+        "token_ids": null,
+        "verdicts": [
+          {
+            "n_scored_tokens": 5,
+            "name": "probe-alpha",
+            "not_scored_reason": null,
+            "probe_id": "<probe:probe-alpha>",
+            "provisional": false,
+            "rung": 2,
+            "rung_language": "detects on unseen tasks",
+            "score": -0.011150623671710491,
+            "served_model": "tiny",
+            "threshold": 0.0,
+            "threshold_revision": 1,
+            "verdict": false,
+            "window": "all"
+          },
+          {
+            "n_scored_tokens": 3,
+            "name": "probe-alpha",
+            "not_scored_reason": null,
+            "probe_id": "<probe:probe-alpha>",
+            "provisional": true,
+            "rung": 2,
+            "rung_language": "detects on unseen tasks",
+            "score": 0.001642684917896986,
+            "served_model": "tiny",
+            "threshold": 0.0,
+            "threshold_revision": 1,
+            "verdict": true,
+            "window": "prompt"
+          },
+          {
+            "n_scored_tokens": 5,
+            "name": "probe-beta",
+            "not_scored_reason": null,
+            "probe_id": "<probe:probe-beta>",
+            "provisional": false,
+            "rung": 2,
+            "rung_language": "detects on unseen tasks",
+            "score": 0.011949723586440086,
+            "served_model": "tiny",
+            "threshold": null,
+            "threshold_revision": 1,
+            "verdict": null,
+            "window": "all"
+          },
+          {
+            "n_scored_tokens": 3,
+            "name": "probe-beta",
+            "not_scored_reason": null,
+            "probe_id": "<probe:probe-beta>",
+            "provisional": true,
+            "rung": 2,
+            "rung_language": "detects on unseen tasks",
+            "score": -0.016849393025040627,
+            "served_model": "tiny",
+            "threshold": null,
+            "threshold_revision": 1,
+            "verdict": null,
+            "window": "prompt"
+          }
+        ]
+      }
+    ],
+    "skipped": []
+  },
+  "session_cells": [
+    {
+      "column": "b-alpha",
+      "event_id": "<event_id>",
+      "not_scored_reason": null,
+      "probe_id": "<probe:probe-alpha>",
+      "probe_name": "probe-alpha",
+      "provisional": false,
+      "score": -0.010560755617916584,
+      "scored": true,
+      "threshold": 0.0,
+      "verdict": false,
+      "window": "all"
+    },
+    {
+      "column": "b-beta",
+      "event_id": "<event_id>",
+      "not_scored_reason": null,
+      "probe_id": "<probe:probe-beta>",
+      "probe_name": "probe-beta",
+      "provisional": false,
+      "score": 0.017661450430750847,
+      "scored": true,
+      "threshold": null,
+      "verdict": null,
+      "window": "all"
+    },
+    {
+      "column": "b-beta",
+      "event_id": "<event_id>",
+      "not_scored_reason": null,
+      "probe_id": "<probe:probe-beta>",
+      "probe_name": "probe-beta",
+      "provisional": true,
+      "score": -0.013543752953410149,
+      "scored": true,
+      "threshold": null,
+      "verdict": null,
+      "window": "response"
+    }
+  ],
+  "socket": [
+    {
+      "created_at": "<created_at>",
+      "id": "<row_id>",
+      "n_scored_tokens": 8,
+      "not_scored_reason": null,
+      "probe_id": "<probe:probe-alpha>",
+      "provisional": false,
+      "request_id": "<completion_id>",
+      "rung": 2,
+      "score": -0.010560755617916584,
+      "scored": true,
+      "served_model": "tiny",
+      "session_id": "<session>",
+      "summary": "score -0.0106 below threshold",
+      "threshold": 0.0,
+      "threshold_revision": 1,
+      "top_positions": [
+        6,
+        0,
+        5,
+        7,
+        1
+      ],
+      "turn_index": 1,
+      "verdict": false,
+      "window": "all"
+    },
+    {
+      "created_at": "<created_at>",
+      "id": "<row_id>",
+      "n_scored_tokens": 8,
+      "not_scored_reason": null,
+      "probe_id": "<probe:probe-beta>",
+      "provisional": false,
+      "request_id": "<completion_id>",
+      "rung": 2,
+      "score": 0.017661450430750847,
+      "scored": true,
+      "served_model": "tiny",
+      "session_id": "<session>",
+      "summary": "score 0.0177 (no threshold placed \u2014 ranks, does not decide)",
+      "threshold": null,
+      "threshold_revision": 1,
+      "top_positions": [
+        4,
+        2,
+        3,
+        7,
+        1
+      ],
+      "turn_index": 1,
+      "verdict": null,
+      "window": "all"
+    },
+    {
+      "created_at": "<created_at>",
+      "id": "<row_id>",
+      "n_scored_tokens": 2,
+      "not_scored_reason": null,
+      "probe_id": "<probe:probe-beta>",
+      "provisional": true,
+      "request_id": "<completion_id>",
+      "rung": 2,
+      "score": -0.013543752953410149,
+      "scored": true,
+      "served_model": "tiny",
+      "session_id": "<session>",
+      "summary": "score -0.0135 (no threshold placed \u2014 ranks, does not decide)",
+      "threshold": null,
+      "threshold_revision": 1,
+      "top_positions": [
+        7,
+        6
+      ],
+      "turn_index": 1,
+      "verdict": null,
+      "window": "response"
+    }
+  ],
+  "stream_chunk": {
+    "choices": [],
+    "created": "<created>",
+    "id": "<completion_id>",
+    "millm_probe_verdicts": [
+      {
+        "name": "probe-alpha",
+        "probe_id": "<probe:probe-alpha>",
+        "provisional": false,
+        "rung": 2,
+        "rung_language": "detects on unseen tasks",
+        "score": -0.010560755617916584,
+        "scored": true,
+        "served_model": "tiny",
+        "threshold": 0.0,
+        "verdict": false,
+        "window": "all"
+      },
+      {
+        "name": "probe-beta",
+        "probe_id": "<probe:probe-beta>",
+        "provisional": false,
+        "rung": 2,
+        "rung_language": "detects on unseen tasks",
+        "score": 0.017661450430750847,
+        "scored": true,
+        "served_model": "tiny",
+        "threshold": null,
+        "verdict": null,
+        "window": "all"
+      },
+      {
+        "name": "probe-beta",
+        "probe_id": "<probe:probe-beta>",
+        "provisional": true,
+        "rung": 2,
+        "rung_language": "detects on unseen tasks",
+        "score": -0.013543752953410149,
+        "scored": true,
+        "served_model": "tiny",
+        "threshold": null,
+        "verdict": null,
+        "window": "response"
+      }
+    ],
+    "model": "tiny",
+    "object": "chat.completion.chunk"
+  }
+}

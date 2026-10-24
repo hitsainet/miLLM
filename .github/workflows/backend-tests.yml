@@ -1,0 +1,395 @@
+name: Backend Tests
+
+on:
+  # The mirror receives an orphan snapshot, so a path filter there has no diff base and never fires;
+  # sync-to-clean dispatches this workflow on the mirror instead. Since 2026-10-20 that mirror run is
+  # informational: the image build trusts THIS repo's run (sync-to-clean's `gate` requires it).
+  workflow_dispatch: {}
+  push:
+    branches: [main]
+    paths:
+      - 'millm/**'
+      - 'tests/**'
+      - 'pyproject.toml'
+      - 'constraints.txt'
+      - 'docker/**'
+      - '.github/workflows/backend-tests.yml'
+  pull_request:
+    branches: [main]
+    paths:
+      - 'millm/**'
+      - 'tests/**'
+      - 'pyproject.toml'
+      - 'constraints.txt'
+      - 'docker/**'
+
+permissions:
+  contents: read
+
+jobs:
+  # ── SHARDED (operator directive, 2026-10-20) ─────────────────────────────────────────
+  # The unit tree ran serially in one job for 13-16 minutes. It is split across SHARDS by
+  # file (`CI_SHARD`, read by tests/conftest.py's `pytest_ignore_collect`;
+  # tests/support/ci_shard.py balances the split on per-file durations taken from a real
+  # CI run), each still serial - no file ever shares a process with a file it did not
+  # share one with before, so no xdist-safety question arises. `all-shards` below is green
+  # only when every shard is; sync-to-clean's gate requires that job by name.
+  # tests/unit/test_ci_shards.py proves every test file runs in exactly one shard;
+  # tests/unit/test_private_ci_trust.py pins this matrix, CI_SHARD and the aggregator.
+  test:
+    name: Unit shard ${{ matrix.shard }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2, 3]
+    env:
+      CI_SHARD: ${{ matrix.shard }}/3
+      FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+      SECRET_KEY: ci-test-secret-key-minimum-32-characters-long
+      DATA_DIR: /tmp/millm-ci
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python 3.13
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+          cache: 'pip'
+          cache-dependency-path: |
+            pyproject.toml
+            constraints.txt
+
+      - name: Install PyTorch (CPU)
+        run: |
+          # MUST equal the pin in pyproject.toml (exact since 2026-10-17; test_torch_pin.py).
+          #
+          # This step exists to keep the multi-gigabyte CUDA build off the
+          # runner. It was pinned to 2.9.1 while pyproject required >=2.10.0, so
+          # the very next step found the constraint unsatisfied, uninstalled
+          # this CPU wheel, and pulled full CUDA torch plus the nvidia-* stack —
+          # exhausting the disk with "[Errno 28] No space left on device" before
+          # a single test ran. A pre-install pinned below the floor is not a
+          # smaller install, it is a wasted download followed by the big one.
+          pip install "torch==2.14.1" --index-url https://download.pytorch.org/whl/cpu
+          python -c "import torch; print('torch', torch.__version__)"
+
+      - name: Install package with dev dependencies
+        run: |
+          # -c constraints.txt: the lock the image installs from too (test_dependency_lock.py).
+          # The checker then fails the job on anything installed but unpinned or off its pin.
+          pip install -c constraints.txt -e ".[dev]"
+          python docker/check_installed_against_constraints.py constraints.txt
+
+      - name: Lint gate (ruff bug-class rules, mypy strict on the scoped packages)
+        # 026 F-6 (suite tracker 4.16). Gated only where the tree is green, so the gate
+        # cannot be "temporarily" switched off: ruff's pyflakes + syntax rules over millm/
+        # (undefined names, unused variables, redefinitions; F401 unused-import and the
+        # style rules are tracked debt, ~1,500 findings), and mypy --strict on the batch
+        # package and the modules written green. Widen MYPY_GATED as packages are cleaned.
+        # tests/unit/test_lint_gate.py pins this step and runs the same commands locally.
+        env:
+          MYPY_GATED: millm/services/batch millm/services/profile_targeting.py millm/ml/llamacpp_modes.py millm/services/hf_token.py millm/core/hf_credentials.py millm/core/secret_box.py millm/api/routes/management/settings.py millm/services/float32_scoring.py millm/api/schemas/scoring_contract.py millm/services/runtime_settings.py millm/api/routes/management/environment.py millm/db/models/env_override.py millm/telemetry
+        run: |
+          python -m ruff check millm --select E9,F --ignore F401
+          python -m mypy --follow-imports=silent $MYPY_GATED
+
+      - name: Run unit tests
+        run: |
+          # integration/ and e2e/ require a real database and full stack.
+          # No file is excluded. Eight were (--ignore, "pre-existing failures") long
+          # after they had been fixed: on 2026-10-16 all 183 of their tests passed on a
+          # GPU-less torch, and services/test_profile_service carries 028 FU-1's
+          # profile-targeting tests, which CI was silently not running.
+          # CI_SHARD (job env) picks this shard's files; unset, the same command runs them all.
+          python -m pytest tests/unit/ \
+            -m "not slow" \
+            -v --no-cov --tb=short
+
+  # The single verdict for every shard: green only if each one is. A shard that failed, was
+  # cancelled or never ran makes this red (a matrix job's `result` is `success` only when
+  # every leg succeeded). sync-to-clean's gate requires THIS job by name, so the mirror never
+  # receives a commit on a partial set of shards.
+  all-shards:
+    name: all shards
+    needs: [test]
+    if: always()
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Require every shard to have passed
+        env:
+          RESULTS: ${{ toJSON(needs) }}
+        run: |
+          set -euo pipefail
+          echo "$RESULTS" | jq -r 'to_entries[] | "\(.key): \(.value.result)"'
+          jq -e 'length > 0 and all(.[]; .result == "success")' <<< "$RESULTS" > /dev/null
+
+  schema:
+    # The migrations build production; the models build every test schema, on
+    # SQLite. Nothing compared them and CI ran no PostgreSQL, so a model that
+    # disagreed with its migration — or an enum value the API accepts and the
+    # database lacks — could not fail here. This job migrates a real PostgreSQL 16
+    # (production's major version) from empty and compares it with the models.
+    #
+    # MILLM_REQUIRE_PG turns "server unreachable" into a FAILURE. These tests skip
+    # without it, and a skipped guard reads as a passing one.
+    name: Schema guards (PostgreSQL 16)
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    env:
+      FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+      SECRET_KEY: ci-test-secret-key-minimum-32-characters-long
+      DATA_DIR: /tmp/millm-ci
+      MILLM_TEST_PG_BASE: postgresql+asyncpg://postgres:postgres@localhost:5432
+      MILLM_REQUIRE_PG: '1'
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python 3.13
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+          cache: 'pip'
+          cache-dependency-path: |
+            pyproject.toml
+            constraints.txt
+
+      - name: Install PyTorch (CPU)
+        run: |
+          # Same spec as the unit job, for the same reason: it must satisfy the
+          # pyproject floor or pip replaces it with the CUDA build.
+          pip install "torch==2.14.1" --index-url https://download.pytorch.org/whl/cpu
+
+      - name: Install package with dev dependencies
+        run: |
+          # -c constraints.txt: the lock the image installs from too (test_dependency_lock.py).
+          # The checker then fails the job on anything installed but unpinned or off its pin.
+          pip install -c constraints.txt -e ".[dev]"
+          python docker/check_installed_against_constraints.py constraints.txt
+
+      - name: Run the schema guards and the migration 013 test
+        run: |
+          python -m pytest tests/schema/ tests/integration/test_migration_013.py \
+            -v --no-cov --tb=short
+
+  cross-repo-contract:
+    # F20 R2-02: the cross-repo guard existed and NOTHING RAN IT.
+    #
+    # R1-14 added `MILLM_REQUIRE_CROSS_REPO_CHECKS=1` to turn the skip into a
+    # failure, and then nothing set it — the mechanism was built and left
+    # unwired, which is this increment's signature defect. A switch nobody
+    # flips is a skip with extra steps.
+    #
+    # This job checks out BOTH repos and runs the guard with the switch ON, so
+    # a contract row that claims a tool miStudio does not register FAILS here
+    # rather than skipping in silence.
+    name: Contract ↔ MCP registry
+    # F20 R3-22: SOURCE REPO ONLY. This job checks out the PRIVATE sibling
+    # `Onegaishimas/miStudio`, which the public mirror has no credentials for —
+    # so on the mirror the checkout fails, `MILLM_REQUIRE_CROSS_REPO_CHECKS=1`
+    # correctly turns the degrade into a failure, and the build goes red for a
+    # guard that cannot meaningfully run there. The contract it checks is
+    # stripped from the mirror by sync-to-clean anyway (see R3-21).
+    #
+    # Every other cross-repo-sensitive job in this repo already gates on
+    # `github.repository` (docker-images, release, deploy-manual,
+    # sync-main-to-gitops-pilot). I added this one without the guard the
+    # codebase had already standardised on.
+    if: github.repository == 'Onegaishimas/miLLM'
+    runs-on: ubuntu-latest
+    env:
+      SECRET_KEY: ci-test-secret-key-minimum-32-characters-long
+      DATA_DIR: /tmp/millm-ci
+      MILLM_REQUIRE_CROSS_REPO_CHECKS: '1'
+      MISTUDIO_REPO: ${{ github.workspace }}/miStudio
+      # Importing miStudio's schema package pulls its app settings, which
+      # default to paths this runner cannot write. Point them at the workspace
+      # so an ENVIRONMENT limit does not read as a parity failure.
+      #
+      # F20 R3-04: this said `${{ runner.temp }}/hf`. The `runner` context is
+      # NOT available in a job-level `env:` block — only inside steps — so
+      # GitHub rejected the WHOLE WORKFLOW FILE and ran NOTHING. Four commits
+      # went out with the entire backend test suite silently not running,
+      # while I reported it green from local runs. Hardcoded because a literal
+      # path cannot reference a context that is out of scope.
+      HF_HOME: /tmp/hf
+      DATABASE_URL: postgresql+asyncpg://u:p@localhost/x
+      DATABASE_URL_SYNC: postgresql://u:p@localhost/x
+      REDIS_URL: redis://localhost:6379/0
+      CELERY_BROKER_URL: redis://localhost:6379/1
+      CELERY_RESULT_BACKEND: redis://localhost:6379/2
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: miLLM
+
+      - name: Check out miStudio (the MCP server lives there)
+        uses: actions/checkout@v4
+        continue-on-error: true
+        id: sibling
+        with:
+          repository: Onegaishimas/miStudio
+          path: miStudio
+          # miStudio became PRIVATE on 2026-09-12, and the default GITHUB_TOKEN
+          # cannot read another private repository: this checkout returned "Not
+          # Found" and every Backend Tests run went red from then on. A read-only
+          # deploy key on miStudio, stored here as a secret, is the narrowest
+          # credential that works.
+          ssh-key: ${{ secrets.MISTUDIO_DEPLOY_KEY }}
+
+      - name: Set up Python 3.13
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+
+      - name: Install the contract-guard dependencies
+        # Only what the guard needs: pytest to run it, mcp to import the
+        # sibling registry. Not the full ML stack.
+        #
+        # The mcp constraint is READ FROM miStudio's own requirements.txt
+        # rather than written here. A second hand-maintained copy is exactly
+        # what broke this job: `pip install mcp` was unbounded, mcp 2.x renamed
+        # FastMCP to MCPServer, and miStudio's v1 server module stopped
+        # importing — so the guard reported "cannot run" on every push from
+        # 2026-08-19 onward while miStudio's own CI stayed green on 1.x.
+        # Deriving it means the guard installs what miStudio actually declares,
+        # and a future bump there needs no edit here.
+        run: |
+          # Say WHY first. When the sibling checkout failed, this step used to report
+          # an unreadable mcp constraint — true, and pointing at the wrong problem.
+          if [ "${{ steps.sibling.outcome }}" != "success" ]; then
+            echo "::error::miStudio checkout failed, so the contract guard cannot run."
+            echo "::error::Check the MISTUDIO_DEPLOY_KEY secret and the read-only deploy key on Onegaishimas/miStudio."
+            exit 1
+          fi
+          spec=$(grep -oE '^mcp[<>=!,.0-9]+' miStudio/backend/requirements.txt | head -1)
+          if [ -z "$spec" ]; then
+            echo "::error::could not read the mcp constraint from miStudio's"
+            echo "::error::requirements.txt — refusing to guess a version."
+            exit 1
+          fi
+          echo "installing mcp as declared by miStudio: $spec"
+          # Everything else from miLLM's lock. mcp itself (and mcp 2.x's mcp-types) is left to
+          # miStudio's declaration, so this job follows miStudio the moment it moves;
+          # test_dependency_lock.py separately requires miLLM's dev pin to equal miStudio's.
+          grep -vE '^mcp(-types)?==' miLLM/constraints.txt > "$RUNNER_TEMP/constraints-no-mcp.txt"
+          # sqlalchemy and httpx (2026-10-21): miStudio's `src/__init__.py` now imports
+          # sqlalchemy (its SQLAlchemy 2.1 psycopg2 dialect registration), and its tool modules
+          # import httpx, which mcp 1.x brought in transitively and mcp 2.x (httpx2) does not.
+          # Without them the registry fails to import and this job fails "cannot run".
+          pip install -c "$RUNNER_TEMP/constraints-no-mcp.txt" pytest "$spec" pydantic pydantic-settings sqlalchemy httpx
+
+      - name: Run the cross-repo guard
+        # If the sibling checkout failed (a fork PR without access), the guard
+        # cannot run — say so LOUDLY rather than passing. A green tick here
+        # would mean the opposite of what it says.
+        run: |
+          if [ "${{ steps.sibling.outcome }}" != "success" ]; then
+            echo "::error::miStudio checkout failed — the contract guard could"
+            echo "::error::not run. This is UNVERIFIED, not verified-clean."
+            exit 1
+          fi
+          cd miLLM
+          # `-p no:cacheprovider --noconftest`: these two files check DOCS and
+          # a SIBLING REGISTRY. They need no database, no Redis and no app
+          # settings, and loading miLLM's conftest would demand all three —
+          # turning a documentation guard into an integration test.
+          # The J-space contract pin (miStudio 027 task 4.2) rides this checkout: the unit job has
+          # no miStudio, so there its byte check SKIPS; here the switch makes it required.
+          # 038 FR-38.1: the generality guard's seeded pack must equal miStudio's seed files; it
+          # rides the same checkout for the same reason.
+          python -m pytest --noconftest -p no:cacheprovider -v -rs \
+                 tests/unit/test_mcp_contract_consistency.py \
+                 tests/unit/test_mcp_tool_paths_are_real.py \
+                 tests/unit/api/test_jspace_contracts_schema_sync.py \
+                 tests/unit/test_behaviour_pack_seed_sync.py
+
+  adapter-manifest-sync:
+    # Feature 33: miLLM vendors miForge's `miforge.adapter-manifest` v1 schema
+    # (docs/schemas/adapter-manifest-v1.json) and the byte-identity half of
+    # tests/unit/api/test_adapter_manifest_schema_sync.py needs miForge checked
+    # out. The unit job above has no sibling checkout, so there it SKIPS.
+    #
+    # miForge is a PRIVATE repo (Onegaishimas/miForge). The default
+    # GITHUB_TOKEN cannot read it; a read-only deploy key on miForge, stored
+    # here as the secret MIFORGE_DEPLOY_KEY, is the narrowest credential that
+    # works (the same arrangement as MISTUDIO_DEPLOY_KEY above).
+    #
+    # The secret exists (created 2026-10-16), so this job now REQUIRES the
+    # check: MILLM_REQUIRE_CROSS_REPO_CHECKS=1 turns a missing miForge schema
+    # into a failure, and a failed checkout is an ERROR, as cross-repo-contract
+    # does for MISTUDIO_DEPLOY_KEY. A green tick here means both byte checks
+    # RAN and passed — never "skipped, unverified".
+    #
+    # The two test files import nothing from `millm` and need pytest alone
+    # (tests/unit/test_cross_repo_sync_files_need_only_pytest.py holds that).
+    # Until 2026-10-16 the adapter file imported the loader, whose package
+    # init needs structlog/torch, so this job died at collection on every
+    # push — a verdict about neither contract (suite tracker 0.9). The
+    # loader-vs-schema field check moved to
+    # tests/unit/services/test_adapter_manifest_fields_match_schema.py, which
+    # the unit job runs.
+    #
+    # Source repo only: the public mirror has no credential for a private
+    # sibling.
+    name: Adapter manifest ↔ miForge
+    if: github.repository == 'Onegaishimas/miLLM'
+    runs-on: ubuntu-latest
+    env:
+      FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+      MIFORGE_REPO: ${{ github.workspace }}/miForge
+      MILLM_REQUIRE_CROSS_REPO_CHECKS: '1'
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: miLLM
+
+      - name: Check out miForge (owner of the adapter manifest schema)
+        uses: actions/checkout@v4
+        continue-on-error: true
+        id: miforge
+        with:
+          repository: Onegaishimas/miForge
+          path: miForge
+          ssh-key: ${{ secrets.MIFORGE_DEPLOY_KEY }}
+
+      - name: Set up Python 3.13
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+
+      - name: Install pytest
+        # The two sync tests read JSON files and import nothing from millm.
+        run: pip install -c miLLM/constraints.txt pytest
+
+      - name: Run the adapter and checkpoint manifest sync tests
+        run: |
+          # Say WHY first: with the cross-repo switch on, a failed checkout
+          # would otherwise surface as two test failures about a missing file.
+          if [ "${{ steps.miforge.outcome }}" != "success" ]; then
+            echo "::error::miForge checkout failed, so the manifest byte checks cannot run."
+            echo "::error::Check the MIFORGE_DEPLOY_KEY secret and the read-only deploy key on Onegaishimas/miForge."
+            exit 1
+          fi
+          cd miLLM
+          # `--noconftest`: the test needs no database, Redis or app settings.
+          # Feature 32's checkpoint manifest (also miForge-owned) rides the same checkout.
+          python -m pytest --noconftest -p no:cacheprovider -v -rs \
+                 tests/unit/api/test_adapter_manifest_schema_sync.py \
+                 tests/unit/api/test_checkpoint_manifest_schema_sync.py

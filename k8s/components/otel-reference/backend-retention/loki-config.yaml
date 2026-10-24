@@ -1,0 +1,65 @@
+# Loki configuration for the reference backend (grafana/otel-lgtm 0.38.0, Loki v3.7.8).
+#
+# Mounted over the image's /otel-lgtm/loki-config.yaml. Everything above the RETENTION block is
+# the image's bundled file, byte for byte (0.38.0); the block below it is the only change: the
+# compactor deletes log chunks older than 168 h (7 days, D38.45). Loki keeps everything forever
+# unless retention is enabled, and `limits_config.retention_period` alone does nothing without
+# `compactor.retention_enabled` (and, since Loki 3, a `delete_request_store`).
+#
+# Verified against the image on 2026-10-23 (FTASKS 12.1): `GET /config` on the running backend
+# reports `retention_enabled: true` and `retention_period: 1w` with this file mounted.
+# When the image is bumped, re-copy its bundled file and keep this block.
+auth_enabled: false
+
+server:
+  http_listen_port: 3100
+
+common:
+  instance_addr: 127.0.0.1
+  path_prefix: /data/loki
+  storage:
+    filesystem:
+      chunks_directory: /data/loki/chunks
+      rules_directory: /data/loki/rules
+  replication_factor: 1
+  ring:
+    kvstore:
+      store: inmemory
+
+schema_config:
+  configs:
+    - from: 2020-10-24
+      store: tsdb
+      object_store: filesystem
+      schema: v13
+      index:
+        prefix: index_
+        period: 24h
+
+ruler:
+  alertmanager_url: http://127.0.0.1:9093
+
+pattern_ingester:
+  lifecycler:
+    min_ready_duration: 1s
+
+ingester:
+  lifecycler:
+    min_ready_duration: 1s
+
+frontend:
+  scheduler_dns_lookup_period: 1s
+  address: 127.0.0.1
+
+query_scheduler:
+  use_scheduler_ring: false
+
+# ── RETENTION (miLLM reference deployment, D38.45) ──────────────────────────────────────────
+compactor:
+  working_directory: /data/loki/compactor
+  retention_enabled: true
+  delete_request_store: filesystem
+  retention_delete_delay: 2h
+
+limits_config:
+  retention_period: 168h

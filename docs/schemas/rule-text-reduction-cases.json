@@ -1,0 +1,302 @@
+{
+  "$comment": "Owned by miLLM 039 (TD39-21 - TD39-23); miStudio 040 vendors it byte-identically. A change lands here first. Each case: the request's messages (or a text completion's prompt) and the first choice's visible reply, and the text each window gives a rule signal; a window with no text is listed under missing with its reason code.",
+  "cases": [
+    {
+      "expect": {
+        "missing": {},
+        "texts": {
+          "all": "hello there\nhi",
+          "last_user": "hello there",
+          "prompt": "hello there",
+          "response": "hi"
+        }
+      },
+      "id": "chat.one_turn",
+      "input": {
+        "messages": [
+          {
+            "content": "hello there",
+            "role": "user"
+          }
+        ],
+        "reply_text": "hi"
+      },
+      "note": "one user message and a reply"
+    },
+    {
+      "expect": {
+        "missing": {},
+        "texts": {
+          "all": "be brief\nq1\na1",
+          "last_user": "q1",
+          "prompt": "be brief\nq1",
+          "response": "a1"
+        }
+      },
+      "id": "chat.system_user",
+      "input": {
+        "messages": [
+          {
+            "content": "be brief",
+            "role": "system"
+          },
+          {
+            "content": "q1",
+            "role": "user"
+          }
+        ],
+        "reply_text": "a1"
+      },
+      "note": "every message's content joined by one newline, the system's included"
+    },
+    {
+      "expect": {
+        "missing": {},
+        "texts": {
+          "all": "first\nans\nsecond\nr",
+          "last_user": "second",
+          "prompt": "first\nans\nsecond",
+          "response": "r"
+        }
+      },
+      "id": "chat.multi_turn_last_user",
+      "input": {
+        "messages": [
+          {
+            "content": "first",
+            "role": "user"
+          },
+          {
+            "content": "ans",
+            "role": "assistant"
+          },
+          {
+            "content": "second",
+            "role": "user"
+          }
+        ],
+        "reply_text": "r"
+      },
+      "note": "last_user is the LAST user message only"
+    },
+    {
+      "expect": {
+        "missing": {},
+        "texts": {
+          "all": "u\nv\nw",
+          "last_user": "v",
+          "prompt": "u\nv",
+          "response": "w"
+        }
+      },
+      "id": "chat.null_content_skipped",
+      "input": {
+        "messages": [
+          {
+            "content": "u",
+            "role": "user"
+          },
+          {
+            "content": null,
+            "role": "assistant"
+          },
+          {
+            "content": "v",
+            "role": "user"
+          }
+        ],
+        "reply_text": "w"
+      },
+      "note": "a message whose content is null contributes nothing (no empty line)"
+    },
+    {
+      "expect": {
+        "missing": {},
+        "texts": {
+          "all": "\nx\ny",
+          "last_user": "x",
+          "prompt": "\nx",
+          "response": "y"
+        }
+      },
+      "id": "chat.empty_content_kept",
+      "input": {
+        "messages": [
+          {
+            "content": "",
+            "role": "user"
+          },
+          {
+            "content": "x",
+            "role": "user"
+          }
+        ],
+        "reply_text": "y"
+      },
+      "note": "an empty-string content is a message of its own (an empty line)"
+    },
+    {
+      "expect": {
+        "missing": {},
+        "texts": {
+          "all": "prev\ngo\nvisible",
+          "last_user": "go",
+          "prompt": "prev\ngo",
+          "response": "visible"
+        }
+      },
+      "id": "chat.reasoning_not_read",
+      "input": {
+        "messages": [
+          {
+            "content": "prev",
+            "reasoning_content": "hidden thoughts",
+            "role": "assistant"
+          },
+          {
+            "content": "go",
+            "role": "user"
+          }
+        ],
+        "reply_text": "visible"
+      },
+      "note": "reasoning_content is never read; the reply is the visible text only"
+    },
+    {
+      "expect": {
+        "missing": {
+          "last_user": "no_user_turn"
+        },
+        "texts": {
+          "all": "sys only\nr",
+          "prompt": "sys only",
+          "response": "r"
+        }
+      },
+      "id": "chat.no_user_turn",
+      "input": {
+        "messages": [
+          {
+            "content": "sys only",
+            "role": "system"
+          }
+        ],
+        "reply_text": "r"
+      },
+      "note": "no user message: last_user is missing (no_user_turn)"
+    },
+    {
+      "expect": {
+        "missing": {
+          "response": "no_scored_tokens"
+        },
+        "texts": {
+          "all": "q",
+          "last_user": "q",
+          "prompt": "q"
+        }
+      },
+      "id": "chat.no_reply",
+      "input": {
+        "messages": [
+          {
+            "content": "q",
+            "role": "user"
+          }
+        ]
+      },
+      "note": "no reply: response is missing and all is the prompt alone"
+    },
+    {
+      "expect": {
+        "missing": {},
+        "texts": {
+          "all": "  ＡＢＣ  Café\tTAB \n  END\n",
+          "last_user": "  ＡＢＣ  Café\tTAB ",
+          "prompt": "  ＡＢＣ  Café\tTAB ",
+          "response": "  END\n"
+        }
+      },
+      "id": "chat.text_as_given",
+      "input": {
+        "messages": [
+          {
+            "content": "  ＡＢＣ  Café\tTAB ",
+            "role": "user"
+          }
+        ],
+        "reply_text": "  END\n"
+      },
+      "note": "no normalisation: case, width, whitespace and combining marks kept"
+    },
+    {
+      "expect": {
+        "missing": {},
+        "texts": {
+          "all": "<|im_start|>literal\nok",
+          "last_user": "<|im_start|>literal",
+          "prompt": "<|im_start|>literal",
+          "response": "ok"
+        }
+      },
+      "id": "chat.markup_never_added",
+      "input": {
+        "messages": [
+          {
+            "content": "<|im_start|>literal",
+            "role": "user"
+          }
+        ],
+        "reply_text": "ok"
+      },
+      "note": "template markup never enters a window (no role names, no tags)"
+    },
+    {
+      "expect": {
+        "missing": {
+          "last_user": "text_completion_has_no_user_turn"
+        },
+        "texts": {
+          "all": "complete this\n done",
+          "prompt": "complete this",
+          "response": " done"
+        }
+      },
+      "id": "completion.prompt_string",
+      "input": {
+        "prompt": "complete this",
+        "reply_text": " done"
+      },
+      "note": "a text completion: the prompt as given; no last_user window"
+    },
+    {
+      "expect": {
+        "missing": {
+          "last_user": "text_completion_has_no_user_turn"
+        },
+        "texts": {
+          "all": "first prompt\nr",
+          "prompt": "first prompt",
+          "response": "r"
+        }
+      },
+      "id": "completion.prompt_list_first",
+      "input": {
+        "prompt": [
+          "first prompt",
+          "second prompt"
+        ],
+        "reply_text": "r"
+      },
+      "note": "a list of prompts: the first one, as the first choice"
+    }
+  ],
+  "format": "millm.rule-text-reduction-cases/v1",
+  "rules": {
+    "all": "prompt + one newline + response when both exist, else whichever exists.",
+    "last_user": "the last user message's content; missing (no_user_turn) when there is none; missing (text_completion_has_no_user_turn) for a text completion.",
+    "normalisation": "none: text is as given, indexed in Unicode code points.",
+    "prompt": "every message's content that is a string, in order, joined by one newline (U+000A); a null content contributes nothing; reasoning_content is never read. A text completion: the prompt string, or the first of a list.",
+    "response": "the first choice's visible reply, reasoning excluded; missing (no_scored_tokens) when there is none."
+  }
+}

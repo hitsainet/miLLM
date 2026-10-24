@@ -1,0 +1,65 @@
+# The reference OpenTelemetry receiver for a single host (Feature 038, FR-38.25): the same
+# Collector configuration, retention files and dashboard as the Kubernetes component
+# (k8s/components/otel-reference), mounted from the same files.
+#
+# On its own (receiver only; point any miLLM at http://localhost:4318):
+#   docker compose -f docker-compose.otel.yml up -d
+# Beside the main stack (the `api` service reaches the Collector as otel-collector:4318):
+#   TELEMETRY_TRACES_ENABLED=true TELEMETRY_METRICS_ENABLED=true TELEMETRY_LOGS_ENABLED=true \
+#   TELEMETRY_ENDPOINT=http://otel-collector:4318 TELEMETRY_ALLOW_PLAINTEXT=true \
+#   docker compose -f docker-compose.yml -f docker-compose.otel.yml up -d
+#
+# Grafana: http://localhost:3000 (bound to 127.0.0.1 only; no login). Telemetry export stays OFF
+# in miLLM unless the TELEMETRY_* variables above are set (docker-compose.yml passes them through,
+# defaulting to off). Guide: docs/telemetry.md; manual: features/telemetry-export.
+#
+# Images: pinned by tag AND digest, the same as the Kubernetes component; bump both together.
+services:
+  otel-collector:
+    image: otel/opentelemetry-collector:0.163.2@sha256:63e5e8eccf4268be02388ba9f2dc36b80b5e47721291293411c0e83152d75bda
+    container_name: millm-otel-collector
+    restart: unless-stopped
+    command: ["--config=/etc/otelcol/collector-config.yaml"]
+    volumes:
+      - ./k8s/components/otel-reference/collector-config.yaml:/etc/otelcol/collector-config.yaml:ro
+    ports:
+      - "127.0.0.1:${OTEL_COLLECTOR_PORT:-4318}:4318"
+    depends_on:
+      - otel-lgtm
+
+  otel-lgtm:
+    image: grafana/otel-lgtm:0.38.0@sha256:75cdf892daffadf3763ef61c16a6d7f8586216fce0b40bba7874a0b053121084
+    container_name: millm-otel-lgtm
+    restart: unless-stopped
+    environment:
+      - PROMETHEUS_EXTRA_ARGS=--storage.tsdb.retention.time=7d --storage.tsdb.retention.size=6GB
+      - GF_AUTH_ANONYMOUS_ENABLED=true
+      - GF_AUTH_ANONYMOUS_ORG_ROLE=Editor
+      # No login at all (the image keeps Grafana's admin/admin) and nothing reported or fetched
+      # from grafana.com: the same settings as the Kubernetes component (backend.yaml).
+      - GF_AUTH_DISABLE_LOGIN_FORM=true
+      - GF_AUTH_BASIC_ENABLED=false
+      - GF_ANALYTICS_REPORTING_ENABLED=false
+      - GF_ANALYTICS_CHECK_FOR_UPDATES=false
+      - GF_ANALYTICS_CHECK_FOR_PLUGIN_UPDATES=false
+      - GF_PLUGINS_PREINSTALL_DISABLED=true
+      - GF_NEWS_NEWS_FEED_ENABLED=false
+      - LOKI_EXTRA_ARGS=-reporting.enabled=false
+      - TEMPO_EXTRA_ARGS=-reporting.enabled=false
+      - PYROSCOPE_EXTRA_ARGS=-usage-stats.enabled=false
+    volumes:
+      - otel_lgtm_data:/data
+      - ./k8s/components/otel-reference/backend-retention/loki-config.yaml:/otel-lgtm/loki-config.yaml:ro
+      - ./k8s/components/otel-reference/backend-retention/tempo-config.yaml:/otel-lgtm/tempo-config.yaml:ro
+      - ./k8s/components/otel-reference/dashboard-provider.yaml:/otel-lgtm/grafana/conf/provisioning/dashboards/millm.yaml:ro
+      - ./k8s/components/otel-reference/dashboard.json:/otel-lgtm/millm/millm-probes.json:ro
+    ports:
+      - "127.0.0.1:${OTEL_GRAFANA_PORT:-3000}:3000"
+
+volumes:
+  otel_lgtm_data:
+    name: millm-otel-lgtm-data
+
+networks:
+  default:
+    name: millm-network

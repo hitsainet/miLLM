@@ -1,0 +1,180 @@
+{
+  "behaviour_key": "card-pan",
+  "cases": [
+    {
+      "expect": {
+        "outputs": {
+          "format": true,
+          "masked": false,
+          "named": true,
+          "valid": true
+        },
+        "vetoed": false
+      },
+      "id": "valid-named",
+      "input": {
+        "text": "card number: 4111 1111 1111 1111."
+      },
+      "note": "a published test number, named",
+      "source": {
+        "citation": "Payment processors' sandbox test card numbers (for example Braintree's testing reference: Visa 4111 1111 1111 1111); test-only values, never issued to a cardholder; retrieval pending (OI-1)",
+        "kind": "published_test_value"
+      }
+    },
+    {
+      "expect": {
+        "outputs": {
+          "format": true,
+          "masked": true,
+          "named": false,
+          "valid": false
+        },
+        "vetoed": false
+      },
+      "id": "masked",
+      "input": {
+        "text": "card XXXX XXXX XXXX 1111"
+      },
+      "note": "last four kept",
+      "source": {
+        "kind": "constructed"
+      }
+    },
+    {
+      "expect": {
+        "outputs": {
+          "format": true,
+          "masked": false,
+          "named": false,
+          "valid": false
+        },
+        "vetoed": false
+      },
+      "id": "bad-check-digit",
+      "input": {
+        "text": "ref 4111 1111 1111 1112"
+      },
+      "note": "Luhn fails: never issued",
+      "source": {
+        "kind": "constructed"
+      }
+    },
+    {
+      "expect": {
+        "outputs": {
+          "format": false,
+          "masked": false,
+          "named": false,
+          "valid": false
+        },
+        "vetoed": false
+      },
+      "id": "none",
+      "input": {
+        "text": "nothing to see"
+      },
+      "note": "",
+      "source": {
+        "kind": "constructed"
+      }
+    }
+  ],
+  "description": "Pilot: a payment card number in format, valid under its issuer range and Luhn check, masked, or named by a nearby word.",
+  "expressions": {
+    "format": {
+      "signal": "num"
+    },
+    "masked": {
+      "signal": "masked"
+    },
+    "named": {
+      "signal": "named"
+    },
+    "valid": {
+      "signal": "valid"
+    }
+  },
+  "format": "midataworks.rule-set/v1",
+  "name": "card-pan-elements",
+  "outputs": [
+    {
+      "column": "format",
+      "type": "bool",
+      "value": {
+        "fired": "format"
+      }
+    },
+    {
+      "column": "valid",
+      "type": "bool",
+      "value": {
+        "fired": "valid"
+      }
+    },
+    {
+      "column": "masked",
+      "type": "bool",
+      "value": {
+        "fired": "masked"
+      }
+    },
+    {
+      "column": "named",
+      "type": "bool",
+      "value": {
+        "fired": "named"
+      }
+    }
+  ],
+  "signals": [
+    {
+      "fold_fullwidth_ascii": false,
+      "id": "num",
+      "ignore_case": false,
+      "kind": "pattern",
+      "pattern": "\\b[0-9X]{4}(?:[ -][0-9X]{4}){3}\\b",
+      "reads": "text"
+    },
+    {
+      "candidates": {
+        "span_of": "num"
+      },
+      "id": "valid",
+      "kind": "validator",
+      "params": {},
+      "validator": {
+        "id": "card_pan",
+        "version": 1
+      }
+    },
+    {
+      "candidates": {
+        "span_of": "num"
+      },
+      "id": "masked",
+      "kind": "validator",
+      "params": {
+        "format": "card_pan"
+      },
+      "validator": {
+        "id": "masked",
+        "version": 1
+      }
+    },
+    {
+      "anchor": "valid",
+      "fold_fullwidth_ascii": false,
+      "id": "named",
+      "ignore_case": true,
+      "kind": "proximity",
+      "max_distance": 24,
+      "phrases": [
+        "card number",
+        "card"
+      ],
+      "side": "before",
+      "unit": "code_points",
+      "word_boundary": true
+    }
+  ]
+}

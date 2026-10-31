@@ -1,0 +1,15 @@
+# Renders the reference OpenTelemetry receiver ALONE (namespace millm-otel): the Collector, the
+# backend, the volume, the dashboard and the internal-host Ingress. Nothing of miLLM's own
+# deployment is here.
+#
+# Deployed only by the `millm-otel` ArgoCD Application (k8s/argocd/millm-otel-app.yaml), which the
+# operator applies once by hand. See k8s/components/otel-reference/kustomization.yaml.
+#
+#   kubectl kustomize k8s/overlays/otel-reference      # render and inspect; applies nothing
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+namespace: millm-otel
+
+components:
+  - ../../components/otel-reference

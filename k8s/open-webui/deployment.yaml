@@ -1,0 +1,87 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: open-webui
+spec:
+  replicas: 1
+  # One SQLite DB on a RWO volume: never run old and new pods together —
+  # the new one migrates the schema on boot while the old one still writes.
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: open-webui
+  template:
+    metadata:
+      labels:
+        app: open-webui
+    spec:
+      # Moved from mcs-lnxgpu01 to mcs-lnxhost02 on 2026-09-13 with the GPU and
+      # started fresh; the old data stayed on mcs-lnxgpu01's disk.
+      nodeSelector:
+        kubernetes.io/hostname: mcs-lnxhost02
+      containers:
+        - name: open-webui
+          # Tag set by kustomization.yaml / Image Updater — not here.
+          image: ghcr.io/open-webui/open-webui
+          # Release tags are immutable; Always + :latest silently pulled
+          # whatever upstream main was on every pod reschedule.
+          imagePullPolicy: IfNotPresent
+          ports:
+            - containerPort: 8080
+          # Ready only once the app (and its first-boot DB migration) is up
+          # and the DB answers, so the Service and rollout status don't
+          # report a pod that would refuse connections.
+          readinessProbe:
+            httpGet:
+              path: /health/db
+              port: 8080
+            initialDelaySeconds: 10
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 3
+          env:
+            - name: ENV
+              value: dev
+            # Secret lives ONLY in the cluster (k8s/ syncs to the public
+            # mirror): kubectl create secret generic open-webui-env
+            #   -n open-webui-ns --from-literal=WEBUI_SECRET_KEY=...
+            - name: WEBUI_SECRET_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: open-webui-env
+                  key: WEBUI_SECRET_KEY
+            - name: WEBUI_AUTH
+              value: "False"
+            - name: OPENAI_API_BASE_URL
+              # In-cluster service DNS — OWUI and miLLM run on the same cluster
+              value: http://millm-backend.millm.svc.cluster.local:8000/v1
+            - name: OPENAI_API_KEY
+              value: sk-dummy-key
+            - name: ENABLE_OLLAMA_API
+              value: "False"
+            - name: ENABLE_OPENAI_API
+              value: "True"
+            - name: DEFAULT_MODELS
+              value: gemma-2-2b
+            - name: DEFAULT_USER_ROLE
+              value: admin
+            - name: ENABLE_SIGNUP
+              value: "True"
+            - name: WEBUI_URL
+              value: https://webui.hitsai.net
+          resources:
+            requests:
+              cpu: 250m
+              memory: 512Mi
+            limits:
+              cpu: "1"
+              # v0.10.x OOMKilled at 1Gi during first-boot DB migration
+              memory: 2Gi
+          volumeMounts:
+            - mountPath: /app/backend/data
+              name: open-webui-volume
+      volumes:
+        - name: open-webui-volume
+          persistentVolumeClaim:
+            claimName: open-webui-pvc

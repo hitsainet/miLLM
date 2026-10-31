@@ -1,0 +1,184 @@
+version: "3.8"
+
+services:
+  # Nginx Reverse Proxy
+  nginx:
+    image: nginx:alpine
+    container_name: millm-nginx
+    restart: unless-stopped
+    ports:
+      - "${NGINX_HTTP_PORT:-80}:80"
+    volumes:
+      - ./nginx/nginx.conf:/etc/nginx/nginx.conf:ro
+      - nginx_logs:/var/log/nginx
+    depends_on:
+      - api
+      - frontend
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://localhost/nginx-health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  # PostgreSQL Database
+  db:
+    image: postgres:16-alpine
+    container_name: millm-db
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-millm}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-millm_dev}
+      POSTGRES_DB: ${POSTGRES_DB:-millm}
+    ports:
+      - "${POSTGRES_PORT:-5432}:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-millm} -d ${POSTGRES_DB:-millm}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # Redis for caching and session storage
+  redis:
+    image: redis:7-alpine
+    container_name: millm-redis
+    restart: unless-stopped
+    ports:
+      - "${REDIS_PORT:-6379}:6379"
+    volumes:
+      - redis_data:/data
+    command: redis-server --appendonly yes
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # miLLM Backend API
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: millm-api
+    restart: unless-stopped
+    environment:
+      - DATABASE_URL=postgresql+asyncpg://${POSTGRES_USER:-millm}:${POSTGRES_PASSWORD:-millm_dev}@db:5432/${POSTGRES_DB:-millm}
+      - MODEL_CACHE_DIR=/app/model_cache
+      - SAE_CACHE_DIR=/app/sae_cache
+      - BATCH_FILES_DIR=/app/batch_files
+      # Feature 32: the checkpoint root miLLM saves to and loads from (named volume below).
+      - WEIGHTS_CHECKPOINT_DIR=/app/checkpoints
+      - HF_HOME=/app/hf_cache
+      - HOST=0.0.0.0
+      - PORT=8000
+      - DEBUG=${DEBUG:-false}
+      - LOG_LEVEL=${LOG_LEVEL:-INFO}
+      - CORS_ORIGINS=${CORS_ORIGINS:-http://localhost,http://localhost:3000,http://millm.hitsai.local}
+      - AUTO_LOAD_MODEL=${AUTO_LOAD_MODEL:-}
+      # Hugging Face credential tiers (Feature 34): HF_TOKEN from .env (empty = absent), and the
+      # key that encrypts a token saved on the Settings page (empty = saving is refused).
+      - HF_TOKEN=${HF_TOKEN:-}
+      - SETTINGS_ENCRYPTION_KEY=${SETTINGS_ENCRYPTION_KEY:-}
+      # cuda:N must be the card nvidia-smi calls N; CUDA's default order is
+      # fastest-first, which disagrees with NVML once there are two GPUs.
+      - CUDA_DEVICE_ORDER=PCI_BUS_ID
+      # Probe telemetry export (Feature 038): OFF unless set. To send to the reference receiver,
+      # run with docker-compose.otel.yml and see its header. Credentials go in TELEMETRY_HEADERS,
+      # never in the endpoint URL.
+      - TELEMETRY_TRACES_ENABLED=${TELEMETRY_TRACES_ENABLED:-false}
+      - TELEMETRY_METRICS_ENABLED=${TELEMETRY_METRICS_ENABLED:-false}
+      - TELEMETRY_LOGS_ENABLED=${TELEMETRY_LOGS_ENABLED:-false}
+      - TELEMETRY_ENDPOINT=${TELEMETRY_ENDPOINT:-}
+      - TELEMETRY_HEADERS=${TELEMETRY_HEADERS:-}
+      - TELEMETRY_ALLOW_PLAINTEXT=${TELEMETRY_ALLOW_PLAINTEXT:-false}
+      # Feature 39 S3: the rule-runner service's socket (the shared volume below).
+      - RULE_RUNNER_SOCKET=/run/millm-rules/runner.sock
+    ports:
+      - "${API_PORT:-8000}:8000"
+    volumes:
+      - model_cache:/app/model_cache
+      - sae_cache:/app/sae_cache
+      - batch_files:/app/batch_files
+      - checkpoints:/app/checkpoints
+      - ${HF_CACHE_DIR:-/home/x-sean/.cache/huggingface}:/app/hf_cache
+      - ./millm:/app/millm:ro
+      - rule_runner_socket:/run/millm-rules
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+
+  # Feature 39 S3 (FR-39.26): operator code rules, OUTSIDE the API process — the Kubernetes
+  # `rule-runner` sidecar's twin. Same image, its own command (the entrypoint would run
+  # migrations); no secret, no database, no GPU, no network, a read-only root, no capability, and
+  # only the socket volume it shares with `api`. The API asks it only after a response is sent.
+  rule-runner:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: millm-rule-runner
+    restart: unless-stopped
+    entrypoint: ["python", "-m", "millm.rules.runner_worker"]
+    # Review R1 (M1): not the api's uid; miLLM's group, for the 0660 socket.
+    user: "1001:1000"
+    read_only: true
+    cap_drop: [ALL]
+    security_opt:
+      - no-new-privileges:true
+      - seccomp=./k8s/seccomp/millm-rule-runner.json
+    network_mode: none
+    environment:
+      - RULE_RUNNER_SOCKET=/run/millm-rules/runner.sock
+      - RULE_RUNNER_BUNDLE_DIR=/app/runner-bundle
+      - NVIDIA_VISIBLE_DEVICES=void
+    volumes:
+      - rule_runner_socket:/run/millm-rules
+
+  # Frontend (Vite dev server)
+  frontend:
+    image: node:22-alpine
+    container_name: millm-frontend
+    working_dir: /app
+    command: sh -c "npm install && npm run dev -- --host 0.0.0.0"
+    environment:
+      - VITE_API_URL=${VITE_API_URL:-http://localhost:8000}
+    ports:
+      - "${FRONTEND_PORT:-3000}:3000"
+    volumes:
+      - ./admin-ui:/app
+      - frontend_node_modules:/app/node_modules
+    depends_on:
+      - api
+
+volumes:
+  postgres_data:
+    name: millm-postgres-data
+  redis_data:
+    name: millm-redis-data
+  model_cache:
+    name: millm-model-cache
+  sae_cache:
+    name: millm-sae-cache
+  batch_files:
+    name: millm-batch-files
+  checkpoints:
+    name: millm-checkpoints
+  frontend_node_modules:
+    name: millm-frontend-node-modules
+  nginx_logs:
+    name: millm-nginx-logs
+  rule_runner_socket:
+    name: millm-rule-runner-socket
+
+networks:
+  default:
+    name: millm-network

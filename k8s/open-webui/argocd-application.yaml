@@ -1,0 +1,41 @@
+# Applied by hand to the cluster (like the millm/mistudio Applications):
+#   kubectl apply -f k8s/open-webui/argocd-application.yaml
+#
+# Auto-deploys every upstream Open WebUI RELEASE, checked nightly:
+#   .github/workflows/owui-release-check.yml (00:00 UTC) finds a newer
+#   vX.Y.Z release whose image is on ghcr.io
+#     → commits the tag to gitops/pilot
+#       (k8s/open-webui/.argocd-source-open-webui.yaml)
+#     → ArgoCD syncs k8s/open-webui and rolls the deployment
+#
+# Not ArgoCD Image Updater: its poll interval is global (2m, shared with
+# millm & co.) so it can't run once a day for one app, and it walked all
+# ~40k ghcr.io tags on every poll. Upstream's :latest is their main branch,
+# never track it.
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: open-webui
+  namespace: argocd
+  labels:
+    app.kubernetes.io/part-of: millm
+spec:
+  project: default
+  source:
+    repoURL: https://github.com/Onegaishimas/miLLM.git
+    path: k8s/open-webui
+    targetRevision: gitops/pilot
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: open-webui-ns
+  revisionHistoryLimit: 10
+  ignoreDifferences:
+    - group: apps
+      kind: Deployment
+      jsonPointers:
+        - /spec/template/metadata/annotations/kubectl.kubernetes.io~1restartedAt
+  syncPolicy:
+    automated:
+      selfHeal: true
+    syncOptions:
+      - ServerSideApply=true

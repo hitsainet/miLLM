@@ -1,0 +1,78 @@
+# The reference OpenTelemetry Collector (core distribution): OTLP/HTTP in on 4318, memory_limiter
+# and batch, OTLP/HTTP out to the backend (collector-config.yaml, shared with
+# docker-compose.otel.yml).
+#
+# In-cluster only: a ClusterIP Service, no Ingress, no NodePort. miLLM reaches it at
+# http://otel-collector.millm-otel.svc:4318 (k8s/components/otel-export, switch-on only).
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: otel-collector
+  namespace: millm-otel
+  labels:
+    app: otel-collector
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: otel-collector
+  template:
+    metadata:
+      labels:
+        app: otel-collector
+    spec:
+      containers:
+        - name: collector
+          # Latest release on 2026-10-23 (0.163.2 of 2026-10-21), pinned by tag AND digest.
+          image: otel/opentelemetry-collector:0.163.2@sha256:63e5e8eccf4268be02388ba9f2dc36b80b5e47721291293411c0e83152d75bda
+          args:
+            - --config=/etc/otelcol/collector-config.yaml
+          env:
+            # The node's default runtime is nvidia: an unset variable would mount every card.
+            - name: NVIDIA_VISIBLE_DEVICES
+              value: void
+          ports:
+            - name: otlp-http
+              containerPort: 4318
+            - name: health
+              containerPort: 13133
+          readinessProbe:
+            httpGet:
+              path: /
+              port: 13133
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /
+              port: 13133
+            initialDelaySeconds: 10
+            periodSeconds: 20
+          resources:
+            requests:
+              cpu: 50m
+              memory: 128Mi
+            limits:
+              # memory_limiter (limit_mib 400, spike 100) refuses data before this is reached.
+              memory: 512Mi
+          volumeMounts:
+            - name: config
+              mountPath: /etc/otelcol
+              readOnly: true
+      volumes:
+        - name: config
+          configMap:
+            name: otel-collector-config
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: otel-collector
+  namespace: millm-otel
+spec:
+  type: ClusterIP
+  selector:
+    app: otel-collector
+  ports:
+    - name: otlp-http
+      port: 4318
+      targetPort: otlp-http

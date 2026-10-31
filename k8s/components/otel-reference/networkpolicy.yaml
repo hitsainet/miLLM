@@ -1,0 +1,55 @@
+# Egress of the reference receiver (review R1 of S3): NOTHING here may send outside its own
+# namespace's pipeline.
+#
+#   - otel-lgtm sends NOTHING out of its pod. Every component in it talks over 127.0.0.1 (the
+#     image's own collector, Loki, Tempo, Prometheus, Pyroscope, Grafana's data sources), which no
+#     policy touches. This also bounds what an anonymous Grafana Editor can do: a webhook contact
+#     point (Editors may create one) cannot reach another namespace's services or the internet.
+#   - otel-collector may reach only the backend's OTLP port, plus DNS to resolve `otel-lgtm`.
+#
+# Ingress is not restricted: miLLM (namespace millm) must reach the Collector, and the ingress
+# controller must reach Grafana. The cluster's CNI (Calico) enforces NetworkPolicy.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: otel-lgtm-no-egress
+  namespace: millm-otel
+spec:
+  podSelector:
+    matchLabels:
+      app: otel-lgtm
+  policyTypes:
+    - Egress
+  egress: []
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: otel-collector-egress
+  namespace: millm-otel
+spec:
+  podSelector:
+    matchLabels:
+      app: otel-collector
+  policyTypes:
+    - Egress
+  egress:
+    - to:
+        - podSelector:
+            matchLabels:
+              app: otel-lgtm
+      ports:
+        - protocol: TCP
+          port: 4318
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+          podSelector:
+            matchLabels:
+              k8s-app: kube-dns
+      ports:
+        - protocol: UDP
+          port: 53
+        - protocol: TCP
+          port: 53

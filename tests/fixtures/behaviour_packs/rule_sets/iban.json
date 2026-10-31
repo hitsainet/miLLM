@@ -1,0 +1,180 @@
+{
+  "behaviour_key": "iban",
+  "cases": [
+    {
+      "expect": {
+        "outputs": {
+          "format": true,
+          "masked": false,
+          "named": true,
+          "valid": true
+        },
+        "vetoed": false
+      },
+      "id": "valid-named",
+      "input": {
+        "text": "IBAN: DE89 3704 0044 0532 0130 00"
+      },
+      "note": "the registry's example, named",
+      "source": {
+        "citation": "SWIFT IBAN Registry, example IBAN in electronic format for the country (DE89 3704 0044 0532 0130 00); retrieval pending (OI-1)",
+        "kind": "published_test_value"
+      }
+    },
+    {
+      "expect": {
+        "outputs": {
+          "format": true,
+          "masked": true,
+          "named": false,
+          "valid": false
+        },
+        "vetoed": false
+      },
+      "id": "masked",
+      "input": {
+        "text": "account DE89 XXXX XXXX XXXX XXXX 00"
+      },
+      "note": "country, check digits and the last two kept",
+      "source": {
+        "kind": "constructed"
+      }
+    },
+    {
+      "expect": {
+        "outputs": {
+          "format": true,
+          "masked": false,
+          "named": false,
+          "valid": false
+        },
+        "vetoed": false
+      },
+      "id": "bad-check-digits",
+      "input": {
+        "text": "pay DE88 3704 0044 0532 0130 00"
+      },
+      "note": "MOD 97-10 fails: never issued",
+      "source": {
+        "kind": "constructed"
+      }
+    },
+    {
+      "expect": {
+        "outputs": {
+          "format": false,
+          "masked": false,
+          "named": false,
+          "valid": false
+        },
+        "vetoed": false
+      },
+      "id": "none",
+      "input": {
+        "text": "nothing to see"
+      },
+      "note": "",
+      "source": {
+        "kind": "constructed"
+      }
+    }
+  ],
+  "description": "Pilot: an international bank account number in format, valid under its country's length, layout and MOD 97-10, masked, or named.",
+  "expressions": {
+    "format": {
+      "signal": "num"
+    },
+    "masked": {
+      "signal": "masked"
+    },
+    "named": {
+      "signal": "named"
+    },
+    "valid": {
+      "signal": "valid"
+    }
+  },
+  "format": "midataworks.rule-set/v1",
+  "name": "iban-elements",
+  "outputs": [
+    {
+      "column": "format",
+      "type": "bool",
+      "value": {
+        "fired": "format"
+      }
+    },
+    {
+      "column": "valid",
+      "type": "bool",
+      "value": {
+        "fired": "valid"
+      }
+    },
+    {
+      "column": "masked",
+      "type": "bool",
+      "value": {
+        "fired": "masked"
+      }
+    },
+    {
+      "column": "named",
+      "type": "bool",
+      "value": {
+        "fired": "named"
+      }
+    }
+  ],
+  "signals": [
+    {
+      "fold_fullwidth_ascii": false,
+      "id": "num",
+      "ignore_case": false,
+      "kind": "pattern",
+      "pattern": "\\b[A-Z]{2}[0-9X]{2}(?: ?[A-Z0-9X]{4}){3,7}(?: ?[A-Z0-9X]{1,3})?\\b",
+      "reads": "text"
+    },
+    {
+      "candidates": {
+        "span_of": "num"
+      },
+      "id": "valid",
+      "kind": "validator",
+      "params": {},
+      "validator": {
+        "id": "iban",
+        "version": 2
+      }
+    },
+    {
+      "candidates": {
+        "span_of": "num"
+      },
+      "id": "masked",
+      "kind": "validator",
+      "params": {
+        "format": "iban"
+      },
+      "validator": {
+        "id": "masked",
+        "version": 1
+      }
+    },
+    {
+      "anchor": "valid",
+      "fold_fullwidth_ascii": false,
+      "id": "named",
+      "ignore_case": true,
+      "kind": "proximity",
+      "max_distance": 24,
+      "phrases": [
+        "iban",
+        "account"
+      ],
+      "side": "before",
+      "unit": "code_points",
+      "word_boundary": true
+    }
+  ]
+}

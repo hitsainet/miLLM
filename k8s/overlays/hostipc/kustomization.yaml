@@ -1,0 +1,11 @@
+# The default deployment (k8s/base) PLUS the opt-in hostIPC component.
+# Not deployed unless the ArgoCD Application's source path is pointed here;
+# see k8s/components/hostipc/kustomization.yaml for when and how.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+resources:
+  - ../../base
+
+components:
+  - ../../components/hostipc

@@ -1,0 +1,153 @@
+{
+  "batch_line": {
+    "custom_id": "golden-1",
+    "error": null,
+    "id": "<batch_req>",
+    "response": {
+      "body": {
+        "choices": [
+          {
+            "finish_reason": "length",
+            "index": 0,
+            "message": {
+              "content": "w27 user w10",
+              "reasoning_content": null,
+              "role": "assistant"
+            }
+          }
+        ],
+        "created": "<created>",
+        "id": "<completion_id>",
+        "model": "tiny",
+        "object": "chat.completion",
+        "system_fingerprint": "millm:tiny@abc123:float32/FP16:transformers",
+        "usage": {
+          "completion_tokens": 3,
+          "prompt_tokens": 6,
+          "total_tokens": 9
+        }
+      },
+      "millm": {
+        "headers": {
+          "X-miLLM-Backend": "serial",
+          "X-miLLM-Batch": "1",
+          "X-miLLM-Model": "\"tiny\";origin=model;commits=0",
+          "X-miLLM-Steering": "none"
+        },
+        "packed": false
+      },
+      "request_id": "<req>",
+      "status_code": 200
+    }
+  },
+  "body": {
+    "choices": [
+      {
+        "finish_reason": "length",
+        "index": 0,
+        "message": {
+          "content": "w27 user w10",
+          "reasoning_content": null,
+          "role": "assistant"
+        }
+      }
+    ],
+    "created": "<created>",
+    "id": "<completion_id>",
+    "model": "tiny",
+    "object": "chat.completion",
+    "system_fingerprint": "millm:tiny@abc123:float32/FP16:transformers",
+    "usage": {
+      "completion_tokens": 3,
+      "prompt_tokens": 6,
+      "total_tokens": 9
+    }
+  },
+  "header": null,
+  "stream_chunk": [
+    {
+      "choices": [
+        {
+          "delta": {
+            "role": "assistant"
+          },
+          "index": 0
+        }
+      ],
+      "created": "<created>",
+      "id": "<completion_id>",
+      "model": "tiny",
+      "object": "chat.completion.chunk"
+    },
+    {
+      "choices": [
+        {
+          "delta": {
+            "content": "w27 "
+          },
+          "index": 0
+        }
+      ],
+      "created": "<created>",
+      "id": "<completion_id>",
+      "model": "tiny",
+      "object": "chat.completion.chunk"
+    },
+    {
+      "choices": [
+        {
+          "delta": {
+            "content": "user "
+          },
+          "index": 0
+        }
+      ],
+      "created": "<created>",
+      "id": "<completion_id>",
+      "model": "tiny",
+      "object": "chat.completion.chunk"
+    },
+    {
+      "choices": [
+        {
+          "delta": {
+            "content": "w10"
+          },
+          "index": 0
+        }
+      ],
+      "created": "<created>",
+      "id": "<completion_id>",
+      "model": "tiny",
+      "object": "chat.completion.chunk"
+    },
+    {
+      "choices": [
+        {
+          "delta": {},
+          "finish_reason": "length",
+          "index": 0
+        }
+      ],
+      "created": "<created>",
+      "id": "<completion_id>",
+      "model": "tiny",
+      "object": "chat.completion.chunk",
+      "usage": {
+        "completion_tokens": 3,
+        "prompt_tokens": 6,
+        "total_tokens": 9
+      }
+    },
+    {
+      "choices": [],
+      "created": "<created>",
+      "id": "<completion_id>",
+      "millm_model": "\"tiny\";origin=model;commits=0",
+      "millm_steering": "none",
+      "model": "tiny",
+      "object": "chat.completion.chunk"
+    },
+    "[DONE]"
+  ]
+}

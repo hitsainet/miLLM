@@ -1,0 +1,68 @@
+# Tempo configuration for the reference backend (grafana/otel-lgtm 0.38.0, Tempo v3.1.0).
+#
+# Mounted over the image's /otel-lgtm/tempo-config.yaml. Everything above the RETENTION block is
+# the image's bundled file, byte for byte (0.38.0); the block below it is the only change: trace
+# blocks are deleted after 168 h (7 days, D38.45) instead of the default 336 h. Tempo 3 runs
+# retention in the backend scheduler and its worker, so both carry the value (in Tempo 2 this was
+# `compactor.compaction.block_retention`, which Tempo 3 no longer has).
+#
+# Verified against the image on 2026-10-23 (FTASKS 12.1): `GET /status/config` on the running
+# backend reports `block_retention: 168h0m0s` in both places with this file mounted.
+# When the image is bumped, re-copy its bundled file and keep this block.
+server:
+  http_listen_port: 3200
+  grpc_listen_port: 9096
+
+distributor:
+  receivers:
+    otlp:
+      protocols:
+        grpc:
+          endpoint: "127.0.0.1:4417"
+        http:
+          endpoint: "127.0.0.1:4418"
+
+memberlist:
+  bind_addr: [127.0.0.1]
+  bind_port: 7947
+
+querier:
+  frontend_worker:
+    frontend_address: 127.0.0.1:9096
+
+storage:
+  trace:
+    backend: local
+    wal:
+      path: /data/tempo/wal
+    local:
+      path: /data/tempo/blocks
+
+metrics_generator:
+  processor:
+    span_metrics:
+      dimensions:
+        - service_name
+        - operation
+        - status_code
+  storage:
+    path: /data/tempo/generator/wal
+    remote_write:
+      - url: http://127.0.0.1:9090/api/v1/write
+        send_exemplars: true
+
+overrides:
+  defaults:
+    metrics_generator:
+      processors: [service-graphs, span-metrics]
+
+# ── RETENTION (miLLM reference deployment, D38.45) ──────────────────────────────────────────
+backend_scheduler:
+  provider:
+    compaction:
+      compaction:
+        block_retention: 168h
+
+backend_worker:
+  compaction:
+    block_retention: 168h

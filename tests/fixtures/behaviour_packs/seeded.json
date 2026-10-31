@@ -1,0 +1,8 @@
+{
+  "pack": "seeded",
+  "note": "miStudio's seeded behaviour catalogue: the `behaviour` and `behaviour_label` of every judge-prompt seed file in miStudio `backend/src/data/judge_prompt_seeds/*.json`. tests/unit/test_behaviour_pack_seed_sync.py compares this file with the sibling (skips loudly without it, fails under MILLM_REQUIRE_CROSS_REPO_CHECKS=1 or MISTUDIO_REQUIRE_CROSS_REPO_CHECKS=1).",
+  "behaviours": [
+    {"key": "high-stakes", "name": "High-stakes interaction"},
+    {"key": "pii", "name": "Personal data present (PII)"}
+  ]
+}

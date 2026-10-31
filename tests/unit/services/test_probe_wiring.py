@@ -1,0 +1,299 @@
+"""The serving-path wiring: where the probe lifecycle is called, and in what order.
+
+⚠ ORDER IS THE WHOLE POINT HERE, not merely that the calls exist.
+
+`_probe_finish` must run **before** the response is committed — before the non-streaming route
+reads the ContextVar for its header, and before the streaming path yields its terminal chunk. A
+verdict computed in a `finally` is a verdict computed after the stream has closed, with nothing
+left to attach it to. The FTDD names that hazard explicitly; these tests are what hold it.
+
+And `_probe_record` must run in the `finally`, so an event exists even when generation failed. A
+request that crashed and a request nobody monitored look identical in the event table otherwise.
+"""
+
+from __future__ import annotations
+
+import inspect
+import re
+
+import pytest
+
+from millm.api.routes.openai.chat import build_probe_verdicts_header
+from millm.services.inference_service import (
+    InferenceService,
+    _verdict_payload,
+    get_probe_verdicts,
+    reset_steering_memo,
+    set_probe_verdicts,
+)
+from millm.services.probe_runtime import Verdict
+from tests.unit.services.test_probe_paths_discovered import discover_entry_points
+
+
+def source_of(name: str) -> str:
+    return inspect.getsource(getattr(InferenceService, name))
+
+
+def verdict(**over) -> Verdict:
+    base = dict(
+        probe_id="pr_1", name="high-stakes", rung=3,
+        rung_language="detects on unseen tasks, compared with a judge",
+        scored=True, score=2.31, threshold=1.07, fires=True,
+    )
+    base.update(over)
+    return Verdict(**base)
+
+
+class TestEveryServingPathIsWired:
+    """Each path must begin, finish and record. A path that begins and never finishes produces
+    a context that is never closed, and the NEXT request's `begin_request` raises.
+
+    ⚠ A SECONDARY CHECK, NOT THE GUARD (FR-27.9d). This was a literal list of four methods and
+    missed batched chat and both continuous-batching non-streaming paths. It now parametrises over
+    the entry points `test_probe_paths_discovered` derives from the class itself, and the guard
+    proper — which drives every discovered generation site with a probe armed — lives there.
+    """
+
+    @pytest.mark.parametrize("method", sorted(discover_entry_points()))
+    def test_it_begins_finishes_and_records(self, method):
+        code = source_of(method)
+        assert "_probe_begin(" in code, f"{method} never opens a probe context"
+        assert "_probe_finish(" in code, f"{method} never computes a verdict"
+        # 038 (D38.33): every record goes through the shielded, tracked task.
+        assert "_record_probe_shielded(" in code, f"{method} never persists an event"
+
+    def test_the_cbm_streaming_path_is_included(self):
+        """⚠ Task 5.8 — no task in the original chain covered this path.
+
+        `PROBE_FORCE_SERIAL` keeps continuous batching out while it is true, but it is a SETTING,
+        and this path does no sensing at all. With the flag off and a probe armed, the verdict
+        would simply be absent: no header, no chunk, no event, no reason.
+        """
+        code = source_of("_cbm_stream_chat_completion")
+        # Detached since Feature 27 (FR-27.8h); the behavioural proof is the path guard.
+        # 038: the call now also states its execution facts, so the reason is read separately.
+        assert "_probe_begin_detached(" in code and '"continuous_batching"' in code
+
+
+class TestFinishRunsBeforeTheResponseIsCommitted:
+    def test_streaming_finishes_before_the_terminal_chunk(self):
+        """A `finally` runs after the stream has closed. There would be nothing to attach to.
+
+        ⚠ ANCHORED ON THE NORMAL TERMINAL PATH, NOT ON `index()`. My first version took the first
+        `[DONE]` in the function and failed — `stream_chat_completion` has SEVEN, four of which
+        are refusal or error returns that come earlier in the source. Taking the first was the
+        "satisfied by the wrong occurrence" trap, and here it produced a false FAILURE; the same
+        mistake in the other direction is a false pass.
+        """
+        code = source_of("stream_chat_completion")
+        finish = code.index("_probe_finish(")
+        final_chunk = code.index('yield f"data: {final_chunk.model_dump_json')
+        done = code.index('yield "data: [DONE]', final_chunk)   # the one AFTER the final chunk
+        assert finish < final_chunk < done, "the verdict is computed too late to be delivered"
+
+    def test_the_probe_chunk_sits_between_the_final_chunk_and_DONE(self):
+        code = source_of("stream_chat_completion")
+        final_chunk = code.index('yield f"data: {final_chunk.model_dump_json')
+        chunk = code.index("_probe_stream_chunk(", final_chunk)
+        done = code.index('yield "data: [DONE]', chunk)
+        assert final_chunk < chunk < done
+
+    def test_an_error_path_still_writes_an_EVENT_even_though_it_sends_no_chunk(self):
+        """⚠ A DELIBERATE ASYMMETRY, found by making the test above precise.
+
+        Four `[DONE]` emissions in this function are refusals or error returns, and three of them
+        occur after the probe context is open. None sends a verdict chunk, and that is right: the
+        client is receiving an error, not a completion, and bolting a verdict onto it would
+        suggest the request was scored and served normally.
+
+        What must NOT happen is silence in the event log — a request that failed and a request
+        nobody monitored would then be indistinguishable. `_probe_record` lives in the `finally`,
+        so every one of those paths still records, carrying whatever the probe saw of the prompt.
+        """
+        code = source_of("stream_chat_completion")
+        begin = code.index("_probe_begin(")
+        record = code.index("_record_probe_shielded(")
+        dones_after_begin = [
+            m for m in range(len(code))
+            if code.startswith('yield "data: [DONE]', m) and m > begin
+        ]
+        assert len(dones_after_begin) >= 3, "expected several post-begin exits to cover"
+        assert code.index("finally:", begin) < record, "record must run for every exit"
+
+    def test_non_streaming_finishes_before_the_finally(self):
+        code = source_of("create_chat_completion")
+        assert code.index("_probe_finish(") < code.index("finally:")
+
+    def test_record_runs_in_the_finally_so_a_crash_still_leaves_an_event(self):
+        """A request that crashed and a request nobody monitored must not look identical."""
+        for method in ("create_chat_completion", "stream_chat_completion",
+                       "create_text_completion"):
+            code = source_of(method)
+            assert code.index("finally:") < code.index("_record_probe_shielded("), method
+
+
+class TestContinuousBatchingIsForcedSerial:
+    def test_the_cbm_gate_asks_the_probe_registry(self):
+        """⚠ Not the SAE registry.
+
+        The sensing clause reads `AttachedSAEState`, which cannot see a probe — a probe sits on
+        any layer and needs no attached SAE. Copying that shape would have produced a guard that
+        never fires. The circuit clause asks its own service, and this follows it.
+        """
+        code = source_of("_use_cbm_for_request")
+        assert "PROBE_FORCE_SERIAL" in code
+        assert "ProbeRuntimeState().has_armed()" in code
+        assert 'reason="probes_armed"' in code
+
+    def test_the_probe_clause_does_not_read_AttachedSAEState(self):
+        code = source_of("_use_cbm_for_request")
+        probe_clause = code[code.index("PROBE_FORCE_SERIAL"):]
+        probe_clause = probe_clause[: probe_clause.index("_cbm_force_serial_monitoring")]
+        assert "AttachedSAEState" not in probe_clause
+
+
+class TestBatchedRequestsSayWhy:
+    def test_n_greater_than_one_is_marked_not_scored(self):
+        code = source_of("create_chat_completion")
+        assert 'mark_not_scored("batched_request")' in code
+
+    def test_multi_prompt_completions_are_marked_not_scored(self):
+        code = source_of("create_text_completion")
+        assert 'mark_not_scored("batched_request")' in code
+
+
+class TestTheHungThreadGuard:
+    def test_probes_are_disarmed_where_sensing_is(self):
+        """A woken hung thread's forward pass would call the probe hook into the NEXT request's
+        context, reporting one conversation's verdict against another's id."""
+        code = source_of("stream_chat_completion")
+        assert 'disarm_all("generation_thread_hung")' in code
+
+    def test_the_reason_is_recorded_not_just_the_flag(self):
+        """⚠ THIS TEST PINNED A DEFECT UNTIL 2026-10-04. It asserted the source CONTAINED
+        `mark_all_disarmed("generation_thread_hung")`, reached through
+        `dependencies._probe_arming_service` — a global that never existed, so the call never ran
+        and the rows were never marked. Text presence is not a call. The write now goes through
+        `mark_armed_rows_disarmed`, run for real in `test_unload_clears_probe_hooks.py`."""
+        code = source_of("stream_chat_completion")
+        assert "mark_armed_rows_disarmed(" in code
+        assert "HANG_REASON" in code
+        assert '"_probe_arming_service"' not in code
+
+
+class TestTheVerdictContextVar:
+    def test_it_is_cleared_by_the_existing_request_reset(self):
+        """⚠ A route that has to remember TWO resets is a route that will one day remember one.
+
+        A stale list would attach one request's verdicts to another's response — reporting a
+        concept as detected in a conversation that never contained it.
+        """
+        set_probe_verdicts([verdict()])
+        assert get_probe_verdicts()
+        reset_steering_memo()
+        assert get_probe_verdicts() == []
+
+
+def _header(verdicts):
+    """038: the header is a projection of the FINALIZED results, built by the one builder.
+    039: in the order the publication gives them (`probe_result_order.order_results`), which is
+    the only place results are sorted."""
+    from millm.services.probe_result import build_probe_results
+    from millm.services.probe_result_order import order_results
+
+    return build_probe_verdicts_header(order_results(build_probe_results(verdicts, None), ()))
+
+
+class TestTheHeader:
+    def test_the_documented_example_is_produced_exactly(self):
+        # ⚠ `window` is a PARAMETER on the member, not part of the name token, so a v1.6
+        # consumer reading the name and the score is unaffected. It cannot be omitted: one probe
+        # now emits several members and they would otherwise share an identical name.
+        # 039 (FR-39.10): each member also names its probe (and its behaviour, when it has one).
+        assert _header([verdict()]) == (
+            '"high-stakes";score=2.31;threshold=1.07;verdict=?1;rung=3;window=all;probe="pr_1"'
+        )
+
+    def test_a_provisional_window_SAYS_SO_in_the_header(self):
+        """The operator chose alerts from uncalibrated windows over silence. The flag is the
+        condition that choice was made under, so it has to reach the wire."""
+        header = _header([verdict(window="prompt", provisional=True)])
+        assert "window=prompt" in header
+        assert "provisional=?1" in header
+
+    def test_a_calibrated_window_carries_no_provisional_flag(self):
+        """Specificity: a flag that is always present says nothing."""
+        assert "provisional" not in _header([verdict()])
+
+    def test_nothing_armed_means_no_header_at_all(self):
+        """An unarmed server's response must be byte-identical to what it was before F024."""
+        assert _header([]) == ""
+
+    def test_members_are_sorted_by_name_for_a_deterministic_header(self):
+        header = _header(
+            [verdict(name="zz"), verdict(name="aa"), verdict(name="mm")]
+        )
+        assert [m.split(";")[0] for m in header.split(", ")] == ['"aa"', '"mm"', '"zz"']
+
+    def test_not_scored_members_carry_their_reason(self):
+        header = _header(
+            [verdict(scored=False, not_scored_reason="speculative_decoding",
+                     score=None, threshold=None, fires=None)]
+        )
+        assert 'not-scored;reason="speculative_decoding"' in header
+        assert "score=" not in header
+
+    def test_no_threshold_means_NO_verdict_parameter(self):
+        """⚠ `verdict=?0` would report a decision the probe never made.
+
+        A probe with no threshold ranks without deciding, so the parameter is omitted entirely.
+        """
+        header = _header([verdict(threshold=None, fires=None)])
+        assert "verdict=" not in header
+        assert "threshold=" not in header
+        assert "score=2.31" in header
+
+    def test_it_stays_a_single_header_line(self):
+        header = _header([verdict(name="a"), verdict(name="b")])
+        assert "\n" not in header and "\r" not in header
+
+    def test_quotes_in_a_name_cannot_break_the_structure(self):
+        """039 (FTID Discrepancy 6): the quote is ESCAPED by the one serializer (`sf_string`), so
+        the name survives a real RFC 8941 parse exactly, rather than being silently altered."""
+        import http_sfv
+
+        header = _header([verdict(name='ev"il')])
+        parsed = http_sfv.List()
+        parsed.parse(header.encode("ascii"))
+        assert len(parsed) == 1 and parsed[0].value == 'ev"il'
+        assert parsed[0].params["probe"] == "pr_1"
+
+
+class TestTheStreamPayload:
+    def test_a_scored_verdict_carries_its_numbers(self):
+        payload = _verdict_payload(verdict())
+        # ⚠ EXACT EQUALITY, DELIBERATELY. `probe_id` and `window` joined this payload on
+        # 2026-09-30: a probe now reports several windows, and without them a streaming consumer
+        # sees N entries distinguishable only by their numbers. `provisional` says whether the
+        # threshold it fired against was ever calibrated for that window.
+        assert payload == {
+            "name": "high-stakes", "probe_id": "pr_1", "window": "all", "provisional": False,
+            "scored": True, "score": 2.31, "threshold": 1.07,
+            "verdict": True, "rung": 3,
+            "rung_language": "detects on unseen tasks, compared with a judge",
+            # 033 D-14 / addendum D-36: which model's residual was read; None = not recorded.
+            "served_model": None,
+        }
+
+    def test_an_unscored_verdict_carries_NO_numbers(self):
+        """Reporting a score of 0 for a request nobody scored would be a measurement never taken."""
+        payload = _verdict_payload(
+            verdict(scored=False, not_scored_reason="batched_request",
+                    score=None, threshold=None, fires=None)
+        )
+        assert payload["scored"] is False
+        assert payload["reason"] == "batched_request"
+        assert "score" not in payload and "verdict" not in payload
+
+    def test_the_rung_language_travels_so_no_client_maps_a_number_to_a_phrase(self):
+        assert "rung_language" in _verdict_payload(verdict())

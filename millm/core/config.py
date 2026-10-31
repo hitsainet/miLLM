@@ -1,0 +1,872 @@
+"""
+Configuration management using Pydantic Settings.
+
+All configuration is loaded from environment variables,
+with support for .env files.
+"""
+
+import warnings
+from typing import Any, Literal, Optional
+
+from pydantic import Field, SecretStr, field_validator, model_validator
+from pydantic_settings import BaseSettings, SettingsConfigDict
+
+
+def parse_gguf_tensor_split(value: Optional[str]) -> Optional[list[float]]:
+    """GGUF_TENSOR_SPLIT as proportions, or None when unset.
+
+    Comma-separated, one non-negative number per GPU a split uses, in index
+    order ("3,1"). Raises ValueError for anything else, so a typo fails at
+    startup instead of silently splitting by free memory.
+    """
+    text = (value or "").strip()
+    if not text:
+        return None
+    try:
+        proportions = [float(part) for part in text.split(",")]
+    except ValueError as e:
+        raise ValueError(
+            f"GGUF_TENSOR_SPLIT must be comma-separated numbers such as '3,1', got {value!r}"
+        ) from e
+    if any(p < 0 or p != p or p == float("inf") for p in proportions):
+        raise ValueError(f"GGUF_TENSOR_SPLIT proportions must be finite and >= 0, got {value!r}")
+    if not any(p > 0 for p in proportions):
+        raise ValueError(f"GGUF_TENSOR_SPLIT needs at least one proportion above 0, got {value!r}")
+    return proportions
+
+
+#: The context, in tokens, every card of a transformers load must have KV-cache
+#: room for (TRANSFORMERS_MIN_CONTEXT). Decision 7, 2026-09-14.
+TRANSFORMERS_MIN_CONTEXT_DEFAULT = 4096
+
+#: Memory, in MB, each card of a transformers load keeps for its CUDA context
+#: (TRANSFORMERS_CUDA_CONTEXT_MB). Measured on the node (hardware acceptance,
+#: 2026-09-14): 250-256 MiB idle, ~330 MiB after a first generation, growing to
+#: ~400 MiB over a session, on both the RTX 3080 Ti and the RTX 3090. 500 covers it.
+#: A request's prefill activations and the caching allocator's share are sized per
+#: model and per card (millm/ml/working_memory.py), not taken from this.
+TRANSFORMERS_CUDA_CONTEXT_MB_DEFAULT = 500
+
+#: Seconds a transformers model's cards stay idle before torch's unused cached blocks
+#: are returned to them (TRANSFORMERS_IDLE_CACHE_RELEASE_S). See the setting.
+TRANSFORMERS_IDLE_CACHE_RELEASE_S_DEFAULT = 5.0
+
+
+#: Settings that were declared and never read, deleted by ENH-003 decision D7 (2026-10-20). A
+#: `.env` that still names one is accepted with a warning (`Settings._drop_retired_settings`).
+RETIRED_SETTINGS = frozenset({
+    "REDIS_URL",
+    "MAX_DOWNLOAD_WORKERS",
+    "MAX_LOAD_WORKERS",
+    "DOWNLOAD_TIMEOUT",
+    "CIRCUIT_HUB_TAG",
+    "CIRCUIT_MAX_LAYERS",
+    "CIRCUIT_MAX_EDGES",
+    "CIRCUIT_MAX_MEMBERS_PER_LAYER",
+    # 037 FR-37.6 (D13, TC-37.3): the score route's probe cap now reads PROBE_MAX_ARMED.
+    "PROBE_SCORE_MAX_PROBES",
+    # ENH-006 D83 (operator 2026-10-29): no behaviour count, and the recommendation is the
+    # slowdown budget (PROBE_SLOWDOWN_BUDGET_PCT), so its target-sets and share ceilings are gone.
+    "PROBE_MAX_ARMED_BEHAVIOURS",
+    "PROBE_RECOMMEND_TARGET_SETS",
+    "PROBE_RECOMMEND_MAX_DECODE_SHARE",
+    "PROBE_RECOMMEND_MAX_PREFILL_SHARE",
+})
+
+
+class Settings(BaseSettings):
+    """Application settings loaded from environment variables."""
+
+    model_config = SettingsConfigDict(
+        env_file=".env",
+        env_file_encoding="utf-8",
+        case_sensitive=True,
+    )
+
+    # Database
+    #: `repr=False` (038 S2 review): a database URL carries its password; `repr(settings)` must not.
+    DATABASE_URL: str = Field(
+        default="postgresql+asyncpg://postgres:postgres@localhost:5432/millm", repr=False
+    )
+
+    # Model cache directory (matches docker-compose volume mount)
+    MODEL_CACHE_DIR: str = "/app/model_cache"
+
+    # SAE cache directory (matches docker-compose volume mount)
+    SAE_CACHE_DIR: str = "/app/sae_cache"
+
+    # HuggingFace. The server-wide token tier of `millm/services/hf_token.py`; a token saved on the
+    # Settings page outranks it, a per-request token outranks both.
+    HF_TOKEN: Optional[str] = Field(default=None, repr=False)
+
+    # Feature 34: the key that encrypts secrets stored in the database (the Settings page's HF
+    # token). No default and no generated fallback: absent, a save is refused. `secret_box.py`.
+    SETTINGS_ENCRYPTION_KEY: Optional[SecretStr] = None
+
+    # Server
+    HOST: str = "0.0.0.0"
+    PORT: int = 8000
+    DEBUG: bool = False
+
+    # CORS
+    CORS_ORIGINS: str = "*"
+
+    # Logging
+    LOG_LEVEL: str = "INFO"
+    LOG_FORMAT: Literal["json", "console"] = "console"
+
+    # Timeouts (seconds)
+    GRACEFUL_UNLOAD_TIMEOUT: float = 30.0
+
+    # Auto-load model on startup (model ID or name, empty to disable)
+    AUTO_LOAD_MODEL: Optional[str] = None
+
+    # ── Cluster import (Feature 8) ──────────────────────────────────────
+    CLUSTER_HUB_TAG: str = "mistudio-cluster-definition"
+    CLUSTER_HUB_CACHE_TTL_S: int = 300
+    # Fallback lambda bounds when a definition lacks budget.intensity_range
+    # (also used by the per-request dial, Feature 10).
+    CLUSTER_INTENSITY_MIN: float = 0.5
+    CLUSTER_INTENSITY_MAX: float = 1.5
+
+    # ── Multi-SAE circuit serving (Feature 12) ─────────────────────────
+    # ADVISORY budget for the attached SAE steering set — a "you may not have
+    # intended this much" hint, NOT a capacity limit. Real capacity is enforced
+    # in attach_set against live free VRAM (torch.cuda.mem_get_info) with a 10%
+    # headroom margin, which refuses with InsufficientMemoryError.
+    #
+    # This was originally 200 MB: the close-out TARGET from the two-SAE spike
+    # (two Gemma-2-2B SAEs = 128 MB fp16 / 256 MB fp32), not a capacity figure.
+    # A 5-SAE circuit on a 24 GB card sits at ~640 MB — entirely fine, but it
+    # tripped an "over the VRAM envelope" warning that read like a refusal.
+    # A documentation number must not masquerade as an operational limit.
+    #
+    # 4096 MB ≈ 32 SAEs at the measured 128 MB fp16 each, comfortably past the
+    # 16-layer contract maximum while still flagging a genuine runaway.
+    MULTISAE_VRAM_ENVELOPE_MB: int = 4096
+    # Dtype for the attached steering-weight set. "model" = the precision the model was LOADED at
+    # (`ml/native_dtype.py`), as the single-SAE path already does. This was "float16", so circuits
+    # and clusters steered with float16 weights added to a bfloat16 residual stream. Bytes per SAE
+    # are unchanged at 16 bits (~64 MB measured); an FP32 model doubles them, and the envelope
+    # sizes from the element width. An explicit dtype name still overrides.
+    MULTISAE_ATTACH_DTYPE: str = "model"
+    # Global circuit intensity (λ) bounds — shared with the Feature 14 dial.
+    CIRCUIT_INTENSITY_MIN: float = 0.0
+    CIRCUIT_INTENSITY_MAX: float = 2.0
+    #: Feature 19. Several circuits may serve at once when their claim sets are
+    #: disjoint, and an operator may compose them on a shared layer with
+    #: `allow_layer_overlap`. FALSE for one release (BR-011a); flipped to TRUE
+    #: by operator decision D19 (suite tracker 2026-10-16) after concurrent
+    #: circuit requests ran clean on the RTX 3090 (019 FTASKS 3.9). Still a
+    #: field switch: set false to make contention unoverridable again.
+    #:
+    #: Flag OFF REFUSES LOUDLY, naming configuration as the reason. It must NOT
+    #: fall back to the silent single-active disarm this feature replaces: that
+    #: silent fallback IS the bug (CLAIM-M4). With it off, startup also demotes
+    #: all but the most recent of several active circuits
+    #: (`circuit_claim_registry`), so a disjoint second circuit does not survive
+    #: a restart — one more reason the default is on.
+    CIRCUIT_ALLOW_CONCURRENT: bool = True
+
+    # Co-activation sensing (Feature 11)
+    SENSING_EPSILON: float = 0.1              # theta_i = max(floor, eps*max_act_i)
+    SENSING_THETA_FLOOR: float = 0.0
+    SENSING_CONTEXT_TOKENS: int = 16          # +-K context window; hard max 64
+    SENSING_MAX_EVENTS_PER_REQUEST: int = 20
+    SENSING_MAX_EVENTS_PER_CLUSTER: int = 1000
+    #: Feature 26 (FTASKS 0.4): batch generation rows' sensing events, capped apart from live.
+    SENSING_MAX_BATCH_EVENTS_PER_CLUSTER: int = 50000
+    SENSING_MAX_AGE_DAYS: int = 7
+    SENSING_FORCE_SERIAL: bool = True         # armed sensing forces serial routing
+    SENSING_DEDUP_HISTORY: bool = True        # report re-read chat history once, not per turn
+    SENSING_MAX_OVERHEAD_MS: float = 5.0      # warn threshold per request
+
+    # --- Feature 15: circuit edge sensing -------------------------------
+    #: Max tokens between an upstream fire and its downstream partner for the
+    #: pair to count as one edge observation. Too wide and unrelated fires get
+    #: attributed to each other; too narrow and real multi-token effects are
+    #: missed. 8 is the authored default, overridable per circuit.
+    CIRCUIT_SENSING_MAX_TOKEN_LAG: int = 8
+    CIRCUIT_SENSING_EPSILON: float = 0.1
+    CIRCUIT_SENSING_THETA_FLOOR: float = 0.0
+    CIRCUIT_SENSING_CONTEXT_TOKENS: int = 16
+    CIRCUIT_SENSING_MAX_EVENTS_PER_REQUEST: int = 20
+    CIRCUIT_SENSING_MAX_EVENTS_PER_CIRCUIT: int = 1000
+    CIRCUIT_SENSING_MAX_BATCH_EVENTS_PER_CIRCUIT: int = 50000
+    CIRCUIT_SENSING_MAX_AGE_DAYS: int = 7
+    CIRCUIT_SENSING_FORCE_SERIAL: bool = True
+    CIRCUIT_SENSING_MAX_OVERHEAD_MS: float = 5.0
+
+    # --- Feature 24: probe monitors -------------------------------------
+    #: Armed probes force the serial path. ⚠ This is a SETTING, so the CBM path must also mark a
+    #: request `not_scored` with a reason rather than relying on this being true — a probe never
+    #: goes silently quiet (BR-006), and an absent verdict is exactly that.
+    PROBE_FORCE_SERIAL: bool = True
+    #: The COUNT backstop (D9); the cost budget (gate 5, measured per card at arm) is the real
+    #: limit. MEASURED (037 FR-37.4, `0xcc/reviews/probe_scaling_2026-10-21.md`): the largest N for
+    #: which the cheapest kind — dense probes sharing one layer — fits BOTH halves of the budget
+    #: (D45) on both measured models on the RTX 3090. Decode allows 7 on each; PREFILL binds:
+    #: Llama-3.1-8B's dense probes cost 0.106 ms per 1,000 prompt tokens each (+0.054 shared), so
+    #: 0.5 ms admits 4 (LFM2.5-1.2B admits 8). Was an unmeasured planner 8.
+    #:
+    #: 039 (D13, TD39-14): RAISED TO 64 and demoted to the armed-PROBE backstop. The count limit now
+    #: counts BEHAVIOURS (`PROBE_MAX_ARMED_BEHAVIOURS`, and each model's recommended value); a set
+    #: of nine probes is one behaviour, and the cost gate still charges every probe. The stateless
+    #: score route's PROBE cap still reads this at request time (037 FR-37.6).
+    #:
+    #: ENH-006 D83 (2026-10-29): the behaviour count is gone and the cost budget is 5% of the
+    #: model's own time; this stays the memory/backstop cap and is NOT raised. At 5% the cost gate
+    #: binds first on every measured model (dense probes on one layer: 40 on Llama-3.1-8B, 10 on
+    #: LFM2.5-1.2B from the 2026-10-21 measurements), and memory is not what would bind above it
+    #: (~3 × d_model float32 per armed head, ~48 KiB at d_model 4096): the per-request recording
+    #: work outside the per-pass budget (~2.75 ms per probe per request) is.
+    PROBE_MAX_ARMED: int = 64
+    #: ENH-006 D83 (operator 2026-10-29): probes may slow each token by at most this many per cent
+    #: of the resident model's OWN measured time — decode ms per generated token, prefill ms per
+    #: 1,000 prompt tokens (`POST /api/models/{id}/probe-capacity/measure`). The cost gate alone
+    #: decides how many probes fit; admission fills up to PROBE_BUDGET_HEADROOM of it. A model
+    #: (or half) never measured falls back to PROBE_MAX_OVERHEAD_MS_PER_PASS /
+    #: PROBE_MAX_PREFILL_MS_PER_1K.
+    PROBE_SLOWDOWN_BUDGET_PCT: float = 5.0
+    #: 039 (TD39-5, FR-39.12): `X-miLLM-Probe-Verdicts` byte bound. Whole behaviour groups up to it,
+    #: then `"...";truncated;total=<n>`; the full list stays in the body, chunk and events API.
+    #: 8,192 since D59 (2026-10-24): the public chain passes it once miLLM's Ingress carries
+    #: `proxy-buffer-size: "16k"` (U3 measured 3,932 B as the limit at ingress-nginx's 4k default).
+    PROBE_VERDICT_HEADER_MAX_BYTES: int = 8192
+    #: 039 catalogue limits (FR-39.15, D32 starting values); each refuses at limit + 1.
+    PROBE_MAX_IMPORTED: int = 10000
+    PROBE_MAX_PER_BEHAVIOUR: int = 32
+    #: The set shape the recommendation reports capacity in ("how many of these fit", OQ-22 (a)).
+    PROBE_REFERENCE_SET_SHAPE: dict[str, Any] = Field(
+        default_factory=lambda: {"probes": 9, "layers": 3,
+                                 "rules": {"mean": 3, "max": 3, "attention": 3}}
+    )
+    #: 039 (FR-39.15): the default page of `GET /api/probes` and `GET /api/probes/behaviours`.
+    PROBE_LIST_PAGE_SIZE: int = 200
+    #: 039 S2 rule signals (FR-39.17 – FR-39.24, TD39-38). The switch turns every attached signal
+    #: into `rule_signals_disabled` without detaching anything; the budget bounds the inline
+    #: evaluation of one request (monotonic wall time); the three catalogue limits refuse at + 1.
+    RULE_SIGNALS_ENABLED: bool = True
+    RULE_TIME_BUDGET_MS: float = 20.0
+    RULE_SETS_MAX_IMPORTED: int = 1000
+    RULE_SET_MAX_SIGNALS: int = 64
+    RULE_SET_MAX_BYTES: int = 1_048_576
+    #: 039 S3 operator code (FR-39.26; D41). Code rules run in the `rule-runner` sidecar AFTER the
+    #: response, never on the live path; these bound each call (never below the runner contract's
+    #: floor: memory 64 MiB, output 4,096 bytes — `runner_client.floor_violations`, checked at
+    #: startup and before every job). Fuel and input length are the contract's floor exactly. Wall
+    #: time is a backstop only (fuel decides `rule_resource_limit`); the S0 measurement put a
+    #: full-floor-fuel call at ~187 ms, so the default leaves room. The per-request count bounds how
+    #: many (signal, window) calls one request's follow-up makes; the rest stay pending.
+    RULE_CODE_CALL_WALL_MS: int = 2000
+    RULE_CODE_CALL_MEMORY_MIB: int = 64
+    RULE_CODE_CALL_OUTPUT_BYTES: int = 4096
+    RULE_CODE_CALLS_PER_REQUEST: int = 16
+    #: The most bytes of code-rule documents one import may carry beside its rule set.
+    RULE_CODE_MODULES_MAX_BYTES: int = 4_194_304
+    #: ENH-008: how long an agent's request waits in the Approvals page before it expires, in
+    #: hours (at least 1). Read when a request is filed, so a change applies to the next one.
+    APPROVAL_TTL_HOURS: int = Field(default=24, ge=1, le=720)
+    #: The worker's Unix socket, in the `emptyDir` both containers mount (restart class).
+    RULE_RUNNER_SOCKET: str = "/run/millm-rules/runner.sock"
+    #: Floor on the parity tolerance. A definition may ask for tighter, never looser; miStudio's
+    #: acceptance measured its vectors reproducing at 0.000e+00 from the recorded token_ids, so
+    #: this is absorbing nothing on the reference path.
+    PROBE_PARITY_TOLERANCE: float = 0.001
+    #: The floor for the GATE's tolerance, on the combined score.
+    #:
+    #: ⚠ Not a loosening of `PROBE_PARITY_TOLERANCE`, which still governs how closely a build is
+    #: expected to track. This is the point below which a refusal says more about float precision
+    #: than about the probe: miStudio scores in fp16, miLLM serves bf16, and over 16 real vectors
+    #: that costs a worst-case 0.098 on the score against a threshold of 2.879 — 3.4%. Set from
+    #: measurement on 2026-09-27, not chosen. See `ParityReport`.
+    PROBE_PARITY_SCORE_TOLERANCE: float = 0.10
+    #: The gate's floor when the definition's `model.load_dtype` EQUALS the precision this server
+    #: loaded at, so no cross-precision gap remains — only two implementations' bfloat16 noise.
+    #:
+    #: The ABSOLUTE minimum of the matched floor; the probe-relative part is below.
+    PROBE_PARITY_MATCHED_DTYPE_FLOOR: float = 0.10
+    #: The matched floor's RELATIVE part, as a fraction of the probe's own bar: the floor is
+    #: max(PROBE_PARITY_MATCHED_DTYPE_FLOOR, this x |decision.threshold|).
+    #:
+    #: MEASURED 2026-10-03 on three retrained bfloat16 probes (48 vectors), miStudio scoring one
+    #: input at a time vs this server: worst combined Δ 0.0679 (L11 rolling w=64, bar 25.29),
+    #: 0.0278 (L16 mean, bar 17.24), 0.0856 (L21 rolling w=32, bar 46.78) — 0.16-0.27% of the bar,
+    #: and 15 of 48 vectors reproduced EXACTLY. Relative because the rules score on different
+    #: scales and the noise tracks the bar more tightly (1.7x spread) than it tracks an absolute
+    #: number (3.1x). 0.6% gives 2.2-3.6x headroom on all three; a wrong detector misses by whole
+    #: units. Chosen by the operator over keeping 0.10, which left the L21 probe 14% headroom.
+    PROBE_PARITY_MATCHED_RELATIVE_FLOOR: float = 0.006
+    #: How much of a vector must be reproducible for its comparison to count.
+    #:
+    #: ⚠ A k-sparse JumpReLU probe has positions whose gate NO independent implementation can
+    #: reproduce (see `ParityReport`); those are set aside rather than tolerated. This is the
+    #: point below which setting them aside would leave a comparison resting on a handful of
+    #: tokens — such a vector is refused, not passed on the remainder. Measured at real width
+    #: (2048 -> 16384, k = 128, the reference probe's own sparsity), 86% of positions survive the
+    #: three-sigma band, so this is nowhere near binding on a healthy probe; it binds on a probe
+    #: whose selected features sit on their own thresholds, which is a probe to refuse. A SMALL
+    #: robust subset is noisy, not blind: a basis error is present at EVERY position, so it
+    #: survives subsetting (measured 0.945 over 94% of positions, 0.356 over 86%).
+    PROBE_PARITY_MIN_ROBUST_FRACTION: float = 0.25
+    # ⚠ THE BUDGET IS PER FORWARD PASS, NOT PER REQUEST, because that is the unit the cost is
+    # incurred in. Measured on Llama-3.1-8B, one probe, layer 11, varying ONLY `max_tokens` on an
+    # identical prompt: 4 tokens -> 0.837 ms, 30 -> 3.425 ms, 120 -> 11.223 ms. Fits
+    # 0.45 ms + ~0.09 ms per pass. Meanwhile 2820 PROMPT tokens with 8 generated cost 1.94 ms —
+    # twenty-one times the tokens for a third of the overhead, because prefill scores the whole
+    # prompt in ONE call while decode scores one token per call. A prompt token is ~300x cheaper
+    # than a generated one.
+    #
+    # So the old per-REQUEST threshold of 5 ms was crossed by any completion longer than ~50
+    # tokens on ANY model, including the LFM2 it was specified against — it warned on normal use,
+    # which is noise rather than signal. It also made the criterion measurable on its cheapest
+    # case: "under 5 ms at 4k-token contexts" is nearly free.
+    #: ENH-006 D83: the ABSOLUTE FALLBACK decode budget, for a model whose decode step time is not
+    #: measured (else PROBE_SLOWDOWN_BUDGET_PCT of it). Also the per-pass warning's threshold when
+    #: nothing has been admitted against a measured budget.
+    PROBE_MAX_OVERHEAD_MS_PER_PASS: float = 0.25
+    # An absolute per-request backstop, kept live rather than reported-and-unused. It exists for
+    # pathology only: at ~0.09 ms/pass a 2000-token completion is ~180 ms, so 500 ms means
+    # "something is wrong", not "this was a long answer". The regression this guards against is
+    # real — copying the whole residual to the CPU once measured 25-37 ms for two probes.
+    PROBE_MAX_OVERHEAD_MS: float = 500.0      # absolute per-request backstop
+
+    # --- Feature 27: stateless probe scoring and per-request activations ---
+    #: Inputs per `POST /api/probes/score` call. Bounds the work one request can queue; each input
+    #: takes its own admission slot, so this bounds how long a call runs, not how long another
+    #: request waits (one input's forward). 64 = miStudio's `millm_score_probes` cap (034 FTDD §9).
+    PROBE_SCORE_MAX_INPUTS: int = 64
+    #: Largest `top_k` a `return_sae_activations` request may ask for, per position.
+    SAE_ACTIVATIONS_MAX_TOP_K: int = 64
+    #: Worst-case (positions x top_k) entries one activation request may return, counted BEFORE
+    #: generation (FR-27.2f) so a request is never refused after it has generated.
+    SAE_ACTIVATIONS_MAX_ENTRIES: int = 65536
+    #: Positions encoded per chunk when capturing activations: bounds the transient
+    #: (positions x d_sae) encode on a long prefill against a wide SAE.
+    SAE_ACTIVATIONS_ENCODE_CHUNK: int = 512
+    PROBE_MAX_EVENTS_PER_PROBE: int = 5000
+    #: Feature 26 (T-70): events from BATCH generation rows have their own cap, so a 50,000-row
+    #: labelling run never evicts the live-traffic history PROBE_MAX_EVENTS_PER_PROBE keeps.
+    PROBE_MAX_BATCH_EVENTS_PER_PROBE: int = 50000
+    PROBE_MAX_AGE_DAYS: int = 30
+    PROBE_EVENT_CONTEXT_TOKENS: int = 24      # +-K decoded tokens around the top firing position
+    PROBE_HUB_TAG: str = "mistudio-probe-definition"
+    PROBE_HUB_CACHE_TTL_S: int = 300
+    PROBE_MAX_IMPORT_BYTES: int = 2_097_152   # 2 MB, the circuit importer's hostile-payload cap
+    # Many probes, measured (Feature 37). ENH-006 D83: both are the ABSOLUTE FALLBACK for a model
+    # whose step time is not measured; a measured model's budget is PROBE_SLOWDOWN_BUDGET_PCT.
+    PROBE_MAX_PREFILL_MS_PER_1K: float = 0.5   # D45: the amended SC-4's prefill half
+    PROBE_BUDGET_HEADROOM: float = 0.9         # D46: admit up to 0.9 of each budget
+    PROBE_COST_SAMPLES: int = 20               # K: timings per shape at arm (median)
+    #: One-token decode steps timed by a model's capacity measurement (median).
+    PROBE_CAPACITY_DECODE_STEPS: int = 32
+    # Probe sessions (Feature 36). Sessions exist only while a probe is armed (D40).
+    #: Opt-in transcript recording (D5): `off` | `on`. ⚠ OFF BY DEFAULT — `on` stores the newest
+    #: user message and the reply of every monitored chat turn, which is personal data.
+    PROBE_TRANSCRIPTS: str = "off"
+    PROBE_TRANSCRIPT_MAX_AGE_DAYS: int = 7     # D5
+    PROBE_TRANSCRIPT_MAX_TURNS: int = 20000    # D42
+    PROBE_SESSION_IDLE_MINUTES: int = 30       # D6: a session ends after 30 idle minutes
+    PROBE_SESSION_MAX_AGE_DAYS: int = 30
+    PROBE_RETENTION_INTERVAL_S: int = 300      # the background retention pass (FR-36.10)
+
+    # Performance: Inference concurrency.
+    # MUST stay 1 for correctness of everything built on the global SAE
+    # state: per-request steering overrides (Features 8/10), monitoring
+    # attribution, and co-activation sensing (Feature 11) all serialize on
+    # the request queue. Raising it re-introduces cross-request races the
+    # reviews closed (011 R1 top finding: the old default of 2 let two
+    # generations interleave apply/restore and share the sensing buffer).
+    MAX_CONCURRENT_REQUESTS: int = 1
+    MAX_PENDING_REQUESTS: int = 10
+    # Feature 30 (FR-30.3.6, T-93): maximum strings in one /v1/embeddings request. A capped
+    # request holds the only admission slot (MAX_CONCURRENT_REQUESTS = 1), so this bounds how
+    # long a chat waits behind it. To be set from measured latency: the largest power of two
+    # with cap x p95 seconds-per-input <= 30 s (S3-11), in [64, 2048]. MEASURED on the RTX 3090
+    # (030_FTASKS 8.3, 2026-10-07) at 512 tokens per input over 64 inputs: LFM2.5-1.2B-Instruct
+    # p95 0.0313 s -> 512; Llama-3.1-8B-Instruct p95 0.1636 s -> 128 (256 would be ~42 s). One
+    # global setting must hold for the largest model served, so 128.
+    EMBEDDINGS_MAX_INPUTS: int = Field(default=128, ge=1, le=2048)
+
+    # --- Feature 26: the Batch API (026 FTID §9) ---
+    #: Where uploaded and assembled batch file BYTES live (metadata is in PostgreSQL). k8s sets
+    #: /data/batch_files, on the data volume, so the bytes survive a pod restart (FR-26.3.7).
+    BATCH_FILES_DIR: str = "/app/batch_files"
+    #: OpenAI's documented limits (FR-26.8.1). A file over either is refused at upload, whole.
+    BATCH_MAX_ROWS: int = 50000
+    BATCH_MAX_FILE_BYTES: int = 209_715_200
+    #: Per input line: a longer line is an invalid line (`line_too_large`), never parsed.
+    BATCH_MAX_LINE_BYTES: int = 1_048_576
+    #: T-63 / 026 FTASKS 9.4: FALSE, by the rule "if any packed row's top token differs from its
+    #: single-row answer, packing defaults off". Measured 2026-10-07 on JEV-9B-decision (bfloat16), RTX 3090, 10,000 scoring rows: single 23.2 rows/s, packed 63.7 rows/s (2.7x); 57 of 10,000 rows (0.57%) changed their top token, max |logprob diff| 0.349.
+    #: bfloat16 is not batch-invariant. A batch may still send `pack: true` for the speed.
+    #: ⚠ An unparseable value FAILS TO THE DEFAULT (false here), never to true (`_bool_to_default`).
+    BATCH_PACK_DEFAULT: bool = False
+    #: Single-row forwards per chunk (one admission slot each chunk). Acceptance 9 bounds it.
+    BATCH_CHUNK_ROWS: int = 8
+    BATCH_PACK_MAX_ROWS: int = 16
+    BATCH_PACK_MAX_TOKENS: int = 16384
+    #: T-65: `completion_window` accepts whole hours 1..this (OpenAI's own value is "24h").
+    BATCH_MAX_COMPLETION_WINDOW_HOURS: int = 168
+    #: T-68: input files expire this many days after upload. Output/error files follow the
+    #: batch's `output_expires_after` (default the same 30 days, FR-26.9.1).
+    BATCH_FILE_RETENTION_DAYS: int = 30
+    #: The batch's OWN lease TTL; renewed when a third of it has passed. ≤ LEASE_MAX_TTL_SECONDS.
+    BATCH_LEASE_TTL_S: int = 900
+    #: How often a waiting batch retries its lease (`model_not_resident`, `lease_unavailable`).
+    BATCH_WAIT_POLL_S: float = 10.0
+    #: `batch:progress` at most this often per batch, plus every status transition.
+    BATCH_PROGRESS_MIN_INTERVAL_S: float = 1.0
+    #: Validation errors listed in the batch object's `errors.data` (the error FILE has all).
+    BATCH_ERRORS_SHOWN: int = 100
+    #: How often expired batch files are pruned (also once at startup, FR-26.9.4).
+    BATCH_RETENTION_INTERVAL_S: float = 3600.0
+
+    # Feature 29: model lease (process memory only; a restart ends every lease, X-01).
+    # The default TTL is also the maximum (2 hours); a TTL outside 1..LEASE_MAX_TTL_SECONDS
+    # is refused with 400 INVALID_LEASE_REQUEST, never clamped.
+    LEASE_DEFAULT_TTL_SECONDS: int = 7200
+    LEASE_MAX_TTL_SECONDS: int = 7200
+    LEASE_HOLDER_MAX_CHARS: int = 128
+    LEASE_REASON_MAX_CHARS: int = 512
+    # Ended leases remembered (by digest) so renew/release of a seen ID answers 409 with
+    # its end reason rather than 404. Lost on restart, deliberately.
+    LEASE_ENDED_MEMORY: int = 64
+    # Feature 29: slot-holding durations kept for /api/health/detailed's estimated wait.
+    QUEUE_DURATION_WINDOW: int = 50
+    # Feature 29: Retry-After seconds per 503 code (029 FTDD §5.3). The fallback is
+    # DISTINCT on purpose: it is set only by RetryAfterMiddleware, for a 503 whose
+    # builder forgot the header, and that path also logs `retry_after_defaulted`.
+    RETRY_AFTER_QUEUE_DEFAULT_S: int = 5
+    RETRY_AFTER_MAX_S: int = 60
+    RETRY_AFTER_LOAD_S: int = 15
+    RETRY_AFTER_UNLOAD_S: int = 5
+    RETRY_AFTER_NOT_LOADED_S: int = 30
+    RETRY_AFTER_MEMORY_S: int = 30
+    RETRY_AFTER_READINESS_S: int = 5
+    RETRY_AFTER_FALLBACK_S: int = 10
+    # Feature 31: WEIGHTS_TORN. Recovery is a late commit-end or a weights load, not seconds.
+    RETRY_AFTER_WEIGHTS_TORN_S: int = Field(default=30, ge=1)
+
+    # --- Attachable weights (Features 31, 32, 33; addendum §2.4) ---
+    #: Bearer tokens for the gated /api/weights routes: a JSON array of
+    #: {"label": str, "role": "trainer"|"operator", "sha256": "<64 hex>"}, digests only.
+    #: ⚠ A RAW STRING, never validated here: a pydantic error echoes its input, and a plaintext
+    #: token pasted into `sha256` would reach the startup log; and a malformed value must not
+    #: stop serving for an optional feature. `millm.core.weights_auth.parse_weights_tokens`
+    #: parses it, and a malformed or empty set refuses every gated call (fails closed, D-05).
+    #: `repr=False` keeps it out of `repr(settings)`.
+    WEIGHTS_TOKENS: str = Field(default="", repr=False)
+    #: A quiesce the holder leaves open longer than this resumes serving on its own (FR-31.9.1).
+    WEIGHTS_HOLD_TIMEOUT_S: float = Field(default=5.0, gt=0)
+    #: A commit open longer marks `torn` (FR-31.11.1). RULE: at least 10x the measured p99.9
+    #: commit, rounded up to the next 100 ms. SOURCE (D45, 2026-10-18): miForge's REAL
+    #: trainer, run f11w2-r2 - 1,000 bracketed training steps of LFM2.5-1.2B-Instruct with
+    #: 8-bit AdamW on the RTX 3090 under concurrent /v1 chat load: commit_ms p50 56.35,
+    #: p99 58.23, p99.9 71.0 ms; 10x = 710 -> 800. The earlier 200 (031 9.4, 2026-10-16:
+    #: synthetic in-place commits, p99.9 15.9 ms) was only 2.8x the real p99.9 and reopened
+    #: 9.4. Re-check after any driver or kernel change
+    #: (0xcc/reviews/attachable_weights_hardware_2026-10-16.md §2.1). miForge mirrors this
+    #: value (HOTUPDATE_COMMIT_WATCHDOG_MS) and pins it to this file.
+    WEIGHTS_COMMIT_WATCHDOG_MS: int = Field(default=800, gt=0)
+    #: An attachment with no heartbeat for this long is stale (FR-31.4.1); above the hint.
+    WEIGHTS_HEARTBEAT_TIMEOUT_S: float = Field(default=30.0, gt=0)
+    #: The heartbeat interval the attach response suggests.
+    WEIGHTS_HEARTBEAT_INTERVAL_HINT_S: float = Field(default=5.0, gt=0)
+    #: How long a quiesce or pause waits for in-flight work to drain before refusing
+    #: (`MODEL_BUSY`, reason `drain_timeout`, FR-31.7.4).
+    WEIGHTS_QUIESCE_DRAIN_TIMEOUT_S: float = Field(default=60.0, gt=0)
+    #: Feature 32: the checkpoint root miLLM writes (and reads). k8s sets /data/checkpoints.
+    #: Adapters (Feature 33) live under the checkpoint root(s) too.
+    WEIGHTS_CHECKPOINT_DIR: str = "/app/checkpoints"
+    #: Comma-separated absolute paths of further checkpoint roots, READ ONLY (addendum D-21):
+    #: load and lineage resolve across them, save never writes there, temp cleanup never runs
+    #: there. For checkpoints miForge writes on its own volume. Empty = none.
+    WEIGHTS_CHECKPOINT_READ_ROOTS: str = ""
+    #: Lineage walks stop after this many links (reported as `depth_limit`).
+    WEIGHTS_LINEAGE_MAX_DEPTH: int = Field(default=10000, ge=1)
+    #: A save needs free disk of at least the estimate times this.
+    WEIGHTS_SAVE_FREE_SPACE_FACTOR: float = Field(default=1.10, ge=1.0)
+    #: Allowance, in MB, added to a save's estimate for the configuration and tokenizer files.
+    WEIGHTS_SAVE_OVERHEAD_MB: int = Field(default=64, ge=0)
+
+    # Feature 25 (request validation and structured output).
+    # Compiled JSON-Schema grammars kept per loaded model (LRU). A compile costs
+    # 0.1-0.7 s on the served tokenizers and runs outside the request slot; the
+    # cache is dropped on unload, because a grammar belongs to one tokenizer.
+    STRUCTURED_OUTPUT_GRAMMAR_CACHE: int = 64
+    # Upper bound, in bytes, on the X-miLLM-Ignored-Fields response header. Field
+    # names are client-chosen JSON keys; past the bound the header ends with
+    # "+N more" rather than growing without limit.
+    IGNORED_FIELDS_HEADER_MAX_BYTES: int = 1024
+
+    # Performance: torch.compile
+    # None  → auto-detect: enabled for CUDA models that don't use bitsandbytes
+    # True  → always attempt compilation (loader still skips for bitsandbytes)
+    # False → never compile
+    TORCH_COMPILE: Optional[bool] = None
+    # "default" deliberately. "reduce-overhead" enables CUDA Graphs, which broke
+    # this generate path in production (2026-07-27): compile and warmup both
+    # succeeded, then every request after the first raised "accessing tensor
+    # output of CUDAGraphs that has been overwritten by a subsequent run".
+    # Changing this back needs a multi-request soak on hardware, not a warmup.
+    TORCH_COMPILE_MODE: str = "default"  # "default" | "reduce-overhead" | "max-autotune"
+
+    # Performance: KV cache
+    KV_CACHE_MODE: str = "dynamic"  # "static" (requires C compiler for triton) or "dynamic"
+
+    # Performance: Speculative decoding
+    SPECULATIVE_MODEL: Optional[str] = None  # HF model ID for draft model
+    SPECULATIVE_NUM_TOKENS: int = 5
+
+    # Performance: Continuous Batching
+    ENABLE_CONTINUOUS_BATCHING: bool = False  # Opt-in, starts CBM on model load
+
+    # Load GGUF models with embedding output enabled, so /v1/embeddings works
+    # on them without a second load.
+    #
+    # ON by default because the alternative is a server that cannot embed the
+    # model it is serving, and the cost is small: MEASURED on the RTX 3090 with
+    # zora-v1.13 Q5_K_M, generation went 113.5 -> 105.9 tok/s, a 6.7% loss, with
+    # no change in VRAM. llama.cpp needs this at CONSTRUCTION — there is no way
+    # to turn it on later — so the choice is made here or not at all.
+    #
+    # Turn it off to buy that 6.7% back on a deployment that never embeds.
+    GGUF_ENABLE_EMBEDDINGS: bool = True
+
+    # CEILING on the context window for GGUF models, in tokens — NOT a target.
+    #
+    # The loader reads what the model itself declares (`n_ctx_train`, via a
+    # 1.2-second CPU probe that costs no VRAM) and starts the ladder at
+    # min(declared, this). It was previously the starting point outright, which
+    # served an 8192 window to a model trained for 262144 and said nothing:
+    # ByteOtter/Qwen3.8-27B-TAK-Reasoning-GGUF declares 262144 and creates a
+    # context at 131072 on this 24 GiB card, so the old default threw away 16x
+    # the window the hardware could actually hold.
+    #
+    # A ceiling is still needed in BOTH directions. llama.cpp's own default is
+    # 512, which truncates almost any real conversation. Unbounded is the other
+    # trap: the whole KV cache is allocated at context creation, so a
+    # quarter-million-token window on a 31B model is tens of gigabytes — after
+    # ~19.9 GiB of Q5_K_S weights on a 24 GiB card the load simply fails, and
+    # even when it succeeds it reserves a GPU that miStudio's extraction,
+    # training and steering work shares.
+    #
+    # 32768 is chosen to clear the labeling prompt (~4700 tokens, which 8192
+    # cleared only in principle and 4096 did not clear at all) with room for
+    # long documents, while leaving the card usable. Raise it when the GPU is
+    # dedicated to serving; 0 means "whatever the file declares", bounded only
+    # by what fits.
+    GGUF_CONTEXT_LENGTH: int = 32768
+
+    # HOW A GGUF LAYER SPLIT DIVIDES ITS LAYERS, when a model needs more than
+    # one GPU. Empty (the default) splits in proportion to the free memory the
+    # plan found on each card used, largest first. Otherwise one proportion per
+    # card the split uses, in CUDA index order: "1,3" puts a quarter of the
+    # layers on the lower-index card. llama.cpp indexes its list by device, so
+    # miLLM maps these onto the cards used and gives every other card 0.
+    #
+    # A value with the wrong number of entries for a load is REFUSED, not
+    # stretched: guessing would put layers on cards nobody chose. It has no
+    # effect on a model that fits one card.
+    GGUF_TENSOR_SPLIT: str = ""
+
+    # KV-CACHE PRECISION. This is the single biggest lever on how much context
+    # a GGUF model can hold, and it sat at llama.cpp's F16 default unexamined.
+    #
+    # gemma-4-31b spends 630 KB PER TOKEN on KV cache at F16 (60 layers x 16 KV
+    # heads x 168 head_dim x 2 tensors x 2 bytes). At 4096 tokens that is 2.6
+    # GiB — more than a third of the free VRAM on a 24 GiB card — to hold about
+    # three thousand words. The context ladder was searching for a context that
+    # fit while the cost of a token went unquestioned.
+    #
+    # MEASURED on gemma-4-31b IQ4_XS on the RTX 3090:
+    #   f16  + FA : 8192 FAILS, 4096 is the ceiling
+    #   q8_0 + FA : 12288 loads          <- 3x, and clears the ~4700-token
+    #                                       labeling prompt that f16 could not
+    #   q4_0 + FA : 16384 loads
+    #
+    # q8_0 is the default because it is near-lossless. q4_0 buys another third
+    # of a window at a real accuracy cost, which is the wrong trade for a
+    # judge — discrimination is the job. Set it only when a long window matters
+    # more than precision.
+    #
+    # "f16" restores the previous behaviour exactly.
+    GGUF_KV_CACHE_TYPE: str = "q8_0"
+
+    # REQUIRED by quantized KV cache, not merely an optimisation: MEASURED,
+    # q8_0 without flash attention fails at 8192 where q8_0 with it reaches
+    # 12288. The loader refuses to pair a quantized cache with this off.
+    GGUF_FLASH_ATTENTION: bool = True
+
+    # THE CONTEXT EVERY TRANSFORMERS LOAD MUST HAVE ROOM FOR, in tokens.
+    #
+    # A transformers load — a split, Auto's one-card-or-split choice, or a named
+    # card — is accepted only when EACH card it uses has room, beside the weights
+    # transformers' own device map puts there, for its CUDA context
+    # (TRANSFORMERS_CUDA_CONTEXT_MB) and the KV cache of the layers it holds at
+    # this many tokens. It replaced a 20% slack on the weight estimate, which grew
+    # with the weights, not with what each card needs: on 11.5 + 23.5 GB free it
+    # refused Qwen2.5-14B at FP16 (room for about 8k tokens on both cards),
+    # accepted OLMo-2-13B (whose cuda:0 cannot hold an 8k cache), and split models
+    # that fit one card. Decision 7, 2026-09-14.
+    #
+    # An admission floor, not a limit on requests: a card with more room serves
+    # longer contexts. GGUF models keep their own context prediction
+    # (GGUF_CONTEXT_LENGTH).
+    TRANSFORMERS_MIN_CONTEXT: int = TRANSFORMERS_MIN_CONTEXT_DEFAULT
+
+    # MEMORY EACH CARD OF A TRANSFORMERS LOAD KEEPS FOR ITS CUDA CONTEXT, in MB.
+    # Measured on the node at 250-400 MiB a card (TRANSFORMERS_CUDA_CONTEXT_MB_DEFAULT).
+    # The context only: a request's prefill activations and the caching allocator's
+    # share are sized per model and per card (millm/ml/working_memory.py). Hardware
+    # acceptance, 2026-09-14: this was the only allowance, and OLMo-2-13B admitted
+    # with 11 MiB to spare ran a 3,879-token request out of memory.
+    TRANSFORMERS_CUDA_CONTEXT_MB: int = TRANSFORMERS_CUDA_CONTEXT_MB_DEFAULT
+
+    # SECONDS A TRANSFORMERS MODEL'S CARDS STAY IDLE BEFORE TORCH'S CACHE IS RETURNED.
+    #
+    # torch keeps the blocks a finished request freed, and nvidia-smi — which
+    # miStudio's placement and every other tenant of the node read — counts them
+    # as used. After three requests the RTX 3080 Ti sat at 12,004 MiB used / 155
+    # MiB free until the model was unloaded (hardware acceptance, 2026-09-14).
+    # Once no request has held or waited for a slot for this long, the model's
+    # cards get their unused cached blocks back (torch.cuda.empty_cache, taken
+    # through the request queue so it never runs during a request). A request that
+    # arrives in the meantime cancels it. The cost is paid by the next request,
+    # which reserves those segments again: for a 2,000-token request on OLMo-2-13B's
+    # cuda:0 that is 29 cudaMalloc calls (1,070 MiB), for Qwen2.5-7B 13. 0 releases
+    # as soon as the queue is idle; a negative value never releases. Nothing is
+    # released while continuous batching runs: its manager generates without a
+    # queue slot, so the queue reads idle during a CBM request.
+    TRANSFORMERS_IDLE_CACHE_RELEASE_S: float = TRANSFORMERS_IDLE_CACHE_RELEASE_S_DEFAULT
+
+    # FLOAT32 SCORING (Feature 25, FR-25.15; D61, miForge F11 FTDD §6.10).
+    #
+    # Where a `scoring_precision: "float32"` request builds its float32 copy of the resident
+    # parameters (4 bytes per parameter: ~4.8 GB for a 1.2B model, ~32 GB for an 8B one). The copy
+    # lives for that one request and is released after it; the served tensors are never cast.
+    # `auto`: the card the model's inputs live on when the copy fits there, else the CPU when it
+    # fits there, else refused (409, reason `memory`). `cpu`, `cuda` (the model's input card) or
+    # `cuda:N` pin it; a pinned device that cannot hold the copy is refused, never swapped for
+    # another. On the 24 GB RTX 3090 a 1.2B model's copy fits beside the bfloat16 set, so `auto`
+    # scores on the card; an 8B one does not and goes to the CPU.
+    SCORING_FLOAT32_DEVICE: str = "auto"
+    # Memory kept free beyond the copy's own size when deciding whether it fits: the forward's
+    # activations (one prompt, logits at one position) and allocator slack. A copy that would
+    # leave less than this free is refused with reason `memory` before anything is allocated.
+    SCORING_FLOAT32_HEADROOM_MB: int = Field(default=1024, ge=0)
+
+    CBM_MAX_QUEUE_SIZE: int = 256
+    # CBM fixes its sampling parameters at manager creation, and any request
+    # whose temperature/top_p differ FALLS BACK TO THE SERIAL PATH
+    # (cbm_routing_fallback_to_serial). So these values decide WHICH workload
+    # gets batched — they are not cosmetic defaults.
+    #
+    # 0.0 to match bulk labeling, which is the workload continuous batching was
+    # turned on for. It runs temperature 0 throughout. With the previous 0.7,
+    # every labeling request mismatched and fell back to serial: the stated
+    # beneficiary was the one workload excluded (observed live 2026-07-27).
+    #
+    # Interactive traffic at other temperatures still falls back to serial —
+    # i.e. exactly the behaviour it had before CBM existed, so this costs it
+    # nothing. Only one sampling profile can be batched at a time.
+    CBM_DEFAULT_TEMPERATURE: float = 0.0
+    CBM_DEFAULT_TOP_P: float = 1.0
+    CBM_DEFAULT_MAX_TOKENS: int = 512
+    # When True, requests with SAE monitoring enabled are routed through the serial
+    # path instead of CBM, ensuring accurate per-request activation attribution.
+    # Trades throughput for monitoring fidelity. Default False (batch-level monitoring).
+    CBM_FORCE_SERIAL_MONITORING: bool = False
+
+    # ── Feature 038 S2: OpenTelemetry export (FTDD §5.8) ─────────────────────────────────────
+    # ⚠ OFF BY DEFAULT, AND ONLY THESE THREE SWITCHES TURN ANYTHING ON (D31, D-08): nothing leaves
+    # the deployment unless the operator enables a signal AND names a receiver. ENH-006 D75
+    # (2026-10-28, reversing OT-D5): every one is a runtime key (Settings page; an agent's change
+    # waits for approval) EXCEPT `runtime_settings.TELEMETRY_ENV_ONLY` — the headers, the client
+    # key, the CA and client-certificate paths and OTEL_SDK_DISABLED, environment only. The names
+    # avoid the `OTEL_` prefix so the SDK's own environment readers never see them (the exporters
+    # take explicit arguments, millm/telemetry/pipeline.py).
+    TELEMETRY_TRACES_ENABLED: bool = False
+    TELEMETRY_METRICS_ENABLED: bool = False
+    TELEMETRY_LOGS_ENABLED: bool = False
+    #: Base URL of the OTLP/HTTP receiver; `/v1/traces|metrics|logs` are appended. A switch on with
+    #: no endpoint leaves that signal `unavailable` (NoEndpoint) — never a default receiver.
+    #: `repr=False` (review R1 of S2): a URL can carry a credential in its userinfo or query, which
+    #: the listing and health strip; `repr(settings)` must not print it either.
+    TELEMETRY_ENDPOINT: Optional[str] = Field(default=None, repr=False)
+    #: The only value accepted; anything else leaves every signal `unavailable`.
+    TELEMETRY_PROTOCOL: str = "http/protobuf"
+    #: `k=v,k=v` headers sent to the receiver (credentials). SECRET: shown only as set/not set.
+    TELEMETRY_HEADERS: Optional[str] = Field(default=None, repr=False)
+    TELEMETRY_TLS_CA_FILE: Optional[str] = None
+    TELEMETRY_TLS_CLIENT_CERT_FILE: Optional[str] = None
+    #: SECRET (a path to the client key; shown only as set/not set).
+    TELEMETRY_TLS_CLIENT_KEY_FILE: Optional[str] = Field(default=None, repr=False)
+    #: An `http://` endpoint is refused unless this records the trusted-local choice (D26 OQ-16).
+    TELEMETRY_ALLOW_PLAINTEXT: bool = False
+    TELEMETRY_SERVICE_NAME: str = "millm"
+    #: Empty = a random id per process.
+    TELEMETRY_SERVICE_INSTANCE_ID: Optional[str] = None
+    TELEMETRY_DEPLOYMENT_ENVIRONMENT: Optional[str] = None
+    TELEMETRY_QUEUE_SIZE: int = Field(default=8192, ge=1, le=1_000_000)
+    TELEMETRY_BATCH_SIZE: int = Field(default=512, ge=1, le=100_000)
+    TELEMETRY_EXPORT_TIMEOUT_S: float = Field(default=10.0, gt=0, le=600)
+    TELEMETRY_RETRY_HORIZON_S: float = Field(default=60.0, ge=0, le=86_400)
+    TELEMETRY_DRAIN_DEADLINE_S: float = Field(default=5.0, ge=0, le=25)
+    TELEMETRY_METRIC_INTERVAL_S: float = Field(default=15.0, ge=1, le=3600)
+    TELEMETRY_TRACES_SAMPLER_RATIO: float = Field(default=1.0, ge=0.0, le=1.0)
+    #: Per-instrument series cap (D38.40); beyond it a series folds into the overflow series.
+    TELEMETRY_SERIES_CAP: int = Field(default=2000, ge=1, le=100_000)
+    #: FR-38.17: the operator's half of the stateless-export gate (the request's
+    #: `export_results` is the other half). Off: `/api/probes/score` results never leave.
+    TELEMETRY_STATELESS_EXPORT_PERMITTED: bool = False
+    #: Which recorded origins become result log records (BR-030), shown in health.
+    TELEMETRY_RESULT_LOG_ORIGINS: str = "live,batch"
+    TELEMETRY_HEALTH_DEGRADED_WINDOW_S: float = Field(default=60.0, gt=0)
+    TELEMETRY_HEALTH_UNAVAILABLE_AFTER_S: float = Field(default=300.0, gt=0)
+    #: The one standard OpenTelemetry variable honoured (D38.38): true forces every signal off.
+    OTEL_SDK_DISABLED: bool = False
+
+    @model_validator(mode="before")
+    @classmethod
+    def _drop_retired_settings(cls, data: Any) -> Any:
+        """Accept, drop and warn about the names of settings that were deleted (ENH-003 D7).
+
+        pydantic-settings refuses an unknown key in a `.env` file (`extra_forbidden`), so deleting
+        a field would stop the server starting for anyone whose `.env` was copied from an older
+        `.env.example`. Only these names are tolerated: any other unknown key is still refused.
+        """
+        if not isinstance(data, dict):
+            return data
+        retired = sorted(name for name in data if name in RETIRED_SETTINGS)
+        if not retired:
+            return data
+        warnings.warn(
+            f"{', '.join(retired)} no longer configure miLLM (deleted settings); "
+            "remove them from the environment or .env file",
+            stacklevel=2,
+        )
+        return {k: v for k, v in data.items() if k not in RETIRED_SETTINGS}
+
+    @field_validator("BATCH_PACK_DEFAULT", mode="before")
+    @classmethod
+    def _bool_to_default(cls, value: Any) -> Any:
+        """A boolean setting fails to its DEFAULT, not to False (this suite's `dry_run` lesson).
+
+        `BATCH_PACK_DEFAULT=ture` must not quietly flip the switch away from its default — nor raise
+        and stop the server starting over a typo in a switch whose default is already safe. The
+        default is off (026 FTASKS 9.4), so a typo can never turn on score-changing packing.
+        """
+        if isinstance(value, bool):
+            return value
+        text = str(value).strip().lower()
+        if text in ("1", "true", "yes", "on"):
+            return True
+        if text in ("0", "false", "no", "off"):
+            return False
+        warnings.warn(
+            f"BATCH_PACK_DEFAULT={value!r} is not a boolean; using the default (false)",
+            stacklevel=2,
+        )
+        return False
+
+    @field_validator("SCORING_FLOAT32_DEVICE")
+    @classmethod
+    def _scoring_float32_device(cls, v: str) -> str:
+        """`auto`, `cpu`, `cuda` or `cuda:N` — anything else fails at startup, not on a request."""
+        import re
+
+        text = v.strip().lower()
+        if text in ("auto", "cpu", "cuda") or re.fullmatch(r"cuda:\d+", text):
+            return text
+        raise ValueError(
+            f"SCORING_FLOAT32_DEVICE must be auto, cpu, cuda or cuda:N; got {v!r}"
+        )
+
+    @field_validator("GGUF_TENSOR_SPLIT")
+    @classmethod
+    def _validate_gguf_tensor_split(cls, value: str) -> str:
+        parse_gguf_tensor_split(value)
+        return value
+
+    @field_validator("TRANSFORMERS_MIN_CONTEXT")
+    @classmethod
+    def _validate_transformers_min_context(cls, value: int) -> int:
+        if value < 1:
+            raise ValueError(f"TRANSFORMERS_MIN_CONTEXT must be at least 1 token, got {value}")
+        return value
+
+    @field_validator("TRANSFORMERS_CUDA_CONTEXT_MB")
+    @classmethod
+    def _validate_transformers_cuda_context_mb(cls, value: int) -> int:
+        if value < 0:
+            raise ValueError(f"TRANSFORMERS_CUDA_CONTEXT_MB must be 0 or more, got {value}")
+        return value
+
+    @model_validator(mode="after")
+    def _validate_batch_lease_ttl(self) -> "Settings":
+        """The batch's own lease is a Feature 29 lease: its TTL must be one 029 would grant."""
+        if not 1 <= self.BATCH_LEASE_TTL_S <= self.LEASE_MAX_TTL_SECONDS:
+            raise ValueError(
+                f"BATCH_LEASE_TTL_S must be between 1 and LEASE_MAX_TTL_SECONDS "
+                f"({self.LEASE_MAX_TTL_SECONDS}), got {self.BATCH_LEASE_TTL_S}"
+            )
+        return self
+
+    @model_validator(mode="after")
+    def _validate_lease_ttls(self) -> "Settings":
+        """A default TTL above the maximum would make every TTL-less grant a refusal."""
+        if self.LEASE_MAX_TTL_SECONDS < 1:
+            raise ValueError(
+                f"LEASE_MAX_TTL_SECONDS must be at least 1, got {self.LEASE_MAX_TTL_SECONDS}"
+            )
+        if not 1 <= self.LEASE_DEFAULT_TTL_SECONDS <= self.LEASE_MAX_TTL_SECONDS:
+            raise ValueError(
+                "LEASE_DEFAULT_TTL_SECONDS must be between 1 and LEASE_MAX_TTL_SECONDS "
+                f"({self.LEASE_MAX_TTL_SECONDS}), got {self.LEASE_DEFAULT_TTL_SECONDS}"
+            )
+        return self
+
+    @model_validator(mode="after")
+    def _validate_weights_settings(self) -> "Settings":
+        """The heartbeat hint must sit below the stale window, or a trainer following the hint
+        is marked stale between beats; read roots must be absolute (relative to what?)."""
+        if self.WEIGHTS_HEARTBEAT_INTERVAL_HINT_S >= self.WEIGHTS_HEARTBEAT_TIMEOUT_S:
+            raise ValueError(
+                "WEIGHTS_HEARTBEAT_INTERVAL_HINT_S must be below WEIGHTS_HEARTBEAT_TIMEOUT_S "
+                f"({self.WEIGHTS_HEARTBEAT_TIMEOUT_S}), got "
+                f"{self.WEIGHTS_HEARTBEAT_INTERVAL_HINT_S}"
+            )
+        for root in self.weights_checkpoint_read_roots:
+            if not root.startswith("/"):
+                raise ValueError(
+                    f"WEIGHTS_CHECKPOINT_READ_ROOTS entries must be absolute paths, got {root!r}"
+                )
+        return self
+
+    @property
+    def weights_checkpoint_read_roots(self) -> list[str]:
+        """WEIGHTS_CHECKPOINT_READ_ROOTS as a list (empty entries dropped)."""
+        return [r.strip() for r in self.WEIGHTS_CHECKPOINT_READ_ROOTS.split(",") if r.strip()]
+
+    @property
+    def cors_origins_list(self) -> list[str]:
+        """Parse CORS origins from comma-separated string."""
+        if self.CORS_ORIGINS == "*":
+            return ["*"]
+        return [origin.strip() for origin in self.CORS_ORIGINS.split(",")]
+
+
+# Global settings instance
+settings = Settings()
+
+
+def get_settings() -> Settings:
+    """Return the process-wide Settings instance.
+
+    Most of the codebase imports the module-level ``settings`` singleton
+    directly; this accessor exists for callers (and tests) that prefer a
+    function-style dependency.
+    """
+    return settings

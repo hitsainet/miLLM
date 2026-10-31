@@ -1,0 +1,982 @@
+"""
+Feature 11 Task 3.8: SensingService unit tests — config build from
+cluster_meta, context-window slicing edges, summary builder, ambient rules,
+and the arm/disarm lifecycle sync.
+"""
+
+from unittest.mock import AsyncMock, MagicMock, patch
+
+import pytest
+import torch
+
+from millm.core.config import settings
+from millm.ml.sae_wrapper import SensedHit
+from millm.services.inference_service import SensingRequestContext
+from millm.services.sensing_service import SensingService
+
+
+def make_profile(members=None, sensing=None, name="fear cluster",
+                 profile_id="prof_s1", display_token="fear"):
+    profile = MagicMock()
+    profile.id = profile_id
+    profile.name = name
+    meta = {
+        "display_token": display_token,
+        "members": members if members is not None else [
+            {"feature_idx": 7, "strength": 1.0, "max_activation": 40.0,
+             "label": "fear of drowning"},
+            {"feature_idx": 9, "strength": -0.5, "max_activation": 20.0},
+            {"feature_idx": 12, "strength": 0.8},  # no max_activation
+        ],
+    }
+    if sensing is not None:
+        meta["sensing"] = sensing
+    profile.cluster_meta = meta
+    profile.source_kind = "cluster"
+    profile.sensing_enabled = True
+    return profile
+
+
+def make_hit(pos_start=5, pos_end=6, phase="decode",
+             fired=((7, 8.4), (9, 2.2)), score=2.1):
+    return SensedHit(pos_start=pos_start, pos_end=pos_end, phase=phase,
+                     fired=list(fired), fired_count=len(fired), score=score)
+
+
+@pytest.fixture
+def service():
+    return SensingService()
+
+
+class TestConfigBuild:
+    def test_thresholds_epsilon_max_with_inf_fallback(self, service):
+        config = service.build_config(make_profile())
+        assert config.member_indices == [7, 9, 12]
+        # theta = max(floor, 0.1 * max_act); member 12 missing + zero floor
+        # -> INFINITE threshold (R1 fix: floor 0 fired on any positive act)
+        assert config.thresholds.tolist()[:2] == pytest.approx([4.0, 2.0])
+        assert config.thresholds.tolist()[2] == float("inf")
+        assert config.threshold_mode == "epsilon_max"
+        assert config.min_k == 2  # max(2, ceil(0.3*3)) = 2
+
+    def test_floor_only_mode_needs_positive_floor(self, service):
+        members = [{"feature_idx": 1, "strength": 1.0},
+                   {"feature_idx": 2, "strength": 1.0}]
+        # All members missing max_activation + default zero floor: refuse
+        # to arm rather than fire on every positive activation (R1 fix).
+        with pytest.raises(ValueError, match="no usable"):
+            service.build_config(make_profile(members=members))
+        # With a positive authored floor, floor_only mode works.
+        config = service.build_config(make_profile(
+            members=members, sensing={"theta_floor": 0.5}))
+        assert config.threshold_mode == "floor_only"
+        assert config.thresholds.tolist() == [0.5, 0.5]
+
+    def test_document_overrides(self, service):
+        config = service.build_config(make_profile(
+            sensing={"epsilon": 0.5, "min_k": 2, "context_tokens": 8}))
+        assert config.thresholds[0].item() == pytest.approx(20.0)  # 0.5*40
+        assert config.min_k == 2
+        assert config.context_tokens == 8
+
+    def test_authored_min_k_clamped_to_sensable(self, service):
+        """R3 #5: the default profile has 3 members but only 2 sensable —
+        an authored min_k=3 would arm an unreachable quorum; clamp."""
+        config = service.build_config(make_profile(sensing={"min_k": 3}))
+        assert config.min_k == 2
+
+    def test_hostile_overrides_degrade_to_defaults(self, service):
+        config = service.build_config(make_profile(
+            sensing={"epsilon": "loud", "min_k": "many",
+                     "context_tokens": 9999}))
+        assert config.thresholds[0].item() == pytest.approx(
+            settings.SENSING_EPSILON * 40.0)
+        assert config.min_k == 2
+        assert config.context_tokens == 64  # hard max
+
+    def test_min_k_clamped_to_member_count(self, service):
+        members = [{"feature_idx": 1, "strength": 1.0, "max_activation": 5.0}]
+        config = service.build_config(make_profile(
+            members=members, sensing={"min_k": 5}))
+        assert config.min_k == 1
+
+    def test_empty_members_raises(self, service):
+        with pytest.raises(ValueError):
+            service.build_config(make_profile(members=[]))
+
+
+class TestContextSlicing:
+    def setup_method(self):
+        self.tokenizer = MagicMock()
+        self.tokenizer.decode.side_effect = (
+            lambda ids, **kw: " ".join(f"t{i}" for i in ids))
+
+    def test_window_around_span(self, service):
+        ids = torch.arange(100).unsqueeze(0)  # (1, 100)
+        text, window, parts = SensingService._context(
+            ids, make_hit(pos_start=50, pos_end=52), k=3, tokenizer=self.tokenizer)
+        assert window == list(range(47, 56))
+        assert text.startswith("t47")
+        # Highlighting via PREFIX decodes (R1: independent segment decodes
+        # glued words on SentencePiece) — the boundary space stays with the
+        # segment it precedes, and the parts exactly reconstruct the window
+        assert parts["before"] == "t47 t48 t49"
+        assert parts["span"] == " t50 t51 t52"
+        assert parts["after"] == " t53 t54 t55"
+        assert parts["before"] + parts["span"] + parts["after"] == \
+            " ".join(f"t{i}" for i in range(47, 56))
+
+    def test_event_at_position_zero(self, service):
+        ids = torch.arange(10).unsqueeze(0)
+        _, window, parts = SensingService._context(
+            ids, make_hit(pos_start=0, pos_end=0), k=4, tokenizer=self.tokenizer)
+        assert window == [0, 1, 2, 3, 4]
+        assert parts["before"] == "" and parts["span"] == "t0"
+
+    def test_event_at_end_of_sequence(self, service):
+        ids = torch.arange(10)  # 1-D also accepted
+        _, window, parts = SensingService._context(
+            ids, make_hit(pos_start=9, pos_end=9), k=4, tokenizer=self.tokenizer)
+        assert window == [5, 6, 7, 8, 9]
+        assert parts["span"] == " t9" and parts["after"] == ""
+
+    def test_k_zero_keeps_event_without_text(self, service):
+        text, window, parts = SensingService._context(
+            torch.arange(10), make_hit(), k=0, tokenizer=self.tokenizer)
+        assert text is None and window is None and parts is None
+
+    def test_missing_ids_degrades(self, service):
+        text, window, parts = SensingService._context(
+            None, make_hit(), k=4, tokenizer=self.tokenizer)
+        assert text is None and window is None and parts is None
+
+    def test_decode_failure_degrades(self, service):
+        self.tokenizer.decode.side_effect = RuntimeError("boom")
+        text, window, parts = SensingService._context(
+            torch.arange(10), make_hit(pos_start=2, pos_end=2), k=2,
+            tokenizer=self.tokenizer)
+        assert text is None and window is None and parts is None
+
+
+class TestSummary:
+    def test_format_and_label(self, service):
+        sae = MagicMock()
+        sae.d_sae = 16384
+        service.arm_for_profile(make_profile(), sae)
+        summary = service._summary(make_hit())
+        assert summary.startswith("fear: 2/3 members fired")
+        assert "F7 'fear of drowning'" in summary
+        assert "during decode @ 5–6" in summary
+
+    def test_single_position_span(self, service):
+        service.arm_for_profile(make_profile(), MagicMock(d_sae=16384))
+        assert "@ 5" in service._summary(make_hit(pos_end=5))
+
+    def test_hard_cap_300(self, service):
+        profile = make_profile(display_token="x" * 400)
+        service.arm_for_profile(profile, MagicMock(d_sae=16384))
+        assert len(service._summary(make_hit())) <= 300
+
+
+class TestLifecycle:
+    def test_arm_and_disarm_track_state(self, service):
+        sae = MagicMock()
+        sae.d_sae = 16384
+        service.arm_for_profile(make_profile(), sae)
+        assert service.is_armed and service.armed_profile_id == "prof_s1"
+        sae.arm_sensing.assert_called_once()
+        service.disarm(sae)
+        assert not service.is_armed
+        sae.disarm_sensing.assert_called_once()
+
+    def test_disarm_with_detached_sae(self, service):
+        service.arm_for_profile(make_profile(), MagicMock(d_sae=16384))
+        service.disarm(None)  # SAE already gone — must not raise
+        assert not service.is_armed
+
+    def test_overhead_warn_threshold(self, service):
+        with patch("millm.services.sensing_service.logger") as mock_log:
+            service.note_request_overhead(settings.SENSING_MAX_OVERHEAD_MS + 1)
+        mock_log.warning.assert_called_once()
+        assert service.status()["last_request_overhead_ms"] > 0
+
+    def test_status_shape(self, service):
+        status = service.status()
+        assert status["armed"] is False
+        sae = MagicMock(d_sae=16384)
+        sae.is_sensing_armed = True
+        service.arm_for_profile(make_profile(), sae)
+        # status() reconciles against the attached SAE (R3 fix)
+        with patch("millm.services.sae_service.AttachedSAEState") as MockState:
+            MockState.return_value.attached_sae = sae
+            status = service.status()
+        assert status["member_count"] == 3
+        assert status["threshold_mode"] == "epsilon_max"
+        assert status["retention"]["max_events_per_cluster"] == \
+            settings.SENSING_MAX_EVENTS_PER_CLUSTER
+
+
+class TestRecord:
+    async def test_record_persists_prunes_and_emits(self, service, test_session):
+        from millm.db.models.profile import Profile
+
+        row = Profile(id="prof_s1", name="fear cluster", steering={"7": 1.0},
+                      source_kind="cluster")
+        test_session.add(row)
+        await test_session.flush()
+
+        service.arm_for_profile(make_profile(), MagicMock(d_sae=16384))
+        tokenizer = MagicMock()
+        tokenizer.decode.side_effect = lambda ids, **kw: "ctx"
+
+        emitted = []
+        factory = MagicMock(return_value=test_session)
+        test_session.commit = AsyncMock()
+
+        class _Ctx:
+            async def __aenter__(self):
+                return test_session
+
+            async def __aexit__(self, *a):
+                return False
+
+        with patch("millm.db.base.async_session_factory",
+                   return_value=_Ctx()), \
+             patch.object(service, "_emit_events",
+                          side_effect=lambda p: emitted.extend(p)):
+            payloads = await service.record(
+                "req-1", [make_hit()], False,
+                torch.arange(20).unsqueeze(0), tokenizer)
+
+        assert len(payloads) == 1
+        assert payloads[0]["context_text"] == "ctx"
+        assert payloads[0]["fired_members"] == [[7, 8.4], [9, 2.2]]
+        assert emitted and emitted[0]["summary"].startswith("fear:")
+
+    async def test_record_noop_when_unarmed_or_empty(self, service):
+        assert await service.record("req-1", [], False, None, None) == []
+        assert await service.record("req-1", [make_hit()], False, None, None) == []
+
+    def test_ws_payload_excludes_context(self, service):
+        """FTID pitfall 6: WS payloads carry no user content — including
+        ANY future context_* field (the name-list filter let context_parts
+        leak the day it was added)."""
+        sent = []
+        emitter = MagicMock()
+        emitter.emit_sensing_event.side_effect = lambda p: sent.append(p)
+        with patch("millm.sockets.progress.progress_emitter", emitter):
+            service._emit_events([{"id": 1, "summary": "s",
+                                   "context_text": "SECRET",
+                                   "context_token_ids": [1, 2],
+                                   "context_parts": {"span": "SECRET"}}])
+        assert sent == [{"id": 1, "summary": "s"}]
+
+
+class TestInferenceWiring:
+    """011 R1 (finder B): the actual begin/flush wiring in InferenceService
+    was untested for every generation path."""
+
+    def _service(self):
+        from millm.services.inference_service import (
+    InferenceService,
+    SensingRequestContext,
+)
+
+        return InferenceService(model_service=MagicMock())
+
+    def _armed_sae(self):
+        sae = MagicMock()
+        sae.is_sensing_armed = True
+        sae._sensing = MagicMock(profile_id="prof_s1")
+        sae._sensing_overhead_ms = 0.5
+        sae.collect_sensing_hits.return_value = ("req-1", [make_hit()], False)
+        return sae
+
+    def test_begin_snapshots_profile_id(self):
+        service = self._service()
+        sae = self._armed_sae()
+        with patch("millm.services.sae_service.AttachedSAEState") as MockState:
+            MockState.return_value.attached_sae = sae
+            ctx = service._sensing_begin("req-1")
+        assert ctx.sae is sae and ctx.profile_id == "prof_s1"
+        assert ctx.config is sae._sensing  # config snapshot (enh R1)
+        sae.begin_sensing_request.assert_called_once_with("req-1")
+
+    def test_begin_skips_under_speculative_decoding(self):
+        """R1 fix: verification passes break absolute-position accounting."""
+        service = self._service()
+        service._speculative_model_id = "draft-model"
+        sae = self._armed_sae()
+        with patch("millm.services.sae_service.AttachedSAEState") as MockState:
+            MockState.return_value.attached_sae = sae
+            assert service._sensing_begin("req-1") is None
+        sae.begin_sensing_request.assert_not_called()
+
+    def test_begin_none_when_unarmed(self):
+        service = self._service()
+        sae = MagicMock()
+        sae.is_sensing_armed = False
+        with patch("millm.services.sae_service.AttachedSAEState") as MockState:
+            MockState.return_value.attached_sae = sae
+            assert service._sensing_begin("req-1") is None
+
+    async def test_notify_records_with_snapshotted_profile(self):
+        service = self._service()
+        sae = self._armed_sae()
+        sensing_service = MagicMock()
+        sensing_service.record = AsyncMock(return_value=[])
+        ids = torch.arange(10)
+        with patch("millm.api.dependencies._sensing_service", sensing_service), \
+             patch.object(type(service), "is_model_loaded",
+                          lambda self: False):
+            await service._notify_sensing(
+                SensingRequestContext(sae, "prof_SNAPSHOT", sae._sensing), ids)
+        kwargs = sensing_service.record.await_args.kwargs
+        assert kwargs["profile_id"] == "prof_SNAPSHOT"
+        sensing_service.note_request_overhead.assert_called_once_with(0.5)
+
+    async def test_notify_survives_record_failure(self):
+        """A DB outage in the flush must never break generation."""
+        service = self._service()
+        sae = self._armed_sae()
+        sensing_service = MagicMock()
+        sensing_service.record = AsyncMock(side_effect=RuntimeError("db down"))
+        with patch("millm.api.dependencies._sensing_service", sensing_service), \
+             patch.object(type(service), "is_model_loaded",
+                          lambda self: False):
+            await service._notify_sensing(
+                SensingRequestContext(sae, "p", sae._sensing), None)  # no raise
+
+    async def test_notify_noop_without_ctx_or_service(self):
+        service = self._service()
+        await service._notify_sensing(None, None)
+        sae = self._armed_sae()
+        with patch("millm.api.dependencies._sensing_service", None):
+            await service._notify_sensing(
+                SensingRequestContext(sae, "p", sae._sensing), None)
+        sae.collect_sensing_hits.assert_called_once()  # boundary still closed
+
+
+class TestAmbientCounts:
+    """R1 (finder B): _ambient_counts rules were completely untested."""
+
+    def _sae(self, monitoring=True, compacted=False, offset=7, acts=None):
+        sae = MagicMock()
+        sae.is_monitoring_enabled = monitoring
+        sae._monitored_features = [1, 2] if compacted else None
+        sae._sensing_token_offset = offset
+        sae.get_feature_activations_for_item.return_value = acts
+        return sae
+
+    def test_counts_only_last_position_events(self):
+        from millm.services.inference_service import (
+    InferenceService,
+    SensingRequestContext,
+)
+
+        acts = torch.zeros(3, 16)
+        acts[-1, :5] = 2.0  # 5 ambient features fired at the last position
+        sae = self._sae(acts=acts)
+        hits = [make_hit(pos_start=2, pos_end=6),   # includes last pos (6)
+                make_hit(pos_start=1, pos_end=3)]   # doesn't
+        counts = InferenceService._ambient_counts(sae, hits)
+        assert counts == {0: 5}
+
+    def test_none_when_monitoring_off_or_compacted(self):
+        from millm.services.inference_service import (
+    InferenceService,
+    SensingRequestContext,
+)
+
+        hits = [make_hit(pos_end=6)]
+        assert InferenceService._ambient_counts(
+            self._sae(monitoring=False), hits) is None
+        assert InferenceService._ambient_counts(
+            self._sae(compacted=True), hits) is None
+
+    def test_none_when_no_capture(self):
+        from millm.services.inference_service import (
+    InferenceService,
+    SensingRequestContext,
+)
+
+        assert InferenceService._ambient_counts(
+            self._sae(acts=None), [make_hit(pos_end=6)]) is None
+
+
+class TestGenerationPathWiring:
+    """R1 (finder B): begin/flush placement on the REAL generation paths."""
+
+    def _service_with_model(self):
+        from millm.services.inference_service import (
+    InferenceService,
+    SensingRequestContext,
+)
+
+        service = InferenceService(model_service=MagicMock())
+        return service
+
+    async def test_nonstreaming_chat_begins_and_flushes(self):
+        import torch as _torch
+        from millm.api.schemas.openai import ChatCompletionRequest, ChatMessage
+
+        service = self._service_with_model()
+        request = ChatCompletionRequest(
+            model="m", messages=[ChatMessage(role="user", content="hi")])
+
+        begin_calls = []
+        notify_calls = []
+
+        with patch.object(service, "_sensing_begin",
+                          side_effect=lambda rid: begin_calls.append(rid) or
+                          SensingRequestContext("SAE", "prof", None)) as _, \
+             patch.object(service, "_notify_sensing",
+                          side_effect=lambda ctx, ids:
+                          notify_calls.append((ctx, ids)) or _async_none()), \
+             patch.object(service, "_format_chat_messages", return_value="hi"), \
+             patch.object(service, "_generate_sync",
+                          return_value=_torch.tensor([[1, 2, 3, 4]])), \
+             patch.object(type(service), "_tokenizer",
+                          property(lambda self: _make_tokenizer())), \
+             patch.object(service, "_check_context_length"), \
+             patch.object(service, "_build_generate_kwargs",
+                          return_value={}), \
+             patch.object(service, "get_loaded_model_info",
+                          return_value=_model_info("m")):
+            await service.create_chat_completion(request)
+
+        assert len(begin_calls) == 1
+        assert len(notify_calls) == 1
+        ctx, full_ids = notify_calls[0]
+        assert ctx == SensingRequestContext("SAE", "prof", None)
+        assert _torch.equal(full_ids, _torch.tensor([1, 2, 3, 4]))
+
+    async def test_n_gt_1_goes_unsensed(self):
+        import torch as _torch
+        from millm.api.schemas.openai import ChatCompletionRequest, ChatMessage
+
+        service = self._service_with_model()
+        request = ChatCompletionRequest(
+            model="m", messages=[ChatMessage(role="user", content="hi")], n=2)
+
+        with patch.object(service, "_sensing_begin") as begin, \
+             patch.object(service, "_notify_sensing",
+                          side_effect=lambda ctx, ids: _async_none()), \
+             patch.object(service, "_format_chat_messages", return_value="hi"), \
+             patch.object(service, "_generate_sync",
+                          return_value=_torch.tensor([[1, 2, 3]])), \
+             patch.object(type(service), "_tokenizer",
+                          property(lambda self: _make_tokenizer())), \
+             patch.object(service, "_check_context_length"), \
+             patch.object(service, "_build_generate_kwargs", return_value={}), \
+             patch.object(service, "get_loaded_model_info",
+                          return_value=_model_info("m")):
+            await service.create_chat_completion(request)
+        begin.assert_not_called()
+
+    def test_force_serial_false_leaves_cbm_eligible(self):
+        """EC-11.3: with forcing off, armed requests stay CBM-eligible (and
+        go unsensed there — begin only exists on the serial paths)."""
+        from millm.core.config import settings
+        from millm.services.inference_service import (
+    InferenceService,
+    SensingRequestContext,
+)
+
+        service = InferenceService(model_service=MagicMock())
+        backend = MagicMock()
+        backend.is_running = True
+        backend.sampling_params_match = MagicMock(return_value=True)
+        service._cbm_backend = backend
+        service._cbm_force_serial_monitoring = False
+
+        armed_sae = MagicMock()
+        armed_sae.is_sensing_armed = True
+        with patch("millm.services.sae_service.AttachedSAEState") as MockState, \
+             patch.object(settings, "SENSING_FORCE_SERIAL", False):
+            MockState.return_value.attached_sae = armed_sae
+            assert service._use_cbm_for_request(
+                temperature=None, top_p=None, has_steering_override=False
+            ) is True
+
+
+def _async_none():
+    import asyncio
+
+    future = asyncio.get_event_loop().create_future()
+    future.set_result(None)
+    return future
+
+
+def _make_tokenizer():
+    tokenizer = MagicMock()
+    encoded = MagicMock()
+    encoded.input_ids = torch.tensor([[1, 2]])
+    encoded.to.return_value = encoded
+    tokenizer.return_value = encoded
+    tokenizer.decode.return_value = "hello"
+    tokenizer.eos_token_id = 0
+    return tokenizer
+
+
+def _model_info(name: str):
+    info = MagicMock()
+    info.name = name  # name= is a reserved MagicMock kwarg
+    return info
+
+
+class TestReviewRound3Pins:
+    """011 R3: pins for the R2 fixes and named mutation survivors."""
+
+    def test_status_reports_ws_dropped_and_first_flush_emits(self, service):
+        assert service.status()["ws_events_dropped"] == 0
+        # first flush must emit (throttle initialized to -inf, R2 fix 2)
+        sent = []
+        emitter = MagicMock()
+        emitter.emit_sensing_event.side_effect = lambda p: sent.append(p)
+        with patch("millm.sockets.progress.progress_emitter", emitter):
+            service._emit_events([{"id": 1, "summary": "s"}])
+        assert len(sent) == 1
+
+    def test_throttle_drops_are_counted_and_observable(self, service):
+        emitter = MagicMock()
+        with patch("millm.sockets.progress.progress_emitter", emitter):
+            service._emit_events([{"id": i, "summary": "s"} for i in range(8)])
+            service._emit_events([{"id": 9, "summary": "s"}])  # within 100ms
+        # 8 - _WS_MAX_PER_FLUSH(5) = 3 dropped from flush 1; flush 2 fully dropped
+        assert service.status()["ws_events_dropped"] == 4
+        assert emitter.emit_sensing_event.call_count == 5
+
+    async def test_rearm_mismatch_does_not_stomp_new_cluster_state(
+        self, service
+    ):
+        """R3 #1 (the regression R3 found): a snapshot flush after a re-arm
+        must render neutrally WITHOUT mutating the armed cluster's state."""
+        sae_a = MagicMock(d_sae=16384)
+        service.arm_for_profile(make_profile(profile_id="prof_A"), sae_a)
+        service.arm_for_profile(
+            make_profile(profile_id="prof_B", display_token="anger",
+                         name="anger cluster"),
+            MagicMock(d_sae=16384))
+
+        rows = {}
+
+        class _Repo:
+            def __init__(self, session):
+                pass
+
+            async def create_many(self, events):
+                rows["events"] = events
+                out = []
+                for event in events:
+                    row = MagicMock()
+                    row.to_dict.return_value = dict(event, id=1)
+                    out.append(row)
+                return out
+
+            async def prune(self, *a, **kw):
+                return 0
+
+        class _Ctx:
+            async def __aenter__(self):
+                session = MagicMock()
+
+                async def _commit():
+                    return None
+
+                session.commit = _commit
+                return session
+
+            async def __aexit__(self, *a):
+                return False
+
+        with patch("millm.db.base.async_session_factory",
+                   return_value=_Ctx()), \
+             patch("millm.db.repositories.sensing_repository.SensingRepository",
+                   _Repo), \
+             patch.object(service, "_emit_events"):
+            await service.record("req-1", [make_hit()], False, None, None,
+                                 profile_id="prof_A")
+
+        # A's rows render neutrally under the snapshot id...
+        assert rows["events"][0]["summary"].startswith("prof_A:")
+        # ...and B's armed formatting is untouched
+        assert service._display_token == "anger"
+
+    def test_zero_max_activation_treated_as_missing(self, service):
+        """R3 #2: max_activation 0.0 must not produce theta=0."""
+        members = [
+            {"feature_idx": 1, "strength": 1.0, "max_activation": 0.0},
+            {"feature_idx": 2, "strength": 1.0, "max_activation": 10.0},
+        ]
+        config = service.build_config(make_profile(members=members))
+        assert config.thresholds.tolist()[0] == float("inf")
+
+    def test_negative_epsilon_override_degrades_to_default(self, service):
+        from millm.core.config import settings
+
+        config = service.build_config(make_profile(
+            sensing={"epsilon": -1.0}))
+        assert config.thresholds[0].item() == pytest.approx(
+            settings.SENSING_EPSILON * 40.0)
+
+    def test_status_reconciles_stale_armed_state(self, service):
+        """R3: swallowed disarm (e.g. detach failure) must not report armed
+        forever."""
+        service.arm_for_profile(make_profile(), MagicMock(d_sae=16384))
+        with patch("millm.services.sae_service.AttachedSAEState") as MockState:
+            MockState.return_value.attached_sae = None  # SAE gone
+            MockState.return_value.entries.return_value = []
+            status = service.status()
+        assert status["armed"] is False
+
+    def test_status_keeps_sensing_armed_on_a_NON_FIRST_entry(self, service):
+        """028 FU-1: a cluster now arms on ITS OWN SAE, which may be the second entry. The
+        reconcile used to read the first entry only and would have disarmed it as stale."""
+        from types import SimpleNamespace
+
+        own = MagicMock(d_sae=16384, is_sensing_armed=True)
+        service.arm_for_profile(make_profile(), own)
+        first = SimpleNamespace(sae=MagicMock(is_sensing_armed=False), sae_id="a", layer=3)
+        second = SimpleNamespace(sae=own, sae_id="b", layer=5)
+        with patch("millm.services.sae_service.AttachedSAEState") as MockState:
+            MockState.return_value.attached_sae = first.sae
+            MockState.return_value.entries.return_value = [first, second]
+            status = service.status()
+        assert status["armed"] is True
+
+    async def test_truncated_last_event_only_persisted(self, service):
+        """R3 mutation pin: the cut point must be recoverable from rows."""
+        service.arm_for_profile(make_profile(), MagicMock(d_sae=16384))
+        captured = {}
+
+        class _Repo:
+            def __init__(self, session):
+                pass
+
+            async def create_many(self, events):
+                captured["events"] = events
+                out = []
+                for event in events:
+                    row = MagicMock()
+                    row.to_dict.return_value = dict(event, id=1)
+                    out.append(row)
+                return out
+
+            async def prune(self, *a, **kw):
+                return 0
+
+        class _Ctx:
+            async def __aenter__(self):
+                session = MagicMock()
+
+                async def _commit():
+                    return None
+
+                session.commit = _commit
+                return session
+
+            async def __aexit__(self, *a):
+                return False
+
+        with patch("millm.db.base.async_session_factory",
+                   return_value=_Ctx()), \
+             patch("millm.db.repositories.sensing_repository.SensingRepository",
+                   _Repo), \
+             patch.object(service, "_emit_events"):
+            await service.record(
+                "req-1",
+                [make_hit(pos_start=1, pos_end=1),
+                 make_hit(pos_start=5, pos_end=5)],
+                True, None, None)
+        flags = [e["truncated"] for e in captured["events"]]
+        assert flags == [False, True]
+
+    def test_events_recorded_counter_increments(self, service):
+        assert service.status()["events_recorded_since_start"] == 0
+
+
+class TestGoalEnhancements2026_07_17:
+    """Pins for the post-increment goal items: quorum=ALL default, local
+    min_k overrides, history dedup, context parts."""
+
+    def test_default_quorum_is_all_sensable_members(self, service):
+        config = service.build_config(make_profile())
+        # 3 members, one lacks max_activation (inf threshold, can't fire)
+        # -> default quorum = the 2 sensable ones, NOT 3 and NOT the old 30%
+        assert config.min_k == 2
+
+    def test_default_quorum_all_when_all_sensable(self, service):
+        members = [
+            {"feature_idx": i, "strength": 1.0, "max_activation": 10.0}
+            for i in range(5)
+        ]
+        config = service.build_config(make_profile(members=members))
+        assert config.min_k == 5  # ALL members (goal item 3)
+
+    def test_local_override_beats_document_sensing_block(self, service):
+        profile = make_profile(sensing={"min_k": 1})
+        profile.cluster_meta["sensing_overrides"] = {"min_k": 2}
+        config = service.build_config(profile)
+        assert config.min_k == 2
+
+    def test_history_boundary_lcp(self, service):
+        from millm.core.config import settings
+
+        assert service.history_boundary([1, 2, 3]) == 0  # no history
+        import torch as _t
+
+        service.note_request_ids(_t.tensor([[1, 2, 3, 4, 5]]))
+        assert service.history_boundary([1, 2, 3, 9, 9]) == 3
+        assert service.history_boundary([1, 2, 3, 4, 5, 6, 7]) == 5
+        assert service.history_boundary([8, 9]) == 0
+
+    def test_history_dedup_flag_off_disables(self, service, monkeypatch):
+        import torch as _t
+
+        from millm.core import config as config_module
+
+        service.note_request_ids(_t.tensor([1, 2, 3]))
+        monkeypatch.setattr(config_module.settings,
+                            "SENSING_DEDUP_HISTORY", False)
+        assert service.history_boundary([1, 2, 3]) == 0
+
+    def test_disarm_clears_history(self, service):
+        import torch as _t
+
+        service.note_request_ids(_t.tensor([1, 2, 3]))
+        service.disarm(None)
+        assert service.history_boundary([1, 2, 3]) == 0
+
+
+class TestReviewRound1SensingEnh:
+    """R1 pins for the enhancement review (2026-07-17)."""
+
+    def test_sentencepiece_style_no_gluing(self, service):
+        """R1: independent segment decodes glue words on SP models — prefix
+        slicing must keep the boundary spaces."""
+        tokenizer = MagicMock()
+
+        def sp_decode(ids, **kw):
+            # SP semantics: pieces carry their own leading-space marker;
+            # a standalone segment decode STRIPS the leading space.
+            pieces = ["Hello", " world", " secret", " plans", " here"]
+            text = "".join(pieces[i] for i in ids)
+            return text.lstrip(" ")
+
+        tokenizer.decode.side_effect = sp_decode
+        _, _, parts = SensingService._context(
+            torch.arange(5), make_hit(pos_start=2, pos_end=2), k=2,
+            tokenizer=tokenizer)
+        joined = parts["before"] + parts["span"] + parts["after"]
+        assert joined == "Hello world secret plans here"
+        assert parts["span"] == " secret"  # boundary space preserved
+
+    def test_span_beyond_ids_yields_no_context(self, service):
+        """R1: decode-phase hit with prompt-only fallback ids must not
+        produce an empty context box with a zero-width highlight."""
+        tokenizer = MagicMock()
+        tokenizer.decode.side_effect = lambda ids, **kw: "x"
+        text, window, parts = SensingService._context(
+            torch.arange(5), make_hit(pos_start=9, pos_end=9), k=2,
+            tokenizer=tokenizer)
+        assert text is None and window is None and parts is None
+
+    def test_any_arm_clears_history(self, service):
+        service.arm_for_profile(make_profile(), MagicMock(d_sae=16384))
+        import torch as _t
+
+        service.note_request_ids(_t.tensor([1, 2, 3]))
+        assert service.history_boundary([1, 2, 3]) == 3
+        # re-arm (same OR different profile) invalidates the premise
+        service.arm_for_profile(make_profile(profile_id="prof_B",
+                                             name="other"),
+                                MagicMock(d_sae=16384))
+        assert service.history_boundary([1, 2, 3]) == 0
+
+    def test_note_guarded_by_armed_profile(self, service):
+        import torch as _t
+
+        service.arm_for_profile(make_profile(), MagicMock(d_sae=16384))
+        service.note_request_ids(_t.tensor([1, 2]), profile_id="prof_GHOST")
+        assert service.history_boundary([1, 2]) == 0  # mismatched: ignored
+        service.note_request_ids(_t.tensor([1, 2]), profile_id="prof_s1")
+        assert service.history_boundary([1, 2]) == 2
+
+    def test_truncated_request_caps_history_at_reported(self, service):
+        """R1: capped-away moments were NEVER reported — history must stop
+        at the truncation point so they re-read next turn."""
+        import torch as _t
+
+        service.note_request_ids(_t.tensor(list(range(100))),
+                                 reported_through=40)
+        assert service.history_boundary(list(range(100))) == 40
+
+    def test_prompt_only_fallback_never_shrinks_history(self, service):
+        """R1: a failed generation stores prompt-only ids — a prefix of the
+        existing history must not shrink the boundary."""
+        import torch as _t
+
+        service.note_request_ids(_t.tensor([1, 2, 3, 4, 5, 6]))
+        service.note_request_ids(_t.tensor([1, 2, 3]))  # prefix: ignored
+        assert service.history_boundary([1, 2, 3, 4, 5, 6, 7]) == 6
+        # a DIVERGING shorter sequence still replaces (new conversation)
+        service.note_request_ids(_t.tensor([9, 8]))
+        assert service.history_boundary([9, 8, 7]) == 2
+
+
+class TestNotifyHistoryPins:
+    """R3 #15: pin the two _notify_sensing history rules at their real
+    call site."""
+
+    def _inference(self):
+        from millm.services.inference_service import (
+    InferenceService,
+    SensingRequestContext,
+)
+
+        return InferenceService(model_service=MagicMock())
+
+    async def test_destroyed_boundary_skips_history_write(self):
+        """R2 #2's fix: collect returning ('', [], False) must not write
+        history — dropped hits would be suppressed forever."""
+        import millm.api.dependencies as deps
+
+        inference = self._inference()
+        sae = MagicMock()
+        sae.collect_sensing_hits.return_value = ("", [], False)
+        sae._sensing_overhead_ms = 1.0
+        service = MagicMock()
+        deps._sensing_service = service
+        try:
+            await inference._notify_sensing(
+                SensingRequestContext(sae, "prof_x", None),
+                torch.tensor([1, 2, 3]))
+        finally:
+            deps._sensing_service = None
+        service.note_request_ids.assert_not_called()
+        service.record.assert_not_called()
+
+    async def test_truncated_caps_history_at_last_reported(self):
+        """R3 #15b: reported_through is computed at the REAL call site."""
+        import millm.api.dependencies as deps
+
+        inference = self._inference()
+        sae = MagicMock()
+        hit = make_hit(pos_start=5, pos_end=7)
+        sae.collect_sensing_hits.return_value = ("req-1", [hit], True)
+        sae._sensing_overhead_ms = 1.0
+        sae.is_monitoring_enabled = False
+        service = MagicMock()
+        service.record = AsyncMock(return_value=[])
+        deps._sensing_service = service
+        try:
+            await inference._notify_sensing(
+                SensingRequestContext(sae, "prof_x", None),
+                torch.tensor([1, 2, 3]))
+        finally:
+            deps._sensing_service = None
+        kwargs = service.note_request_ids.call_args.kwargs
+        assert kwargs["reported_through"] == 8  # pos_end + 1
+        assert kwargs["profile_id"] == "prof_x"
+
+
+class TestEndToEndDedup:
+    """R3 #12: the flagship behavior through TWO real generation calls —
+    the second request's re-read moment records nothing and history
+    advances. Mutating the boundary wiring to 0 fails this test."""
+
+    async def test_second_request_suppresses_rereported_moment(self):
+        import millm.api.dependencies as deps
+
+        from millm.api.schemas.openai import (
+            ChatCompletionRequest,
+            ChatMessage,
+        )
+        from millm.services.inference_service import (
+    InferenceService,
+    SensingRequestContext,
+)
+
+        # Deterministic SAE: feature j fires on input dim j (see ml tests)
+        import sys
+        sys.path.insert(0, "tests/unit/ml")
+        from test_sensing import make_config, make_sae, pos_row
+
+        sae = make_sae()
+        sae.arm_sensing(make_config())  # members 0,1,2; theta 1.0; min_k 2
+
+        service = SensingService()
+        # armed id must match the config's profile id — in production
+        # arm_for_profile guarantees this; the note_request_ids profile
+        # guard depends on it
+        service._armed_profile_id = sae._sensing.profile_id
+        service._armed_config = sae._sensing
+        recorded: list = []
+
+        async def fake_record(request_id, hits, truncated, full_ids,
+                              tokenizer, **kw):
+            recorded.append((request_id, [
+                (h.pos_start, h.pos_end) for h in hits]))
+            return []
+
+        service.record = fake_record
+
+        inference = InferenceService(model_service=MagicMock())
+
+        # request 1: prompt ids [1,2] -> generated [1,2,9]; the co-firing
+        # moment is at position 1 (hidden states drive the hook manually)
+        hot = pos_row({0: 2.0, 1: 2.0})
+
+        def run_request(prompt_ids, full_ids, passes):
+            async def go():
+                ctx = None
+                with patch("millm.services.sae_service.AttachedSAEState") as MockState:
+                    MockState.return_value.attached_sae = sae
+                    ctx = inference._sensing_begin("req")
+                    inference._sensing_mark_history(
+                        ctx, torch.tensor([prompt_ids]))
+                    for rows in passes:
+                        sae._sense(torch.tensor([rows]))
+                    await inference._notify_sensing(
+                        ctx, torch.tensor([full_ids]))
+            return go
+
+        deps._sensing_service = service
+        try:
+            # request 1: positions 0-1 prefill (hot at 1), decode 2
+            await run_request([1, 2], [1, 2, 9],
+                              [[pos_row({}), hot], [pos_row({})]])()
+            assert recorded == [("req", [(1, 1)])]
+
+            # request 2: prompt = request 1's FULL sequence + new tokens;
+            # the hot moment at position 1 re-reads — must be suppressed
+            await run_request([1, 2, 9, 5], [1, 2, 9, 5, 7],
+                              [[pos_row({}), hot, pos_row({}), pos_row({})],
+                               [pos_row({})]])()
+            assert len(recorded) == 1  # nothing new recorded
+            # history advanced to request 2's full sequence
+            assert service.history_boundary([1, 2, 9, 5, 7]) == 5
+        finally:
+            deps._sensing_service = None
+
+
+class TestBpeRewriteGuard:
+    """R3 #13: the U+FFFD consistency guard falls back to plain text."""
+
+    def test_rewriting_tokenizer_yields_no_parts(self, service):
+        tokenizer = MagicMock()
+
+        def decode(ids, **kw):
+            # shorter prefix ends in a replacement char that the longer
+            # decode rewrites into the real character
+            if len(ids) == 1:
+                return "caf\ufffd"
+            return "caf\u00e9 au lait"[:4 + 2 * (len(ids) - 1)]
+
+        tokenizer.decode.side_effect = decode
+        text, window, parts = SensingService._context(
+            torch.arange(4), make_hit(pos_start=1, pos_end=1), k=2,
+            tokenizer=tokenizer)
+        assert parts is None          # guard tripped
+        assert text is not None       # plain fallback retained

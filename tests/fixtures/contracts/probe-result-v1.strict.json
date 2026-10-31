@@ -1,0 +1,1413 @@
+{
+  "$defs": {
+    "AttachedRuleSet": {
+      "additionalProperties": false,
+      "properties": {
+        "rule_set_digest": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Rule Set Digest",
+          "type": "string"
+        },
+        "rule_set_id": {
+          "pattern": "^[A-Za-z0-9._:-]{1,64}$",
+          "title": "Rule Set Id",
+          "type": "string"
+        }
+      },
+      "required": [
+        "rule_set_id",
+        "rule_set_digest"
+      ],
+      "title": "AttachedRuleSet",
+      "type": "object"
+    },
+    "BehaviourOut": {
+      "additionalProperties": false,
+      "description": "The behaviour the probe's DEFINITION names (never a code constant, FR-38.1).",
+      "properties": {
+        "key": {
+          "pattern": "^[a-z0-9][a-z0-9-]{0,62}[a-z0-9]$",
+          "title": "Key",
+          "type": "string"
+        },
+        "version": {
+          "anyOf": [
+            {
+              "minimum": 1,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Version"
+        }
+      },
+      "required": [
+        "key"
+      ],
+      "title": "BehaviourOut",
+      "type": "object"
+    },
+    "DecisionOut": {
+      "additionalProperties": false,
+      "properties": {
+        "calibration_id": {
+          "anyOf": [
+            {
+              "pattern": "^[A-Za-z0-9._:-]{1,64}$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Calibration Id"
+        },
+        "provisional": {
+          "title": "Provisional",
+          "type": "boolean"
+        },
+        "target_fpr": {
+          "anyOf": [
+            {
+              "maximum": 1.0,
+              "minimum": 0.0,
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Target Fpr"
+        }
+      },
+      "required": [
+        "provisional"
+      ],
+      "title": "DecisionOut",
+      "type": "object"
+    },
+    "ProbeResult": {
+      "additionalProperties": false,
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "outcome": {
+                "const": "completed"
+              }
+            },
+            "required": [
+              "outcome"
+            ]
+          },
+          "then": {
+            "properties": {
+              "reason": {
+                "type": "null"
+              },
+              "score": {
+                "type": "number"
+              },
+              "scored": {
+                "const": true
+              },
+              "status": {
+                "const": "final"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "outcome": {
+                "enum": [
+                  "skipped",
+                  "failed"
+                ]
+              }
+            },
+            "required": [
+              "outcome"
+            ]
+          },
+          "then": {
+            "properties": {
+              "reason": {
+                "type": "string"
+              },
+              "score": {
+                "type": "null"
+              },
+              "scored": {
+                "const": false
+              },
+              "verdict": {
+                "type": "null"
+              }
+            },
+            "required": [
+              "reason"
+            ]
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "outcome": {
+                "const": "interrupted"
+              }
+            },
+            "required": [
+              "outcome"
+            ]
+          },
+          "then": {
+            "properties": {
+              "reason": {
+                "type": "string"
+              },
+              "status": {
+                "enum": [
+                  "partial",
+                  "unavailable"
+                ]
+              },
+              "verdict": {
+                "type": "null"
+              }
+            },
+            "required": [
+              "reason"
+            ]
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "status": {
+                "const": "partial"
+              }
+            },
+            "required": [
+              "status"
+            ]
+          },
+          "then": {
+            "properties": {
+              "n_scored_tokens": {
+                "minimum": 1
+              },
+              "score": {
+                "type": "number"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "status": {
+                "const": "unavailable"
+              }
+            },
+            "required": [
+              "status"
+            ]
+          },
+          "then": {
+            "properties": {
+              "score": {
+                "type": "null"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "threshold": {
+                "type": "null"
+              }
+            },
+            "required": [
+              "threshold"
+            ]
+          },
+          "then": {
+            "properties": {
+              "verdict": {
+                "type": "null"
+              }
+            }
+          }
+        }
+      ],
+      "description": "`kind: \"probe\"` — what one armed probe concluded over one window of one request.",
+      "properties": {
+        "basis": {
+          "default": "unknown",
+          "enum": [
+            "residual",
+            "sae_features",
+            "unknown"
+          ],
+          "title": "Basis",
+          "type": "string"
+        },
+        "batch_id": {
+          "anyOf": [
+            {
+              "pattern": "^[A-Za-z0-9._:-]{1,64}$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Batch Id"
+        },
+        "batch_line": {
+          "anyOf": [
+            {
+              "minimum": 1,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Batch Line"
+        },
+        "behaviour": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/BehaviourOut"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "calibration_ref": {
+          "default": null,
+          "title": "Calibration Ref",
+          "type": "null"
+        },
+        "choice_index": {
+          "anyOf": [
+            {
+              "minimum": 0,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Choice Index"
+        },
+        "comparator": {
+          "const": ">=",
+          "default": ">=",
+          "title": "Comparator",
+          "type": "string"
+        },
+        "completed_at": {
+          "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(\\.[0-9]{1,6})?Z$",
+          "title": "Completed At",
+          "type": "string"
+        },
+        "decision": {
+          "$ref": "#/$defs/DecisionOut"
+        },
+        "decision_digest": {
+          "default": "unknown",
+          "pattern": "^([0-9a-f]{64}|unknown)$",
+          "title": "Decision Digest",
+          "type": "string"
+        },
+        "decision_revision": {
+          "anyOf": [
+            {
+              "minimum": 1,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "miStudio's revision of the decision (the producer's); null when the producer stated none.",
+          "title": "Decision Revision"
+        },
+        "definition_schema": {
+          "const": "mistudio.probe-definition/v1",
+          "default": "mistudio.probe-definition/v1",
+          "title": "Definition Schema",
+          "type": "string"
+        },
+        "definition_scope": {
+          "default": "unknown",
+          "enum": [
+            "all",
+            "prompt",
+            "response",
+            "last_user",
+            "unknown"
+          ],
+          "title": "Definition Scope",
+          "type": "string"
+        },
+        "detector_digest": {
+          "default": "unknown",
+          "pattern": "^([0-9a-f]{64}|unknown)$",
+          "title": "Detector Digest",
+          "type": "string"
+        },
+        "detector_digest_source": {
+          "default": "unknown",
+          "enum": [
+            "producer",
+            "computed",
+            "unknown"
+          ],
+          "title": "Detector Digest Source",
+          "type": "string"
+        },
+        "engine": {
+          "default": "transformers",
+          "enum": [
+            "transformers",
+            "llamacpp",
+            "cbm"
+          ],
+          "title": "Engine",
+          "type": "string"
+        },
+        "evaluation_ms": {
+          "anyOf": [
+            {
+              "minimum": 0.0,
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Evaluation Ms"
+        },
+        "event_time": {
+          "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(\\.[0-9]{1,6})?Z$",
+          "title": "Event Time",
+          "type": "string"
+        },
+        "event_time_source": {
+          "default": "finalized",
+          "enum": [
+            "finalized",
+            "inserted"
+          ],
+          "title": "Event Time Source",
+          "type": "string"
+        },
+        "execution_mode": {
+          "default": "serial",
+          "enum": [
+            "serial",
+            "batched",
+            "continuous_batching",
+            "speculative"
+          ],
+          "title": "Execution Mode",
+          "type": "string"
+        },
+        "fires": {
+          "anyOf": [
+            {
+              "type": "boolean"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Fires"
+        },
+        "hook": {
+          "default": "unknown",
+          "enum": [
+            "resid_post",
+            "unknown"
+          ],
+          "title": "Hook",
+          "type": "string"
+        },
+        "identity_algorithm": {
+          "anyOf": [
+            {
+              "const": "mistudio.probe-identity/1",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Identity Algorithm"
+        },
+        "input_index": {
+          "anyOf": [
+            {
+              "minimum": 0,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Input Index"
+        },
+        "kind": {
+          "const": "probe",
+          "default": "probe",
+          "title": "Kind",
+          "type": "string"
+        },
+        "layer": {
+          "anyOf": [
+            {
+              "minimum": 0,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Layer"
+        },
+        "migrated": {
+          "default": false,
+          "title": "Migrated",
+          "type": "boolean"
+        },
+        "model_load_id": {
+          "default": "unknown",
+          "pattern": "^([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}|unknown)$",
+          "title": "Model Load Id",
+          "type": "string"
+        },
+        "model_revision": {
+          "default": "unknown",
+          "pattern": "^([0-9a-f]{40}|[A-Za-z0-9._/\\-]{1,100})$",
+          "title": "Model Revision",
+          "type": "string"
+        },
+        "n_scored_tokens": {
+          "default": 0,
+          "minimum": 0,
+          "title": "N Scored Tokens",
+          "type": "integer"
+        },
+        "origin": {
+          "enum": [
+            "live",
+            "batch",
+            "stateless"
+          ],
+          "title": "Origin",
+          "type": "string"
+        },
+        "outcome": {
+          "enum": [
+            "completed",
+            "skipped",
+            "failed",
+            "interrupted"
+          ],
+          "title": "Outcome",
+          "type": "string"
+        },
+        "parity_status": {
+          "default": "unknown",
+          "enum": [
+            "passed",
+            "failed",
+            "never_run",
+            "unknown"
+          ],
+          "title": "Parity Status",
+          "type": "string"
+        },
+        "persistence": {
+          "anyOf": [
+            {
+              "enum": [
+                "persisted",
+                "not_persisted",
+                "unknown"
+              ],
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Recorded copies only.",
+          "title": "Persistence"
+        },
+        "precision": {
+          "default": "unknown",
+          "pattern": "^[a-z0-9_]{1,32}$",
+          "title": "Precision",
+          "type": "string"
+        },
+        "probability": {
+          "default": null,
+          "title": "Probability",
+          "type": "null"
+        },
+        "probe_id": {
+          "pattern": "^pr_[0-9a-f]{12}$",
+          "title": "Probe Id",
+          "type": "string"
+        },
+        "probe_name": {
+          "anyOf": [
+            {
+              "pattern": "^[A-Za-z0-9._:+\\-() ]{1,200}$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Probe Name"
+        },
+        "producer": {
+          "$ref": "#/$defs/Producer"
+        },
+        "reason": {
+          "anyOf": [
+            {
+              "enum": [
+                "batched_request",
+                "cancelled",
+                "client_disconnected",
+                "continuous_batching",
+                "encoder_failed",
+                "engine_unsupported",
+                "generation_error",
+                "generation_thread_hung",
+                "head_mismatch",
+                "judge_traffic",
+                "last_user_span_unknown",
+                "last_user_span_unresolved",
+                "no_chat_template",
+                "no_scored_tokens",
+                "no_user_header",
+                "no_user_turn",
+                "non_finite_score",
+                "prompt_boundary_conflict",
+                "prompt_boundary_invalid",
+                "prompt_boundary_unknown",
+                "rule_error",
+                "rule_input_too_large",
+                "rule_load_refused",
+                "rule_output_invalid",
+                "rule_resource_limit",
+                "rule_set_vectors_failed",
+                "rule_signals_disabled",
+                "rule_timeout",
+                "rule_worker_unavailable",
+                "speculative_decoding",
+                "text_completion_has_no_user_turn"
+              ],
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "A code from the published list (millm/services/probe_reasons.py); null when outcome is completed. Consumers read an unknown code as other."
+        },
+        "request_id": {
+          "anyOf": [
+            {
+              "pattern": "^[A-Za-z0-9._:-]{1,64}$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Request Id"
+        },
+        "result_id": {
+          "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
+          "title": "Result Id",
+          "type": "string"
+        },
+        "rule": {
+          "default": "unknown",
+          "enum": [
+            "mean",
+            "max",
+            "last",
+            "softmax",
+            "attention",
+            "rolling_mean_max",
+            "unknown"
+          ],
+          "title": "Rule",
+          "type": "string"
+        },
+        "rung": {
+          "maximum": 3,
+          "minimum": 0,
+          "title": "Rung",
+          "type": "integer"
+        },
+        "rung_language": {
+          "enum": [
+            "trained",
+            "detects on held-out data",
+            "detects on unseen tasks",
+            "detects on unseen tasks, compared with a judge"
+          ],
+          "type": "string"
+        },
+        "schema": {
+          "const": "mi.probe.result/v1",
+          "default": "mi.probe.result/v1",
+          "title": "Schema",
+          "type": "string"
+        },
+        "score": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Score"
+        },
+        "score_semantics": {
+          "const": "raw_margin",
+          "default": "raw_margin",
+          "title": "Score Semantics",
+          "type": "string"
+        },
+        "scored": {
+          "title": "Scored",
+          "type": "boolean"
+        },
+        "served_model": {
+          "default": "unknown",
+          "pattern": "^([A-Za-z0-9._:/+@\\- ]{1,255})$",
+          "title": "Served Model",
+          "type": "string"
+        },
+        "session_id": {
+          "anyOf": [
+            {
+              "pattern": "^[A-Za-z0-9._:-]{1,64}$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Session Id"
+        },
+        "set": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/SetBlock"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "source_event_id": {
+          "anyOf": [
+            {
+              "minimum": 1,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Recorded copies only: the probe_events.id this result is stored as.",
+          "title": "Source Event Id"
+        },
+        "span_id": {
+          "anyOf": [
+            {
+              "pattern": "^[0-9a-f]{16}$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Span Id"
+        },
+        "status": {
+          "default": "final",
+          "enum": [
+            "final",
+            "partial",
+            "unavailable"
+          ],
+          "title": "Status",
+          "type": "string"
+        },
+        "steering_ref": {
+          "$ref": "#/$defs/SteeringRef"
+        },
+        "target": {
+          "default": "unknown",
+          "enum": [
+            "positive_class",
+            "unknown"
+          ],
+          "title": "Target",
+          "type": "string"
+        },
+        "template_sha256": {
+          "default": "unknown",
+          "pattern": "^([0-9a-f]{64}|unknown)$",
+          "title": "Template Sha256",
+          "type": "string"
+        },
+        "threshold": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Threshold"
+        },
+        "threshold_revision": {
+          "default": 1,
+          "description": "miLLM's own counter of the bar that judged this result.",
+          "minimum": 1,
+          "title": "Threshold Revision",
+          "type": "integer"
+        },
+        "trace_id": {
+          "anyOf": [
+            {
+              "pattern": "^[0-9a-f]{32}$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Trace Id"
+        },
+        "turn_index": {
+          "anyOf": [
+            {
+              "minimum": 0,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Turn Index"
+        },
+        "verdict": {
+          "anyOf": [
+            {
+              "type": "boolean"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Verdict"
+        },
+        "window": {
+          "enum": [
+            "all",
+            "prompt",
+            "response",
+            "last_user"
+          ],
+          "title": "Window",
+          "type": "string"
+        }
+      },
+      "required": [
+        "basis",
+        "batch_id",
+        "batch_line",
+        "behaviour",
+        "calibration_ref",
+        "choice_index",
+        "comparator",
+        "completed_at",
+        "decision",
+        "decision_digest",
+        "decision_revision",
+        "definition_schema",
+        "definition_scope",
+        "detector_digest",
+        "detector_digest_source",
+        "engine",
+        "evaluation_ms",
+        "event_time",
+        "event_time_source",
+        "execution_mode",
+        "fires",
+        "hook",
+        "identity_algorithm",
+        "input_index",
+        "kind",
+        "layer",
+        "migrated",
+        "model_load_id",
+        "model_revision",
+        "n_scored_tokens",
+        "origin",
+        "outcome",
+        "parity_status",
+        "precision",
+        "probability",
+        "probe_id",
+        "probe_name",
+        "producer",
+        "reason",
+        "request_id",
+        "result_id",
+        "rule",
+        "rung",
+        "rung_language",
+        "schema",
+        "score",
+        "score_semantics",
+        "scored",
+        "served_model",
+        "session_id",
+        "set",
+        "span_id",
+        "status",
+        "steering_ref",
+        "target",
+        "template_sha256",
+        "threshold",
+        "threshold_revision",
+        "trace_id",
+        "turn_index",
+        "verdict",
+        "window"
+      ],
+      "title": "ProbeResult",
+      "type": "object"
+    },
+    "Producer": {
+      "additionalProperties": false,
+      "properties": {
+        "name": {
+          "const": "millm",
+          "default": "millm",
+          "title": "Name",
+          "type": "string"
+        },
+        "version": {
+          "pattern": "^[0-9]+\\.[0-9]+\\.[0-9]+([-+][0-9A-Za-z.\\-]+)?$",
+          "title": "Version",
+          "type": "string"
+        }
+      },
+      "required": [
+        "version"
+      ],
+      "title": "Producer",
+      "type": "object"
+    },
+    "RuleResult": {
+      "additionalProperties": false,
+      "description": "`kind: \"rule\"` — Part A's rule signal (D38.2). Defined in v1 so miLLM 039 emits it without\na schema change; 038 never produces one.",
+      "properties": {
+        "batch_id": {
+          "anyOf": [
+            {
+              "pattern": "^[A-Za-z0-9._:-]{1,64}$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Batch Id"
+        },
+        "batch_line": {
+          "anyOf": [
+            {
+              "minimum": 1,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Batch Line"
+        },
+        "behaviour": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/BehaviourOut"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "count": {
+          "default": 0,
+          "minimum": 0,
+          "title": "Count",
+          "type": "integer"
+        },
+        "event_time": {
+          "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(\\.[0-9]{1,6})?Z$",
+          "title": "Event Time",
+          "type": "string"
+        },
+        "event_time_source": {
+          "default": "finalized",
+          "enum": [
+            "finalized",
+            "inserted"
+          ],
+          "title": "Event Time Source",
+          "type": "string"
+        },
+        "fires": {
+          "anyOf": [
+            {
+              "type": "boolean"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Fires"
+        },
+        "form": {
+          "pattern": "^[a-z][a-z0-9_.\\-]{0,63}$",
+          "title": "Form",
+          "type": "string"
+        },
+        "kind": {
+          "const": "rule",
+          "default": "rule",
+          "title": "Kind",
+          "type": "string"
+        },
+        "migrated": {
+          "default": false,
+          "title": "Migrated",
+          "type": "boolean"
+        },
+        "origin": {
+          "enum": [
+            "live",
+            "batch",
+            "stateless"
+          ],
+          "title": "Origin",
+          "type": "string"
+        },
+        "outcome": {
+          "enum": [
+            "completed",
+            "skipped",
+            "failed",
+            "interrupted"
+          ],
+          "title": "Outcome",
+          "type": "string"
+        },
+        "persistence": {
+          "anyOf": [
+            {
+              "enum": [
+                "persisted",
+                "not_persisted",
+                "unknown"
+              ],
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Recorded copies only.",
+          "title": "Persistence"
+        },
+        "producer": {
+          "$ref": "#/$defs/Producer"
+        },
+        "reason": {
+          "anyOf": [
+            {
+              "enum": [
+                "batched_request",
+                "cancelled",
+                "client_disconnected",
+                "continuous_batching",
+                "encoder_failed",
+                "engine_unsupported",
+                "generation_error",
+                "generation_thread_hung",
+                "head_mismatch",
+                "judge_traffic",
+                "last_user_span_unknown",
+                "last_user_span_unresolved",
+                "no_chat_template",
+                "no_scored_tokens",
+                "no_user_header",
+                "no_user_turn",
+                "non_finite_score",
+                "prompt_boundary_conflict",
+                "prompt_boundary_invalid",
+                "prompt_boundary_unknown",
+                "rule_error",
+                "rule_input_too_large",
+                "rule_load_refused",
+                "rule_output_invalid",
+                "rule_resource_limit",
+                "rule_set_vectors_failed",
+                "rule_signals_disabled",
+                "rule_timeout",
+                "rule_worker_unavailable",
+                "speculative_decoding",
+                "text_completion_has_no_user_turn"
+              ],
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "A code from the published list (millm/services/probe_reasons.py); null when outcome is completed. Consumers read an unknown code as other."
+        },
+        "request_id": {
+          "anyOf": [
+            {
+              "pattern": "^[A-Za-z0-9._:-]{1,64}$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Request Id"
+        },
+        "result_id": {
+          "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
+          "title": "Result Id",
+          "type": "string"
+        },
+        "rule_set_digest": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Rule Set Digest",
+          "type": "string"
+        },
+        "rule_set_id": {
+          "pattern": "^[A-Za-z0-9._:-]{1,64}$",
+          "title": "Rule Set Id",
+          "type": "string"
+        },
+        "rule_set_version": {
+          "minimum": 1,
+          "title": "Rule Set Version",
+          "type": "integer"
+        },
+        "schema": {
+          "const": "mi.probe.result/v1",
+          "default": "mi.probe.result/v1",
+          "title": "Schema",
+          "type": "string"
+        },
+        "session_id": {
+          "anyOf": [
+            {
+              "pattern": "^[A-Za-z0-9._:-]{1,64}$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Session Id"
+        },
+        "set": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/SetBlock"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "signal": {
+          "pattern": "^[A-Za-z0-9._:-]{1,64}$",
+          "title": "Signal",
+          "type": "string"
+        },
+        "source_event_id": {
+          "anyOf": [
+            {
+              "minimum": 1,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Recorded copies only: the probe_events.id this result is stored as.",
+          "title": "Source Event Id"
+        },
+        "span_id": {
+          "anyOf": [
+            {
+              "pattern": "^[0-9a-f]{16}$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Span Id"
+        },
+        "status": {
+          "default": "final",
+          "enum": [
+            "final",
+            "partial",
+            "unavailable"
+          ],
+          "title": "Status",
+          "type": "string"
+        },
+        "trace_id": {
+          "anyOf": [
+            {
+              "pattern": "^[0-9a-f]{32}$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Trace Id"
+        },
+        "turn_index": {
+          "anyOf": [
+            {
+              "minimum": 0,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Turn Index"
+        },
+        "window": {
+          "enum": [
+            "all",
+            "prompt",
+            "response",
+            "last_user"
+          ],
+          "title": "Window",
+          "type": "string"
+        }
+      },
+      "required": [
+        "batch_id",
+        "batch_line",
+        "behaviour",
+        "count",
+        "event_time",
+        "event_time_source",
+        "fires",
+        "form",
+        "kind",
+        "migrated",
+        "origin",
+        "outcome",
+        "producer",
+        "reason",
+        "request_id",
+        "result_id",
+        "rule_set_digest",
+        "rule_set_id",
+        "rule_set_version",
+        "schema",
+        "session_id",
+        "set",
+        "signal",
+        "span_id",
+        "status",
+        "trace_id",
+        "turn_index",
+        "window"
+      ],
+      "title": "RuleResult",
+      "type": "object"
+    },
+    "SetBlock": {
+      "additionalProperties": false,
+      "description": "Part A's behaviour-set slot (OQ-38.3 (a), D31). 038 always sends `set: null`.",
+      "properties": {
+        "armed_members": {
+          "minimum": 0,
+          "title": "Armed Members",
+          "type": "integer"
+        },
+        "attached_rule_sets": {
+          "items": {
+            "$ref": "#/$defs/AttachedRuleSet"
+          },
+          "title": "Attached Rule Sets",
+          "type": "array"
+        },
+        "complete": {
+          "title": "Complete",
+          "type": "boolean"
+        },
+        "members_digest": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Members Digest",
+          "type": "string"
+        },
+        "missing_probe_ids": {
+          "items": {
+            "pattern": "^[A-Za-z0-9._:-]{1,64}$",
+            "type": "string"
+          },
+          "title": "Missing Probe Ids",
+          "type": "array"
+        },
+        "total_members": {
+          "minimum": 0,
+          "title": "Total Members",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "armed_members",
+        "total_members",
+        "complete",
+        "members_digest"
+      ],
+      "title": "SetBlock",
+      "type": "object"
+    },
+    "SteeringRef": {
+      "additionalProperties": false,
+      "description": "What steered the residual this result read, from the request's steering report.\n\n`unknown` when no report was published: a result never claims \"unsteered\" it cannot show.",
+      "properties": {
+        "id": {
+          "anyOf": [
+            {
+              "pattern": "^[A-Za-z0-9._:-]{1,64}$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Id"
+        },
+        "kind": {
+          "enum": [
+            "none",
+            "profile",
+            "circuit",
+            "inline",
+            "unknown"
+          ],
+          "title": "Kind",
+          "type": "string"
+        }
+      },
+      "required": [
+        "kind"
+      ],
+      "title": "SteeringRef",
+      "type": "object"
+    }
+  },
+  "$id": "https://hitsai.net/schemas/millm/probe-result-v1.json",
+  "description": "One probe result, the same object on every miLLM surface (header projection, terminal chunk, millm_probe_verdicts body field, stored event, probe:event socket, events API, session cells, score route, Batch lines, telemetry). Generated from millm/api/schemas/probe_result.py; do not hand-edit.",
+  "discriminator": {
+    "mapping": {
+      "probe": "#/$defs/ProbeResult",
+      "rule": "#/$defs/RuleResult"
+    },
+    "propertyName": "kind"
+  },
+  "oneOf": [
+    {
+      "$ref": "#/$defs/ProbeResult"
+    },
+    {
+      "$ref": "#/$defs/RuleResult"
+    }
+  ],
+  "title": "mi.probe.result/v1"
+}

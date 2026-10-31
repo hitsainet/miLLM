@@ -1,0 +1,485 @@
+"""
+Repository for Model database operations.
+
+Provides CRUD operations for the Model ORM class.
+"""
+
+from datetime import datetime
+from typing import Any
+
+from sqlalchemy import select, update
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from millm.core.errors import AmbiguousModelNameError
+from millm.db.models.model import Model, ModelSource, ModelStatus, QuantizationType
+
+
+LIKE_ESCAPE = "\\"
+
+
+def escape_like(value: str) -> str:
+    """Make `value` match itself literally inside a LIKE pattern using `LIKE_ESCAPE`.
+
+    `_` and `%` are LIKE wildcards, so an unescaped `a_b:%` also matches `axb:…`, and the
+    escape character itself must be escaped first or it would swallow the next one.
+    """
+    return (
+        value.replace(LIKE_ESCAPE, LIKE_ESCAPE * 2)
+        .replace("%", LIKE_ESCAPE + "%")
+        .replace("_", LIKE_ESCAPE + "_")
+    )
+
+
+def _precision(row: Model) -> str:
+    """A row's precision as its served-name tag would say it: the GGUF label, else the
+    quantization."""
+    if row.gguf_label:
+        return row.gguf_label
+    quantization = row.quantization
+    return getattr(quantization, "value", str(quantization))
+
+
+class ModelRepository:
+    """
+    Repository for Model CRUD operations.
+
+    All methods are async and use the provided session.
+    The repository does not manage transactions - that's the caller's responsibility.
+    """
+
+    def __init__(self, session: AsyncSession) -> None:
+        """
+        Initialize the repository with a database session.
+
+        Args:
+            session: SQLAlchemy async session for database operations.
+        """
+        self.session = session
+
+    async def create(self, **kwargs: Any) -> Model:
+        """
+        Create a new model record.
+
+        Args:
+            **kwargs: Model attributes to set.
+
+        Returns:
+            The created Model instance with id populated.
+        """
+        model = Model(**kwargs)
+        self.session.add(model)
+        await self.session.commit()
+        await self.session.refresh(model)
+        return model
+
+    async def get_by_id(self, model_id: int) -> Model | None:
+        """
+        Get a model by its ID.
+
+        Args:
+            model_id: The model's primary key.
+
+        Returns:
+            The Model instance or None if not found.
+        """
+        return await self.session.get(Model, model_id)
+
+    async def get_all(self) -> list[Model]:
+        """
+        Get all models, ordered by created_at descending.
+
+        Returns:
+            List of all Model instances.
+        """
+        result = await self.session.execute(
+            select(Model).order_by(Model.created_at.desc())
+        )
+        return list(result.scalars().all())
+
+    async def get_by_status(self, status: ModelStatus) -> list[Model]:
+        """
+        Get all models with a specific status.
+
+        Args:
+            status: The ModelStatus to filter by.
+
+        Returns:
+            List of Model instances with the given status.
+        """
+        result = await self.session.execute(
+            select(Model).where(Model.status == status).order_by(Model.created_at.desc())
+        )
+        return list(result.scalars().all())
+
+    async def get_loaded_model(self) -> Model | None:
+        """
+        Get the currently loaded model (if any).
+
+        Returns:
+            The loaded Model instance or None.
+        """
+        result = await self.session.execute(
+            select(Model).where(Model.status == ModelStatus.LOADED)
+        )
+        return result.scalar_one_or_none()
+
+    async def find_by_exact_name(self, name: str) -> Model | None:
+        """The row carrying exactly `name` (no bare-name fallback), lowest id first."""
+        result = await self.session.execute(
+            select(Model).where(Model.name == name).order_by(Model.id)
+        )
+        return result.scalars().first()
+
+    async def find_by_name(self, name: str) -> Model | None:
+        """
+        Find a model by its display name.
+
+        EXACT MATCH FIRST, then a bare repo name when exactly one row carries
+        it. A GGUF model is named `repo:QUANT` (see ModelService.download_model)
+        because several quantizations of one repository can now coexist —
+        `…-GGUF:Q4_K_M` and `…-GGUF:IQ4_XS` are different models with different
+        sizes and different quality.
+
+        Before this, `scalar_one_or_none()` on a bare name raised "Multiple rows
+        were found when one or none was required" the moment a second quant was
+        downloaded, and every OpenAI request naming that model returned 500. The
+        model was loaded and serving; it was simply unreachable by name.
+
+        AMBIGUITY RAISES rather than picking one. Choosing silently would make
+        the served model depend on insertion order — the same request answered
+        by a 4-bit or a 5-bit model depending on which was downloaded first, with
+        nothing on the wire to say which.
+
+        THE FALLBACK IS LITERAL AND SKIPS WEIGHTS-ORIGIN ROWS (Feature 32). The
+        name is escaped, so `a_b` cannot reach `axb:…` through LIKE's `_`
+        wildcard. A checkpoint carrier is named `<base>:<run>:step-<N>`, which
+        the `<name>:%` pattern would otherwise match, so a request for the bare
+        base name would silently pick up a trained checkpoint. Carriers are
+        reachable only by their full name (the exact match above).
+
+        Args:
+            name: The model's display name, with or without the `:QUANT` tag.
+
+        Returns:
+            The Model instance or None if not found.
+
+        Raises:
+            AmbiguousModelNameError: The bare name matches several quantizations,
+                or (on a database before migration 027) several rows carry the
+                exact name.
+        """
+        exact = await self.session.execute(
+            select(Model).where(Model.name == name).order_by(Model.id)
+        )
+        rows = list(exact.scalars().all())
+        if len(rows) == 1:
+            return rows[0]
+        if len(rows) > 1:
+            # EXACT DUPLICATES ARE REFUSED TOO (2026-10-18, D56). Two non-GGUF
+            # registrations of one repo (jevify FP16 row 13, Q8 row 7) shared
+            # `jevify-gemma4-e4b`; `.first()` with no ORDER BY answered with
+            # whichever tuple Postgres returned, so an auto-load picked a
+            # precision by heap order. Migration 027 renames such rows and adds
+            # `uq_models_name`, so this is reachable only on a database that has
+            # not run it — where it must still be a 400 naming the rows, not a
+            # coin toss.
+            raise AmbiguousModelNameError(
+                f"'{name}' names {len(rows)} models: "
+                + ", ".join(f"id {r.id} ({_precision(r)})" for r in rows)
+                + ". Each needs its own name: run the database migrations "
+                "(027 tags all but one with its precision, e.g. ':Q8')."
+            )
+
+        # A bare repo name: unambiguous while only one quantization exists, which
+        # keeps every existing caller and saved Open WebUI selection working.
+        tagged = await self.session.execute(
+            select(Model).where(
+                Model.name.like(f"{escape_like(name)}:%", escape=LIKE_ESCAPE),
+                Model.weights_origin.is_(None),
+            ).order_by(Model.id)
+        )
+        candidates = list(tagged.scalars().all())
+        if not candidates:
+            return None
+        if len(candidates) == 1:
+            return candidates[0]
+
+        raise AmbiguousModelNameError(
+            f"'{name}' matches {len(candidates)} quantizations: "
+            + ", ".join(sorted(c.name for c in candidates))
+            + ". Name one of them exactly."
+        )
+
+    async def get_locked_model(self) -> Model | None:
+        """
+        Get the currently locked model, if one is actually holding the lock.
+
+        A LOCK ONLY COUNTS WHILE THE MODEL IS LOADED. Both things the lock does
+        — keep `/v1/models` pinned to one entry, and stop an inference request
+        auto-unloading it — are meaningless for a model that is not resident,
+        and `lock_model` refuses to set the flag on anything but a LOADED model.
+        So a locked row in any other state is not a lock; it is debris, and the
+        read is where that has to be decided.
+
+        This is deliberately belt-and-braces with the startup reset in
+        `main.py`, which clears the flag outright. That reset is the cure; this
+        is the immunity. A lock that leaks by some route nobody has thought of
+        yet — a crash between two writes, a hand-edited row, a restore from a
+        backup taken mid-steer — costs a stale flag rather than a catalogue
+        that has silently collapsed to a single model. Which is exactly what
+        happened: `gemma-2-2b-it` held the lock from 2026-05-12 until
+        2026-08-19, and for three months `/v1/models` advertised it alone while
+        thirteen other ready models were invisible to every OpenAI client.
+
+        `.first()` rather than `scalar_one_or_none()`: two locked rows are not
+        supposed to be reachable — `set_exclusive_lock` is the only writer and
+        it clears the others in the same statement — but the previous form
+        RAISED `MultipleResultsFound` if they ever were, turning a stale flag
+        into a 500 on the models listing for every client at once. A listing
+        must degrade to "wrong entry" and never to "no service".
+        """
+        result = await self.session.execute(
+            select(Model)
+            .where(Model.locked.is_(True), Model.status == ModelStatus.LOADED)
+            .order_by(Model.id)
+        )
+        return result.scalars().first()
+
+    async def clear_locks(self, except_model_id: int | None = None) -> int:
+        """Release every model lock, optionally sparing one. Returns rows changed."""
+        stmt = update(Model).where(Model.locked.is_(True)).values(locked=False)
+        if except_model_id is not None:
+            stmt = stmt.where(Model.id != except_model_id)
+        result = await self.session.execute(stmt)
+        return int(result.rowcount or 0)
+
+    async def set_exclusive_lock(self, model_id: int) -> Model | None:
+        """Lock this model and release every other lock, together.
+
+        THE ONLY WRITER THAT MAY SET THE FLAG. "Only one model can be locked at
+        a time" was documented on `lock_model` and enforced only there, by a
+        read-then-check that two callers in `sae_service` bypassed entirely by
+        writing `repository.update(..., locked=True)` straight to the row. An
+        invariant that a caller can skip by picking a different method is a
+        convention, not an invariant; making the exclusive write the only write
+        is what turns it back into one.
+        """
+        await self.clear_locks(except_model_id=model_id)
+        return await self.update(model_id, locked=True)
+
+    async def get_available_models(self) -> list[Model]:
+        """
+        Get all models that are available for use (READY, LOADED, or LOADING).
+
+        Returns:
+            List of available Model instances. `/v1/models` hides idle weights-origin carrier
+            rows itself, against the in-process resident (review R2-A removed a status-based
+            filter here: a row's status lags a load or an unload, so the two can disagree).
+        """
+        stmt = select(Model).where(
+            Model.status.in_([ModelStatus.READY, ModelStatus.LOADED, ModelStatus.LOADING])
+        )
+        result = await self.session.execute(stmt.order_by(Model.created_at.desc()))
+        return list(result.scalars().all())
+
+    async def find_by_repo_quantization(
+        self, repo_id: str, quantization: QuantizationType, gguf_label: str = ""
+    ) -> Model | None:
+        """
+        Find a model by repository ID, quantization level and GGUF label.
+
+        Args:
+            repo_id: The HuggingFace repository ID.
+            quantization: The quantization level.
+            gguf_label: The exact GGUF quantization, '' for a whole-repo model.
+                This must be part of the lookup or it does not match the
+                uq_repo_quantization constraint: Q4_K_M and Q4_K_S are two
+                legitimate rows, and matching on the coarse level alone would
+                reject the second as a duplicate of the first.
+
+        Returns:
+            The Model instance or None if not found.
+        """
+        result = await self.session.execute(
+            select(Model).where(
+                Model.repo_id == repo_id,
+                Model.quantization == quantization,
+                Model.gguf_label == (gguf_label or ""),
+            )
+        )
+        return result.scalar_one_or_none()
+
+    async def find_by_local_path(self, local_path: str) -> Model | None:
+        """
+        Find a model by local path.
+
+        Args:
+            local_path: The local filesystem path.
+
+        Returns:
+            The Model instance or None if not found.
+        """
+        result = await self.session.execute(
+            select(Model).where(Model.local_path == local_path)
+        )
+        return result.scalar_one_or_none()
+
+    async def upsert_checkpoint_carrier(
+        self,
+        *,
+        local_path: str,
+        name: str,
+        trust_remote_code: bool = False,
+    ) -> Model:
+        """The carrier row for a checkpoint directory (Feature 32, FTDD §4.3; M34).
+
+        ONE ROW PER DIRECTORY, keyed by `local_path` (unique, `uq_local_path`): loading the
+        same checkpoint twice reuses its row, so leases and probe rows keyed by `model_id`
+        do not multiply. Refusals, all before any write:
+
+        * a plain row (`weights_origin` NULL) already on this directory — an operator
+          registered it as a LOCAL model — is `LOCAL_PATH_REGISTERED` (addendum D-26). Adopting
+          it would make an unverified row a verified one; inserting would 500 on
+          `uq_local_path`.
+        * another row already holds `name` → `MODEL_NAME_TAKEN`.
+
+        Args:
+            local_path: The checkpoint directory's real path.
+            name: The manifest's `name`, which the row carries.
+            trust_remote_code: Whether the loader may run the directory's remote code.
+
+        Returns:
+            The existing carrier row (name and flag brought up to date) or a new one.
+        """
+        from millm.core.errors import LocalPathRegisteredError, ModelNameTakenError
+
+        existing = await self.find_by_local_path(local_path)
+        if existing is not None and existing.weights_origin is None:
+            raise LocalPathRegisteredError(
+                f"The checkpoint directory is already registered as the model '{existing.name}' "
+                f"(id {existing.id}), which was never verified against its manifest. Delete or "
+                "re-register that model, then load the checkpoint through POST /api/weights/load.",
+                details={"model_id": existing.id, "name": existing.name},
+            )
+        clash = await self.session.execute(
+            select(Model).where(Model.name == name)
+        )
+        holder = clash.scalars().first()
+        if holder is not None and (existing is None or holder.id != existing.id):
+            raise ModelNameTakenError(
+                f"The model name '{name}' is already used by model {holder.id}.",
+                details={"name": name, "model_id": holder.id},
+            )
+        if existing is not None:
+            if existing.name != name or existing.trust_remote_code != trust_remote_code:
+                updated = await self.update(
+                    existing.id, name=name, trust_remote_code=trust_remote_code
+                )
+                assert updated is not None
+                return updated
+            return existing
+        return await self.create(
+            name=name,
+            source=ModelSource.LOCAL,
+            repo_id=None,
+            local_path=local_path,
+            weights_origin="checkpoint",
+            quantization=QuantizationType.FP16,
+            gguf_label="",
+            cache_path=local_path,
+            trust_remote_code=trust_remote_code,
+            status=ModelStatus.READY,
+        )
+
+    async def update(self, model_id: int, **kwargs: Any) -> Model | None:
+        """
+        Update a model's attributes.
+
+        Args:
+            model_id: The model's primary key.
+            **kwargs: Attributes to update.
+
+        Returns:
+            The updated Model instance or None if not found.
+        """
+        model = await self.get_by_id(model_id)
+        if model is None:
+            return None
+
+        for key, value in kwargs.items():
+            if hasattr(model, key):
+                setattr(model, key, value)
+
+        model.updated_at = datetime.utcnow()
+        await self.session.commit()
+        await self.session.refresh(model)
+        return model
+
+    async def update_status(
+        self,
+        model_id: int,
+        status: ModelStatus,
+        error_message: str | None = None,
+    ) -> Model | None:
+        """
+        Update a model's status and optionally its error message.
+
+        Args:
+            model_id: The model's primary key.
+            status: The new ModelStatus.
+            error_message: Optional error message (cleared if not provided and status isn't ERROR).
+
+        Returns:
+            The updated Model instance or None if not found.
+        """
+        model = await self.get_by_id(model_id)
+        if model is None:
+            return None
+
+        model.status = status
+        model.updated_at = datetime.utcnow()
+
+        if status == ModelStatus.ERROR:
+            model.error_message = error_message
+        elif error_message is None:
+            model.error_message = None
+
+        if status == ModelStatus.LOADED:
+            model.loaded_at = datetime.utcnow()
+        elif status != ModelStatus.LOADING:
+            model.loaded_at = None
+
+        await self.session.commit()
+        await self.session.refresh(model)
+        return model
+
+    async def delete(self, model_id: int) -> bool:
+        """
+        Delete a model by ID.
+
+        Args:
+            model_id: The model's primary key.
+
+        Returns:
+            True if deleted, False if not found.
+        """
+        model = await self.get_by_id(model_id)
+        if model is None:
+            return False
+
+        await self.session.delete(model)
+        await self.session.commit()
+        return True
+
+    async def exists(self, model_id: int) -> bool:
+        """
+        Check if a model exists.
+
+        Args:
+            model_id: The model's primary key.
+
+        Returns:
+            True if exists, False otherwise.
+        """
+        model = await self.get_by_id(model_id)
+        return model is not None

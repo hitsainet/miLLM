@@ -1,0 +1,593 @@
+"""
+Unit tests for OpenAI-compatible API schemas.
+
+Tests validation, serialization, and edge cases for all OpenAI schemas.
+"""
+
+import pytest
+from pydantic import ValidationError
+
+from millm.api.schemas.openai import (
+    ChatCompletionChoice,
+    ChatCompletionChunk,
+    ChatCompletionChunkChoice,
+    ChatCompletionChunkDelta,
+    ChatCompletionRequest,
+    ChatCompletionResponse,
+    ChatMessage,
+    EmbeddingData,
+    EmbeddingRequest,
+    EmbeddingResponse,
+    ModelListResponse,
+    ModelObject,
+    OpenAIError,
+    OpenAIErrorResponse,
+    TextCompletionChoice,
+    TextCompletionRequest,
+    TextCompletionResponse,
+    Usage,
+)
+
+
+class TestChatMessage:
+    """Tests for ChatMessage schema."""
+
+    def test_valid_user_message(self):
+        msg = ChatMessage(role="user", content="Hello")
+        assert msg.role == "user"
+        assert msg.content == "Hello"
+
+    def test_valid_assistant_message(self):
+        msg = ChatMessage(role="assistant", content="Hi there!")
+        assert msg.role == "assistant"
+        assert msg.content == "Hi there!"
+
+    def test_valid_system_message(self):
+        msg = ChatMessage(role="system", content="You are a helpful assistant.")
+        assert msg.role == "system"
+        assert msg.content == "You are a helpful assistant."
+
+    def test_invalid_role_raises_error(self):
+        with pytest.raises(ValidationError):
+            ChatMessage(role="invalid", content="Test")
+
+    def test_extra_fields_are_accepted_and_kept_for_reporting(self):
+        """Feature 25: extras are no longer dropped silently — they land in model_extra so the
+        request policy can report them as messages[i].<key> (was extra="ignore")."""
+        msg = ChatMessage(role="user", content="Hello", name="John", extra_field="ignored")
+        assert msg.role == "user"
+        assert msg.content == "Hello"
+        assert msg.model_extra == {"name": "John", "extra_field": "ignored"}
+
+
+class TestChatCompletionRequest:
+    """Tests for ChatCompletionRequest schema."""
+
+    def test_minimal_valid_request(self):
+        request = ChatCompletionRequest(
+            model="gpt-4",
+            messages=[ChatMessage(role="user", content="Hello")],
+        )
+        assert request.model == "gpt-4"
+        assert len(request.messages) == 1
+        assert request.stream is False
+        assert request.temperature == 1.0
+        assert request.max_tokens is None
+
+    def test_full_request_with_all_parameters(self):
+        request = ChatCompletionRequest(
+            model="gpt-4",
+            messages=[
+                ChatMessage(role="system", content="You are helpful."),
+                ChatMessage(role="user", content="Hello"),
+            ],
+            stream=True,
+            temperature=0.7,
+            top_p=0.9,
+            max_tokens=100,
+            stop=["END"],
+            frequency_penalty=0.5,
+            presence_penalty=0.5,
+        )
+        assert request.stream is True
+        assert request.temperature == 0.7
+        assert request.max_tokens == 100
+        assert request.stop == ["END"]
+
+    def test_temperature_validation_min(self):
+        with pytest.raises(ValidationError):
+            ChatCompletionRequest(
+                model="gpt-4",
+                messages=[ChatMessage(role="user", content="Hello")],
+                temperature=-0.1,
+            )
+
+    def test_temperature_validation_max(self):
+        with pytest.raises(ValidationError):
+            ChatCompletionRequest(
+                model="gpt-4",
+                messages=[ChatMessage(role="user", content="Hello")],
+                temperature=2.1,
+            )
+
+    def test_temperature_zero_valid(self):
+        request = ChatCompletionRequest(
+            model="gpt-4",
+            messages=[ChatMessage(role="user", content="Hello")],
+            temperature=0.0,
+        )
+        assert request.temperature == 0.0
+
+    def test_stop_string_accepted(self):
+        # Schema accepts string for stop, conversion to list happens in GenerationConfig
+        request = ChatCompletionRequest(
+            model="gpt-4",
+            messages=[ChatMessage(role="user", content="Hello")],
+            stop="STOP",
+        )
+        assert request.stop == "STOP"
+
+    def test_stop_list_preserved(self):
+        request = ChatCompletionRequest(
+            model="gpt-4",
+            messages=[ChatMessage(role="user", content="Hello")],
+            stop=["END", "STOP"],
+        )
+        assert request.stop == ["END", "STOP"]
+
+    def test_stop_max_four_sequences(self):
+        with pytest.raises(ValidationError):
+            ChatCompletionRequest(
+                model="gpt-4",
+                messages=[ChatMessage(role="user", content="Hello")],
+                stop=["1", "2", "3", "4", "5"],
+            )
+
+    def test_unknown_fields_parse_and_are_kept(self):
+        """Feature 25: `logprobs` is now a real chat field (scoring), so this test — which used it
+        as an "unsupported field silently ignored" example — uses a genuinely unknown one."""
+        request = ChatCompletionRequest(
+            model="gpt-4",
+            messages=[ChatMessage(role="user", content="Hello")],
+            some_unknown_field=True,
+            n=5,
+        )
+        assert request.model == "gpt-4"
+        assert request.model_extra == {"some_unknown_field": True}
+
+    def test_logprobs_is_chat_scoring_and_carries_its_limits(self):
+        with pytest.raises(Exception, match="max_tokens=1"):
+            ChatCompletionRequest(model="gpt-4", messages=[ChatMessage(role="user", content="x")],
+                                  logprobs=True, n=5)
+
+
+class TestChatCompletionResponse:
+    """Tests for ChatCompletionResponse schema."""
+
+    def test_valid_response(self):
+        response = ChatCompletionResponse(
+            id="chatcmpl-123abc",
+            created=1700000000,
+            model="gpt-4",
+            choices=[
+                ChatCompletionChoice(
+                    index=0,
+                    message=ChatMessage(role="assistant", content="Hello!"),
+                    finish_reason="stop",
+                )
+            ],
+            usage=Usage(prompt_tokens=10, completion_tokens=5),
+        )
+        assert response.object == "chat.completion"
+        assert response.id == "chatcmpl-123abc"
+        assert len(response.choices) == 1
+        assert response.usage.total_tokens == 15
+
+    def test_response_serialization_format(self):
+        response = ChatCompletionResponse(
+            id="chatcmpl-123",
+            created=1700000000,
+            model="test-model",
+            choices=[
+                ChatCompletionChoice(
+                    index=0,
+                    message=ChatMessage(role="assistant", content="Test"),
+                    finish_reason="stop",
+                )
+            ],
+            usage=Usage(prompt_tokens=5, completion_tokens=3),
+        )
+        data = response.model_dump()
+        assert data["object"] == "chat.completion"
+        assert "choices" in data
+        assert data["choices"][0]["message"]["role"] == "assistant"
+
+
+class TestChatCompletionChunk:
+    """Tests for streaming chunk schemas."""
+
+    def test_chunk_with_role_only(self):
+        chunk = ChatCompletionChunk(
+            id="chatcmpl-123",
+            created=1700000000,
+            model="gpt-4",
+            choices=[
+                ChatCompletionChunkChoice(
+                    index=0,
+                    delta=ChatCompletionChunkDelta(role="assistant"),
+                    finish_reason=None,
+                )
+            ],
+        )
+        assert chunk.object == "chat.completion.chunk"
+        assert chunk.choices[0].delta.role == "assistant"
+        assert chunk.choices[0].delta.content is None
+
+    def test_chunk_with_content(self):
+        chunk = ChatCompletionChunk(
+            id="chatcmpl-123",
+            created=1700000000,
+            model="gpt-4",
+            choices=[
+                ChatCompletionChunkChoice(
+                    index=0,
+                    delta=ChatCompletionChunkDelta(content="Hello"),
+                    finish_reason=None,
+                )
+            ],
+        )
+        assert chunk.choices[0].delta.content == "Hello"
+
+    def test_final_chunk_with_finish_reason(self):
+        chunk = ChatCompletionChunk(
+            id="chatcmpl-123",
+            created=1700000000,
+            model="gpt-4",
+            choices=[
+                ChatCompletionChunkChoice(
+                    index=0,
+                    delta=ChatCompletionChunkDelta(),
+                    finish_reason="stop",
+                )
+            ],
+        )
+        assert chunk.choices[0].finish_reason == "stop"
+
+    def test_chunk_serialization(self):
+        chunk = ChatCompletionChunk(
+            id="chatcmpl-123",
+            created=1700000000,
+            model="gpt-4",
+            choices=[
+                ChatCompletionChunkChoice(
+                    index=0,
+                    delta=ChatCompletionChunkDelta(content="test"),
+                    finish_reason=None,
+                )
+            ],
+        )
+        json_str = chunk.model_dump_json()
+        assert '"object":"chat.completion.chunk"' in json_str or '"object": "chat.completion.chunk"' in json_str
+
+
+class TestTextCompletionRequest:
+    """Tests for TextCompletionRequest schema."""
+
+    def test_string_prompt(self):
+        request = TextCompletionRequest(
+            model="gpt-3.5-turbo-instruct",
+            prompt="Once upon a time",
+        )
+        assert request.prompt == "Once upon a time"
+
+    def test_list_prompt(self):
+        request = TextCompletionRequest(
+            model="gpt-3.5-turbo-instruct",
+            prompt=["Prompt 1", "Prompt 2"],
+        )
+        assert request.prompt == ["Prompt 1", "Prompt 2"]
+
+    def test_stop_string_accepted(self):
+        # Schema accepts string for stop, conversion to list happens in GenerationConfig
+        request = TextCompletionRequest(
+            model="gpt-3.5-turbo-instruct",
+            prompt="Test",
+            stop="END",
+        )
+        assert request.stop == "END"
+
+
+class TestTextCompletionResponse:
+    """Tests for TextCompletionResponse schema."""
+
+    def test_valid_response(self):
+        response = TextCompletionResponse(
+            id="cmpl-123abc",
+            created=1700000000,
+            model="gpt-3.5-turbo-instruct",
+            choices=[
+                TextCompletionChoice(
+                    index=0,
+                    text="there was a dragon",
+                    finish_reason="stop",
+                )
+            ],
+            usage=Usage(prompt_tokens=4, completion_tokens=5),
+        )
+        assert response.object == "text_completion"
+        assert response.choices[0].text == "there was a dragon"
+
+
+class TestEmbeddingRequest:
+    """Tests for EmbeddingRequest schema."""
+
+    def test_string_input(self):
+        request = EmbeddingRequest(
+            model="text-embedding-ada-002",
+            input="Hello world",
+        )
+        assert request.input == "Hello world"
+
+    def test_list_input(self):
+        request = EmbeddingRequest(
+            model="text-embedding-ada-002",
+            input=["Hello", "World"],
+        )
+        assert request.input == ["Hello", "World"]
+
+    def test_feature_30_defaults_change_nothing(self):
+        request = EmbeddingRequest(model="m", input="x")
+        assert (request.pooling, request.normalize) == ("mean", False)
+        assert "pooling" not in request.model_fields_set, "a default is not a presence"
+
+    @pytest.mark.parametrize("mode", ["mean", "last", "cls"])
+    def test_pooling_accepts_the_three_modes(self, mode):
+        assert EmbeddingRequest(model="m", input="x", pooling=mode).pooling == mode
+
+    def test_pooling_refuses_anything_else(self):
+        with pytest.raises(ValidationError) as caught:
+            EmbeddingRequest(model="m", input="x", pooling="max")
+        assert caught.value.errors()[0]["loc"] == ("pooling",)
+
+    @pytest.mark.parametrize("value", ["", [], ["a", ""]])
+    def test_empty_input_is_refused_on_the_input_field(self, value):
+        with pytest.raises(ValidationError) as caught:
+            EmbeddingRequest(model="m", input=value)
+        assert caught.value.errors()[0]["loc"] == ("input",), "param must be `input` (ID1)"
+
+    def test_the_cap_reads_the_live_setting(self):
+        from unittest.mock import patch
+
+        from millm.core.config import settings
+
+        with patch.object(settings, "EMBEDDINGS_MAX_INPUTS", 2):
+            EmbeddingRequest(model="m", input=["a", "b"])
+            with pytest.raises(ValidationError, match="input has 3 items; the limit is 2"):
+                EmbeddingRequest(model="m", input=["a", "b", "c"])
+
+
+class TestEmbeddingResponse:
+    """Tests for EmbeddingResponse schema."""
+
+    def test_single_embedding(self):
+        response = EmbeddingResponse(
+            data=[
+                EmbeddingData(index=0, embedding=[0.1, 0.2, 0.3])
+            ],
+            model="text-embedding-ada-002",
+            usage=Usage(prompt_tokens=2, completion_tokens=0),
+        )
+        assert response.object == "list"
+        assert len(response.data) == 1
+        assert response.data[0].object == "embedding"
+        assert len(response.data[0].embedding) == 3
+
+    def test_multiple_embeddings(self):
+        response = EmbeddingResponse(
+            data=[
+                EmbeddingData(index=0, embedding=[0.1, 0.2]),
+                EmbeddingData(index=1, embedding=[0.3, 0.4]),
+            ],
+            model="text-embedding-ada-002",
+            usage=Usage(prompt_tokens=4, completion_tokens=0),
+        )
+        assert len(response.data) == 2
+
+
+class TestModelSchemas:
+    """Tests for model listing schemas."""
+
+    def test_model_object(self):
+        model = ModelObject(
+            id="gpt-4",
+            created=1700000000,
+            owned_by="openai",
+        )
+        assert model.object == "model"
+        assert model.id == "gpt-4"
+
+    def test_model_list_response(self):
+        response = ModelListResponse(
+            data=[
+                ModelObject(id="gpt-4", created=1700000000, owned_by="openai"),
+                ModelObject(id="gpt-3.5-turbo", created=1699000000, owned_by="openai"),
+            ]
+        )
+        assert response.object == "list"
+        assert len(response.data) == 2
+
+    def test_empty_model_list(self):
+        response = ModelListResponse(data=[])
+        assert response.object == "list"
+        assert len(response.data) == 0
+
+
+class TestUsage:
+    """Tests for Usage schema."""
+
+    def test_auto_compute_total_tokens(self):
+        usage = Usage(prompt_tokens=10, completion_tokens=5)
+        assert usage.total_tokens == 15
+
+    def test_explicit_total_tokens(self):
+        usage = Usage(prompt_tokens=10, completion_tokens=5, total_tokens=20)
+        assert usage.total_tokens == 20  # Explicit value preserved
+
+    def test_zero_tokens(self):
+        usage = Usage(prompt_tokens=0, completion_tokens=0)
+        assert usage.total_tokens == 0
+
+
+class TestErrorSchemas:
+    """Tests for error schemas."""
+
+    def test_openai_error(self):
+        error = OpenAIError(
+            message="Invalid request",
+            type="invalid_request_error",
+            param="temperature",
+            code="invalid_parameter",
+        )
+        assert error.message == "Invalid request"
+        assert error.param == "temperature"
+
+    def test_openai_error_response(self):
+        response = OpenAIErrorResponse(
+            error=OpenAIError(
+                message="Model not found",
+                type="invalid_request_error",
+                param="model",
+                code="model_not_found",
+            )
+        )
+        data = response.model_dump()
+        assert "error" in data
+        assert data["error"]["message"] == "Model not found"
+
+
+class TestSteeringIntensityField:
+    """Feature 10: per-request cluster intensity dial (Task 1.2)."""
+
+    @staticmethod
+    def make(**kwargs):
+        return ChatCompletionRequest(
+            model="m", messages=[{"role": "user", "content": "x"}], **kwargs
+        )
+
+    def test_default_is_none(self):
+        assert self.make().steering_intensity is None
+
+    @pytest.mark.parametrize("value,expected", [
+        (0, 0.0), (2, 2.0), (0.5, 0.5), (1.3, 1.3),
+        ("off", "off"), ("min", "min"), ("max", "max"),
+    ])
+    def test_accepted_values(self, value, expected):
+        assert self.make(steering_intensity=value).steering_intensity == expected
+
+    @pytest.mark.parametrize("value", [2.1, -0.5, "3.5", "loud", True, False, [1.0]])
+    def test_rejected_values(self, value):
+        with pytest.raises(ValidationError):
+            self.make(steering_intensity=value)
+
+    @pytest.mark.parametrize("value", [
+        float("nan"), float("inf"), float("-inf"), 1e308, "nan", "infinity",
+    ])
+    def test_nonfinite_rejected(self, value):
+        """nan rejection currently rides on the chained-comparison form
+        `not 0.0 <= v <= 2.0` (0<=nan is False -> rejected). Pin it so an
+        'equivalent' validator rewrite can't silently let nan through into
+        the steering delta (nan*strength poisons every logit)."""
+        with pytest.raises(ValidationError):
+            self.make(steering_intensity=value)
+
+    def test_out_of_range_message_names_the_bounds(self):
+        with pytest.raises(ValidationError, match=r"\[0, 2\]"):
+            self.make(steering_intensity=5.0)
+
+    def test_unknown_fields_still_parse(self):
+        """Unknown fields must still PARSE — rollout safety (FTID §2). Since Feature 25 they are
+        kept in model_extra and reported (X-miLLM-Ignored-Fields), not silently dropped."""
+        request = self.make(some_future_field={"nested": True})
+        assert request.model_extra == {"some_future_field": {"nested": True}}
+
+
+class TestInlineSteeringSchema:
+    """Feature 28 (FR-28.1.1, FR-28.1.6, FR-28.2.1, FR-28.2.2, FR-28.2.4, FR-28.4.1)."""
+
+    @staticmethod
+    def chat(**kwargs):
+        return ChatCompletionRequest(
+            model="m", messages=[{"role": "user", "content": "x"}], **kwargs
+        )
+
+    @staticmethod
+    def text(**kwargs):
+        return TextCompletionRequest(model="m", prompt="x", **kwargs)
+
+    @pytest.mark.parametrize("make", ["chat", "text"])
+    def test_a_valid_set_parses(self, make):
+        req = getattr(self, make)(steering={"sae_id": "s1",
+                                            "features": [{"index": 3, "strength": 500}]})
+        assert req.steering.sae_id == "s1"
+        assert [(f.index, f.strength) for f in req.steering.features] == [(3, 500.0)]
+
+    @pytest.mark.parametrize("make", ["chat", "text"])
+    def test_explicit_unsteered_form_parses(self, make):
+        req = getattr(self, make)(steering={"features": []})
+        assert req.steering.features == [] and req.steering.sae_id is None
+
+    @pytest.mark.parametrize("make", ["chat", "text"])
+    @pytest.mark.parametrize("bad, message", [
+        ({"features": [{"index": 1, "strength": True}]}, "not a boolean"),
+        ({"features": [{"index": True, "strength": 1.0}]}, "not a boolean"),
+        ({"features": [{"index": 1, "strength": float("nan")}]}, "finite"),
+        ({"features": [{"index": 1, "strength": float("inf")}]}, "finite"),
+        ({"features": [{"index": 1, "strength": float("-inf")}]}, "finite"),
+        ({"features": [{"index": 7, "strength": 1.0}, {"index": 7, "strength": 2.0}]},
+         "index 7 more than once"),
+        ({"sae_id": "s1", "features": []}, "empty features"),
+        ({"features": [{"index": -1, "strength": 1.0}]}, "greater than or equal to 0"),
+        ({"features": [{"index": 1, "strength": 1.0}], "sae_id": ""}, "at least 1"),
+        ({"features": [{"index": 1, "strength": 1.0}], "sae_id": "x" * 101}, "at most 100"),
+        ({"sae_id": "s1"}, "Field required"),
+    ])
+    def test_refusals(self, make, bad, message):
+        with pytest.raises(ValidationError, match=message):
+            getattr(self, make)(steering=bad)
+
+    @pytest.mark.parametrize("make", ["chat", "text"])
+    def test_a_misspelt_key_inside_steering_is_refused_not_ignored(self, make):
+        """FTASKS 2.6 / FTID ID5: `strenght` must fail, not vanish."""
+        with pytest.raises(ValidationError) as exc:
+            getattr(self, make)(steering={"features": [{"index": 1, "strength": 1.0,
+                                                        "strenght": 9.0}]})
+        assert "strenght" in str(exc.value)
+        with pytest.raises(ValidationError) as exc:
+            getattr(self, make)(steering={"features": [], "clusters": []})
+        assert "clusters" in str(exc.value)
+
+    @pytest.mark.parametrize("make", ["chat", "text"])
+    def test_steering_with_profile_is_refused_naming_both(self, make):
+        with pytest.raises(ValidationError) as exc:
+            getattr(self, make)(profile="p", steering={"features": []})
+        assert "'steering' and 'profile'" in str(exc.value)
+
+    @pytest.mark.parametrize("make", ["chat", "text"])
+    @pytest.mark.parametrize("dial", [0.0, 1.0, "max"])
+    def test_steering_with_intensity_is_refused_naming_both(self, make, dial):
+        """T-78: even λ=0 — the dial scales a profile or circuit, an inline set has none."""
+        with pytest.raises(ValidationError) as exc:
+            getattr(self, make)(steering_intensity=dial,
+                                steering={"features": [{"index": 1, "strength": 1.0}]})
+        assert "'steering' and 'steering_intensity'" in str(exc.value)
+
+    def test_text_completion_gains_profile_and_dial(self):
+        req = self.text(profile="humor", steering_intensity="max")
+        assert req.profile == "humor" and req.steering_intensity == "max"
+        assert self.text(steering_intensity=1.5).steering_intensity == 1.5
+
+    @pytest.mark.parametrize("value", [True, False, 2.5, -0.1, float("nan"), "loud"])
+    def test_text_completion_dial_has_the_chat_validators(self, value):
+        """FTASKS 2.4: `true` and `2.5` are refused on completions too."""
+        with pytest.raises(ValidationError):
+            self.text(steering_intensity=value)

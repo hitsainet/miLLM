@@ -1,0 +1,802 @@
+"""
+FastAPI application entry point.
+
+Creates the combined FastAPI + Socket.IO application.
+"""
+
+import asyncio
+import contextlib
+from contextlib import asynccontextmanager
+from collections.abc import AsyncGenerator
+from typing import Any
+
+import socketio
+from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
+
+from millm import __version__
+from millm.api.exception_handlers import generic_exception_handler, millm_error_handler
+from millm.api.retry_after import RetryAfterMiddleware
+from millm.api.routes import register_routes
+from millm.core.config import settings
+from millm.core.errors import MiLLMError
+from millm.core.logging import get_logger, setup_logging
+from millm.services.batch.reconcile import start_batch_api, stop_batch_api
+from millm.services.checkpoint_store import remove_stale_temp_dirs
+from millm.services.hf_token import load_hf_token_on_startup
+from millm.services.runtime_settings import load_runtime_overrides_on_startup
+from millm.services.weights_checkpoint_service import check_schema_ownership_on_startup
+from millm.services.model_lease import clear_leases_on_startup
+from millm.services.weight_attachment import reset_weights_on_startup, weights_tick_loop
+
+logger = get_logger(__name__)
+
+
+async def _auto_load_model(model_identifier: str) -> None:
+    """
+    Auto-load a model on startup.
+
+    Args:
+        model_identifier: Model ID (numeric) or model name
+    """
+    from millm.db.base import async_session_factory
+    from millm.db.repositories.model_repository import ModelRepository
+    from millm.ml.model_downloader import ModelDownloader
+    from millm.ml.model_loader import ModelLoader
+    from millm.services.model_service import ModelService
+
+    logger.info("auto_load_model_starting", model=model_identifier)
+
+    async with async_session_factory() as session:
+        repository = ModelRepository(session)
+        downloader = ModelDownloader()
+        loader = ModelLoader()
+        service = ModelService(
+            repository=repository,
+            downloader=downloader,
+            loader=loader,
+            emitter=None,  # No progress emitter needed for auto-load
+        )
+
+        # Find model by ID or name
+        model = None
+        if model_identifier.isdigit():
+            model = await service.get_model(int(model_identifier))
+        else:
+            # Search by name
+            models = await service.list_models()
+            for m in models:
+                if m.name == model_identifier:
+                    model = m
+                    break
+
+        if not model:
+            logger.error(
+                "auto_load_model_not_found",
+                model=model_identifier,
+                hint="Check AUTO_LOAD_MODEL env var — model must exist in the database.",
+            )
+            return
+
+        if model.status.value == "loaded":
+            logger.info("auto_load_model_already_loaded", model_id=model.id, name=model.name)
+            return
+
+        if model.status.value != "ready":
+            logger.error(
+                "auto_load_model_not_ready",
+                model_id=model.id,
+                name=model.name,
+                status=model.status.value,
+                hint="Model must be in 'ready' status to auto-load on startup.",
+            )
+            return
+
+        # Load the model
+        logger.info("auto_load_model_loading", model_id=model.id, name=model.name)
+        await service.load_model(model.id)
+
+        # Wait for model to finish loading (poll status)
+        import asyncio
+        for _ in range(120):  # Max 2 minutes
+            await asyncio.sleep(1)
+            updated_model = await service.get_model(model.id)
+            if updated_model.status.value == "loaded":
+                logger.info("auto_load_model_complete", model_id=model.id, name=model.name)
+                return
+            elif updated_model.status.value == "error":
+                logger.error(
+                    "auto_load_model_error",
+                    model_id=model.id,
+                    error=updated_model.error_message,
+                )
+                return
+
+        logger.error(
+            "auto_load_model_timeout",
+            model_id=model.id,
+            name=model.name,
+            hint="Model load did not complete within 2 minutes. Check GPU memory and logs.",
+        )
+
+
+def _note_claims_degraded(reason: str) -> None:
+    """Flag layer claims as unreconciled for /health/detailed (F19 R2-19).
+
+    Guarded: a health-reporting helper must never be the reason startup fails.
+    """
+    try:
+        from millm.api.routes.system.health import note_claims_degraded
+
+        note_claims_degraded(reason)
+    except Exception:  # pragma: no cover - reporting must not break startup
+        pass
+
+
+#: Every kind of state that is derived from the running process and therefore
+#: cannot survive a restart, with the statement that clears it.
+#:
+#: MODULE LEVEL SO A TEST CAN BIND TO IT. While this lived as a local inside
+#: `lifespan`, a test could only assert against its own copy of the SQL — which
+#: passes just as happily when the entry has been deleted from the list. Every
+#: statement here exists because its absence was, at some point, a bug nobody
+#: noticed for months.
+STALE_STATE_RESETS: list[tuple[str, str, str]] = [
+    (
+        "reset_stale_model_status",
+        "UPDATE models SET status = 'ready', loaded_at = NULL "
+        "WHERE status IN ('loaded', 'loading')",
+        "models",
+    ),
+    (
+        # A DOWNLOAD IS IN-MEMORY STATE TOO, and this block forgot it.
+        #
+        # `_DOWNLOAD_PROGRESS` in model_service carries a comment justifying its
+        # in-process design with "a restart ends it anyway — startup already
+        # resets any model left in DOWNLOADING". Nothing did. A model row was
+        # found stuck in `downloading` half an hour after the pod that was
+        # fetching it had been replaced, with 8 GB of a 17 GB file on disk, no
+        # thread behind it, and `download_progress: null` — indistinguishable in
+        # the UI from a download that is merely slow.
+        #
+        # 'error', not 'ready': the files are PARTIAL. Calling that ready would
+        # offer a model that cannot load. The message says it can be retried,
+        # and the partial directory is deliberately left in place so the retry
+        # resumes rather than starting again.
+        "reset_stale_model_download",
+        "UPDATE models SET status = 'error', "
+        "error_message = 'Download interrupted by a server restart. "
+        "Retry to resume it.' "
+        "WHERE status = 'downloading'",
+        "models",
+    ),
+    (
+        # THE LOCK IS IN-MEMORY STATE TOO, and it was the one piece of
+        # it this block forgot. A model is locked while an SAE is
+        # attached to it for steering; the attachment lives in the
+        # process, so a restart ends it — the two resets directly below
+        # say exactly that about the SAE and the attachment row. The
+        # lock outlived both, and a locked model is the ONLY model
+        # `/v1/models` will advertise, so one restart during steering
+        # hid every other ready model from every OpenAI client until
+        # someone unlocked it by hand. It went unnoticed from
+        # 2026-05-12 to 2026-08-19.
+        #
+        # SEPARATE FROM THE STATUS RESET ABOVE, not folded into it.
+        # That one is scoped `WHERE status IN ('loaded','loading')`,
+        # and the stale row does not match: an earlier restart already
+        # set its status to 'ready' and left `locked` true. The exact
+        # row this exists to clear is the one that filter drops.
+        "reset_stale_model_lock",
+        "UPDATE models SET locked = false WHERE locked = true",
+        "models",
+    ),
+    (
+        "reset_stale_sae_status",
+        "UPDATE saes SET status = 'cached' WHERE status = 'attached'",
+        "saes",
+    ),
+    (
+        "deactivated_stale_attachments",
+        "UPDATE sae_attachments SET is_active = false, detached_at = NOW() "
+        "WHERE is_active = true",
+        "sae_attachments",
+    ),
+    (
+        # Feature 13: in-memory steering is lost on restart, so an
+        # is_active circuit row would claim live influence that does not
+        # exist — and because the evidence gate is checked at ACTIVATION,
+        # dialling that stale row would re-arm an unvalidated (rung<2)
+        # circuit without a fresh acknowledgement.
+        "deactivated_stale_circuits",
+        "UPDATE circuits SET is_active = false, serving_mode = NULL "
+        "WHERE is_active = true",
+        "circuits",
+    ),
+    (
+        # ENH-008 (BUILD_SPEC §6 risk 4): an approved request runs as an asyncio task in THIS
+        # process. A restart ends it, and the row would otherwise read `executing` forever: a
+        # run nobody is running. It failed; the agent must ask again. The lease id it may hold is
+        # cleared with it (a decided request keeps none).
+        "failed_interrupted_approvals",
+        "UPDATE approval_requests SET status = 'failed', secret_payload = NULL, "
+        "error = '{\"code\": \"interrupted_by_restart\", \"message\": \"Interrupted by a "
+        "restart; ask again.\", \"details\": {}}' "
+        "WHERE status = 'executing'",
+        "approval_requests",
+    ),
+]
+
+
+async def disarm_probes_on_startup(session_factory: Any) -> list[str]:
+    """Clear every `armed` probe row, because no hook survived into this process.
+
+    ⚠ `probes.armed` is a database column; the hook it describes lives in this process's
+    `ProbeRuntimeState`. A restart empties the second and leaves the first, so every armed row
+    survives into a process where nothing is hooked — and `/api/probes/status` reported those rows
+    as armed. Observed live on 2026-09-28: a rollout landed under an armed probe, status went on
+    listing it, and a real generation came back with no verdict header. The module that builds that
+    status says the governing invariant is *"a probe never goes silently quiet"*, and a monitor
+    that stopped monitoring while still claiming to be armed is the loudest version of exactly
+    that.
+
+    Identical in shape to the circuit-claim release in `lifespan`, which is the part worth
+    recording: this estate has now shipped "a new in-memory flag left out of startup
+    reconciliation" three times — miLLM's steering lock hid thirteen models for three months.
+    Anything added to `ProbeRuntimeState` belongs here on the same commit.
+
+    Returns the ids it disarmed. Never raises: a probe bookkeeping failure must not be the reason
+    the server does not start, and `status()` cross-checks the live registry independently, so the
+    READ stays honest even when this fails.
+    """
+    from millm.db.models.probe import Probe
+    from millm.services.probe_arming import RESTART_REASON
+    from sqlalchemy import select, update as sa_update
+
+    try:
+        async with session_factory() as session:
+            # The identity columns, for the lifecycle record below (038 review R1 of S2).
+            rows = (
+                await session.execute(
+                    select(Probe.id, Probe.behaviour_key, Probe.detector_digest,
+                           Probe.threshold_revision, Probe.decision_revision,
+                           Probe.decision_digest).where(Probe.armed.is_(True))
+                )
+            ).all()
+            armed = [row.id for row in rows]
+            if not armed:
+                return []
+            await session.execute(
+                sa_update(Probe)
+                .where(Probe.armed.is_(True))
+                .values(
+                    armed=False,
+                    # ⚠ THE CONSTANT, never a literal (039 TD39-12): "armed before restart" is
+                    # derived from `INVOLUNTARY_REASONS`, so an inline copy that drifted by one
+                    # character would drop every restarted behaviour from that list silently.
+                    paused_reason=RESTART_REASON,
+                    cost=None,  # Feature 37: a cost is never trusted across a restart
+                )
+            )
+            await session.commit()
+            # ⚠ 038 FR-38.20 (review R1 of S2): a restart DISARMS, so it is a `disarm` record like
+            # the unload and hang paths (`mark_armed_rows_disarmed`), with the cause as a code.
+            # Without it a receiver's last word on these probes was `arm`, after the process that
+            # ran them was gone. `telemetry.configure()` ran earlier in `lifespan`.
+            from millm import telemetry
+
+            for row in rows:
+                telemetry.emit_lifecycle(row, "disarm", code="process_restarted")
+            logger.info(
+                "probes_disarmed_on_startup",
+                count=len(armed),
+                probes=sorted(armed),
+                detail=(
+                    "nothing is hooked after a restart, so no probe can be scoring — "
+                    "these rows would otherwise report a monitor that is not monitoring"
+                ),
+            )
+            return sorted(armed)
+    except Exception as e:  # pragma: no cover - exercised by its own test
+        logger.error(
+            "probe_startup_disarm_failed",
+            error=str(e),
+            error_type=type(e).__name__,
+            detail=(
+                "armed probe rows may survive with no hook installed; /api/probes/status "
+                "cross-checks the live registry and will mark them stale, so the read stays "
+                "honest, but the rows themselves are wrong until something re-arms or disarms"
+            ),
+            exc_info=True,
+        )
+        return []
+
+
+#: How long shutdown waits for probe records still in flight (038 D38.33).
+PROBE_RECORD_DRAIN_S = 10.0
+
+
+async def refresh_probe_members_on_startup(session_factory: Any) -> int:
+    """Build the per-behaviour member map once at startup (039). Never raises."""
+    from millm.services import probe_selection
+
+    try:
+        async with session_factory() as session:
+            return await probe_selection.refresh_member_counts(session)
+    except Exception as e:  # pragma: no cover - bookkeeping must not stop the server
+        logger.warning("probe_member_map_failed", error_type=type(e).__name__)
+        return -1
+
+
+async def check_rule_sets_on_startup(session_factory: Any) -> Any:
+    """039 S2 (FR-39.20, TD39-26): every stored rule set re-proves itself under THIS build, then
+    the compiled registry the request path reads is built. Never raises."""
+    from millm.rules import registry as rule_registry
+    from millm.rules import selfcheck
+
+    report = await selfcheck.run(session_factory)
+    try:
+        async with session_factory() as session:
+            await rule_registry.rebuild(session, reason="startup")
+    except Exception as e:  # pragma: no cover - bookkeeping must not stop the server
+        logger.warning("rule_registry_startup_failed", error_type=type(e).__name__)
+    check_rule_code_floor_on_startup()
+    return report
+
+
+def check_rule_code_floor_on_startup() -> list[str]:
+    """039 S3 (FTASKS 17.4): refuse to run operator code while any per-call setting sits below the
+    runner contract's floor. Logged here, and every job re-checks (`code_followup.score`), so a
+    value lowered at runtime is refused too: code rules then stay pending. Never raises."""
+    from millm.rules.runner_client import floor_violations
+
+    try:
+        below = floor_violations(settings)
+    except Exception as e:  # pragma: no cover - bookkeeping must not stop the server
+        logger.warning("rule_code_floor_check_failed", error_type=type(e).__name__)
+        return []
+    if below:
+        logger.error("rule_code_disabled_below_floor", limits=below)
+    return below
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
+    """
+    Application lifespan handler.
+
+    Sets up logging on startup and cleans up resources on shutdown.
+    """
+    # Startup
+    # Feature 35: the overrides saved on the Settings page, applied onto `settings` FIRST — before
+    # logging reads LOG_LEVEL, before the inference service builds its queue, before the batch API
+    # starts and before AUTO_LOAD_MODEL — so nothing captures an environment value an override
+    # replaces. Without this line every saved override is silently ignored after a restart while
+    # the page still lists it. Never raises (an unmigrated database leaves the environment's values).
+    from millm.db import base as _db_base
+
+    overrides_loaded = await load_runtime_overrides_on_startup(_db_base.async_session_factory)
+    setup_logging()
+    # 038 S2: telemetry resolves its settings here. OFF BY DEFAULT: with every TELEMETRY_*_ENABLED
+    # switch off (the default) this starts nothing and imports no OpenTelemetry SDK module
+    # (D38.17, D31/D-08). Never raises; a refused configuration shows in the health block.
+    from millm import telemetry
+
+    telemetry.configure()
+    logger.info(
+        "application_starting",
+        version=__version__,
+        debug=settings.DEBUG,
+    )
+    logger.info(
+        "runtime_overrides_loaded",
+        applied=overrides_loaded["applied"],
+        ignored=[item["key"] for item in overrides_loaded["ignored"]],
+    )
+
+    # Reset any models/SAEs marked as "loaded" since in-memory state is lost on restart
+    try:
+        from millm.db.base import async_session_factory
+        from sqlalchemy import text
+
+        # Each reset gets its OWN transaction. Sharing one would mean a single
+        # failing statement (e.g. a table from a migration that has not run on
+        # this deployment yet) aborts the transaction and rolls back the resets
+        # that DID succeed — silently leaving exactly the stale state this block
+        # exists to clear.
+        resets = STALE_STATE_RESETS
+        for event, sql, table in resets:
+            try:
+                async with async_session_factory() as session:
+                    result = await session.execute(text(sql))
+                    await session.commit()
+                    if result.rowcount > 0:
+                        logger.info(event, count=result.rowcount)
+            except Exception as e:
+                logger.warning(
+                    "stale_reset_failed", table=table, error=str(e)
+                )
+    except Exception as e:
+        logger.warning("failed_to_reset_stale_status", error=str(e))
+
+    # F19 R2-09: RELEASE ALL CLAIMS at startup, plainly.
+    #
+    # The previous version ran `reconcile()` AFTER the bulk
+    # `UPDATE circuits SET is_active=false` above, which empties the active set
+    # — so reconcile's orphan branch fired for EVERY claim on EVERY restart and
+    # logged `circuit_claim_orphan_released` ("claims outlived their circuit's
+    # activation") as an anomaly. It is not an anomaly; it is the guaranteed
+    # steady state of a restart. A permanently false-positive warning trains
+    # operators to ignore the one signal that would matter when a genuine
+    # orphan appears, and reconcile's demotion branch was likewise unreachable.
+    #
+    # Say what actually happens: nothing is steering after a restart (the
+    # in-memory owner map is empty), so no claim can be valid. Release them all
+    # as a restart consequence, and log it as routine.
+    try:
+        from millm.services.circuit_claim_registry import CircuitClaimRegistry
+        from millm.db.models.circuit_layer_claim import CircuitLayerClaim
+        from sqlalchemy import select, update as sa_update
+        from datetime import datetime, timezone
+
+        async with async_session_factory() as session:
+            live = (
+                await session.execute(
+                    select(CircuitLayerClaim.circuit_id).where(
+                        CircuitLayerClaim.released_at.is_(None)
+                    )
+                )
+            ).scalars().all()
+            if live:
+                await session.execute(
+                    sa_update(CircuitLayerClaim)
+                    .where(CircuitLayerClaim.released_at.is_(None))
+                    .values(released_at=datetime.now(timezone.utc), composed=False)
+                )
+                await session.commit()
+                logger.info(
+                    "circuit_claims_released_on_startup",
+                    count=len(live),
+                    circuits=sorted(set(live)),
+                    detail=(
+                        "nothing is steering after a restart, so no claim can "
+                        "be valid — these layers are free again"
+                    ),
+                )
+    except Exception as e:
+        _note_claims_degraded(f"claim release failed: {e}")
+        logger.error(
+            "circuit_claim_startup_release_failed",
+            error=str(e),
+            error_type=type(e).__name__,
+            detail=(
+                "stale layer claims remain and will REFUSE every activation "
+                "on those layers for the life of this process; there is no "
+                "runtime remedy short of another restart"
+            ),
+            exc_info=True,
+        )
+
+    # ⚠ THE SAME FACT, FOR PROBES, AND IT WAS MISSED WHEN THEY WERE ADDED.
+    # See `disarm_probes_on_startup` for why, and why it is a named function rather than a block
+    # inlined here like the claim release above: a block can only be tested by reading the source,
+    # and a test that reads source cannot tell a statement that RUNS from one that is merely
+    # present. Gating this whole block behind `if False:` left my first version of that test green.
+    await disarm_probes_on_startup(async_session_factory)
+    # 039: the per-key member map every `set` block reads (no database read per request).
+    await refresh_probe_members_on_startup(async_session_factory)
+    # 039 S2: the rule self-check and the compiled rule registry (FR-39.20, FR-39.22).
+    await check_rule_sets_on_startup(async_session_factory)
+
+    # Feature 34: the Hugging Face token saved on the Settings page, decrypted into memory BEFORE
+    # the auto-load below, so every Hub call (a startup download included) resolves it. Without
+    # this line a saved token is silently ignored until someone saves it again. Never raises.
+    await load_hf_token_on_startup(async_session_factory)
+
+    # Feature 29 (X-01): a restart ends every model lease. The registry is process memory, so
+    # it starts empty anyway; the call makes the reconciliation explicit and testable — the
+    # shape and reason of `disarm_probes_on_startup` above. Never raises.
+    clear_leases_on_startup()
+
+    # Feature 31: a restart begins `clean`, serving, with no attachment and no counters (PADR
+    # v1.6 §10). Process memory is empty after a real restart anyway; the call makes the
+    # reconciliation explicit and testable, as the lease clear above does. Never raises.
+    reset_weights_on_startup()
+
+    # Feature 32: the vendored checkpoint-manifest schema must mark every field's owner, or a
+    # save would write a manifest nobody can validate (032 task 2.6). NOT fatal (addendum D-35):
+    # serving starts, the failure is logged at error level, and every save and load refuses
+    # with reason `schema_ownership` until the schema is fixed. Never raises. Then remove this
+    # module's own crash leftovers under the primary checkpoint root.
+    check_schema_ownership_on_startup()
+    remove_stale_temp_dirs()
+
+    # Feature 31: the 5-second tick that logs a stale attachment once (FR-31.4.2). Correctness
+    # never depends on it; cancelled on shutdown.
+    weights_tick = asyncio.create_task(weights_tick_loop(), name="weights-tick")
+
+    # Feature 26: reconcile every non-terminal batch, THEN start the runner and the retention
+    # loop (FR-26.3.3, FR-26.9.4). After the lease clear: a resumed batch must find no lease and
+    # re-acquire one or wait (X-01). Never raises.
+    await start_batch_api(async_session_factory)
+
+    # Feature 36 (FR-36.10): the probe retention pass — events by age, session text after
+    # PROBE_TRANSCRIPT_MAX_AGE_DAYS / past PROBE_TRANSCRIPT_MAX_TURNS, sessions past their age or
+    # with no turn left. One pass now, then every PROBE_RETENTION_INTERVAL_S. Before this, events
+    # were pruned only on write, so a server with no traffic kept everything forever — and session
+    # text kept longer than the 7 days promised is a privacy defect, not a disk one.
+    from millm.services.probe_sessions import probe_retention_loop
+
+    probe_retention = asyncio.create_task(probe_retention_loop(), name="probe-retention")
+
+    # F19 R3-15: `reconcile()` is NOT called here, deliberately.
+    #
+    # R1-01 wired it at startup because nothing called it. R2-09 then made the
+    # startup path release EVERY claim outright — which is correct, since
+    # nothing is steering after a restart — and that left reconcile dead in
+    # both directions:
+    #
+    #   * its ORPHAN branch computes {live claims} - {active circuits}, and the
+    #     release above empties the first set, so it can never fire;
+    #   * its DEMOTION branch reads active circuits, and the bulk
+    #     `UPDATE circuits SET is_active=false` above empties that set too.
+    #
+    # Calling it anyway would be theatre: a green log line implying a check ran
+    # when both its inputs are empty by construction. Worse, a test asserting
+    # reconcile is "WIRED" would keep passing after its body was deleted —
+    # which is exactly the dead-mechanism trap this increment has hit four
+    # times.
+    #
+    # The method is KEPT, not deleted: it is the recovery path for a database
+    # written by an older build, and `at_startup=True` gates it (R2-18). If a
+    # future startup stops releasing claims wholesale, this is where it goes
+    # back.
+
+    # Clear any stale in-memory SAE attachment state
+    try:
+        from millm.services.sae_service import AttachedSAEState
+        sae_state = AttachedSAEState()
+        if sae_state.is_attached:
+            logger.info("clearing_stale_sae_attachment")
+            sae_state.clear()
+    except Exception as e:
+        logger.warning("failed_to_clear_sae_state", error=str(e))
+
+    # Auto-load model if configured
+    if settings.AUTO_LOAD_MODEL:
+        try:
+            await _auto_load_model(settings.AUTO_LOAD_MODEL)
+        except Exception as e:
+            logger.error("auto_load_model_failed", error=str(e), model=settings.AUTO_LOAD_MODEL)
+
+    yield
+
+    # Shutdown
+    logger.info("application_shutting_down")
+    weights_tick.cancel()
+    with contextlib.suppress(asyncio.CancelledError):
+        await weights_tick
+    probe_retention.cancel()
+    with contextlib.suppress(asyncio.CancelledError):
+        await probe_retention
+    await stop_batch_api()
+    # 038 (D38.33): probe records still in flight are tracked tasks; wait for them (bounded) so a
+    # shutdown does not drop the events of requests that already returned. S2 adds the telemetry
+    # shutdown after this drain.
+    from millm.services.inference_service import InferenceService
+
+    await InferenceService.drain_probe_records(PROBE_RECORD_DRAIN_S)
+    # 039 S3 (D41): operator-code jobs the drained records started, bounded the same way.
+    from millm.rules import code_followup
+
+    await code_followup.drain(PROBE_RECORD_DRAIN_S)
+    # ⚠ AFTER the record drain: the drained records publish their results to telemetry, which
+    # then drains its own queues until TELEMETRY_DRAIN_DEADLINE_S and counts the rest as dropped.
+    telemetry.shutdown()
+
+    # Cleanup any loaded model
+    try:
+        from millm.ml.model_loader import LoadedModelState
+
+        state = LoadedModelState()
+        if state.is_loaded:
+            logger.info("unloading_model_on_shutdown")
+            state.clear()
+    except ImportError:
+        pass  # Model loader not yet implemented
+
+
+def create_app() -> FastAPI:
+    """
+    Create and configure the FastAPI application.
+
+    Returns:
+        Configured FastAPI application instance.
+    """
+    app = FastAPI(
+        title="miLLM API",
+        description="""
+## Mechanistic Interpretability LLM Server
+
+miLLM provides a REST API for managing Large Language Models (LLMs) with support for
+Sparse Autoencoders (SAEs) for mechanistic interpretability research.
+
+### Features
+
+- **Model Management**: Download, load, and manage LLM models from HuggingFace
+- **Quantization Support**: FP16, Q4, and Q8 quantization for memory efficiency
+- **Real-time Updates**: WebSocket events for download and load progress
+- **SAE Integration**: Attach and configure Sparse Autoencoders for interpretability
+- **Feature Steering**: Modify model behavior through feature interventions
+
+### Authentication
+
+Currently, the API does not require authentication for local use.
+For gated HuggingFace models, provide a `hf_token` in the request.
+
+### WebSocket Events
+
+Connect to `/socket.io/` for real-time progress updates:
+
+- `model:download:progress` - Download progress (bytes, speed)
+- `model:download:complete` - Download finished
+- `model:download:error` - Download failed
+- `model:load:progress` - Load progress (stage, percentage)
+- `model:load:complete` - Model loaded successfully
+- `model:unload:complete` - Model unloaded
+
+### Error Handling
+
+All errors return a standard response format:
+```json
+{
+    "success": false,
+    "error": {
+        "code": "ERROR_CODE",
+        "message": "User-friendly message",
+        "details": {"technical_message": "..."}
+    }
+}
+```
+        """,
+        version=__version__,
+        lifespan=lifespan,
+        # ⚠ 038 (FTDD §2.4 U6, D38.20): FastAPI 0.159's NATIVE OpenTelemetry instrumentation is on
+        # by default and activates as soon as any global provider exists; its spans carry
+        # `url.query` and its logs exception messages and stack traces. Every part is switched off
+        # here, and `auto_configure` False overrides FASTAPI_OTEL_AUTO_CONFIGURE. miLLM also never
+        # installs a global provider (millm/telemetry/pipeline.py). Either alone keeps FastAPI
+        # dark; both are tested (T-S2-02, control M23).
+        telemetry={
+            "tracing": False,
+            "metrics": False,
+            "logs": False,
+            "operation_spans": False,
+            "auto_configure": False,
+        },
+        docs_url="/docs",
+        redoc_url="/redoc",
+        openapi_url="/openapi.json",
+        contact={
+            "name": "miLLM Support",
+            "url": "https://github.com/miLLM/miLLM",
+        },
+        license_info={
+            "name": "MIT",
+            "url": "https://opensource.org/licenses/MIT",
+        },
+        openapi_tags=[
+            {
+                "name": "models",
+                "description": "Model management operations - download, load, unload, delete",
+            },
+            {
+                "name": "saes",
+                "description": "SAE management operations - download, attach, steer, monitor",
+            },
+            {
+                "name": "system",
+                "description": "System health and status endpoints",
+            },
+            {
+                "name": "openai",
+                "description": "OpenAI-compatible API endpoints for chat completions, text completions, and embeddings",
+            },
+        ],
+    )
+
+    # CORS middleware
+    # allow_credentials=False: the server has no authentication in v1.0, so there
+    # are no cookies or auth headers to forward. Combining allow_credentials=True
+    # with a wildcard origin causes Starlette to reflect the request Origin header
+    # rather than responding with "*", which grants every origin credential access.
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=settings.cors_origins_list,
+        allow_credentials=False,
+        allow_methods=["*"],
+        allow_headers=["*"],
+    )
+
+    # Feature 29: any 503 that reaches the response without Retry-After gets a distinct
+    # fallback value and a `retry_after_defaulted` warning (FR-29.6.2). Pure ASGI, so SSE
+    # streams pass through untouched.
+    app.add_middleware(RetryAfterMiddleware)
+
+    # 038 FR-38.14: the client's W3C `traceparent` → the request's trace (`_REQUEST_TRACE`), read
+    # once per probe context by `telemetry.capture_trace`. Pure ASGI; a missing or malformed
+    # header is never an error. Parses with the OpenTelemetry API only (no SDK).
+    from millm.telemetry.context import TraceContextMiddleware
+
+    app.add_middleware(TraceContextMiddleware)
+
+    # Exception handlers
+    from fastapi.exceptions import RequestValidationError
+
+    from millm.api.exception_handlers import openai_validation_error_handler
+
+    app.add_exception_handler(RequestValidationError, openai_validation_error_handler)
+    app.add_exception_handler(MiLLMError, millm_error_handler)
+    app.add_exception_handler(Exception, generic_exception_handler)
+
+    # Register routes
+    register_routes(app)
+
+    return app
+
+
+def create_socket_io_server() -> socketio.AsyncServer:
+    """
+    Create and configure the Socket.IO server.
+
+    Returns:
+        Configured Socket.IO AsyncServer instance.
+    """
+    from millm.sockets.progress import create_socket_io
+
+    # Use the sockets module's factory which configures progress_emitter
+    return create_socket_io()
+
+
+def create_combined_app() -> socketio.ASGIApp:
+    """
+    Create the combined FastAPI + Socket.IO ASGI application.
+
+    Returns:
+        Combined ASGI application that handles both HTTP and WebSocket.
+    """
+    fastapi_app = create_app()
+    sio = create_socket_io_server()
+
+    # Store Socket.IO reference in app state for dependency injection
+    fastapi_app.state.sio = sio
+
+    # Combine FastAPI and Socket.IO
+    combined = socketio.ASGIApp(sio, other_asgi_app=fastapi_app)
+
+    return combined
+
+
+# The ASGI application
+app = create_combined_app()
+
+
+def run() -> None:
+    """
+    Run the application with Uvicorn.
+
+    This is the entry point for the `millm` command.
+    """
+    import uvicorn
+
+    uvicorn.run(
+        "millm.main:app",
+        host=settings.HOST,
+        port=settings.PORT,
+        reload=settings.DEBUG,
+        log_level=settings.LOG_LEVEL.lower(),
+    )
+
+
+if __name__ == "__main__":
+    run()

@@ -1,0 +1,262 @@
+"""Unit tests for SAEDownloader."""
+
+from pathlib import Path
+from unittest.mock import MagicMock, patch
+
+import pytest
+
+from huggingface_hub.utils import RepositoryNotFoundError
+
+from millm.ml.sae_downloader import SAEDownloader
+
+
+@pytest.fixture
+def temp_cache_dir(tmp_path):
+    """Create a temporary cache directory."""
+    cache_dir = tmp_path / "sae_cache"
+    cache_dir.mkdir()
+    return cache_dir
+
+
+@pytest.fixture
+def downloader(temp_cache_dir):
+    """Create an SAEDownloader with a temporary cache directory."""
+    with patch.object(SAEDownloader, "__init__", lambda self, cache_dir: None):
+        dl = SAEDownloader.__new__(SAEDownloader)
+        dl.cache_dir = temp_cache_dir
+        dl._api = MagicMock()
+        return dl
+
+
+class TestSAEDownloaderDownload:
+    """Tests for download method."""
+
+    @pytest.mark.asyncio
+    @patch("millm.ml.sae_downloader.snapshot_download")
+    async def test_download_calls_snapshot_download(self, mock_snapshot, downloader):
+        """Test that download calls snapshot_download with correct params."""
+        mock_snapshot.return_value = "/path/to/sae"
+        downloader._api.repo_info.return_value = MagicMock()
+
+        result = await downloader.download("jbloom/gemma-2-2b-res-jb")
+
+        mock_snapshot.assert_called_once()
+        call_kwargs = mock_snapshot.call_args[1]
+        assert call_kwargs["repo_id"] == "jbloom/gemma-2-2b-res-jb"
+        assert call_kwargs["revision"] == "main"
+        # Bind against the INSTALLED huggingface_hub (a mock accepts any kwarg): a removed or
+        # deprecated kwarg such as `resume_download` fails here, not in the image.
+        import inspect
+
+        import huggingface_hub
+
+        inspect.signature(huggingface_hub.snapshot_download).bind(**call_kwargs)
+        assert "resume_download" not in call_kwargs
+
+    @pytest.mark.asyncio
+    @patch("millm.ml.sae_downloader.snapshot_download")
+    async def test_download_passes_token(self, mock_snapshot, downloader):
+        """Test that download passes token to snapshot_download."""
+        mock_snapshot.return_value = "/path/to/sae"
+        downloader._api.repo_info.return_value = MagicMock()
+
+        await downloader.download(
+            "jbloom/gemma-2-2b-res-jb",
+            token="hf_test_token",
+        )
+
+        call_kwargs = mock_snapshot.call_args[1]
+        assert call_kwargs["token"] == "hf_test_token"
+
+    @pytest.mark.asyncio
+    @patch("millm.ml.sae_downloader.snapshot_download")
+    async def test_download_calls_progress_callback(self, mock_snapshot, downloader):
+        """Test that download invokes the progress callback."""
+        mock_snapshot.return_value = "/path/to/sae"
+        downloader._api.repo_info.return_value = MagicMock()
+        callback = MagicMock()
+
+        await downloader.download(
+            "jbloom/gemma-2-2b-res-jb",
+            progress_callback=callback,
+        )
+
+        # Callback should be called at least twice: start and complete
+        assert callback.call_count >= 2
+
+        # First call should be downloading start
+        first_call_args = callback.call_args_list[0][0][0]
+        assert first_call_args["status"] == "downloading"
+        assert first_call_args["percent"] == 0
+
+        # Last call should be complete
+        last_call_args = callback.call_args_list[-1][0][0]
+        assert last_call_args["status"] == "complete"
+        assert last_call_args["percent"] == 100
+
+    @pytest.mark.asyncio
+    async def test_download_handles_repository_not_found(self, downloader):
+        """Test that download raises ValueError for missing repositories."""
+        downloader._api.repo_info.side_effect = RepositoryNotFoundError(
+            "Not found", response=MagicMock()
+        )
+
+        with pytest.raises(ValueError) as exc_info:
+            await downloader.download("nonexistent/sae-repo")
+
+        assert "not found" in str(exc_info.value).lower()
+
+
+class TestSAEDownloaderListRepositoryFiles:
+    """Tests for list_repository_files method."""
+
+    @pytest.mark.asyncio
+    async def test_returns_file_list(self, downloader):
+        """Test that list_repository_files returns structured file data."""
+        # Mock repo_info
+        mock_sibling = MagicMock()
+        mock_sibling.rfilename = "layer_12/width_16k/average_l0_50/params.npz"
+        mock_sibling.size = 256_000_000
+
+        mock_repo_info = MagicMock()
+        mock_repo_info.siblings = [mock_sibling]
+        downloader._api.repo_info.return_value = mock_repo_info
+
+        # Mock list_repo_files
+        downloader._api.list_repo_files.return_value = [
+            "layer_12/width_16k/average_l0_50/params.npz",
+        ]
+
+        result = await downloader.list_repository_files("google/gemma-scope-2b-pt-res")
+
+        assert result["repository_id"] == "google/gemma-scope-2b-pt-res"
+        assert result["total_files"] >= 1
+        assert len(result["files"]) >= 1
+
+        first_file = result["files"][0]
+        assert first_file["path"] == "layer_12/width_16k/average_l0_50/params.npz"
+        assert first_file["layer"] == 12
+        assert first_file["width"] == "16k"
+
+
+class TestSAEDownloaderGenerateSaeId:
+    """Tests for generate_sae_id method."""
+
+    def test_generates_id_from_repo(self, downloader):
+        """Test that generate_sae_id produces a filesystem-safe ID."""
+        sae_id = downloader.generate_sae_id("jbloom/gemma-2-2b-res-jb")
+
+        assert sae_id == "jbloom--gemma-2-2b-res-jb"
+        assert "/" not in sae_id
+
+    def test_includes_revision_when_not_main(self, downloader):
+        """Test that non-main revisions are included in the ID."""
+        sae_id = downloader.generate_sae_id(
+            "jbloom/gemma-2-2b-res-jb",
+            revision="v2.0",
+        )
+
+        assert "@v2.0" in sae_id
+
+    def test_includes_file_path_directory(self, downloader):
+        """Test that file path directory is included for unique IDs."""
+        sae_id = downloader.generate_sae_id(
+            "google/gemma-scope-2b-pt-res",
+            file_path="layer_12/width_16k/average_l0_50/params.npz",
+        )
+
+        assert "layer_12--width_16k--average_l0_50" in sae_id
+
+    def test_consistent_ids_for_same_input(self, downloader):
+        """Test that the same inputs always produce the same ID."""
+        id1 = downloader.generate_sae_id("jbloom/gemma-2-2b-res-jb")
+        id2 = downloader.generate_sae_id("jbloom/gemma-2-2b-res-jb")
+
+        assert id1 == id2
+
+
+class TestSAEDownloaderExists:
+    """Tests for is_cached method."""
+
+    def test_returns_false_when_not_cached(self, downloader):
+        """Test that is_cached returns False for non-existent SAEs."""
+        assert downloader.is_cached("nonexistent/sae") is False
+
+    def test_returns_true_when_snapshot_exists(self, downloader, temp_cache_dir):
+        """Test that is_cached returns True when cache path exists."""
+        # Create a mock cache path structure
+        with patch.object(downloader, "get_cache_path", return_value=temp_cache_dir):
+            assert downloader.is_cached("some/repo") is True
+
+
+class TestPrivateRepositoryToken:
+    """The repository check must carry the same token as the download.
+
+    Regression (2026-10-17): `_validate_repository` called `repo_info` with no token, so a PRIVATE
+    repository was refused as "not found" before the download ever used the token — the Hub answers an
+    anonymous request for a private repo with 401 RepositoryNotFound. Preview worked (it passed the
+    token), the download did not. The old `test_download_passes_token` only checked snapshot_download.
+    """
+
+    @pytest.mark.asyncio
+    @patch("millm.ml.sae_downloader.snapshot_download")
+    async def test_repository_check_carries_the_request_token(self, mock_snapshot, downloader, monkeypatch):
+        monkeypatch.delenv("HF_TOKEN", raising=False)
+        mock_snapshot.return_value = "/path/to/sae"
+        await downloader.download("org/private-sae", token="hf_request")
+        assert downloader._api.repo_info.call_count == 1
+        assert downloader._api.repo_info.call_args.kwargs["token"] == "hf_request"
+        assert mock_snapshot.call_args.kwargs["token"] == "hf_request"
+
+    @pytest.mark.asyncio
+    @patch("millm.ml.sae_downloader.snapshot_download")
+    async def test_repository_check_falls_back_to_the_environment_token(self, mock_snapshot, downloader, monkeypatch):
+        monkeypatch.setenv("HF_TOKEN", "hf_env")
+        mock_snapshot.return_value = "/path/to/sae"
+        await downloader.download("org/private-sae")
+        assert downloader._api.repo_info.call_args.kwargs["token"] == "hf_env"
+        assert mock_snapshot.call_args.kwargs["token"] == "hf_env"
+
+    @pytest.mark.asyncio
+    async def test_a_private_repo_refusal_says_it_may_be_private(self, downloader, monkeypatch):
+        monkeypatch.delenv("HF_TOKEN", raising=False)
+        downloader._api.repo_info.side_effect = RepositoryNotFoundError("401", response=MagicMock())
+        with pytest.raises(ValueError) as exc_info:
+            await downloader.download("org/private-sae", token="hf_wrong")
+        msg = str(exc_info.value)
+        assert "not found" in msg and "private" in msg and "token cannot read it" in msg
+        assert "hf_wrong" not in msg  # never echo the credential
+
+
+class TestPreviewUsesTheServerToken:
+    """2026-10-18 hardware finding: preview went to the Hub anonymously (download used HF_TOKEN), so a
+    private repository the server can read previewed as a 500. One token rule for both calls."""
+
+    @pytest.mark.asyncio
+    async def test_preview_falls_back_to_the_environment_token(self, downloader, monkeypatch):
+        monkeypatch.setenv("HF_TOKEN", "hf_env")
+        downloader._api.repo_info.return_value = MagicMock(siblings=[])
+        downloader._api.list_repo_files.return_value = []
+        await downloader.list_repository_files("org/private-sae")
+        assert downloader._api.repo_info.call_count == 1
+        assert downloader._api.repo_info.call_args.kwargs["token"] == "hf_env"
+        assert downloader._api.list_repo_files.call_args.kwargs["token"] == "hf_env"
+
+    @pytest.mark.asyncio
+    async def test_preview_request_token_wins(self, downloader, monkeypatch):
+        monkeypatch.setenv("HF_TOKEN", "hf_env")
+        downloader._api.repo_info.return_value = MagicMock(siblings=[])
+        downloader._api.list_repo_files.return_value = []
+        await downloader.list_repository_files("org/private-sae", token="hf_request")
+        assert downloader._api.repo_info.call_args.kwargs["token"] == "hf_request"
+
+    @pytest.mark.asyncio
+    async def test_preview_of_an_unreadable_repo_is_a_typed_404(self, downloader, monkeypatch):
+        from millm.core.errors import RepoNotFoundError
+
+        monkeypatch.delenv("HF_TOKEN", raising=False)
+        downloader._api.repo_info.side_effect = RepositoryNotFoundError("401", response=MagicMock())
+        with pytest.raises(RepoNotFoundError) as exc_info:
+            await downloader.list_repository_files("org/private-sae", token="hf_wrong")
+        assert exc_info.value.status_code == 404
+        assert "private" in str(exc_info.value) and "hf_wrong" not in str(exc_info.value)

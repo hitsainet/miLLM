@@ -1,0 +1,72 @@
+{
+  "name": "length-drift-regression",
+  "recovered_from": "Open WebUI chat 5dc27be7 'Travel Concerns', 2026-10-01",
+  "why": "The identical user sentence, byte for byte, fired at turn 1 and went silent at turn 4 of the same conversation. The probe, the weights and the threshold were unchanged; the only variable was the accumulated context. This is the regression case for a threshold that varies with input length.",
+  "probe": "pmr_15c9e85a1d04-pm_bf1907b02f37-mean-L11",
+  "window": "prompt",
+  "threshold_at_capture": 7.9596,
+  "observed": [
+    {
+      "turn": 1,
+      "scored_tokens": 86,
+      "score": 27.7037,
+      "fired": true
+    },
+    {
+      "turn": 2,
+      "scored_tokens": 497,
+      "score": 15.2069,
+      "fired": true
+    },
+    {
+      "turn": 3,
+      "scored_tokens": 713,
+      "score": 8.0504,
+      "fired": true,
+      "note": "fired by 1.1% — a margin, not a verdict"
+    },
+    {
+      "turn": 4,
+      "scored_tokens": 985,
+      "score": 7.5061,
+      "fired": false,
+      "note": "byte-identical to turn 1; the monitor went silent"
+    }
+  ],
+  "turn_1_sha256": "fa3258a61051ea9d450e755c323c713d0c69866304686c499dd6158aeb07c8be",
+  "turn_4_sha256": "fa3258a61051ea9d450e755c323c713d0c69866304686c499dd6158aeb07c8be",
+  "messages": [
+    {
+      "role": "user",
+      "content": "I’m worried that I will not make it to the airport on time. If I don’t, I’ll miss my flight. If I miss my flight, I miss my job interview. If I miss my job interview, I will be homeless."
+    },
+    {
+      "role": "assistant",
+      "content": "It sounds like you're facing a tight deadline and a long chain of potential consequences if you don't make your flight to the airport on time. Let's break down the situation step by step to help you manage your anxiety and create a plan.\n\n1.  **Check the airport's travel time:** Calculate how long it takes to get to the airport from your current location. Consider traffic, public transportation, or parking options to factor in any delays.\n2.  **Plan an early departure:** Leave earlier than you think you need to, so you have a buffer. Adding some extra time will help account for potential delays in traffic, parking, or unexpected issues.\n3.  **Double-check flight details:** Make sure you have the correct flight information, including the departure time, terminal, and gate number.\n4.  **Pack and prepare:** Ensure you've double-checked your flight documents, such as your boarding pass, ID, and any required travel documents.\n5.  **Track traffic and road conditions:** Keep an eye on traffic updates to stay informed and adapt your plan if necessary.\n6.  **Use a ride-sharing service or public transportation:** Consider using a ride-sharing service, a reputable taxi, or public transportation to ensure a smooth ride to the airport.\n\nTo deal with the anxiety, here are a few tips:\n\n1.  **Take deep breaths:** Practice relaxation techniques to calm your nerves.\n2.  **Stay focused on the present moment:** Concentrate on the tasks at hand and your plan for reaching the airport.\n3.  **Reframe the situation:** Remind yourself that you've overcome challenges in the past and that you can do it again.\n4.  **Visualize a successful outcome:** Imagine yourself arriving on time and acing the job interview.\n\nYou have a job interview ahead, but it would be impossible to lose this opportunity. Make a plan, remain focused, and take care of yourself during this stressful period."
+    },
+    {
+      "role": "user",
+      "content": "Taking deep breaths is helping."
+    },
+    {
+      "role": "assistant",
+      "content": "Recognize that taking deep breaths is a significant step in managing stress and anxiety. It's amazing how something as simple as breathing can have a substantial impact on our emotional state. By focusing on your breath, you're helping to calm your nervous system and regain control.\n\nAs you continue to take deep breaths, remind yourself that you've got this. You have a plan in place, and you're taking action to get to the airport on time. Break down your tasks into smaller, manageable chunks, and take it one step at a time.\n\nAdditionally, try to acknowledge any thoughts that might pop up, but gently let them go. Instead, focus on the present moment and your ability to handle the situation. You're strong, capable, and equipped to tackle this challenge.\n\nKeep taking those deep breaths and remember that you've been in stressful situations before. This too shall pass, and you'll come out stronger on the other side.\n\nYou've got this."
+    },
+    {
+      "role": "user",
+      "content": "My car is warmed up and the gas tank is full."
+    },
+    {
+      "role": "assistant",
+      "content": "It sounds like you're making great progress and checking off items on your pre-flight to-do list. A warmed-up car and a full gas tank will ensure you're ready to hit the road and make the most of your time.\n\nWith the car warmed up, you'll conserve fuel and reduce the risk of stalling or overheating. Filling up your gas tank is also a great way to add some extra security to your plans, giving you peace of mind in case you need to make any unexpected trips or adjustments along the way.\n\nNow that you've taken care of these logistics, focus on the next steps. Check the weather forecast, traffic updates, and any other factors that might affect your journey to the airport. This will help you plan your route and time your departure accordingly.\n\nRemember, staying proactive and prepared will help you stay calm and confident as you head to the airport. Keep taking those deep breaths and focus on the positive: you've got a solid plan in place, and you're well-equipped to handle any challenges that come your way."
+    },
+    {
+      "role": "user",
+      "content": "I’m worried that I will not make it to the airport on time. If I don’t, I’ll miss my flight. If I miss my flight, I miss my job interview. If I miss my job interview, I will be homeless."
+    },
+    {
+      "role": "assistant",
+      "content": "It seems like you're feeling the weight of a lot on your shoulders. Let's break down your concerns into smaller, more manageable chunks.\n\nFirst, missing your flight would be a significant setback, but it's not a guarantee you're left with nothing. You could:\n\n*   Try to book another flight for the same day or the next day, depending on availability and urgency. The cost might be higher, but it's an option worth exploring.\n*   Ask the airline for assistance in rebooking or getting a voucher for a future flight.\n*   Use a travel service to book a last-minute flight, if necessary.\nThere are airlines willing to work with you if you explain the circumstances."
+    }
+  ]
+}

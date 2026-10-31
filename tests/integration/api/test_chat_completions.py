@@ -1,0 +1,587 @@
+"""
+Integration tests for OpenAI chat completions endpoint.
+
+Tests the full endpoint behavior including:
+- No model loaded returns 503
+- Invalid parameters return 400
+- Valid requests return proper responses
+"""
+
+import pytest
+
+from tests.support.factories import make_model
+from fastapi.testclient import TestClient
+
+from millm.main import create_app
+
+
+
+@pytest.fixture
+def client():
+    """Client whose ModelService reports the requested model as UNKNOWN.
+
+    These tests post model "gpt-4", which this server does not have. Before
+    on-demand loading they asserted 503 "no model loaded", because the endpoint
+    rejected anything not already resident and never got as far as looking the
+    name up properly — the mocked DB session returned a truthy stub for
+    find_model_by_name, and nothing ever touched it.
+
+    Now the endpoints LOAD what they are asked for, so an unknown name is a
+    404 model_not_found and a known one would be loaded. Overriding the service
+    explicitly makes that distinction real instead of an artifact of how deeply
+    the session mock happened to be inspected.
+    """
+    from unittest.mock import AsyncMock, MagicMock
+
+    from millm.api.dependencies import get_model_service
+
+    svc = MagicMock()
+    svc.find_model_by_name = AsyncMock(return_value=None)
+    svc.get_locked_model = AsyncMock(return_value=None)
+    svc.get_available_models = AsyncMock(return_value=[])
+    svc.load_model_and_wait = AsyncMock()
+
+    app = create_app()
+    app.dependency_overrides[get_model_service] = lambda: svc
+    return TestClient(app)
+
+
+class TestChatCompletionsNoModel:
+    """Tests when no model is loaded."""
+
+    def test_returns_404_for_an_unknown_model(self, client):
+        """POST /v1/chat/completions returns 503 when no model is loaded."""
+        response = client.post(
+            "/v1/chat/completions",
+            json={
+                "model": "gpt-4",
+                "messages": [{"role": "user", "content": "Hello"}],
+            },
+        )
+        assert response.status_code == 404
+        data = response.json()
+        assert "error" in data
+        assert data["error"]["code"] == "model_not_found"
+
+    def test_streaming_returns_404_for_an_unknown_model(self, client):
+        """POST /v1/chat/completions with stream=true returns 503 when no model."""
+        response = client.post(
+            "/v1/chat/completions",
+            json={
+                "model": "gpt-4",
+                "messages": [{"role": "user", "content": "Hello"}],
+                "stream": True,
+            },
+        )
+        assert response.status_code == 404
+
+
+class TestChatCompletionsValidation:
+    """Tests for request validation."""
+
+    def test_invalid_temperature_too_low(self, client):
+        """Negative temperature returns 400."""
+        response = client.post(
+            "/v1/chat/completions",
+            json={
+                "model": "gpt-4",
+                "messages": [{"role": "user", "content": "Hello"}],
+                "temperature": -1.0,
+            },
+        )
+        assert response.status_code == 400
+
+    def test_invalid_temperature_too_high(self, client):
+        """Temperature > 2 returns 400."""
+        response = client.post(
+            "/v1/chat/completions",
+            json={
+                "model": "gpt-4",
+                "messages": [{"role": "user", "content": "Hello"}],
+                "temperature": 3.0,
+            },
+        )
+        assert response.status_code == 400
+
+    def test_missing_messages(self, client):
+        """Request without messages returns 400."""
+        response = client.post(
+            "/v1/chat/completions",
+            json={"model": "gpt-4"},
+        )
+        assert response.status_code == 400
+
+    def test_missing_model(self, client):
+        """Request without model returns 400."""
+        response = client.post(
+            "/v1/chat/completions",
+            json={"messages": [{"role": "user", "content": "Hello"}]},
+        )
+        assert response.status_code == 400
+
+    def test_invalid_role(self, client):
+        """Invalid message role returns 400."""
+        response = client.post(
+            "/v1/chat/completions",
+            json={
+                "model": "gpt-4",
+                "messages": [{"role": "invalid", "content": "Hello"}],
+            },
+        )
+        assert response.status_code == 400
+
+    def test_too_many_stop_sequences(self, client):
+        """More than 4 stop sequences returns 400."""
+        response = client.post(
+            "/v1/chat/completions",
+            json={
+                "model": "gpt-4",
+                "messages": [{"role": "user", "content": "Hello"}],
+                "stop": ["1", "2", "3", "4", "5"],
+            },
+        )
+        assert response.status_code == 400
+
+    def test_invalid_top_p(self, client):
+        """top_p > 1 returns 400."""
+        response = client.post(
+            "/v1/chat/completions",
+            json={
+                "model": "gpt-4",
+                "messages": [{"role": "user", "content": "Hello"}],
+                "top_p": 1.5,
+            },
+        )
+        assert response.status_code == 400
+
+
+class TestChatCompletionsWithValidParams:
+    """Tests that valid parameters are accepted (but may return 503 without model)."""
+
+    def test_accepts_all_valid_parameters(self, client):
+        """All valid parameters are accepted."""
+        response = client.post(
+            "/v1/chat/completions",
+            json={
+                "model": "gpt-4",
+                "messages": [
+                    {"role": "system", "content": "You are helpful."},
+                    {"role": "user", "content": "Hello"},
+                ],
+                "temperature": 0.7,
+                "top_p": 0.9,
+                "max_tokens": 100,
+                "stop": ["END"],
+                "frequency_penalty": 0.5,
+                "presence_penalty": 0.5,
+            },
+        )
+        # Should be 503 (no model) not 422 (validation)
+        assert response.status_code == 404
+
+    def test_accepts_temperature_zero(self, client):
+        """Temperature=0 (greedy decoding) is accepted."""
+        response = client.post(
+            "/v1/chat/completions",
+            json={
+                "model": "gpt-4",
+                "messages": [{"role": "user", "content": "Hello"}],
+                "temperature": 0.0,
+            },
+        )
+        assert response.status_code == 404
+
+    def test_accepts_stop_string(self, client):
+        """Single stop sequence as string is accepted."""
+        response = client.post(
+            "/v1/chat/completions",
+            json={
+                "model": "gpt-4",
+                "messages": [{"role": "user", "content": "Hello"}],
+                "stop": "END",
+            },
+        )
+        assert response.status_code == 404
+
+    def test_accepts_stop_list(self, client):
+        """Stop sequences as list is accepted."""
+        response = client.post(
+            "/v1/chat/completions",
+            json={
+                "model": "gpt-4",
+                "messages": [{"role": "user", "content": "Hello"}],
+                "stop": ["END", "STOP"],
+            },
+        )
+        assert response.status_code == 404
+
+    def test_extra_fields_ignored(self, client):
+        """Unknown fields are ignored, not rejected."""
+        response = client.post(
+            "/v1/chat/completions",
+            json={
+                "model": "gpt-4",
+                "messages": [{"role": "user", "content": "Hello"}],
+                "unknown_field": "value",
+            },
+        )
+        # An unknown field is REPORTED (Feature 25), never a validation error: the request goes
+        # on to the model lookup, which 404s ("gpt-4" is not downloaded). The old body also sent
+        # `logprobs: true` with `n: 5`, which Feature 25 made a 400 (scoring needs n=1) — so this
+        # test had failed since 025 for a reason unrelated to what it checks (fixed in 026).
+        assert response.status_code == 404
+
+
+class TestChatCompletionsErrorFormat:
+    """Tests that error responses match OpenAI format."""
+
+    def test_error_has_correct_structure(self, client):
+        """Error response has correct OpenAI structure."""
+        response = client.post(
+            "/v1/chat/completions",
+            json={
+                "model": "gpt-4",
+                "messages": [{"role": "user", "content": "Hello"}],
+            },
+        )
+        data = response.json()
+
+        # Must have error object
+        assert "error" in data
+        error = data["error"]
+
+        # Must have required fields
+        assert "message" in error
+        assert "type" in error
+
+        # May have optional fields
+        # param and code can be None or missing
+
+    def test_unknown_model_returns_invalid_request_type(self, client):
+        """503 status returns server_error type."""
+        response = client.post(
+            "/v1/chat/completions",
+            json={
+                "model": "gpt-4",
+                "messages": [{"role": "user", "content": "Hello"}],
+            },
+        )
+        data = response.json()
+        assert data["error"]["type"] == "invalid_request_error"
+
+
+class TestSteeringIntensityDial:
+    """Feature 10: the steering_intensity field at the HTTP boundary."""
+
+    BODY = {
+        "model": "gpt-4",
+        "messages": [{"role": "user", "content": "Hello"}],
+    }
+
+    def test_invalid_dial_returns_openai_400(self, client):
+        response = client.post(
+            "/v1/chat/completions",
+            json={**self.BODY, "steering_intensity": 5.0},
+        )
+        assert response.status_code == 400
+        error = response.json()["error"]
+        assert error["type"] == "invalid_request_error"
+        assert "steering_intensity" in (error.get("param") or "")
+        assert "[0, 2]" in error["message"]
+
+    def test_symbolic_garbage_returns_openai_400(self, client):
+        response = client.post(
+            "/v1/chat/completions",
+            json={**self.BODY, "steering_intensity": "loud"},
+        )
+        assert response.status_code == 400
+        assert response.json()["error"]["type"] == "invalid_request_error"
+
+    def test_valid_dial_reaches_model_gate(self, client):
+        """A well-formed dial doesn't break routing — request proceeds to the
+        normal no-model 503, not a validation failure."""
+        for dial in ("off", "min", "max", 1.25):
+            response = client.post(
+                "/v1/chat/completions",
+                json={**self.BODY, "steering_intensity": dial},
+            )
+            assert response.status_code == 404, dial
+
+    def test_echo_header_non_streaming(self):
+        """X-miLLM-Steering-Intensity echoes the effective lambda."""
+        from unittest.mock import AsyncMock, MagicMock
+
+        from millm.api.dependencies import get_inference_service, get_model_service
+        from millm.api.schemas.openai import (
+            ChatCompletionChoice,
+            ChatCompletionResponse,
+            ChatMessage,
+            Usage,
+        )
+        from millm.main import create_app
+
+        app = create_app()
+        inference = MagicMock()
+        inference.get_loaded_model_info.return_value = MagicMock(name="gpt-4")
+        inference.get_loaded_model_info.return_value.name = "gpt-4"
+        inference.backend_name = "serial"
+        inference.resolve_request_intensity = AsyncMock(return_value=1.4)
+        inference.create_chat_completion = AsyncMock(
+            return_value=ChatCompletionResponse(
+                id="chatcmpl-1", created=1, model="gpt-4",
+                choices=[ChatCompletionChoice(
+                    index=0,
+                    message=ChatMessage(role="assistant", content="hi"),
+                    finish_reason="stop",
+                )],
+                usage=Usage(prompt_tokens=1, completion_tokens=1, total_tokens=2),
+            )
+        )
+        model_service = MagicMock()
+        # A REAL row. A MagicMock answers every attribute truthily, so a route
+        # that branches on a column — `gguf_files` selects the llama.cpp engine —
+        # takes the GGUF path for an ordinary model.
+        model_service.find_model_by_name = AsyncMock(return_value=make_model())
+        # The endpoints load on demand now; without this the awaited call
+        # returns a bare MagicMock and the route raises TypeError.
+        model_service.load_model_and_wait = AsyncMock()
+        model_service.get_locked_model = AsyncMock(return_value=None)
+        app.dependency_overrides[get_inference_service] = lambda: inference
+        app.dependency_overrides[get_model_service] = lambda: model_service
+
+        with TestClient(app) as tc:
+            response = tc.post(
+                "/v1/chat/completions",
+                json={**self.BODY, "steering_intensity": "max"},
+            )
+        assert response.status_code == 200
+        assert response.headers["X-miLLM-Steering-Intensity"] == "1.4"
+
+    def test_echo_header_streaming(self):
+        """Streaming sends the echo header before the body."""
+        from unittest.mock import AsyncMock, MagicMock
+
+        from millm.api.dependencies import get_inference_service, get_model_service
+        from millm.main import create_app
+
+        async def fake_stream(request):
+            yield "data: [DONE]\n\n"
+
+        app = create_app()
+        inference = MagicMock()
+        inference.get_loaded_model_info.return_value = MagicMock()
+        inference.get_loaded_model_info.return_value.name = "gpt-4"
+        inference.backend_name = "serial"
+        inference.resolve_request_intensity = AsyncMock(return_value=0.0)
+        inference.stream_chat_completion = fake_stream
+        inference.request_queue = MagicMock(pending_count=0, max_pending=5)
+        model_service = MagicMock()
+        # A REAL row. A MagicMock answers every attribute truthily, so a route
+        # that branches on a column — `gguf_files` selects the llama.cpp engine —
+        # takes the GGUF path for an ordinary model.
+        model_service.find_model_by_name = AsyncMock(return_value=make_model())
+        # The endpoints load on demand now; without this the awaited call
+        # returns a bare MagicMock and the route raises TypeError.
+        model_service.load_model_and_wait = AsyncMock()
+        model_service.get_locked_model = AsyncMock(return_value=None)
+        app.dependency_overrides[get_inference_service] = lambda: inference
+        app.dependency_overrides[get_model_service] = lambda: model_service
+
+        with TestClient(app) as tc:
+            response = tc.post(
+                "/v1/chat/completions",
+                json={**self.BODY, "steering_intensity": "off", "stream": True},
+            )
+        assert response.status_code == 200
+        assert response.headers["X-miLLM-Steering-Intensity"] == "0"
+        assert response.headers["X-miLLM-Backend"] == "serial"
+
+    def test_no_dial_no_echo_header(self):
+        """Without the field, the header is absent (and no resolution runs)."""
+        from unittest.mock import AsyncMock, MagicMock
+
+        from millm.api.dependencies import get_inference_service, get_model_service
+        from millm.main import create_app
+
+        app = create_app()
+        inference = MagicMock()
+        inference.get_loaded_model_info.return_value = None
+        model_service = MagicMock()
+        # A REAL row. A MagicMock answers every attribute truthily, so a route
+        # that branches on a column — `gguf_files` selects the llama.cpp engine —
+        # takes the GGUF path for an ordinary model.
+        model_service.find_model_by_name = AsyncMock(return_value=make_model())
+        # The endpoints load on demand now; without this the awaited call
+        # returns a bare MagicMock and the route raises TypeError.
+        model_service.load_model_and_wait = AsyncMock()
+        model_service.get_locked_model = AsyncMock(return_value=None)
+        app.dependency_overrides[get_inference_service] = lambda: inference
+        app.dependency_overrides[get_model_service] = lambda: model_service
+
+        with TestClient(app) as tc:
+            response = tc.post("/v1/chat/completions", json=self.BODY)
+        # The model IS found here, so the endpoint attempts a load; the stub
+        # load is a no-op, so nothing is resident afterwards and 503 is
+        # correct. (An UNKNOWN model is the 404 case, covered above.)
+        assert response.status_code == 503
+        assert "X-miLLM-Steering-Intensity" not in response.headers
+
+    def test_streaming_bad_profile_404_before_stream_commits(self):
+        """R2: a bad profile name must 404 pre-stream, not abort a 200."""
+        from unittest.mock import AsyncMock, MagicMock
+
+        from millm.api.dependencies import get_inference_service, get_model_service
+        from millm.core.errors import ProfileNotFoundError
+        from millm.main import create_app
+
+        app = create_app()
+        inference = MagicMock()
+        inference.get_loaded_model_info.return_value = MagicMock()
+        inference.get_loaded_model_info.return_value.name = "gpt-4"
+        inference.backend_name = "serial"
+        inference.resolve_request_intensity = AsyncMock(return_value=None)
+        inference.ensure_profile_exists = AsyncMock(
+            side_effect=ProfileNotFoundError("Profile 'ghost' not found")
+        )
+        model_service = MagicMock()
+        # A REAL row. A MagicMock answers every attribute truthily, so a route
+        # that branches on a column — `gguf_files` selects the llama.cpp engine —
+        # takes the GGUF path for an ordinary model.
+        model_service.find_model_by_name = AsyncMock(return_value=make_model())
+        # The endpoints load on demand now; without this the awaited call
+        # returns a bare MagicMock and the route raises TypeError.
+        model_service.load_model_and_wait = AsyncMock()
+        model_service.get_locked_model = AsyncMock(return_value=None)
+        app.dependency_overrides[get_inference_service] = lambda: inference
+        app.dependency_overrides[get_model_service] = lambda: model_service
+
+        with TestClient(app) as tc:
+            response = tc.post(
+                "/v1/chat/completions",
+                json={**self.BODY, "profile": "ghost", "stream": True},
+            )
+        assert response.status_code == 404
+        assert response.json()["error"]["type"] == "invalid_request_error"
+
+
+class TestOpenAIValidationHandlerHardening:
+    """010 R3: multi-error and non-/v1 paths of the validation handler."""
+
+    def test_multi_error_names_first_and_counts_rest(self, client):
+        response = client.post(
+            "/v1/chat/completions",
+            json={"model": "m",
+                  "messages": [{"role": "user", "content": "x"}],
+                  "temperature": -5, "steering_intensity": 9.0},
+        )
+        assert response.status_code == 400
+        assert "more validation error" in response.json()["error"]["message"]
+
+    def test_single_error_has_param(self, client):
+        response = client.post(
+            "/v1/chat/completions",
+            json={"model": "m",
+                  "messages": [{"role": "user", "content": "x"}],
+                  "steering_intensity": 9.0},
+        )
+        assert response.status_code == 400
+        assert "steering_intensity" in (response.json()["error"]["param"] or "")
+
+    def test_non_v1_keeps_fastapi_shape(self, client):
+        response = client.put(
+            "/api/clusters/prof_x/intensity", json={"intensity": 99}
+        )
+        assert response.status_code == 422
+        assert "detail" in response.json()
+
+
+class TestBatchCapabilityHeader:
+    """X-miLLM-Batch is the probe that makes batch support observable.
+
+    Without it a client cannot distinguish this server from one that predates
+    `extra_messages`: both schemas are extra="ignore", so the older server
+    accepts the field and returns a single choice with no error.
+    """
+
+    BODY = {
+        "model": "gpt-4",
+        "messages": [{"role": "user", "content": "one"}],
+    }
+
+    def _app(self, choices):
+        from unittest.mock import AsyncMock, MagicMock
+
+        from millm.api.dependencies import get_inference_service, get_model_service
+        from millm.api.schemas.openai import (
+            ChatCompletionChoice,
+            ChatCompletionResponse,
+            ChatMessage,
+            Usage,
+        )
+        from millm.main import create_app
+
+        app = create_app()
+        inference = MagicMock()
+        info = MagicMock()
+        info.name = "gpt-4"
+        inference.get_loaded_model_info.return_value = info
+        inference.backend_name = "serial"
+        inference.resolve_request_intensity = AsyncMock(return_value=None)
+        inference.request_queue = MagicMock(pending_count=0, max_pending=5)
+        inference.create_chat_completion = AsyncMock(
+            return_value=ChatCompletionResponse(
+                id="chatcmpl-x",
+                created=0,
+                model="gpt-4",
+                choices=[
+                    ChatCompletionChoice(
+                        index=i,
+                        message=ChatMessage(role="assistant", content=f"r{i}"),
+                        finish_reason="stop",
+                    )
+                    for i in range(choices)
+                ],
+                usage=Usage(prompt_tokens=1, completion_tokens=1, total_tokens=2),
+            )
+        )
+        model_service = MagicMock()
+        # A REAL row. A MagicMock answers every attribute truthily, so a route
+        # that branches on a column — `gguf_files` selects the llama.cpp engine —
+        # takes the GGUF path for an ordinary model.
+        model_service.find_model_by_name = AsyncMock(return_value=make_model())
+        # The endpoints load on demand now; without this the awaited call
+        # returns a bare MagicMock and the route raises TypeError.
+        model_service.load_model_and_wait = AsyncMock()
+        model_service.get_locked_model = AsyncMock(return_value=None)
+        app.dependency_overrides[get_inference_service] = lambda: inference
+        app.dependency_overrides[get_model_service] = lambda: model_service
+        return app
+
+    def test_header_reports_the_batch_size(self):
+        from fastapi.testclient import TestClient
+
+        with TestClient(self._app(3)) as tc:
+            r = tc.post(
+                "/v1/chat/completions",
+                json={
+                    **self.BODY,
+                    "extra_messages": [
+                        [{"role": "user", "content": "two"}],
+                        [{"role": "user", "content": "three"}],
+                    ],
+                },
+            )
+        assert r.status_code == 200
+        assert r.headers["X-miLLM-Batch"] == "3"
+        assert len(r.json()["choices"]) == 3
+
+    def test_header_is_present_for_an_unbatched_request(self):
+        """Presence is the capability signal; the value is just the size."""
+        from fastapi.testclient import TestClient
+
+        with TestClient(self._app(1)) as tc:
+            r = tc.post("/v1/chat/completions", json=self.BODY)
+        assert r.status_code == 200
+        assert r.headers["X-miLLM-Batch"] == "1", (
+            "a client cannot detect batch support without this header"
+        )

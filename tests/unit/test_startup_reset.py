@@ -1,0 +1,517 @@
+"""Startup stale-state reset (Feature 13 R3 regression).
+
+The reset clears in-memory-derived state that cannot survive a restart: loaded
+models, the steering lock, attached SAEs, active attachments, and active
+circuits.
+
+The regression this pins: the UPDATEs originally shared ONE transaction
+with a single commit, so a table that does not exist yet (a migration not run
+on this deployment) aborted the transaction and silently rolled back the resets
+that HAD succeeded — leaving exactly the stale state the block exists to clear,
+reported only as a warning. Each reset now owns its transaction.
+"""
+
+from pathlib import Path
+
+from millm.main import STALE_STATE_RESETS
+from tests.unit.batch_fixtures import batch_db  # noqa: F401
+
+REPO = Path(__file__).resolve().parents[2]
+MAIN = REPO / "millm" / "main.py"
+
+
+def _reset_block() -> str:
+    """The region of `lifespan` that RUNS the resets.
+
+    Structure only — how the statements are executed. What they say is asserted
+    against the imported `STALE_STATE_RESETS` instead of scraped out of here: a
+    test that greps source for `"models",` keeps passing when the entry has been
+    renamed to something the runtime never looks up, and one that greps for SQL
+    keeps passing when nothing executes it.
+    """
+    text = MAIN.read_text()
+    start = text.index("resets = STALE_STATE_RESETS")
+    # F19: stop at the claim-reconciliation block, which now sits between the
+    # resets and the SAE-state clear. Without this the helper swallowed the new
+    # block and the "one session per reset" count went from 1 to 2.
+    end = text.index("F19 R2-09: RELEASE ALL CLAIMS at startup")
+    return text[start:end]
+
+
+def _sql_for(event: str) -> str:
+    """The statement the runtime will actually run for `event`."""
+    matches = [sql for name, sql, _ in STALE_STATE_RESETS if name == event]
+    assert matches, f"no {event!r} entry in STALE_STATE_RESETS"
+    return matches[0]
+
+
+class TestResetsAreIndependent:
+    def test_each_reset_gets_its_own_session_and_commit(self):
+        """One shared transaction meant one failure rolled back the others."""
+        block = _reset_block()
+        # The loop opens a session per reset and commits inside it.
+        assert "for event, sql, table in resets:" in block
+        assert block.count("async with async_session_factory() as session:") == 1
+        assert "await session.commit()" in block
+        # And each iteration is individually guarded.
+        assert "except Exception" in block
+        assert "stale_reset_failed" in block
+
+    def test_a_failing_reset_cannot_abort_the_others(self):
+        """The try/except is INSIDE the loop, so one bad table is isolated."""
+        block = _reset_block()
+        loop_at = block.index("for event, sql, table in resets:")
+        try_at = block.index("try:", loop_at)
+        session_at = block.index("async with async_session_factory()", loop_at)
+        # try: comes after the loop header and before the session — i.e. the
+        # guard wraps each iteration's own transaction.
+        assert loop_at < try_at < session_at
+
+    def test_every_kind_of_restart_scoped_state_is_reset(self):
+        tables = {table for _, _, table in STALE_STATE_RESETS}
+        assert {"models", "saes", "sae_attachments", "circuits"} <= tables
+
+    def test_the_STEERING_LOCK_is_among_them(self):
+        """The one this block forgot, and the cost of forgetting it.
+
+        A locked model is the only model `/v1/models` advertises. The lock is
+        taken when an SAE attaches — in-memory state, exactly like the three
+        resets either side of it — but nothing cleared it on restart, so one
+        restart mid-steer pinned the catalogue to a single model until somebody
+        unlocked the row by hand. `gemma-2-2b-it` held it from 2026-05-12 to
+        2026-08-19, hiding thirteen ready models.
+        """
+        sql = _sql_for("reset_stale_model_lock")
+        assert "locked = false" in sql
+        # Scoped on the FLAG, not on status. The stale row's status has already
+        # been reset to 'ready' by an earlier restart, so a status-scoped filter
+        # drops the exact row that still needs clearing.
+        assert "WHERE locked = true" in sql
+
+    def test_circuits_reset_clears_serving_mode_too(self):
+        """A stale is_active row with a serving_mode would keep claiming to
+        serve — and would let set_intensity re-arm an unvalidated circuit."""
+        sql = _sql_for("deactivated_stale_circuits")
+        assert "is_active = false" in sql
+        assert "serving_mode = NULL" in sql
+
+    def test_model_reset_still_clears_loaded_and_loading(self):
+        """The pre-existing behaviour must survive the restructure."""
+        sql = _sql_for("reset_stale_model_status")
+        assert "status IN ('loaded', 'loading')" in sql
+        assert "loaded_at = NULL" in sql
+
+
+class TestF19ReconcileIsDELIBERATELYNotCalledAtStartup:
+    """F19 R3-15. R1-01 wired `reconcile()` at startup because nothing called
+    it. R2-09 then made startup release EVERY claim outright — correct, since
+    nothing is steering after a restart — and that left reconcile dead in BOTH
+    directions:
+
+      * the ORPHAN branch computes {live claims} - {active circuits}, and the
+        release empties the first set;
+      * the DEMOTION branch reads active circuits, and the bulk
+        `UPDATE circuits SET is_active=false` empties that set.
+
+    Calling it anyway is theatre: a green log line implying a check ran when
+    both its inputs are empty by construction. And the previous test here
+    asserted reconcile was "WIRED" by MOCKING it — so it would have kept
+    passing after the method body was deleted, which is the dead-mechanism trap
+    this increment has hit four times.
+
+    The method is KEPT (recovery for a database written by an older build,
+    gated by `at_startup=True`), so these tests pin the DECISION rather than
+    the absence.
+    """
+
+    def test_startup_does_not_call_reconcile(self):
+        # Strip comments before asserting: the word appears in the block
+        # explaining WHY it is not called, and matching prose would make this
+        # test fail on its own documentation.
+        text = MAIN.read_text()
+        code = "\n".join(
+            line for line in text.splitlines() if not line.strip().startswith("#")
+        )
+        assert ".reconcile(" not in code, (
+            "reconcile is called at startup again — both its inputs are "
+            "emptied by the steps above it, so it can only report an empty "
+            "result while implying a check ran"
+        )
+
+    def test_the_reasoning_is_recorded_where_the_call_was(self):
+        """So the next reader does not re-add it as a missing safety step."""
+        text = MAIN.read_text()
+        assert "F19 R3-15" in text
+        assert "dead in" in text
+
+    def test_the_method_still_exists_for_older_databases(self):
+        from millm.services.circuit_claim_registry import CircuitClaimRegistry
+
+        assert hasattr(CircuitClaimRegistry, "reconcile"), (
+            "reconcile was deleted — it is the recovery path for a database "
+            "written by a build that did not release claims at startup"
+        )
+
+
+class TestF19R2StartupReleasesClaimsPLAINLY:
+    """F19 R2-09. Reconcile ran AFTER the bulk
+    `UPDATE circuits SET is_active=false`, which empties the active set — so
+    its orphan branch fired for EVERY claim on EVERY restart and logged
+    `circuit_claim_orphan_released` ("claims outlived their circuit's
+    activation") as an anomaly.
+
+    It is not an anomaly. It is the guaranteed steady state of a restart. A
+    permanently false-positive warning trains operators to ignore the one
+    signal that would matter when a genuine orphan appears, and reconcile's
+    demotion branch was unreachable for the same reason.
+
+    Nothing is steering after a restart — the in-memory owner map is empty — so
+    no claim can be valid. Startup now releases them plainly and says so as
+    routine.
+    """
+
+    def test_startup_releases_claims_as_a_restart_consequence(self):
+        text = MAIN.read_text()
+        assert "circuit_claims_released_on_startup" in text
+        assert "nothing is steering after a restart" in text, (
+            "the log does not say WHY the claims went, so it reads as an "
+            "anomaly rather than as the expected outcome"
+        )
+
+    def test_it_runs_AFTER_the_circuits_are_deactivated(self):
+        """Ordering still matters, just against a different neighbour.
+
+        (This asserted the release ran BEFORE reconcile; R3-15 removed the
+        reconcile call, so the meaningful ordering is now against the bulk
+        deactivation — the release must see the post-reset state.)
+        """
+        text = MAIN.read_text()
+        deactivate = text.index("deactivated_stale_circuits")
+        release = text.index("circuit_claims_released_on_startup")
+        assert deactivate < release
+
+    def test_a_failed_release_is_an_ERROR_not_a_warning(self):
+        """Stale claims refuse every activation on those layers for the life of
+        the process, and there is no runtime remedy — that is not a warning."""
+        text = MAIN.read_text()
+        start = text.index("circuit_claim_startup_release_failed")
+        # The handler is the logger.error call this event name sits inside.
+        block = text[start - 60 : start + 700]
+        assert "logger.error" in block, "a failed release is only a warning"
+        # NB: the source wraps the sentence across concatenated string
+        # literals, so match a fragment that cannot straddle a line break.
+        assert "runtime remedy short of another restart" in block, (
+            "the log does not say that stale claims cannot be cleared without "
+            "another restart"
+        )
+
+
+class TestF19R2ClaimsDegradationIsVISIBLE:
+    """F19 R2-19. A failed reconcile logged a line and the app served anyway.
+
+    That is the right call — refusing to start over a bookkeeping table would
+    be worse — but stale claims REFUSE every activation on their layers for the
+    life of the process, with no runtime remedy. The only clue was one WARNING
+    in startup logs that has already scrolled away, while `/health` reported a
+    fully healthy system and a readiness probe could not tell the difference.
+    """
+
+    def test_health_reports_DEGRADED_when_claims_are_unreconciled(self):
+        import asyncio
+        from unittest.mock import MagicMock
+
+        from millm.api.routes.system import health as health_mod
+
+        health_mod.CIRCUIT_CLAIMS_DEGRADED["degraded"] = False
+        health_mod.CIRCUIT_CLAIMS_DEGRADED["reason"] = None
+        try:
+            health_mod.note_claims_degraded("reconcile failed: boom")
+            result = asyncio.run(
+                health_mod.detailed_health_check(model_loader=MagicMock(is_loaded=False))
+            )
+            claims = next(
+                c for c in result.components if c.name == "circuit_claims"
+            )
+            assert claims.status == health_mod.HealthStatus.DEGRADED
+            assert "restarts" in claims.message
+            assert result.status == health_mod.HealthStatus.DEGRADED
+        finally:
+            health_mod.CIRCUIT_CLAIMS_DEGRADED["degraded"] = False
+            health_mod.CIRCUIT_CLAIMS_DEGRADED["reason"] = None
+
+    def test_health_reports_HEALTHY_when_they_reconciled(self):
+        import asyncio
+        from unittest.mock import MagicMock
+
+        from millm.api.routes.system import health as health_mod
+
+        health_mod.CIRCUIT_CLAIMS_DEGRADED["degraded"] = False
+        result = asyncio.run(
+            health_mod.detailed_health_check(model_loader=MagicMock(is_loaded=False))
+        )
+        claims = next(c for c in result.components if c.name == "circuit_claims")
+        assert claims.status == health_mod.HealthStatus.HEALTHY
+
+    def test_the_release_failure_path_flags_degraded(self):
+        """R3-15 removed the reconcile call, so there is one startup claim path
+        left — and its failure must still reach `/health/detailed`."""
+        text = MAIN.read_text()
+        idx = text.index("circuit_claim_startup_release_failed")
+        window = text[max(0, idx - 400) : idx]
+        assert "_note_claims_degraded" in window, (
+            "the release failure path does not flag claims as degraded, so "
+            "/health stays green while activations are refused"
+        )
+
+
+class TestAnInterruptedDownloadIsNotLeftRunningForever:
+    """A restart kills the download thread; the row must not claim otherwise.
+
+    `_DOWNLOAD_PROGRESS` justifies its in-process design with "startup already
+    resets any model left in DOWNLOADING". Nothing did, and a row sat stuck in
+    `downloading` for half an hour after its pod was replaced — 8 GB of a 17 GB
+    file on disk, no thread behind it, and `download_progress: null`, which the
+    UI renders identically to a slow download.
+
+    MUTATION CONTROLS:
+      * remove the reset entry      -> "there is a reset" fails
+      * change 'error' to 'ready'   -> "does not call a partial download ready" fails
+    """
+
+    def _download_reset(self):
+        matches = [r for r in STALE_STATE_RESETS if "download" in r[0]]
+        assert matches, "no startup reset covers an interrupted download"
+        return matches[0]
+
+    def test_there_is_a_reset_for_interrupted_downloads(self):
+        event, sql, table = self._download_reset()
+        assert table == "models"
+        assert "downloading" in sql
+
+    def test_it_does_not_call_a_partial_download_ready(self):
+        """The files are incomplete; 'ready' would offer a model that cannot load."""
+        _event, sql, _table = self._download_reset()
+        assert "'error'" in sql
+        assert "status = 'ready'" not in sql
+
+    def test_it_says_the_download_can_be_retried(self):
+        """A terminal row with no explanation is a dead end for the operator."""
+        _event, sql, _table = self._download_reset()
+        assert "error_message" in sql
+        assert "etry" in sql, "the message must tell the operator what to do next"
+
+    def test_it_only_touches_downloading_rows(self):
+        """A ready or loaded model must not be marked as an error."""
+        _event, sql, _table = self._download_reset()
+        assert "WHERE status = 'downloading'" in sql
+
+
+
+class TestLeasesEndAtRestart:
+    """Feature 29, X-01: a restart ends every model lease (task 4.4).
+
+    The reconciliation is RUN for real against a filled registry; the AST is used only to prove
+    `lifespan` calls it (memory `startup-reset-lists-hide-omissions`: a new in-memory state left
+    out of startup reconciliation has shipped three times in this estate).
+    """
+
+    def test_clear_leases_on_startup_empties_a_filled_registry(self):
+        from millm.services.model_lease import (
+            LeaseRegistry,
+            clear_leases_on_startup,
+            get_lease_registry,
+            set_lease_registry,
+        )
+
+        set_lease_registry(LeaseRegistry(resident_model_id=lambda: 1))
+        registry = get_lease_registry()
+        registry.grant(1, "m1", "midataworks", "label run", 7200)
+        assert registry.current(1) is not None
+
+        assert clear_leases_on_startup() == 1
+
+        assert registry.current(1) is None
+        assert registry.last_ended(1).end_reason == "restart"
+
+    def test_lifespan_calls_it(self):
+        import ast
+        import inspect
+
+        import millm.main as main
+
+        tree = ast.parse(inspect.getsource(main.lifespan))
+        calls = [
+            node.func.id
+            for node in ast.walk(tree)
+            if isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
+        ]
+        assert calls, "the scanner found no calls in lifespan, so it is not reading it"
+        assert calls.count("clear_leases_on_startup") == 1, (
+            f"lifespan does not call clear_leases_on_startup; calls seen: {sorted(set(calls))}"
+        )
+
+    def test_the_name_lifespan_calls_is_the_real_function(self):
+        """A local stub named `clear_leases_on_startup` in main.py would satisfy the AST test."""
+        import millm.main as main
+        from millm.services import model_lease
+
+        assert main.clear_leases_on_startup is model_lease.clear_leases_on_startup
+
+
+class TestWeightsAndCheckpointsAtRestart:
+    """Feature 31 task 7.1/7.3 (control M18) and 032 task 2.6 (control M30).
+
+    The reset is RUN for real over a barrier left torn with an attachment; the lifespan is RUN
+    for real with the four Feature 31/32 startup calls replaced by spies (call and count, not
+    source text), and its AST is walked only to pin the order after the lease clear.
+    """
+
+    async def test_reset_weights_on_startup_clears_a_torn_barrier_and_its_attachment(
+        self, monkeypatch
+    ):
+        import contextlib
+        from datetime import datetime, timezone
+
+        import millm.services.weight_barrier as barrier_module
+        from millm.core.weights_auth import WeightsIdentity
+        from millm.services.weight_attachment import (
+            Attachment,
+            get_weight_service,
+            reset_weights_on_startup,
+        )
+        from millm.services.weight_barrier import WeightBarrier, get_weight_barrier, set_weight_barrier
+
+        class Inference:
+            request_queue = type("Q", (), {"max_concurrent": 1})()
+
+            def cbm_enabled(self):
+                return False
+
+            def invalidate_request_caches(self):
+                return 0
+
+            @contextlib.asynccontextmanager
+            async def hold_admission(self):
+                yield
+
+        monkeypatch.setattr(barrier_module, "_synchronize_resident_devices", lambda: None)
+        who = WeightsIdentity("miforge", "trainer")
+        barrier = WeightBarrier(inference=Inference)
+        set_weight_barrier(barrier)
+        await barrier.quiesce("d" * 64, who)
+        barrier.commit_begin("d" * 64)
+        barrier.commit_end("d" * 64)
+        barrier.commit_begin("d" * 64)
+        barrier.mark_torn("test")
+        service = get_weight_service()
+        service._attachment = Attachment(
+            digest="d" * 64, ref="dddddddd", identity=who,
+            attached_at=datetime.now(timezone.utc), model_id=1, pending=False,
+        )
+
+        reset_weights_on_startup()
+
+        snap = get_weight_barrier().snapshot()
+        assert (snap.weights_state, snap.barrier, snap.hold_owner) == ("clean", "serving", None)
+        assert snap.steps_since_load == 0 and not barrier.holds_slot()
+        assert get_weight_service() is not service
+        assert get_weight_service().is_attached() is False
+
+    def test_lifespan_calls_them_after_the_lease_clear(self):
+        import ast
+        import inspect
+
+        import millm.main as main
+
+        tree = ast.parse(inspect.getsource(main.lifespan))
+        order = [
+            node.func.id
+            for node in ast.walk(tree)
+            if isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
+        ]
+        for name in ("reset_weights_on_startup", "check_schema_ownership_on_startup",
+                     "remove_stale_temp_dirs", "weights_tick_loop"):
+            assert order.count(name) == 1, f"lifespan does not call {name}"
+        lines = {
+            node.func.id: node.lineno
+            for node in ast.walk(tree)
+            if isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
+        }
+        assert lines["clear_leases_on_startup"] < lines["reset_weights_on_startup"]
+        assert lines["reset_weights_on_startup"] < lines["remove_stale_temp_dirs"]
+
+    def test_the_names_lifespan_calls_are_the_real_functions(self):
+        import millm.main as main
+        from millm.services import checkpoint_store, weight_attachment, weights_checkpoint_service
+
+        assert main.reset_weights_on_startup is weight_attachment.reset_weights_on_startup
+        assert main.weights_tick_loop is weight_attachment.weights_tick_loop
+        assert (main.check_schema_ownership_on_startup
+                is weights_checkpoint_service.check_schema_ownership_on_startup)
+        assert main.remove_stale_temp_dirs is checkpoint_store.remove_stale_temp_dirs
+
+    async def test_running_lifespan_calls_each_once_and_starts_and_stops_the_tick(
+        self, monkeypatch, batch_db
+    ):
+        """M18 / M30: each removal turns one count red."""
+        import asyncio
+        from unittest.mock import AsyncMock, MagicMock
+
+        import millm.db.base as db_base
+        import millm.main as main
+
+        monkeypatch.setattr(db_base, "async_session_factory", batch_db)
+        monkeypatch.setattr(main, "start_batch_api", AsyncMock())
+        monkeypatch.setattr(main, "stop_batch_api", AsyncMock())
+        monkeypatch.setattr(main, "disarm_probes_on_startup", AsyncMock(return_value=[]))
+        monkeypatch.setattr(main.settings, "AUTO_LOAD_MODEL", None, raising=False)
+        reset, assert_owner, cleanup = MagicMock(), MagicMock(), MagicMock()
+        monkeypatch.setattr(main, "reset_weights_on_startup", reset)
+        monkeypatch.setattr(main, "check_schema_ownership_on_startup", assert_owner)
+        monkeypatch.setattr(main, "remove_stale_temp_dirs", cleanup)
+        ticks: list[str] = []
+
+        async def tick_loop():
+            ticks.append("started")
+            try:
+                await asyncio.sleep(3600)
+            except asyncio.CancelledError:
+                ticks.append("cancelled")
+                raise
+
+        monkeypatch.setattr(main, "weights_tick_loop", tick_loop)
+
+        async with main.lifespan(MagicMock()):
+            await asyncio.sleep(0)
+            assert (reset.call_count, assert_owner.call_count, cleanup.call_count) == (1, 1, 1)
+            assert reset.call_args.args == () and cleanup.call_args.args == ()
+            assert ticks == ["started"]
+        assert ticks == ["started", "cancelled"]
+
+    async def test_a_fresh_process_reports_clean_on_the_status_route(self, monkeypatch, batch_db):
+        """PADR v1.6 §10: new barrier, new service, the app started through `lifespan`."""
+        import httpx
+        from unittest.mock import AsyncMock
+
+        import millm.db.base as db_base
+        import millm.main as main
+        from tests.unit.lease_fixtures import clear_resident, set_resident
+
+        monkeypatch.setattr(db_base, "async_session_factory", batch_db)
+        monkeypatch.setattr(main, "start_batch_api", AsyncMock())
+        monkeypatch.setattr(main, "stop_batch_api", AsyncMock())
+        monkeypatch.setattr(main, "disarm_probes_on_startup", AsyncMock(return_value=[]))
+        monkeypatch.setattr(main.settings, "AUTO_LOAD_MODEL", None, raising=False)
+        monkeypatch.setattr(main, "remove_stale_temp_dirs", lambda: [])
+        app = main.create_app()
+        try:
+            async with main.lifespan(app):
+                set_resident(1, "m1")
+                async with httpx.AsyncClient(
+                    transport=httpx.ASGITransport(app=app), base_url="http://test"
+                ) as client:
+                    data = (await client.get("/api/weights/status")).json()["data"]
+        finally:
+            clear_resident()
+        assert data["weights_state"] == "clean" and data["attached"] is False
+        assert data["barrier"] == "serving" and data["steps_since_load"] == 0

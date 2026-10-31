@@ -1,0 +1,882 @@
+{
+  "format": "mistudio.decision-precedence-cases/1",
+  "owner": "miStudio (feature 040 S2, services/probe_monitor_metrics.deployed_decision); vendored by miLLM",
+  "rule": [
+    "Inputs: the probe's global bar (probe.threshold), its length bands (probe.length_bands), its scope (probe.scope, a contract scope), the window being judged (null = the probe's own scope), that window's entry from decision.windows (window_entry: {threshold, length_bands}, or null), and the number of scored tokens (n_scored).",
+    "own = window_entry.threshold (null when there is no entry). bar = own when not null, else probe.threshold. base rule = window_bar when own is not null, else global when bar is not null, else none.",
+    "A band table (probe.length_bands, or window_entry.length_bands) is used whole or not at all: it is treated as empty unless every band has a numeric threshold (not null), an integer min_tokens >= 0 and a max_tokens that is null or an integer, and the last band is open-ended (max_tokens null). This is the table a server arms; a table it would not arm decides nothing.",
+    "A band table matches n_scored with the first band where min_tokens <= n_scored and (max_tokens is null or n_scored <= max_tokens). A matched band sets the bar to its threshold.",
+    "1. When own is not null and window_entry.length_bands is non-empty: a matching band gives rule window_band; no matching band gives the base rule and the bar.",
+    "2. Otherwise, when the window is the probe's own scope (window null or equal to probe.scope) and (own is null or probe.scope is \"all\") and probe.length_bands is non-empty: a matching band gives rule probe_band.",
+    "3. Otherwise: the base rule and the bar.",
+    "expect.threshold null means no bar: the probe does not fire. A probe fires when score >= threshold."
+  ],
+  "cases": [
+    {
+      "name": "own-scope.short.probe-band",
+      "note": "no window named: the probe's own scope; its length bands refine the global bar",
+      "probe": {
+        "threshold": 0.5,
+        "length_bands": [
+          {
+            "min_tokens": 0,
+            "max_tokens": 100,
+            "threshold": 0.4,
+            "threshold_source": "band"
+          },
+          {
+            "min_tokens": 101,
+            "max_tokens": null,
+            "threshold": 0.6,
+            "threshold_source": "band"
+          }
+        ],
+        "scope": "all"
+      },
+      "window_entry": null,
+      "window": null,
+      "n_scored": 10,
+      "expect": {
+        "threshold": 0.4,
+        "rule": "probe_band"
+      }
+    },
+    {
+      "name": "own-scope.long.probe-band",
+      "note": "the open-ended last band",
+      "probe": {
+        "threshold": 0.5,
+        "length_bands": [
+          {
+            "min_tokens": 0,
+            "max_tokens": 100,
+            "threshold": 0.4,
+            "threshold_source": "band"
+          },
+          {
+            "min_tokens": 101,
+            "max_tokens": null,
+            "threshold": 0.6,
+            "threshold_source": "band"
+          }
+        ],
+        "scope": "all"
+      },
+      "window_entry": null,
+      "window": null,
+      "n_scored": 500,
+      "expect": {
+        "threshold": 0.6,
+        "rule": "probe_band"
+      }
+    },
+    {
+      "name": "own-scope.band-boundary",
+      "note": "max_tokens is inclusive",
+      "probe": {
+        "threshold": 0.5,
+        "length_bands": [
+          {
+            "min_tokens": 0,
+            "max_tokens": 100,
+            "threshold": 0.4,
+            "threshold_source": "band"
+          },
+          {
+            "min_tokens": 101,
+            "max_tokens": null,
+            "threshold": 0.6,
+            "threshold_source": "band"
+          }
+        ],
+        "scope": "all"
+      },
+      "window_entry": null,
+      "window": null,
+      "n_scored": 100,
+      "expect": {
+        "threshold": 0.4,
+        "rule": "probe_band"
+      }
+    },
+    {
+      "name": "own-scope.next-band-boundary",
+      "note": "min_tokens is inclusive",
+      "probe": {
+        "threshold": 0.5,
+        "length_bands": [
+          {
+            "min_tokens": 0,
+            "max_tokens": 100,
+            "threshold": 0.4,
+            "threshold_source": "band"
+          },
+          {
+            "min_tokens": 101,
+            "max_tokens": null,
+            "threshold": 0.6,
+            "threshold_source": "band"
+          }
+        ],
+        "scope": "all"
+      },
+      "window_entry": null,
+      "window": null,
+      "n_scored": 101,
+      "expect": {
+        "threshold": 0.6,
+        "rule": "probe_band"
+      }
+    },
+    {
+      "name": "window.own-bar.own-bands.short",
+      "note": "a window with its own bar AND its own bands: its own bands refine its own bar",
+      "probe": {
+        "threshold": 0.5,
+        "length_bands": [
+          {
+            "min_tokens": 0,
+            "max_tokens": 100,
+            "threshold": 0.4,
+            "threshold_source": "band"
+          },
+          {
+            "min_tokens": 101,
+            "max_tokens": null,
+            "threshold": 0.6,
+            "threshold_source": "band"
+          }
+        ],
+        "scope": "all"
+      },
+      "window_entry": {
+        "threshold": 0.7,
+        "length_bands": [
+          {
+            "min_tokens": 0,
+            "max_tokens": 50,
+            "threshold": 0.65,
+            "threshold_source": "band"
+          },
+          {
+            "min_tokens": 51,
+            "max_tokens": null,
+            "threshold": 0.75,
+            "threshold_source": "band"
+          }
+        ]
+      },
+      "window": "prompt",
+      "n_scored": 10,
+      "expect": {
+        "threshold": 0.65,
+        "rule": "window_band"
+      }
+    },
+    {
+      "name": "window.own-bar.own-bands.long",
+      "note": "the window's own open-ended band",
+      "probe": {
+        "threshold": 0.5,
+        "length_bands": [
+          {
+            "min_tokens": 0,
+            "max_tokens": 100,
+            "threshold": 0.4,
+            "threshold_source": "band"
+          },
+          {
+            "min_tokens": 101,
+            "max_tokens": null,
+            "threshold": 0.6,
+            "threshold_source": "band"
+          }
+        ],
+        "scope": "all"
+      },
+      "window_entry": {
+        "threshold": 0.7,
+        "length_bands": [
+          {
+            "min_tokens": 0,
+            "max_tokens": 50,
+            "threshold": 0.65,
+            "threshold_source": "band"
+          },
+          {
+            "min_tokens": 51,
+            "max_tokens": null,
+            "threshold": 0.75,
+            "threshold_source": "band"
+          }
+        ]
+      },
+      "window": "prompt",
+      "n_scored": 60,
+      "expect": {
+        "threshold": 0.75,
+        "rule": "window_band"
+      }
+    },
+    {
+      "name": "window.own-bar.no-bands",
+      "note": "the probe's bands were cut for another window and never refine this one",
+      "probe": {
+        "threshold": 0.5,
+        "length_bands": [
+          {
+            "min_tokens": 0,
+            "max_tokens": 100,
+            "threshold": 0.4,
+            "threshold_source": "band"
+          },
+          {
+            "min_tokens": 101,
+            "max_tokens": null,
+            "threshold": 0.6,
+            "threshold_source": "band"
+          }
+        ],
+        "scope": "all"
+      },
+      "window_entry": {
+        "threshold": 0.7,
+        "length_bands": null
+      },
+      "window": "prompt",
+      "n_scored": 10,
+      "expect": {
+        "threshold": 0.7,
+        "rule": "window_bar"
+      }
+    },
+    {
+      "name": "window.bands-without-own-bar",
+      "note": "a window's bands are read only beside its own bar; with none the global bar applies, unrefined (the window is not the probe's scope)",
+      "probe": {
+        "threshold": 0.5,
+        "length_bands": [
+          {
+            "min_tokens": 0,
+            "max_tokens": 100,
+            "threshold": 0.4,
+            "threshold_source": "band"
+          },
+          {
+            "min_tokens": 101,
+            "max_tokens": null,
+            "threshold": 0.6,
+            "threshold_source": "band"
+          }
+        ],
+        "scope": "all"
+      },
+      "window_entry": {
+        "threshold": null,
+        "length_bands": [
+          {
+            "min_tokens": 0,
+            "max_tokens": 50,
+            "threshold": 0.65,
+            "threshold_source": "band"
+          },
+          {
+            "min_tokens": 51,
+            "max_tokens": null,
+            "threshold": 0.75,
+            "threshold_source": "band"
+          }
+        ]
+      },
+      "window": "prompt",
+      "n_scored": 10,
+      "expect": {
+        "threshold": 0.5,
+        "rule": "global"
+      }
+    },
+    {
+      "name": "window.no-entry",
+      "note": "a window with no entry is judged against the global bar, unrefined",
+      "probe": {
+        "threshold": 0.5,
+        "length_bands": [
+          {
+            "min_tokens": 0,
+            "max_tokens": 100,
+            "threshold": 0.4,
+            "threshold_source": "band"
+          },
+          {
+            "min_tokens": 101,
+            "max_tokens": null,
+            "threshold": 0.6,
+            "threshold_source": "band"
+          }
+        ],
+        "scope": "all"
+      },
+      "window_entry": null,
+      "window": "prompt",
+      "n_scored": 10,
+      "expect": {
+        "threshold": 0.5,
+        "rule": "global"
+      }
+    },
+    {
+      "name": "window.no-entry.response",
+      "note": "same over the reply window",
+      "probe": {
+        "threshold": 0.5,
+        "length_bands": [
+          {
+            "min_tokens": 0,
+            "max_tokens": 100,
+            "threshold": 0.4,
+            "threshold_source": "band"
+          },
+          {
+            "min_tokens": 101,
+            "max_tokens": null,
+            "threshold": 0.6,
+            "threshold_source": "band"
+          }
+        ],
+        "scope": "all"
+      },
+      "window_entry": null,
+      "window": "response",
+      "n_scored": 500,
+      "expect": {
+        "threshold": 0.5,
+        "rule": "global"
+      }
+    },
+    {
+      "name": "own-window.own-bar.all-probe",
+      "note": "an `all` probe read over `all` with its own window bar: the probe's bands refine it (cut from the same pass)",
+      "probe": {
+        "threshold": 0.5,
+        "length_bands": [
+          {
+            "min_tokens": 0,
+            "max_tokens": 100,
+            "threshold": 0.4,
+            "threshold_source": "band"
+          },
+          {
+            "min_tokens": 101,
+            "max_tokens": null,
+            "threshold": 0.6,
+            "threshold_source": "band"
+          }
+        ],
+        "scope": "all"
+      },
+      "window_entry": {
+        "threshold": 0.7,
+        "length_bands": null
+      },
+      "window": "all",
+      "n_scored": 10,
+      "expect": {
+        "threshold": 0.4,
+        "rule": "probe_band"
+      }
+    },
+    {
+      "name": "own-window.own-bar.all-probe.long",
+      "note": "as above, long",
+      "probe": {
+        "threshold": 0.5,
+        "length_bands": [
+          {
+            "min_tokens": 0,
+            "max_tokens": 100,
+            "threshold": 0.4,
+            "threshold_source": "band"
+          },
+          {
+            "min_tokens": 101,
+            "max_tokens": null,
+            "threshold": 0.6,
+            "threshold_source": "band"
+          }
+        ],
+        "scope": "all"
+      },
+      "window_entry": {
+        "threshold": 0.7,
+        "length_bands": null
+      },
+      "window": "all",
+      "n_scored": 500,
+      "expect": {
+        "threshold": 0.6,
+        "rule": "probe_band"
+      }
+    },
+    {
+      "name": "own-window.own-bar.own-bands.all-probe",
+      "note": "the window's own bands come first even over the probe's own scope",
+      "probe": {
+        "threshold": 0.5,
+        "length_bands": [
+          {
+            "min_tokens": 0,
+            "max_tokens": 100,
+            "threshold": 0.4,
+            "threshold_source": "band"
+          },
+          {
+            "min_tokens": 101,
+            "max_tokens": null,
+            "threshold": 0.6,
+            "threshold_source": "band"
+          }
+        ],
+        "scope": "all"
+      },
+      "window_entry": {
+        "threshold": 0.7,
+        "length_bands": [
+          {
+            "min_tokens": 0,
+            "max_tokens": 50,
+            "threshold": 0.65,
+            "threshold_source": "band"
+          },
+          {
+            "min_tokens": 51,
+            "max_tokens": null,
+            "threshold": 0.75,
+            "threshold_source": "band"
+          }
+        ]
+      },
+      "window": "all",
+      "n_scored": 10,
+      "expect": {
+        "threshold": 0.65,
+        "rule": "window_band"
+      }
+    },
+    {
+      "name": "prompt-probe.own-window.own-bar",
+      "note": "a non-`all` probe with its own window bar: its bands (cut under another internal scope) do not refine it",
+      "probe": {
+        "threshold": 0.5,
+        "length_bands": [
+          {
+            "min_tokens": 0,
+            "max_tokens": 100,
+            "threshold": 0.4,
+            "threshold_source": "band"
+          },
+          {
+            "min_tokens": 101,
+            "max_tokens": null,
+            "threshold": 0.6,
+            "threshold_source": "band"
+          }
+        ],
+        "scope": "prompt"
+      },
+      "window_entry": {
+        "threshold": 0.7,
+        "length_bands": null
+      },
+      "window": "prompt",
+      "n_scored": 10,
+      "expect": {
+        "threshold": 0.7,
+        "rule": "window_bar"
+      }
+    },
+    {
+      "name": "prompt-probe.own-window.no-entry",
+      "note": "a non-`all` probe over its own scope with no window bar",
+      "probe": {
+        "threshold": 0.5,
+        "length_bands": [
+          {
+            "min_tokens": 0,
+            "max_tokens": 100,
+            "threshold": 0.4,
+            "threshold_source": "band"
+          },
+          {
+            "min_tokens": 101,
+            "max_tokens": null,
+            "threshold": 0.6,
+            "threshold_source": "band"
+          }
+        ],
+        "scope": "prompt"
+      },
+      "window_entry": null,
+      "window": "prompt",
+      "n_scored": 10,
+      "expect": {
+        "threshold": 0.4,
+        "rule": "probe_band"
+      }
+    },
+    {
+      "name": "prompt-probe.other-window",
+      "note": "another window: the global bar, unrefined",
+      "probe": {
+        "threshold": 0.5,
+        "length_bands": [
+          {
+            "min_tokens": 0,
+            "max_tokens": 100,
+            "threshold": 0.4,
+            "threshold_source": "band"
+          },
+          {
+            "min_tokens": 101,
+            "max_tokens": null,
+            "threshold": 0.6,
+            "threshold_source": "band"
+          }
+        ],
+        "scope": "prompt"
+      },
+      "window_entry": null,
+      "window": "all",
+      "n_scored": 10,
+      "expect": {
+        "threshold": 0.5,
+        "rule": "global"
+      }
+    },
+    {
+      "name": "thin-band.inherits-global",
+      "note": "a band too thin to cut carries the global bar's value and threshold_source global (what miStudio exports); the rule is still probe_band",
+      "probe": {
+        "threshold": 0.5,
+        "length_bands": [
+          {
+            "min_tokens": 0,
+            "max_tokens": 100,
+            "threshold": 0.5,
+            "threshold_source": "global"
+          },
+          {
+            "min_tokens": 101,
+            "max_tokens": null,
+            "threshold": 0.6,
+            "threshold_source": "band"
+          }
+        ],
+        "scope": "all"
+      },
+      "window_entry": null,
+      "window": null,
+      "n_scored": 10,
+      "expect": {
+        "threshold": 0.5,
+        "rule": "probe_band"
+      }
+    },
+    {
+      "name": "thin-band.other-band",
+      "note": "the cut band beside a thin one",
+      "probe": {
+        "threshold": 0.5,
+        "length_bands": [
+          {
+            "min_tokens": 0,
+            "max_tokens": 100,
+            "threshold": 0.5,
+            "threshold_source": "global"
+          },
+          {
+            "min_tokens": 101,
+            "max_tokens": null,
+            "threshold": 0.6,
+            "threshold_source": "band"
+          }
+        ],
+        "scope": "all"
+      },
+      "window_entry": null,
+      "window": null,
+      "n_scored": 500,
+      "expect": {
+        "threshold": 0.6,
+        "rule": "probe_band"
+      }
+    },
+    {
+      "name": "band-gap.no-match",
+      "note": "no band covers lengths below the first band's min_tokens: the base rule and the bar",
+      "probe": {
+        "threshold": 0.5,
+        "length_bands": [
+          {
+            "min_tokens": 10,
+            "max_tokens": null,
+            "threshold": 0.45,
+            "threshold_source": "band"
+          }
+        ],
+        "scope": "all"
+      },
+      "window_entry": null,
+      "window": null,
+      "n_scored": 5,
+      "expect": {
+        "threshold": 0.5,
+        "rule": "global"
+      }
+    },
+    {
+      "name": "band-gap.match",
+      "note": "a table that does not start at 0 still matches above its first min_tokens",
+      "probe": {
+        "threshold": 0.5,
+        "length_bands": [
+          {
+            "min_tokens": 10,
+            "max_tokens": null,
+            "threshold": 0.45,
+            "threshold_source": "band"
+          }
+        ],
+        "scope": "all"
+      },
+      "window_entry": null,
+      "window": null,
+      "n_scored": 15,
+      "expect": {
+        "threshold": 0.45,
+        "rule": "probe_band"
+      }
+    },
+    {
+      "name": "unusable-table.null-band-threshold",
+      "note": "one band without a threshold: the whole table is unusable, so even the cut band does not apply",
+      "probe": {
+        "threshold": 0.5,
+        "length_bands": [
+          {
+            "min_tokens": 0,
+            "max_tokens": 100,
+            "threshold": null,
+            "threshold_source": "global"
+          },
+          {
+            "min_tokens": 101,
+            "max_tokens": null,
+            "threshold": 0.6,
+            "threshold_source": "band"
+          }
+        ],
+        "scope": "all"
+      },
+      "window_entry": null,
+      "window": null,
+      "n_scored": 500,
+      "expect": {
+        "threshold": 0.5,
+        "rule": "global"
+      }
+    },
+    {
+      "name": "unusable-table.closed-last-band",
+      "note": "the last band is not open-ended: the whole table is unusable",
+      "probe": {
+        "threshold": 0.5,
+        "length_bands": [
+          {
+            "min_tokens": 0,
+            "max_tokens": 100,
+            "threshold": 0.4,
+            "threshold_source": "band"
+          },
+          {
+            "min_tokens": 101,
+            "max_tokens": 1000,
+            "threshold": 0.6,
+            "threshold_source": "band"
+          }
+        ],
+        "scope": "all"
+      },
+      "window_entry": null,
+      "window": null,
+      "n_scored": 10,
+      "expect": {
+        "threshold": 0.5,
+        "rule": "global"
+      }
+    },
+    {
+      "name": "window.own-bar.unusable-own-bands",
+      "note": "the window's own table is unusable (closed last band): its own bar applies",
+      "probe": {
+        "threshold": 0.5,
+        "length_bands": [
+          {
+            "min_tokens": 0,
+            "max_tokens": 100,
+            "threshold": 0.4,
+            "threshold_source": "band"
+          },
+          {
+            "min_tokens": 101,
+            "max_tokens": null,
+            "threshold": 0.6,
+            "threshold_source": "band"
+          }
+        ],
+        "scope": "all"
+      },
+      "window_entry": {
+        "threshold": 0.7,
+        "length_bands": [
+          {
+            "min_tokens": 0,
+            "max_tokens": 50,
+            "threshold": 0.65,
+            "threshold_source": "band"
+          },
+          {
+            "min_tokens": 51,
+            "max_tokens": 500,
+            "threshold": 0.75,
+            "threshold_source": "band"
+          }
+        ]
+      },
+      "window": "prompt",
+      "n_scored": 10,
+      "expect": {
+        "threshold": 0.7,
+        "rule": "window_bar"
+      }
+    },
+    {
+      "name": "no-bands",
+      "note": "a probe calibrated before length bands",
+      "probe": {
+        "threshold": 0.5,
+        "length_bands": null,
+        "scope": "all"
+      },
+      "window_entry": null,
+      "window": null,
+      "n_scored": 10,
+      "expect": {
+        "threshold": 0.5,
+        "rule": "global"
+      }
+    },
+    {
+      "name": "empty-bands",
+      "note": "an empty band table is no table",
+      "probe": {
+        "threshold": 0.5,
+        "length_bands": [],
+        "scope": "all"
+      },
+      "window_entry": null,
+      "window": null,
+      "n_scored": 10,
+      "expect": {
+        "threshold": 0.5,
+        "rule": "global"
+      }
+    },
+    {
+      "name": "no-threshold",
+      "note": "no bar placed: the probe never fires (recall 0), never an error",
+      "probe": {
+        "threshold": null,
+        "length_bands": null,
+        "scope": "all"
+      },
+      "window_entry": null,
+      "window": null,
+      "n_scored": 10,
+      "expect": {
+        "threshold": null,
+        "rule": "none"
+      }
+    },
+    {
+      "name": "no-global.band-only",
+      "note": "a band bar with no global bar",
+      "probe": {
+        "threshold": null,
+        "length_bands": [
+          {
+            "min_tokens": 0,
+            "max_tokens": 100,
+            "threshold": 0.4,
+            "threshold_source": "band"
+          },
+          {
+            "min_tokens": 101,
+            "max_tokens": null,
+            "threshold": 0.6,
+            "threshold_source": "band"
+          }
+        ],
+        "scope": "all"
+      },
+      "window_entry": null,
+      "window": null,
+      "n_scored": 10,
+      "expect": {
+        "threshold": 0.4,
+        "rule": "probe_band"
+      }
+    },
+    {
+      "name": "no-global.no-band-match",
+      "note": "no global bar and no band for this length",
+      "probe": {
+        "threshold": null,
+        "length_bands": [
+          {
+            "min_tokens": 10,
+            "max_tokens": null,
+            "threshold": 0.45,
+            "threshold_source": "band"
+          }
+        ],
+        "scope": "all"
+      },
+      "window_entry": null,
+      "window": null,
+      "n_scored": 5,
+      "expect": {
+        "threshold": null,
+        "rule": "none"
+      }
+    },
+    {
+      "name": "no-global.window-bar",
+      "note": "a window bar stands without a global bar",
+      "probe": {
+        "threshold": null,
+        "length_bands": null,
+        "scope": "all"
+      },
+      "window_entry": {
+        "threshold": 0.7,
+        "length_bands": null
+      },
+      "window": "prompt",
+      "n_scored": 10,
+      "expect": {
+        "threshold": 0.7,
+        "rule": "window_bar"
+      }
+    }
+  ]
+}

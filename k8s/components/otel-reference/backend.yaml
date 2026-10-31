@@ -1,0 +1,189 @@
+# The reference backend: grafana/otel-lgtm (Grafana, Loki, Tempo, Prometheus and the image's own
+# collector, in one container). The reference Collector sends to its OTLP/HTTP port 4318; the
+# image routes traces to Tempo, logs to Loki and metrics to Prometheus (OTLP receiver).
+#
+# RETENTION: 7 days in all three stores (D38.45), plus a size cap on Prometheus:
+#   - Loki   168h  backend-retention/loki-config.yaml  (compactor retention)
+#   - Tempo  168h  backend-retention/tempo-config.yaml (backend scheduler and worker)
+#   - Prometheus 7d and 6GB  PROMETHEUS_EXTRA_ARGS below (flags; the image reads this variable)
+# tests/unit/test_k8s_otel_reference.py asserts all three on the rendered overlay.
+#
+# STORAGE: one 20 Gi volume on the GPU node's /data disk, the miLLM convention (hostPath under
+# /data, pinned to the node that holds it). A static PersistentVolume bound by NAME, Retain, so
+# deleting the Application never deletes the data and the claim can never bind anything else.
+# To wipe the reference data: delete the Application, the PV, and /data/millm-otel/lgtm on the node.
+apiVersion: v1
+kind: PersistentVolume
+metadata:
+  name: millm-otel-lgtm
+  labels:
+    app.kubernetes.io/part-of: millm-otel
+spec:
+  capacity:
+    storage: 20Gi
+  accessModes:
+    - ReadWriteOnce
+  persistentVolumeReclaimPolicy: Retain
+  storageClassName: millm-otel-local
+  volumeMode: Filesystem
+  hostPath:
+    path: /data/millm-otel/lgtm
+    type: DirectoryOrCreate
+  nodeAffinity:
+    required:
+      nodeSelectorTerms:
+        - matchExpressions:
+            - key: kubernetes.io/hostname
+              operator: In
+              values:
+                - mcs-lnxhost02
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: otel-lgtm-data
+  namespace: millm-otel
+spec:
+  # Bound by NAME: this claim takes that volume or stays Pending.
+  volumeName: millm-otel-lgtm
+  storageClassName: millm-otel-local
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 20Gi
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: otel-lgtm
+  namespace: millm-otel
+  labels:
+    app: otel-lgtm
+spec:
+  replicas: 1
+  # Recreate: two copies of Loki/Tempo/Prometheus must never share one data directory.
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: otel-lgtm
+  template:
+    metadata:
+      labels:
+        app: otel-lgtm
+    spec:
+      # PINNED to the node whose disk holds the volume (see the PV's nodeAffinity).
+      nodeSelector:
+        kubernetes.io/hostname: mcs-lnxhost02
+      containers:
+        - name: lgtm
+          # Latest release on 2026-10-23 (0.38.0, published that day), pinned by tag AND digest.
+          # Bundles Grafana v13.2.4, Loki v3.7.8, Tempo v3.1.0, Prometheus v3.15.0.
+          image: grafana/otel-lgtm:0.38.0@sha256:75cdf892daffadf3763ef61c16a6d7f8586216fce0b40bba7874a0b053121084
+          env:
+            # The node's default runtime is nvidia: an unset variable would mount every card.
+            - name: NVIDIA_VISIBLE_DEVICES
+              value: void
+            - name: PROMETHEUS_EXTRA_ARGS
+              value: "--storage.tsdb.retention.time=7d --storage.tsdb.retention.size=6GB"
+            # No login (operator decision); anonymous viewers may query (Explore) and edit
+            # dashboards but not change data sources, users or settings (the image's default is
+            # Admin).
+            - name: GF_AUTH_ANONYMOUS_ENABLED
+              value: "true"
+            - name: GF_AUTH_ANONYMOUS_ORG_ROLE
+              value: Editor
+            # ...and NO LOGIN AT ALL (review R1 of S3): the image keeps Grafana's built-in
+            # admin/admin account, so with the login form or basic auth on, anyone who can reach
+            # the host becomes Admin (data sources whose proxy reaches any in-cluster URL, plugin
+            # installs) and the Editor limit above means nothing.
+            - name: GF_AUTH_DISABLE_LOGIN_FORM
+              value: "true"
+            - name: GF_AUTH_BASIC_ENABLED
+              value: "false"
+            # NOTHING LEAVES THE CLUSTER (review R1 of S3). Grafana, Loki, Tempo and Pyroscope
+            # all report anonymous usage to stats.grafana.org by default, Grafana also polls
+            # grafana.com for updates, and the image's start script makes Grafana download the
+            # grafana-llm-app plugin at every start. The NetworkPolicy (networkpolicy.yaml)
+            # blocks the traffic as well; these switch the senders off.
+            - name: GF_ANALYTICS_REPORTING_ENABLED
+              value: "false"
+            - name: GF_ANALYTICS_CHECK_FOR_UPDATES
+              value: "false"
+            - name: GF_ANALYTICS_CHECK_FOR_PLUGIN_UPDATES
+              value: "false"
+            - name: GF_PLUGINS_PREINSTALL_DISABLED
+              value: "true"
+            - name: GF_NEWS_NEWS_FEED_ENABLED
+              value: "false"
+            - name: LOKI_EXTRA_ARGS
+              value: "-reporting.enabled=false"
+            - name: TEMPO_EXTRA_ARGS
+              value: "-reporting.enabled=false"
+            - name: PYROSCOPE_EXTRA_ARGS
+              value: "-usage-stats.enabled=false"
+          ports:
+            - name: grafana
+              containerPort: 3000
+            - name: otlp-http
+              containerPort: 4318
+          readinessProbe:
+            exec:
+              # The image's start script writes this file once Grafana, Loki, Tempo, Prometheus
+              # and its collector all answer.
+              command: ["test", "-f", "/tmp/ready"]
+            initialDelaySeconds: 10
+            periodSeconds: 10
+          resources:
+            requests:
+              cpu: 250m
+              memory: 1Gi
+            limits:
+              memory: 4Gi
+          volumeMounts:
+            - name: data
+              mountPath: /data
+            - name: retention
+              mountPath: /otel-lgtm/loki-config.yaml
+              subPath: loki-config.yaml
+              readOnly: true
+            - name: retention
+              mountPath: /otel-lgtm/tempo-config.yaml
+              subPath: tempo-config.yaml
+              readOnly: true
+            - name: dashboards
+              mountPath: /otel-lgtm/grafana/conf/provisioning/dashboards/millm.yaml
+              subPath: dashboard-provider.yaml
+              readOnly: true
+            - name: dashboards
+              mountPath: /otel-lgtm/millm/millm-probes.json
+              subPath: dashboard.json
+              readOnly: true
+      volumes:
+        - name: data
+          persistentVolumeClaim:
+            claimName: otel-lgtm-data
+        - name: retention
+          configMap:
+            name: otel-lgtm-retention
+        - name: dashboards
+          configMap:
+            name: otel-lgtm-dashboards
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: otel-lgtm
+  namespace: millm-otel
+spec:
+  type: ClusterIP
+  selector:
+    app: otel-lgtm
+  ports:
+    - name: grafana
+      port: 3000
+      targetPort: grafana
+    - name: otlp-http
+      port: 4318
+      targetPort: otlp-http

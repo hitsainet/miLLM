@@ -1,0 +1,125 @@
+# Throwaway hardware-acceptance pod for Features 31-33 (attachable weights), 2026-10-16.
+#
+# NOT deployed by ArgoCD and not part of k8s/base. Applied by hand on the GPU node into its own
+# namespace, then deleted with the namespace. It runs the SAME image digest as the live
+# millm-backend, with the branch under test supplied from a hostPath (~/millm-hwtest/src, a
+# symlink to src-<commit>, an untouched `git archive` of that commit) ahead of the image's code on
+# PYTHONPATH. Its own Postgres (data on ~/millm-hwtest/pg, owned by uid 1000 so the operator can
+# remove it) means the live database is never read or written. No Service, no ingress: the
+# harness runs inside the pod (`kubectl exec`), which is also the in-container trainer topology
+# (addendum D-02).
+#
+# The barrier needs MAX_CONCURRENT_REQUESTS=1 and continuous batching off (D-04, D-13).
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: millm-hwtest
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: millm-hwtest
+  namespace: millm-hwtest
+  labels:
+    app: millm-hwtest
+spec:
+  nodeSelector:
+    kubernetes.io/hostname: mcs-lnxhost02
+  restartPolicy: Always
+  terminationGracePeriodSeconds: 20
+  containers:
+    - name: postgres
+      image: postgres:16
+      securityContext:
+        runAsUser: 1000
+        runAsGroup: 1000
+      env:
+        - name: POSTGRES_USER
+          value: millm
+        - name: POSTGRES_PASSWORD
+          value: hwtest-throwaway
+        - name: POSTGRES_DB
+          value: millm
+        - name: PGDATA
+          value: /hw/pg/data
+      volumeMounts:
+        - name: hw
+          mountPath: /hw
+        - name: pg-run
+          mountPath: /var/run/postgresql
+    - name: millm
+      image: docker.io/hitsai/millm-backend:latest@sha256:aa45716e681ed3e2405b912e75311de40f0937abf54059ff6c99e9aeb4a368a8
+      imagePullPolicy: IfNotPresent
+      workingDir: /hw/src
+      command: ["sh", "-c"]
+      args:
+        - |
+          set -e
+          echo "hwtest: code at $(readlink -f /hw/src)"
+          for i in $(seq 1 60); do
+            python3 -c "import socket; s=socket.socket(); s.settimeout(2); s.connect(('127.0.0.1', 5432))" 2>/dev/null && break
+            sleep 2
+          done
+          cd /hw/src && python -m alembic upgrade head
+          exec python -m uvicorn millm.main:app --host 0.0.0.0 --port 8000
+      env:
+        - name: PYTHONPATH
+          value: /hw/src
+        - name: DATABASE_URL
+          value: postgresql+asyncpg://millm:hwtest-throwaway@127.0.0.1:5432/millm
+        - name: MODEL_CACHE_DIR
+          value: /hw/data/model_cache
+        - name: SAE_CACHE_DIR
+          value: /hw/data/sae_cache
+        - name: BATCH_FILES_DIR
+          value: /hw/data/batch_files
+        - name: HF_HOME
+          value: /hw/data/hf_cache
+        - name: HF_HUB_OFFLINE
+          value: "1"
+        - name: WEIGHTS_CHECKPOINT_DIR
+          value: /hw/data/checkpoints
+        - name: LOG_LEVEL
+          value: INFO
+        - name: LOG_FORMAT
+          value: json
+        - name: DEBUG
+          value: "false"
+        - name: TORCH_COMPILE
+          value: "false"
+        - name: ENABLE_CONTINUOUS_BATCHING
+          value: "false"
+        - name: MAX_CONCURRENT_REQUESTS
+          value: "1"
+        - name: WEIGHTS_TOKENS
+          valueFrom:
+            secretKeyRef:
+              name: hwtest-tokens
+              key: WEIGHTS_TOKENS
+        - name: HWTEST_TRAINER_TOKEN
+          valueFrom:
+            secretKeyRef:
+              name: hwtest-tokens
+              key: TRAINER_TOKEN
+        - name: HWTEST_OPERATOR_TOKEN
+          valueFrom:
+            secretKeyRef:
+              name: hwtest-tokens
+              key: OPERATOR_TOKEN
+        # Pinned by UUID (the node has one card, the RTX 3090); the live deployment uses "all".
+        - name: NVIDIA_VISIBLE_DEVICES
+          value: GPU-247aa582-0d1b-e161-8156-983ed1fefc57
+        - name: NVIDIA_DRIVER_CAPABILITIES
+          value: compute,utility
+        - name: CUDA_DEVICE_ORDER
+          value: PCI_BUS_ID
+      volumeMounts:
+        - name: hw
+          mountPath: /hw
+  volumes:
+    - name: hw
+      hostPath:
+        path: /home/sean/millm-hwtest
+        type: Directory
+    - name: pg-run
+      emptyDir: {}

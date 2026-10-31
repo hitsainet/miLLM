@@ -1,0 +1,61 @@
+# OPTIONAL: the reference OpenTelemetry receiver for miLLM's probe telemetry (Feature 038,
+# FR-38.25; FTDD §11.3; decisions D17, D26, D38.44 – D38.46).
+#
+# An OTel Collector (core distribution) in front of grafana/otel-lgtm (Grafana + Loki + Tempo +
+# Prometheus in one container), in its own namespace `millm-otel`, with one provisioned dashboard
+# and a 7-day retention on one 20 Gi volume. A reference and test target for the export, NOT a
+# forensic store: what it holds expires after 7 days, and deleting probes or events in miLLM does
+# not erase what was already exported here.
+#
+# NOT PART OF THE DEFAULT DEPLOYMENT. ArgoCD's `millm` Application deploys `k8s/base`, which does
+# not reference this component, so a push to miLLM never deploys it. It is rendered by
+# `k8s/overlays/otel-reference` and deployed by its OWN Application,
+# `k8s/argocd/millm-otel-app.yaml`, which the operator applies once by hand (steps in that file).
+# `tests/unit/test_k8s_otel_reference.py` fails if `k8s/base` ever references it.
+#
+# miLLM DOES NOT EXPORT TO IT UNTIL THE SWITCH-ON (038 FTASKS 14.0): that is a separate component,
+# `k8s/components/otel-export`, added to `k8s/base` in its own commit and push.
+#
+# Exposure: the Collector is a ClusterIP Service only (in-cluster, port 4318, no Ingress). The
+# query UI (Grafana) is on the internal host k8s-millm-otel.hitsai.local only; there is no public
+# name, and no login (operator decision: no auth in the suite; anonymous users are Editors, not
+# the image's default Admin, and the login form and basic auth are off so the image's built-in
+# admin/admin account cannot be used).
+#
+# Nothing leaves the cluster: the usage reporting and update checks of Grafana, Loki, Tempo and
+# Pyroscope are off (backend.yaml), and networkpolicy.yaml denies the backend all egress and lets
+# the Collector reach only the backend's OTLP port (and DNS).
+#
+# GPUs: nothing here requests one, and every container sets NVIDIA_VISIBLE_DEVICES=void — the
+# node's default container runtime is nvidia, so a container that says nothing is handed every
+# card.
+#
+# Images: pinned by tag AND digest (the multi-arch index digest) at the latest release on
+# 2026-10-23; bump both together, never one.
+apiVersion: kustomize.config.k8s.io/v1alpha1
+kind: Component
+
+resources:
+  - namespace.yaml
+  - collector.yaml
+  - backend.yaml
+  - ingress.yaml
+  - networkpolicy.yaml
+
+# Generated with a content hash in the name, so changing any of these files rolls the pod that
+# mounts it.
+configMapGenerator:
+  - name: otel-collector-config
+    namespace: millm-otel
+    files:
+      - collector-config.yaml
+  - name: otel-lgtm-retention
+    namespace: millm-otel
+    files:
+      - backend-retention/loki-config.yaml
+      - backend-retention/tempo-config.yaml
+  - name: otel-lgtm-dashboards
+    namespace: millm-otel
+    files:
+      - dashboard-provider.yaml
+      - dashboard.json

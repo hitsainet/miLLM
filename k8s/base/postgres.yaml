@@ -1,0 +1,88 @@
+# PostgreSQL — metadata store (models/SAEs registry, profiles).
+# Data lives on a hostPath, NOT a PVC; ArgoCD prune can never delete it, but
+# the deployment is still annotated Prune=false as a second guard.
+#
+# Credentials come from the `miserver-secrets` Secret, which is created
+# out-of-band (never committed — this repo syncs to a public mirror):
+#   kubectl create secret generic miserver-secrets -n miserver \
+#     --from-literal=POSTGRES_PASSWORD=... \
+#     --from-literal=DATABASE_URL=postgresql+asyncpg://millm:...@postgres:5432/millm
+# The database and role stay `millm` (R6, DR-19); only the namespace and the Secret were renamed
+# (040 P2; the window copied the old Secret's data by hand, same keys and values).
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: postgres
+  namespace: miserver
+  annotations:
+    argocd.argoproj.io/sync-options: Prune=false,Delete=false
+spec:
+  replicas: 1
+  # Recreate: two postgres pods must never share the hostPath PGDATA during a
+  # rolling update (lock conflict / corruption risk on single-node storage).
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: postgres
+  template:
+    metadata:
+      labels:
+        app: postgres
+    spec:
+      # PINNED. This volume is a hostPath, so the data lives on ONE node's disk
+      # and the pod is only correct where that disk is. Unpinned, the scheduler
+      # may place it anywhere; `type: DirectoryOrCreate` (as it was then) made an
+      # EMPTY directory on the new node and postgres initialised a BRAND NEW EMPTY
+      # DATABASE. Nothing errors — the service comes up healthy against an empty
+      # DB while the real data sits untouched on the original node.
+      #
+      # That happened on 2026-08-30: a reboot moved this pod to mcs-lnxhost02
+      # and miLLM came back reporting 2 models where it had had 30+, because it
+      # was reading a database created minutes earlier. millm-backend was
+      # already pinned this way (it needs the GPU); postgres and redis simply
+      # never had the same treatment.
+      #
+      # Moved from mcs-lnxgpu01 to mcs-lnxhost02 on 2026-09-13 with the GPU and
+      # started fresh; the old database stayed on mcs-lnxgpu01's disk.
+      nodeSelector:
+        kubernetes.io/hostname: mcs-lnxhost02
+      containers:
+        - name: postgres
+          image: postgres:16
+          env:
+            - name: POSTGRES_DB
+              value: millm
+            - name: POSTGRES_USER
+              value: millm
+            - name: POSTGRES_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: miserver-secrets
+                  key: POSTGRES_PASSWORD
+            - name: PGDATA
+              value: /var/lib/postgresql/data/pgdata
+          ports:
+            - containerPort: 5432
+          volumeMounts:
+            - name: postgres-data
+              mountPath: /var/lib/postgresql/data
+      volumes:
+        - name: postgres-data
+          hostPath:
+            path: /data/miserver/postgres
+            # `type: Directory` (040 FR-040.22): a missing path stops the pod (FailedMount)
+            # instead of initialising an empty database on a new directory.
+            type: Directory
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: postgres
+  namespace: miserver
+spec:
+  selector:
+    app: postgres
+  ports:
+    - port: 5432
+      targetPort: 5432

@@ -1,0 +1,19 @@
+[project]
+name = "oldpkg"
+version = "1.0"
+
+[project.scripts]
+oldpkg = "oldpkg.main:run"
+
+[tool.setuptools.packages.find]
+include = ["oldpkg*"]
+
+[tool.coverage.run]
+source = ["oldpkg"]
+omit = [
+    "oldpkg/core/*",
+    "tests/*",
+]
+
+[tool.ruff.lint.isort]
+known-first-party = ["oldpkg"]

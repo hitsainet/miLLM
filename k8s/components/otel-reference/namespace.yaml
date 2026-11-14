@@ -1,0 +1,9 @@
+# The reference receiver's own namespace (FR-38.25). The `miserver` AppProject cannot deploy here
+# and the `miserver-otel` AppProject can deploy nowhere else (k8s/argocd/miserver-otel-app.yaml).
+# Renamed from `millm-otel` in the 040 P2 window.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: miserver-otel
+  labels:
+    app.kubernetes.io/part-of: miserver-otel

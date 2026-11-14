@@ -1,0 +1,574 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://hitsai.net/schemas/mistudio/behaviour-verdict-v1.json",
+  "title": "mistudio.behaviour-verdict/v1",
+  "description": "A behaviour verdict definition (ENH-006 G19, operator decisions G19-1 to G19-6 of 2026-11-08, revising D9): what miServer serves as ONE verdict for a behaviour's probe stack, BESIDE the member results, which are unchanged. Exported by miWorkbench from one candidate of a stored blend report (041) with the report's RECORDED parameters; written as RFC 8785 (JCS) after rounding every float to 6 decimals, so two exports of one report are byte-identical. SEMANTICS (pinned by behaviour-verdict-cases.json; per behaviour and window): (1) rule match (any `rules.match.any_of` expression true after the vetoes) -> fires true, decided_by rule_match; a match beats a veto. (2) rule veto (a veto removed a span and nothing matched) suppresses the members whose `veto_applies` is true. (3) the candidate over the members not suppressed: any_of / all_of / k_of_n count members whose OWN served verdict fired, fires when the count >= k (no bar of its own); stack / max / best_single standardise each member's score with params.mean and params.std, then stack = intercept + sum(weights * z), max = max(z), best_single = z[member_index], and fire when value >= threshold (no length bands). (4) an unknown rule (timeout, error, pending operator code, the rule set absent) is no match and no veto; the members decide. (5) a member not armed or that produced nothing: fires true only when a rule or a present member proves it, otherwise fires null with decided_by members_missing, never false. A verdict false while the veto held reads decided_by vetoed. Members bind by detector digest; members_digest = sha256 of the JCS of the sorted detector digests. A consumer recomputes every combiner vector at attach and refuses on any disagreement (value within 1e-9, everything else exact).",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema",
+    "behaviour",
+    "model",
+    "members",
+    "members_digest",
+    "candidate",
+    "rules",
+    "windows",
+    "target_fpr",
+    "calibration",
+    "combiner_vectors",
+    "end_to_end_vectors",
+    "end_to_end_status",
+    "statement"
+  ],
+  "properties": {
+    "schema": {
+      "const": "mistudio.behaviour-verdict/v1"
+    },
+    "behaviour": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "key",
+        "version"
+      ],
+      "properties": {
+        "key": {
+          "type": "string",
+          "pattern": "^[a-z0-9][a-z0-9-]{0,62}[a-z0-9]$"
+        },
+        "version": {
+          "type": "integer",
+          "minimum": 1
+        }
+      }
+    },
+    "model": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "template_sha256"
+      ],
+      "properties": {
+        "id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 255
+        },
+        "template_sha256": {
+          "anyOf": [
+            {
+              "type": "string",
+              "pattern": "^[0-9a-f]{64}$"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "null: not recorded."
+        }
+      }
+    },
+    "members": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 64,
+      "items": {
+        "$ref": "#/$defs/Member"
+      },
+      "description": "In the report's member order: params arrays index members in this order."
+    },
+    "members_digest": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "candidate": {
+      "$ref": "#/$defs/Candidate"
+    },
+    "rules": {
+      "anyOf": [
+        {
+          "type": "null"
+        },
+        {
+          "$ref": "#/$defs/Rules"
+        }
+      ],
+      "description": "null for a candidate without the rules (not rules_or_*)."
+    },
+    "windows": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 4,
+      "uniqueItems": true,
+      "items": {
+        "enum": [
+          "all",
+          "prompt",
+          "response",
+          "last_user"
+        ]
+      }
+    },
+    "target_fpr": {
+      "type": "number",
+      "exclusiveMinimum": 0,
+      "exclusiveMaximum": 1
+    },
+    "calibration": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "report_id",
+        "report_sha256",
+        "view_id",
+        "n_negatives",
+        "realised_union_fpr",
+        "over_budget",
+        "acknowledged"
+      ],
+      "properties": {
+        "report_id": {
+          "type": "string"
+        },
+        "report_sha256": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "view_id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "n_negatives": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 0
+        },
+        "realised_union_fpr": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        },
+        "over_budget": {
+          "type": "boolean"
+        },
+        "acknowledged": {
+          "anyOf": [
+            {
+              "type": "null"
+            },
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "reason",
+                "by"
+              ],
+              "properties": {
+                "reason": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 2000
+                },
+                "by": {
+                  "type": "string"
+                }
+              }
+            }
+          ],
+          "description": "G19-6: the operator's reason for exporting a union over the target."
+        }
+      }
+    },
+    "combiner_vectors": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/Vector"
+      }
+    },
+    "end_to_end_vectors": {
+      "type": "array",
+      "maxItems": 0,
+      "description": "Reserved: inputs with miWorkbench's score_family verdict (needs a model load; not generated in v1)."
+    },
+    "end_to_end_status": {
+      "enum": [
+        "not_generated"
+      ]
+    },
+    "statement": {
+      "type": "string"
+    }
+  },
+  "$defs": {
+    "Member": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "detector_digest",
+        "decision_digest",
+        "decision_revision",
+        "probe_id",
+        "name",
+        "role",
+        "forms",
+        "veto_applies"
+      ],
+      "properties": {
+        "detector_digest": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "decision_digest": {
+          "anyOf": [
+            {
+              "type": "string",
+              "pattern": "^[0-9a-f]{64}$"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "decision_revision": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 1
+        },
+        "probe_id": {
+          "type": "string",
+          "description": "miWorkbench's id (display only; miServer binds by detector_digest)."
+        },
+        "name": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "Display only."
+        },
+        "role": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "Display only."
+        },
+        "forms": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "description": "Display only."
+        },
+        "veto_applies": {
+          "type": "boolean",
+          "description": "G19-3: the rule veto suppresses this member."
+        }
+      }
+    },
+    "Candidate": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "name",
+        "kind",
+        "rules",
+        "k",
+        "params",
+        "threshold"
+      ],
+      "properties": {
+        "name": {
+          "type": "string",
+          "pattern": "^(rules_or_)?(stack|max|best_single|any_of|all_of|k_of_n:[0-9]+)$"
+        },
+        "kind": {
+          "enum": [
+            "stack",
+            "max",
+            "best_single",
+            "any_of",
+            "all_of",
+            "k_of_n"
+          ]
+        },
+        "rules": {
+          "type": "boolean"
+        },
+        "k": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 1
+        },
+        "params": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "mean": {
+              "type": "array",
+              "items": {
+                "type": "number"
+              }
+            },
+            "std": {
+              "type": "array",
+              "items": {
+                "type": "number",
+                "exclusiveMinimum": 0
+              }
+            },
+            "weights": {
+              "type": "array",
+              "items": {
+                "type": "number"
+              }
+            },
+            "intercept": {
+              "type": "number"
+            },
+            "member_index": {
+              "type": "integer",
+              "minimum": 0
+            }
+          }
+        },
+        "threshold": {
+          "type": [
+            "number",
+            "null"
+          ]
+        }
+      }
+    },
+    "Rules": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "rule_set_digest",
+        "engine_digest",
+        "match",
+        "veto_scope"
+      ],
+      "properties": {
+        "rule_set_digest": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "engine_digest": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "match": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "source",
+            "any_of"
+          ],
+          "properties": {
+            "source": {
+              "enum": [
+                "explicit",
+                "inferred",
+                "inferred_all_outputs"
+              ]
+            },
+            "any_of": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            }
+          }
+        },
+        "veto_scope": {
+          "enum": [
+            "all",
+            "per_member"
+          ]
+        }
+      }
+    },
+    "Vector": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "members",
+        "rules",
+        "expect"
+      ],
+      "properties": {
+        "id": {
+          "type": "string",
+          "pattern": "^[a-z0-9_]{1,64}$"
+        },
+        "members": {
+          "type": "object",
+          "propertyNames": {
+            "pattern": "^[0-9a-f]{64}$"
+          },
+          "additionalProperties": {
+            "anyOf": [
+              {
+                "type": "null"
+              },
+              {
+                "type": "object",
+                "additionalProperties": false,
+                "required": [
+                  "fires",
+                  "score"
+                ],
+                "properties": {
+                  "fires": {
+                    "type": [
+                      "boolean",
+                      "null"
+                    ]
+                  },
+                  "score": {
+                    "type": [
+                      "number",
+                      "null"
+                    ]
+                  }
+                }
+              }
+            ]
+          }
+        },
+        "rules": {
+          "anyOf": [
+            {
+              "type": "null"
+            },
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "match",
+                "veto",
+                "unknown"
+              ],
+              "properties": {
+                "match": {
+                  "type": "boolean"
+                },
+                "veto": {
+                  "type": "boolean"
+                },
+                "unknown": {
+                  "type": "boolean"
+                }
+              }
+            }
+          ]
+        },
+        "expect": {
+          "$ref": "#/$defs/Verdict"
+        }
+      }
+    },
+    "Verdict": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "fires",
+        "decided_by",
+        "members_fired",
+        "members_vetoed",
+        "members_missing",
+        "rules",
+        "value"
+      ],
+      "properties": {
+        "fires": {
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "decided_by": {
+          "enum": [
+            "rule_match",
+            "members",
+            "vetoed",
+            "members_missing"
+          ]
+        },
+        "members_fired": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{64}$"
+          }
+        },
+        "members_vetoed": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{64}$"
+          }
+        },
+        "members_missing": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{64}$"
+          }
+        },
+        "rules": {
+          "anyOf": [
+            {
+              "type": "null"
+            },
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "match",
+                "veto",
+                "unknown"
+              ],
+              "properties": {
+                "match": {
+                  "type": [
+                    "boolean",
+                    "null"
+                  ]
+                },
+                "veto": {
+                  "type": [
+                    "boolean",
+                    "null"
+                  ]
+                },
+                "unknown": {
+                  "type": "boolean"
+                }
+              }
+            }
+          ]
+        },
+        "value": {
+          "type": [
+            "number",
+            "null"
+          ]
+        }
+      }
+    }
+  }
+}

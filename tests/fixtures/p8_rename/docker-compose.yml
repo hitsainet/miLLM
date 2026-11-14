@@ -1,0 +1,6 @@
+services:
+  api:
+    volumes:
+      - ./oldpkg:/app/oldpkg:ro
+  runner:
+    entrypoint: ["python", "-m", "oldpkg.rules.runner_worker"]

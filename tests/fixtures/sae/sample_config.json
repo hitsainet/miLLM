@@ -1,0 +1,9 @@
+{
+    "d_in": 64,
+    "d_sae": 128,
+    "model_name": "test/model",
+    "hook_name": "blocks.0.hook_resid_post",
+    "hook_layer": 0,
+    "dtype": "float32",
+    "normalize_activations": "none"
+}

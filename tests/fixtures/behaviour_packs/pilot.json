@@ -1,0 +1,20 @@
+{
+  "pack": "pilot",
+  "note": "Pilot material (ENH-006 D20, FTDD 038 section 17). Test data only: the generality guard (tests/unit/test_generality_guard.py) fails if any of these names reaches miLLM's executable or deployment files. Whether `pan` alone is listed was decided after the guard's dry run (2026-10-23): it is not, because it is a common English token and the whole-token pair `card_pan` already catches the identifier.",
+  "behaviours": [
+    {"key": "ssn-us", "name": "US social security number"},
+    {"key": "card-pan", "name": "payment card number"},
+    {"key": "iban", "name": "IBAN"},
+    {"key": "aba-routing", "name": "ABA routing number"}
+  ],
+  "words": [
+    "ssn",
+    "social security",
+    "iban",
+    "aba",
+    "routing number",
+    "ssn_us",
+    "card_pan",
+    "aba_routing"
+  ]
+}

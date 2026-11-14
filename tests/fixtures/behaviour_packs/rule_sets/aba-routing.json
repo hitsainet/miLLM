@@ -1,0 +1,180 @@
+{
+  "behaviour_key": "aba-routing",
+  "cases": [
+    {
+      "expect": {
+        "outputs": {
+          "format": true,
+          "masked": false,
+          "named": true,
+          "valid": true
+        },
+        "vetoed": false
+      },
+      "id": "valid-named",
+      "input": {
+        "text": "routing 011000015"
+      },
+      "note": "a published reference value, named",
+      "source": {
+        "citation": "Federal Reserve Financial Services, E-Payments Routing Directory: 011000015 is the Federal Reserve Bank of Boston; retrieval pending (OI-1)",
+        "kind": "published_reference_value"
+      }
+    },
+    {
+      "expect": {
+        "outputs": {
+          "format": true,
+          "masked": true,
+          "named": false,
+          "valid": false
+        },
+        "vetoed": false
+      },
+      "id": "masked",
+      "input": {
+        "text": "routing XXXXX0015"
+      },
+      "note": "last four kept",
+      "source": {
+        "kind": "constructed"
+      }
+    },
+    {
+      "expect": {
+        "outputs": {
+          "format": true,
+          "masked": false,
+          "named": false,
+          "valid": false
+        },
+        "vetoed": false
+      },
+      "id": "bad-check-digit",
+      "input": {
+        "text": "number 011000016"
+      },
+      "note": "check digit fails: never issued",
+      "source": {
+        "kind": "constructed"
+      }
+    },
+    {
+      "expect": {
+        "outputs": {
+          "format": false,
+          "masked": false,
+          "named": false,
+          "valid": false
+        },
+        "vetoed": false
+      },
+      "id": "none",
+      "input": {
+        "text": "nothing to see"
+      },
+      "note": "",
+      "source": {
+        "kind": "constructed"
+      }
+    }
+  ],
+  "description": "Pilot: a bank routing number in format, valid under its 3-7-1 check digit and prefix table, masked, or named.",
+  "expressions": {
+    "format": {
+      "signal": "num"
+    },
+    "masked": {
+      "signal": "masked"
+    },
+    "named": {
+      "signal": "named"
+    },
+    "valid": {
+      "signal": "valid"
+    }
+  },
+  "format": "midataworks.rule-set/v1",
+  "name": "aba-routing-elements",
+  "outputs": [
+    {
+      "column": "format",
+      "type": "bool",
+      "value": {
+        "fired": "format"
+      }
+    },
+    {
+      "column": "valid",
+      "type": "bool",
+      "value": {
+        "fired": "valid"
+      }
+    },
+    {
+      "column": "masked",
+      "type": "bool",
+      "value": {
+        "fired": "masked"
+      }
+    },
+    {
+      "column": "named",
+      "type": "bool",
+      "value": {
+        "fired": "named"
+      }
+    }
+  ],
+  "signals": [
+    {
+      "fold_fullwidth_ascii": false,
+      "id": "num",
+      "ignore_case": false,
+      "kind": "pattern",
+      "pattern": "\\b[0-9X]{9}\\b",
+      "reads": "text"
+    },
+    {
+      "candidates": {
+        "span_of": "num"
+      },
+      "id": "valid",
+      "kind": "validator",
+      "params": {},
+      "validator": {
+        "id": "aba_routing",
+        "version": 1
+      }
+    },
+    {
+      "candidates": {
+        "span_of": "num"
+      },
+      "id": "masked",
+      "kind": "validator",
+      "params": {
+        "format": "aba_routing"
+      },
+      "validator": {
+        "id": "masked",
+        "version": 1
+      }
+    },
+    {
+      "anchor": "valid",
+      "fold_fullwidth_ascii": false,
+      "id": "named",
+      "ignore_case": true,
+      "kind": "proximity",
+      "max_distance": 24,
+      "phrases": [
+        "routing",
+        "routing number"
+      ],
+      "side": "before",
+      "unit": "code_points",
+      "word_boundary": true
+    }
+  ]
+}

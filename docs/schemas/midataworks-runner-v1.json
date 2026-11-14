@@ -1,0 +1,765 @@
+{
+  "$comment": "The runner contract (feature 018). A HOST runs a code rule's source inside the published WebAssembly guest (guest.bundle.snapshot, fetched by sha256; never rebuilt by a consumer) on Wasmtime with fuel, a memory cap and an epoch deadline, through its OWN implementation of the wasi table (no preopened directory, empty environment, fixed clock and random stream). One fresh instance per (text, function) call (instance_rule). The guest reads one canonical JSON request on descriptor 0 and writes one reply line on descriptor 1; phase markers on descriptor 3 switch the fuel budget and are accepted once and in order. The host reduces the reply to a count (a non-negative int, clamped to count_cap) or one of the reasons; a code rule can never return text. Hosts grant at least limits_floor; a deployment may raise a limit, never lower it. Fuel, not wall time, decides rule_resource_limit. The top-level schema validates a code-rule document (CodeRuleDocument); $defs.CodeRuleCase is a stored case; $defs.CodeRuleListing is the dataset-version manifest extension midataworks.code-rules/v1. The vectors in runner-cases-v1.json pin every rule; a vector outranks every implementation.",
+  "$defs": {
+    "CaseCount": {
+      "additionalProperties": false,
+      "properties": {
+        "count": {
+          "minimum": 0,
+          "title": "Count",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "count"
+      ],
+      "title": "CaseCount",
+      "type": "object"
+    },
+    "CaseReason": {
+      "additionalProperties": false,
+      "properties": {
+        "reason": {
+          "$ref": "#/$defs/Reason"
+        }
+      },
+      "required": [
+        "reason"
+      ],
+      "title": "CaseReason",
+      "type": "object"
+    },
+    "CaseSource": {
+      "additionalProperties": false,
+      "properties": {
+        "citation": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Citation"
+        },
+        "kind": {
+          "enum": [
+            "published_test_value",
+            "published_reference_value",
+            "constructed"
+          ],
+          "title": "Kind",
+          "type": "string"
+        },
+        "retrieved": {
+          "anyOf": [
+            {
+              "pattern": "^\\d{4}-\\d{2}-\\d{2}$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Retrieved"
+        },
+        "source_version_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Source Version Id"
+        }
+      },
+      "required": [
+        "kind"
+      ],
+      "title": "CaseSource",
+      "type": "object"
+    },
+    "CodeRuleCase": {
+      "additionalProperties": false,
+      "description": "A case stored beside a code rule (NOT hashed: a case-only edit needs no approval).",
+      "properties": {
+        "expect": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/CaseCount"
+            },
+            {
+              "$ref": "#/$defs/CaseReason"
+            }
+          ],
+          "title": "Expect"
+        },
+        "function": {
+          "pattern": "^[a-z_][a-z0-9_]{0,63}$",
+          "title": "Function",
+          "type": "string"
+        },
+        "id": {
+          "pattern": "^[a-z0-9][a-z0-9_.-]{0,95}$",
+          "title": "Id",
+          "type": "string"
+        },
+        "params": {
+          "additionalProperties": true,
+          "title": "Params",
+          "type": "object"
+        },
+        "source": {
+          "$ref": "#/$defs/CaseSource"
+        },
+        "text": {
+          "title": "Text",
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "function",
+        "params",
+        "text",
+        "expect",
+        "source"
+      ],
+      "title": "CodeRuleCase",
+      "type": "object"
+    },
+    "CodeRuleListing": {
+      "additionalProperties": false,
+      "description": "``extensions[\"midataworks.code-rules/v1\"]`` of a dataset-version manifest (S4).",
+      "properties": {
+        "code_rules": {
+          "items": {
+            "$ref": "#/$defs/CodeRuleListingEntry"
+          },
+          "title": "Code Rules",
+          "type": "array"
+        },
+        "recorded": {
+          "const": true,
+          "title": "Recorded",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "recorded",
+        "code_rules"
+      ],
+      "title": "CodeRuleListing",
+      "type": "object"
+    },
+    "CodeRuleListingEntry": {
+      "additionalProperties": false,
+      "properties": {
+        "behaviour_key": {
+          "title": "Behaviour Key",
+          "type": "string"
+        },
+        "cases_path": {
+          "title": "Cases Path",
+          "type": "string"
+        },
+        "cases_sha256": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Cases Sha256",
+          "type": "string"
+        },
+        "code_sha256": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Code Sha256",
+          "type": "string"
+        },
+        "name": {
+          "pattern": "^[a-z0-9][a-z0-9-]{0,99}$",
+          "title": "Name",
+          "type": "string"
+        },
+        "path": {
+          "title": "Path",
+          "type": "string"
+        },
+        "rule_sets": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Rule Sets",
+          "type": "array"
+        },
+        "runner_contract": {
+          "title": "Runner Contract",
+          "type": "string"
+        },
+        "version": {
+          "minimum": 1,
+          "title": "Version",
+          "type": "integer"
+        },
+        "visibility_floor": {
+          "title": "Visibility Floor",
+          "type": "string"
+        }
+      },
+      "required": [
+        "name",
+        "version",
+        "behaviour_key",
+        "code_sha256",
+        "runner_contract",
+        "path",
+        "cases_path",
+        "cases_sha256",
+        "rule_sets",
+        "visibility_floor"
+      ],
+      "title": "CodeRuleListingEntry",
+      "type": "object"
+    },
+    "DerivedFrom": {
+      "additionalProperties": false,
+      "description": "The source versions that informed the code (F5 (a)); hashed, so a change needs approval.",
+      "properties": {
+        "sources": {
+          "items": {
+            "maxLength": 200,
+            "minLength": 1,
+            "type": "string"
+          },
+          "title": "Sources",
+          "type": "array"
+        },
+        "statement": {
+          "maxLength": 500,
+          "minLength": 1,
+          "title": "Statement",
+          "type": "string"
+        }
+      },
+      "required": [
+        "sources",
+        "statement"
+      ],
+      "title": "DerivedFrom",
+      "type": "object"
+    },
+    "FunctionDecl": {
+      "additionalProperties": false,
+      "properties": {
+        "name": {
+          "pattern": "^[a-z_][a-z0-9_]{0,63}$",
+          "title": "Name",
+          "type": "string"
+        },
+        "output": {
+          "$ref": "#/$defs/FunctionOutput"
+        }
+      },
+      "required": [
+        "name",
+        "output"
+      ],
+      "title": "FunctionDecl",
+      "type": "object"
+    },
+    "FunctionOutput": {
+      "additionalProperties": false,
+      "properties": {
+        "type": {
+          "const": "count",
+          "title": "Type",
+          "type": "string"
+        }
+      },
+      "required": [
+        "type"
+      ],
+      "title": "FunctionOutput",
+      "type": "object"
+    },
+    "Reason": {
+      "description": "Why a code rule produced no count. Host faults never count toward a step's failure share.",
+      "enum": [
+        "rule_timeout",
+        "rule_resource_limit",
+        "rule_worker_unavailable",
+        "rule_error",
+        "rule_load_refused",
+        "rule_output_invalid",
+        "rule_input_too_large",
+        "rule_not_approved"
+      ],
+      "title": "Reason",
+      "type": "string"
+    }
+  },
+  "$id": "https://raw.githubusercontent.com/hitsainet/miDataworks/main/docs/schemas/midataworks-runner-v1.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "cases_format": "midataworks.runner-cases/v1",
+  "contract_major": 1,
+  "contract_version": "1.0",
+  "count_cap": 1000,
+  "description": "The isolated runner contract (format midataworks.runner/v1). GENERATED from backend/src/runner_contract/ (constants.py, prelude.py, document.py) by backend/scripts/write_runner_contract.py; do not edit by hand. Consumers vendor this file byte-identical. Changes within v1 are additive only (versioning).",
+  "diagnostic": {
+    "fields": [
+      "exception_type",
+      "line",
+      "message"
+    ],
+    "max_message_chars": 200,
+    "modes": [
+      "dry_run"
+    ]
+  },
+  "format": "midataworks.runner/v1",
+  "guest": {
+    "bundle": {
+      "bundle_digest": "74b4f96033d31058603b18e87a1678c43fe2287dc3f7dc1c046825fe24c7897a",
+      "entry": "run",
+      "headers": {
+        "sha256": "b0ca8592506635d0b2dbf73a198931300d542afa2b62f63213ae0d401ff855af",
+        "url": "https://github.com/python/cpython/archive/refs/tags/v3.15.1.tar.gz"
+      },
+      "interpreter": {
+        "library_root": "lib/python3.15",
+        "name": "CPython",
+        "sha256": "252e2e17fab9f51a51fbfc73d51e18805cb633e9f9200c9753b4b801c70ad32c",
+        "target": "wasm32-wasip1",
+        "url": "https://github.com/brettcannon/cpython-wasi-build/releases/download/v3.15.1/python-3.15.1-wasi_sdk-33.zip",
+        "version": "3.15.1"
+      },
+      "libpython": {
+        "archives": [
+          "libpython3.15.a",
+          "Modules/_hacl/libHacl_HMAC.a",
+          "Modules/_hacl/libHacl_Hash_BLAKE2.a",
+          "Modules/_hacl/libHacl_Hash_MD5.a",
+          "Modules/_hacl/libHacl_Hash_SHA1.a",
+          "Modules/_hacl/libHacl_Hash_SHA2.a",
+          "Modules/_hacl/libHacl_Hash_SHA3.a",
+          "Modules/expat/libexpat.a"
+        ],
+        "sha256": "1b4a2ecd484d5ed9c0c9ed2d91ad45e7c1a1b06c6d9ba286ffef96f2aa229fd6",
+        "url": "https://github.com/brettcannon/cpython-wasi-build/releases/download/v3.15.1/_build-python-3.15.1-wasi_sdk-33.zip"
+      },
+      "preinit": {
+        "init_func": "wizer.initialize",
+        "normalisation": "fixed clock linked into the guest (SHIM_SOURCE), random.seed(0) at the end of the prelude, library and prelude file times set to 1000000000 (2001-09-09T01:46:40Z)",
+        "sha256": "77c19ee0437991f9ac7837b9c269d9c7076744f85dad263fea5214cc2723c7ff",
+        "tool": "wasmtime wizer",
+        "url": "https://github.com/bytecodealliance/wasmtime/releases/download/v50.0.0/wasmtime-v50.0.0-x86_64-linux.tar.xz",
+        "version": "50.0.0"
+      },
+      "prelude_sha256": "8a941cc753947b76b2babe0f90b17d26e7f7ea4db00a00d1b7b9407c93320241",
+      "shim": {
+        "sha256": "75296ace8d930f2a3d2d786311cf13bf536fd0608941655092ba8e6d68bb51c3"
+      },
+      "snapshot": {
+        "sha256": "a113fe691fed77e63aebf0239d2b7dd84bc0d0a11255b43a17c7547a63dbb6fb",
+        "size": 40760800,
+        "url": "https://github.com/hitsainet/miDataworks/releases/download/runner-bundle-v1/midataworks-runner-snapshot-v1.wasm"
+      },
+      "wasi_sdk": {
+        "link_flags": [
+          "-mexec-model=reactor",
+          "-z",
+          "stack-size=16777216",
+          "-Wl,--stack-first",
+          "-Wl,--initial-memory=41943040",
+          "-ldl",
+          "-lwasi-emulated-signal",
+          "-lwasi-emulated-getpid",
+          "-lwasi-emulated-process-clocks",
+          "-lpthread",
+          "-lm"
+        ],
+        "sha256": "0ba8b5bfaeb2adf3f29bab5841d76cf5318ab8e1642ea195f88baba1abd47bce",
+        "url": "https://github.com/WebAssembly/wasi-sdk/releases/download/wasi-sdk-33/wasi-sdk-33.0-x86_64-linux.tar.gz",
+        "version": "33.0"
+      }
+    },
+    "prelude_source": "# midataworks.runner/v1 guest prelude. Runs once at pre-initialisation; every call is a fresh\n# instance of the resulting snapshot and enters _runner_main.\nimport sys\n\nsys.setrecursionlimit(1000)\n\nimport builtins\nimport json\nimport os\n\nimport bisect\nimport collections\nimport decimal\nimport fractions\nimport functools\nimport heapq\nimport itertools\nimport math\nimport operator\nimport re\nimport statistics\nimport string\nimport unicodedata\n\n_ALLOWED = frozenset((\n    \"bisect\", \"collections\", \"decimal\", \"fractions\", \"functools\", \"heapq\", \"itertools\", \"json\",\n    \"math\", \"operator\", \"re\", \"statistics\", \"string\", \"unicodedata\",\n))\n_REMOVED_BUILTINS = frozenset((\n    \"__import__\", \"breakpoint\", \"compile\", \"copyright\", \"credits\", \"eval\", \"exec\", \"exit\",\n    \"globals\", \"help\", \"input\", \"license\", \"locals\", \"open\", \"quit\", \"vars\",\n))\n# The introspection and frame attributes that reach past the restricted builtins (the escape path).\n# Plain builtins (open, eval, exec, compile, globals, ...) are simply absent from _SAFE, so naming\n# one is a NameError (rule_error); refusing them statically too would catch legitimate attribute\n# names such as re.compile. This set must equal constants.STATIC_REFUSALS (a contract test pins it).\n_REFUSED_NAMES = frozenset((\n    \"__base__\", \"__bases__\", \"__builtins__\", \"__class__\", \"__closure__\", \"__code__\", \"__dict__\",\n    \"__getattribute__\", \"__globals__\", \"__import__\", \"__loader__\", \"__mro__\", \"__reduce__\",\n    \"__reduce_ex__\", \"__spec__\", \"__subclasses__\", \"ag_frame\", \"cr_frame\", \"f_back\", \"f_builtins\",\n    \"f_globals\", \"f_locals\", \"gi_code\", \"gi_frame\", \"tb_frame\", \"tb_next\",\n))\n\n_write = os.write\n_read = os.read\n_dumps = json.dumps\n_loads = json.loads\n_compile = compile\n_exec = exec\n_real_import = builtins.__import__\n_code_type = type(_compile(\"0\", \"<p>\", \"eval\"))\n_function_type = type(lambda: 0)\n_int = int\n_str = str\n_type = type\n_sorted = sorted\n_isinstance = isinstance\n_frozenset = frozenset\n_len = len\n_RULE = \"<rule>\"\n_state = {\"refused\": None, \"imports\": set()}\n\n\nclass _Discard:\n    \"\"\"print() and the standard streams write nowhere: only the reply reaches fd 1.\"\"\"\n\n    def write(self, s):\n        return _len(s)\n\n    def flush(self):\n        return None\n\n\nsys.stdout = _Discard()\nsys.stderr = _Discard()\n\n\ndef _checked_import(name, globals=None, locals=None, fromlist=(), level=0):\n    top = name.partition(\".\")[0]\n    if level != 0 or top not in _ALLOWED:\n        if _state[\"refused\"] is None:\n            _state[\"refused\"] = name\n        raise ImportError(\"import of %r refused\" % (name,))\n    _state[\"imports\"].add(top)\n    return _real_import(name, globals, locals, fromlist, level)\n\n\n_SAFE = {k: getattr(builtins, k) for k in dir(builtins) if k not in _REMOVED_BUILTINS}\n_SAFE[\"__import__\"] = _checked_import\n\n\ndef _static_refusal(code):\n    stack = [code]\n    while stack:\n        c = stack.pop(0)\n        for name in c.co_names:\n            if name in _REFUSED_NAMES:\n                return name\n        for const in c.co_consts:\n            if _type(const) is _code_type:\n                stack.append(const)\n    return None\n\n\ndef _diag(exc, wanted):\n    if not wanted:\n        return None\n    line = None\n    tb = exc.__traceback__\n    while tb is not None:\n        if tb.tb_frame.f_code.co_filename == _RULE:\n            line = tb.tb_lineno\n        tb = tb.tb_next\n    if line is None and _isinstance(exc, SyntaxError) and exc.filename == _RULE:\n        line = exc.lineno\n    try:\n        message = _str(exc)[:200]\n    except BaseException:\n        message = \"\"\n    return {\"exception_type\": _type(exc).__name__[:100], \"line\": line, \"message\": message}\n\n\ndef _reply(obj):\n    _write(1, _dumps(obj, separators=(\",\", \":\"), sort_keys=True, ensure_ascii=True).encode(\"ascii\") + b\"\\n\")\n\n\ndef _fail(phase, kind, exc=None, wanted=False, refused=None):\n    result = {\"fail\": kind}\n    if refused is not None:\n        result[\"refused\"] = refused\n    d = _diag(exc, wanted) if exc is not None else None\n    if d is not None:\n        result[\"diag\"] = d\n    _reply({\"phase\": phase, \"result\": result})\n\n\ndef _failure_kind(exc):\n    if _isinstance(exc, MemoryError):\n        return \"memory\"\n    if _isinstance(exc, RecursionError):\n        return \"recursion\"\n    return \"error\"\n\n\ndef _runner_main():\n    chunks = []\n    while True:\n        chunk = _read(0, 1 << 20)\n        if not chunk:\n            break\n        chunks.append(chunk)\n    request = _loads(b\"\".join(chunks))\n    mode = request[\"mode\"]\n    wanted = request[\"diagnostics\"] is True\n    _write(3, b\"load\")\n    try:\n        code = _compile(request[\"source\"], _RULE, \"exec\")\n    except BaseException as exc:\n        return _fail(\"load\", _failure_kind(exc), exc, wanted)\n    refused = _static_refusal(code)\n    if refused is not None:\n        return _fail(\"load\", \"load_refused\", refused=refused)\n    module = {\"__builtins__\": _SAFE, \"__name__\": \"rule\"}\n    try:\n        _exec(code, module)\n    except BaseException as exc:\n        if _state[\"refused\"] is not None:\n            return _fail(\"load\", \"load_refused\", refused=_state[\"refused\"])\n        return _fail(\"load\", _failure_kind(exc), exc, wanted)\n    if _state[\"refused\"] is not None:\n        return _fail(\"load\", \"load_refused\", refused=_state[\"refused\"])\n    if mode == \"inspect\":\n        functions = _sorted(\n            k for k, v in module.items()\n            if _type(v) is _function_type and v.__code__.co_filename == _RULE\n        )\n        return _reply({\"phase\": \"load\", \"inspect\": {\n            \"functions\": functions, \"imports\": _sorted(_state[\"imports\"])}})\n    function = module.get(request[\"function\"])\n    if _type(function) is not _function_type or function.__code__.co_filename != _RULE:\n        return _fail(\"load\", \"error\", NameError(\"function %r is not exported\" % (request[\"function\"],)), wanted)\n    _write(3, b\"call\")\n    try:\n        value = function(request[\"text\"], request[\"params\"])\n    except BaseException as exc:\n        if _state[\"refused\"] is not None:\n            return _fail(\"call\", \"load_refused\", refused=_state[\"refused\"])\n        return _fail(\"call\", _failure_kind(exc), exc, wanted)\n    if _state[\"refused\"] is not None:\n        return _fail(\"call\", \"load_refused\", refused=_state[\"refused\"])\n    kind = _type(value)\n    if kind is _int:\n        if value < 0:\n            result = {\"t\": \"int\", \"v\": \"negative\"}\n        elif value >= (1 << 63):\n            result = {\"t\": \"int\", \"v\": \"overflow\"}\n        else:\n            result = {\"t\": \"int\", \"v\": _str(value)}\n    elif kind is bool:\n        result = {\"t\": \"bool\"}\n    elif kind is float:\n        result = {\"t\": \"float\"}\n    elif kind is _str:\n        result = {\"t\": \"str\"}\n    elif kind is bytes:\n        result = {\"t\": \"bytes\"}\n    elif value is None:\n        result = {\"t\": \"none\"}\n    else:\n        result = {\"t\": \"other\"}\n    _reply({\"phase\": \"call\", \"result\": result})\n\n\nimport random as _random\n\n_random.seed(0)\ndel _random\n",
+    "shim_source": "/* midataworks.runner/v1 guest shim: the reactor entry points around libpython (ENH-006 D41).\n * wizer.initialize runs once under `wasmtime wizer` (interpreter start + the prelude); run is\n * the entry point every call enters on a fresh instance of the snapshot. */\n#include <Python.h>\n#include <time.h>\n\nextern void __wasm_call_ctors(void);\nstatic PyObject *runner_main = NULL;\n\n/* Table W's fixed instant inside the guest: every libc clock reads the Unix epoch. */\nint clock_gettime(clockid_t id, struct timespec *ts) {\n    (void)id;\n    if (ts) { ts->tv_sec = 0; ts->tv_nsec = 0; }\n    return 0;\n}\n\n__attribute__((export_name(\"wizer.initialize\")))\nvoid runner_initialize(void) {\n    __wasm_call_ctors();\n    PyPreConfig pre;\n    PyPreConfig_InitIsolatedConfig(&pre);\n    pre.utf8_mode = 1;\n    Py_PreInitialize(&pre);\n    PyConfig config;\n    PyConfig_InitIsolatedConfig(&config);\n    config.site_import = 0;\n    config.write_bytecode = 0;\n    config.use_hash_seed = 1;\n    config.hash_seed = 0;\n    config.install_signal_handlers = 0;\n    config.buffered_stdio = 0;\n    PyConfig_SetString(&config, &config.home, L\"/\");\n    PyStatus status = Py_InitializeFromConfig(&config);\n    PyConfig_Clear(&config);\n    if (PyStatus_Exception(status)) { Py_ExitStatusException(status); }\n    FILE *fh = fopen(\"/prelude/prelude.py\", \"rb\");\n    if (!fh) { __builtin_trap(); }\n    if (PyRun_SimpleFileExFlags(fh, \"<prelude>\", 1, NULL) != 0) { __builtin_trap(); }\n    PyObject *main_module = PyImport_AddModule(\"__main__\");\n    runner_main = PyObject_GetAttrString(main_module, \"_runner_main\");\n    if (!runner_main) { __builtin_trap(); }\n}\n\n__attribute__((export_name(\"run\")))\nint runner_run(void) {\n    if (!runner_main) { __builtin_trap(); }\n    PyObject *result = PyObject_CallNoArgs(runner_main);\n    if (!result) { return 1; }\n    Py_DECREF(result);\n    return 0;\n}\n"
+  },
+  "guest_interface": {
+    "host_reduction": "the HOST decides: a count only for t == \"int\" with a decimal v >= 0 (clamped to count_cap; \"overflow\" -> count_cap); \"negative\", bool and every other t -> rule_output_invalid; load_refused -> rule_load_refused; error -> rule_error; recursion, memory -> rule_resource_limit; a reply absent, longer than the output limit, not exactly one line or outside this grammar -> rule_output_invalid. The grammar is the output barrier: a guest that forges the line can only report a count. diag is kept only in dry_run",
+    "phases": "prelude_fuel from the first instruction of the entry point 'run'; load_fuel from the 'load' marker; call_fuel from the 'call' marker. Fuel exhausted before 'load' is rule_error (never expected); in the load or call phase, rule_resource_limit",
+    "reply": "exactly one line on descriptor 1: canonical-key compact ASCII JSON followed by one newline. run: {\"phase\": \"load\" | \"call\", \"result\": R}; R = {\"t\": \"int\", \"v\": \"<decimal >= 0>\" | \"overflow\" | \"negative\"} | {\"t\": \"bool\" | \"float\" | \"str\" | \"bytes\" | \"none\" | \"other\"} | {\"fail\": \"load_refused\", \"refused\": str} | {\"fail\": \"error\" | \"recursion\" | \"memory\", \"diag\"?: {\"exception_type\": str, \"line\": int | null, \"message\": str}}. inspect: {\"phase\": \"load\", \"inspect\": {\"functions\": [str], \"imports\": [str]}} or a load fail",
+    "request": "canonical JSON (keys sorted by code point, ',' and ':' separators, UTF-8, non-ASCII as itself) of {\"mode\": \"run\" | \"inspect\", \"source\": str, \"function\": str | null, \"params\": object | null, \"text\": str | null, \"diagnostics\": bool}; fuel depends on these exact bytes",
+    "traps": "out of fuel -> as phases; epoch deadline -> rule_timeout; stack overflow -> rule_resource_limit; memory growth refused -> the guest's MemoryError, else a trap -> rule_resource_limit; any other trap -> rule_error"
+  },
+  "hash_rule": "code_sha256 = SHA-256 of the canonical JSON of the CodeRuleDocument (every field present; keys sorted by Unicode code point, NOT UTF-16 code units; ',' and ':' separators; UTF-8 with non-ASCII characters written as themselves, never \\u escapes; NaN and infinity refused). The published document file is exactly the bytes hashed. Outside the hash on purpose: the code rule's name, behaviour key, version number and cases.",
+  "hostile_classes": [
+    {
+      "attack": "open a network socket",
+      "number": 1
+    },
+    {
+      "attack": "read a file: /etc/passwd, the runner's configuration, another rule",
+      "number": 2
+    },
+    {
+      "attack": "read an environment variable",
+      "number": 3
+    },
+    {
+      "attack": "spawn a process",
+      "number": 4
+    },
+    {
+      "attack": "loop forever",
+      "number": 5
+    },
+    {
+      "attack": "allocate past the memory floor",
+      "number": 6
+    },
+    {
+      "attack": "return or print a megabyte",
+      "number": 7
+    },
+    {
+      "attack": "return the matched text",
+      "number": 8
+    },
+    {
+      "attack": "read the clock or a random source",
+      "number": 9
+    },
+    {
+      "attack": "carry state between calls",
+      "number": 10
+    },
+    {
+      "attack": "recurse until the stack is exhausted",
+      "number": 11
+    },
+    {
+      "attack": "load-time bomb (a huge constant built at import)",
+      "number": 12
+    },
+    {
+      "attack": "malformed return: negative, float, bool, string, structure, nothing",
+      "number": 13
+    },
+    {
+      "attack": "count above the cap",
+      "number": 14
+    },
+    {
+      "attack": "import a module outside the list",
+      "number": 15
+    },
+    {
+      "attack": "pathological backtracking in the guest's re",
+      "number": 16
+    },
+    {
+      "attack": "refill fuel by replaying a phase marker (S0)",
+      "number": 17
+    },
+    {
+      "attack": "an out-of-order or unknown phase marker (S0)",
+      "number": 18
+    },
+    {
+      "attack": "forge an extra reply line on descriptor 1 (S0)",
+      "number": 19
+    }
+  ],
+  "instance_rule": "One fresh instance of the snapshot per (text, function) call: a module with three functions over one row is three instances. A host may cache the compiled snapshot by its sha256 and documents by code_sha256, never an instance or any guest state.",
+  "language": {
+    "flags": [
+      "isolated",
+      "no_site",
+      "dont_write_bytecode",
+      "utf8_mode"
+    ],
+    "hash_seed": 0,
+    "implementation": "CPython",
+    "recursion_limit": 1000,
+    "version": "3.15.1"
+  },
+  "limits_floor": {
+    "call_fuel": 2147483648,
+    "input_code_points": 65536,
+    "load_fuel": 33554432,
+    "memory_bytes": 67108864,
+    "output_bytes": 4096,
+    "prelude_fuel": 67108864,
+    "wasm_stack_bytes": 2097152
+  },
+  "limits_floor_basis": {
+    "call_fuel": "10 x fixture 2's call fuel on its worst 65,536-code-point vector text, rounded up to a power of two",
+    "input_code_points": "D32 starting value",
+    "load_fuel": "10 x the largest conformance document's load fuel, rounded up to a power of two",
+    "memory_bytes": "64 MiB (X-13); the snapshot's linear memory starts at 40 MiB",
+    "output_bytes": "D32 starting value",
+    "prelude_fuel": "2 x the prelude fuel to read a maximal request (65,536 four-byte code points), rounded up to a power of two",
+    "wasm_stack_bytes": "2 MiB; Python recursion at recursion_limit raises RecursionError well inside it; C-level recursion past it traps (both rule_resource_limit); edge vectors stay far from it"
+  },
+  "limits_floor_status": {
+    "change_rule": "a confirmed value or a RAISED floor is a contract minor (contract_version 1.x); a floor is never lowered within v1",
+    "measured": "S0 on a workstation, 2026-10-24 (0xcc/reviews/018_S0_measurement_2026-10-24.md)",
+    "pending": [
+      "FTASKS 2.7: cold start, per-call p95 and instantiation on the node, per image",
+      "FTASKS 2.9: fuel identity on GitHub's runners"
+    ],
+    "provisional": true
+  },
+  "properties": {
+    "derived_from": {
+      "$ref": "#/$defs/DerivedFrom"
+    },
+    "functions": {
+      "items": {
+        "$ref": "#/$defs/FunctionDecl"
+      },
+      "maxItems": 16,
+      "minItems": 1,
+      "title": "Functions",
+      "type": "array"
+    },
+    "params_schema": {
+      "additionalProperties": true,
+      "title": "Params Schema",
+      "type": "object"
+    },
+    "runner_contract": {
+      "const": "midataworks.runner/v1",
+      "title": "Runner Contract",
+      "type": "string"
+    },
+    "source": {
+      "minLength": 1,
+      "title": "Source",
+      "type": "string"
+    }
+  },
+  "random": {
+    "algorithm": "block i (i = 0, 1, 2, ...) = SHA-256(UTF-8(seed) || i as 8 bytes little-endian); the stream is the blocks concatenated; random_get(n) returns the next n bytes of the stream",
+    "seed": "midataworks.runner/v1 random stream"
+  },
+  "reason_meanings": {
+    "rule_error": "the code raised, did not compile, did not export the function, or broke the phase-marker protocol; also a guest that called an unlinked capability",
+    "rule_input_too_large": "the text has more code points than the input limit in force",
+    "rule_load_refused": "the code named a refused capability or imported a module not allowed",
+    "rule_not_approved": "the code's hash is not approved where the database is (never emitted by the runner)",
+    "rule_output_invalid": "the reply was absent, more than one line, over the output limit, outside the grammar, or the function returned anything but a non-negative int (bool is not an int)",
+    "rule_resource_limit": "fuel ran out in the load or call phase, memory growth was refused, Python recursion or the WebAssembly stack was exhausted",
+    "rule_timeout": "the wall-time backstop expired (host fault; never a verdict)",
+    "rule_worker_unavailable": "the runner could not be reached, its bundle did not verify, or its lane stayed full past the backstop (host fault)"
+  },
+  "reasons": [
+    "rule_timeout",
+    "rule_resource_limit",
+    "rule_worker_unavailable",
+    "rule_error",
+    "rule_load_refused",
+    "rule_output_invalid",
+    "rule_input_too_large",
+    "rule_not_approved"
+  ],
+  "request_limits": [
+    "call_fuel",
+    "load_fuel",
+    "prelude_fuel",
+    "memory_bytes",
+    "input_code_points",
+    "output_bytes",
+    "wall_ms"
+  ],
+  "required": [
+    "runner_contract",
+    "source",
+    "functions",
+    "params_schema",
+    "derived_from"
+  ],
+  "runtime": {
+    "config": {
+      "consume_fuel": true,
+      "epoch_interruption": true,
+      "epoch_tick_ms": 10,
+      "max_wasm_stack": "limits_floor.wasm_stack_bytes"
+    },
+    "family": "wasmtime",
+    "fuel": "Wasmtime fuel with consume_fuel enabled: the count of WebAssembly operators executed, as Wasmtime 50 meters it. It does not depend on the CPU or the host language, only on the module bytes (the published snapshot), the request bytes and the runtime major.",
+    "major": 50
+  },
+  "sentinel_kinds": {
+    "cached_rule": "a fresh random value in the source of another code rule the runner ran (and cached) just before the vector",
+    "env": "a fresh random value in the runner process's own environment, under the given NAME",
+    "file": "a fresh random value in a file the runner process can read, at the given relative NAME in the runner process's working directory"
+  },
+  "static_refusals": [
+    "__base__",
+    "__bases__",
+    "__builtins__",
+    "__class__",
+    "__closure__",
+    "__code__",
+    "__dict__",
+    "__getattribute__",
+    "__globals__",
+    "__import__",
+    "__loader__",
+    "__mro__",
+    "__reduce__",
+    "__reduce_ex__",
+    "__spec__",
+    "__subclasses__",
+    "ag_frame",
+    "cr_frame",
+    "f_back",
+    "f_builtins",
+    "f_globals",
+    "f_locals",
+    "gi_code",
+    "gi_frame",
+    "tb_frame",
+    "tb_next"
+  ],
+  "stdlib_allowed": [
+    "bisect",
+    "collections",
+    "decimal",
+    "fractions",
+    "functools",
+    "heapq",
+    "itertools",
+    "json",
+    "math",
+    "operator",
+    "re",
+    "statistics",
+    "string",
+    "unicodedata"
+  ],
+  "text_rules": "Texts are sequences of Unicode code points. The CALLER replaces every lone surrogate (U+D800 - U+DFFF) with U+FFFD before encoding; a host refuses a request whose text is not valid UTF-8 (text_invalid). A text longer than input_code_points code points is rule_input_too_large for that text; texts are never truncated or split.",
+  "title": "miDataworks Runner Contract v1",
+  "type": "object",
+  "versioning": "Additive within v1: new vectors, reasons, modules and RAISED floors are a new minor (contract_version 1.x). A new interpreter, prelude, shim or snapshot is v2. A runtime major that keeps every fuel-edge and limit vector green is a minor; otherwise a major, or not taken. The cases file is append-only within v1.",
+  "wasi": [
+    {
+      "behaviour": "descriptor 0: serves the request bytes (canonical JSON, see guest_interface.request), then end of file; any other descriptor: EBADF (8)",
+      "imports": [
+        "fd_read"
+      ]
+    },
+    {
+      "behaviour": "descriptor 1: appended to the reply buffer; a write that takes the buffer past the output limit in force ends the instance with rule_output_invalid. Descriptor 2: discarded (bytes counted, never stored). Descriptor 3: phase markers, the exact bytes 'load' then 'call', EACH ACCEPTED ONCE AND IN ORDER (prelude -> load -> call; inspect requests stop at load); a marker sets the store's remaining fuel to the next phase's budget. A repeated marker, an out-of-order marker or any other bytes on descriptor 3 end the instance with rule_error (a rule must not refill its own fuel; hostile 17, 18). Any other descriptor: EBADF (8)",
+      "imports": [
+        "fd_write"
+      ]
+    },
+    {
+      "behaviour": "time 0 (the Unix epoch) for every clock; resolution 1",
+      "imports": [
+        "clock_time_get",
+        "clock_res_get"
+      ]
+    },
+    {
+      "behaviour": "the contract's fixed stream (random.algorithm), restarted at counter 0 in every instance and continued across calls within it",
+      "imports": [
+        "random_get"
+      ]
+    },
+    {
+      "behaviour": "an empty environment (count 0, size 0)",
+      "imports": [
+        "environ_sizes_get",
+        "environ_get"
+      ]
+    },
+    {
+      "behaviour": "arguments [\"python\"]",
+      "imports": [
+        "args_sizes_get",
+        "args_get"
+      ]
+    },
+    {
+      "behaviour": "descriptors 0, 1, 2: a character device (filetype 2), no flags; any other: EBADF (8)",
+      "imports": [
+        "fd_fdstat_get"
+      ]
+    },
+    {
+      "behaviour": "EBADF (8) for every descriptor: there are no preopened directories",
+      "imports": [
+        "fd_prestat_get",
+        "fd_prestat_dir_name"
+      ]
+    },
+    {
+      "behaviour": "ENOTCAPABLE (76)",
+      "imports": [
+        "path_create_directory",
+        "path_filestat_get",
+        "path_filestat_set_times",
+        "path_link",
+        "path_open",
+        "path_readlink",
+        "path_remove_directory",
+        "path_rename",
+        "path_symlink",
+        "path_unlink_file"
+      ]
+    },
+    {
+      "behaviour": "EBADF (8) for every descriptor",
+      "imports": [
+        "fd_advise",
+        "fd_allocate",
+        "fd_close",
+        "fd_datasync",
+        "fd_fdstat_set_flags",
+        "fd_fdstat_set_rights",
+        "fd_filestat_get",
+        "fd_filestat_set_size",
+        "fd_filestat_set_times",
+        "fd_pread",
+        "fd_pwrite",
+        "fd_readdir",
+        "fd_renumber",
+        "fd_seek",
+        "fd_sync",
+        "fd_tell"
+      ]
+    },
+    {
+      "behaviour": "linked as functions that end the instance with rule_error when called (the snapshot imports them, so an unlinked import would refuse instantiation)",
+      "imports": [
+        "sock_accept",
+        "sock_recv",
+        "sock_send",
+        "sock_shutdown",
+        "proc_raise"
+      ]
+    },
+    {
+      "behaviour": "ends the instance; an exit before a complete reply is rule_output_invalid",
+      "imports": [
+        "proc_exit"
+      ]
+    },
+    {
+      "behaviour": "return at once with success (0); poll_oneoff reports 0 events",
+      "imports": [
+        "sched_yield",
+        "poll_oneoff"
+      ]
+    }
+  ]
+}

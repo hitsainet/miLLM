@@ -1,0 +1,13 @@
+# Grafana file provider for the one provisioned miLLM dashboard (FR-38.25). Mounted into the
+# image's provisioning directory beside its own providers; the dashboard JSON is mounted at the
+# path below. Shared by Kubernetes (ConfigMap) and docker-compose.otel.yml (bind mount).
+apiVersion: 1
+
+providers:
+  - name: "miLLM probes"
+    type: file
+    disableDeletion: true
+    allowUiUpdates: false
+    options:
+      path: /otel-lgtm/millm/millm-probes.json
+      foldersFromFilesStructure: false

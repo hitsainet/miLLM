@@ -1,0 +1,19 @@
+{
+  "version": 1,
+  "next_tools": [
+    "miserver_arm_behaviour",
+    "miserver_clear_behaviour_rule_signals",
+    "miserver_delete_probe",
+    "miserver_delete_rule_set",
+    "miserver_disarm_behaviour",
+    "miserver_evaluate_rule_set",
+    "miserver_get_approval_status",
+    "miserver_get_probe_limit_recommendation",
+    "miserver_list_approvals",
+    "miserver_list_probes",
+    "miserver_list_rule_sets",
+    "miserver_list_rule_validators",
+    "miserver_score_probes",
+    "miserver_validate_rule_set"
+  ]
+}

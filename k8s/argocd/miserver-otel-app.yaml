@@ -1,0 +1,85 @@
+# ArgoCD GitOps definition for miServer's REFERENCE OpenTelemetry receiver (Feature 038, FR-38.25;
+# FTDD §11.3, D38.46): the Collector + grafana/otel-lgtm backend of
+# k8s/components/otel-reference, rendered by k8s/overlays/otel-reference, in namespace miserver-otel
+# (renamed from millm-otel in the 040 P2 window).
+#
+# Apply once by hand (kubectl apply -f k8s/argocd/miserver-otel-app.yaml); ArgoCD manages the
+# receiver from then on. Pushing miServer never creates it: nothing in k8s/base references it.
+#
+# Separate from the `miserver` project on purpose: the `miserver` AppProject may deploy only to the
+# `miserver` namespace (miserver-app.yaml), and this project may deploy only
+# to `miserver-otel`, with
+# exactly two cluster-scoped kinds — the Namespace and the one static PersistentVolume.
+#
+# No Image Updater: both images are pinned by tag AND digest in the manifests; a bump is a commit.
+#
+# Prerequisites: none beyond the cluster's existing ArgoCD repo credential for
+# https://github.com/Onegaishimas/miServer.git and the gitops/pilot branch (see miserver-app.yaml).
+# The PersistentVolume's hostPath (/data/miserver-otel/lgtm on mcs-lnxhost02) must exist
+# (`type: Directory`; the P2 window moved it there).
+#
+# Operator steps (after the push that carries these files has reached gitops/pilot), from a miServer
+# checkout with a kubeconfig for the cluster (or copy this file to the node and use
+# `microk8s kubectl`):
+#   kubectl kustomize k8s/overlays/otel-reference | less           # inspect what will be created
+#   kubectl apply -f k8s/argocd/miserver-otel-app.yaml              # the AppProject + Application
+#   kubectl -n argocd get application miserver-otel -w              # until Synced / Healthy
+#   kubectl -n miserver-otel get pods,svc,pvc,ingress,networkpolicy
+# Grafana: http://k8s-miserver-otel.hitsai.local (internal only; the name has no DNS record: add a
+# hosts entry for the ingress node 192.168.244.52, or test with
+# curl -H 'Host: k8s-miserver-otel.hitsai.local' http://192.168.244.52/api/health).
+# The Collector is in-cluster only: http://otel-collector.miserver-otel.svc:4318.
+#
+# Remove (rollback, FTDD §11.4): delete the Application FIRST (its finalizer prunes everything it
+# created, the PersistentVolume object included; the data on the node stays), then the project:
+#   kubectl -n argocd delete application miserver-otel
+#   kubectl -n argocd delete appproject miserver-otel
+#   # optional wipe, on mcs-lnxhost02: sudo rm -rf /data/miserver-otel/lgtm
+---
+apiVersion: argoproj.io/v1alpha1
+kind: AppProject
+metadata:
+  name: miserver-otel
+  namespace: argocd
+spec:
+  description: miServer — reference OpenTelemetry receiver (Collector + Grafana LGTM), Feature 038
+  sourceRepos:
+    - https://github.com/Onegaishimas/miServer.git
+  destinations:
+    - namespace: miserver-otel
+      server: https://kubernetes.default.svc
+  clusterResourceWhitelist:
+    - group: ''
+      kind: Namespace
+    - group: ''
+      kind: PersistentVolume
+  namespaceResourceWhitelist:
+    - group: '*'
+      kind: '*'
+---
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: miserver-otel
+  namespace: argocd
+  labels:
+    app.kubernetes.io/part-of: miserver
+  finalizers:
+    # Deleting the Application deletes what it created (the PV's data stays: Retain).
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  project: miserver-otel
+  source:
+    repoURL: https://github.com/Onegaishimas/miServer.git
+    targetRevision: gitops/pilot
+    path: k8s/overlays/otel-reference
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: miserver-otel
+  revisionHistoryLimit: 10
+  syncPolicy:
+    automated:
+      selfHeal: true
+      prune: true
+    syncOptions:
+      - ServerSideApply=true

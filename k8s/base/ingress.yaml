@@ -1,0 +1,97 @@
+# Main ingress: API paths → backend, everything else → Admin UI.
+#
+# HOSTS (040 P2, FR-040.24; R20). `k8s-miserver.hitsai.local` is the name; the public name
+# `miserver.hitsai.net` reaches it through the tunnel, which sends `Host: k8s-miserver.hitsai.local`,
+# so there is NO `k8s-miserver.hitsai.net` host (no public k8s-*.hitsai.net name exists for the new
+# brand). The old-brand hosts kept as aliases from P2 were retired at P7 on evidence (FR-040.40):
+# the new host is the only one. tests/unit/test_ingress_manifest.py holds it.
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: miserver-ingress
+  namespace: miserver
+  annotations:
+    nginx.ingress.kubernetes.io/proxy-body-size: "0"
+    # D59 (2026-10-24): ingress-nginx's default 4k `proxy_buffer_size` caps the WHOLE upstream
+    # response-header block, so an X-miLLM-Probe-Verdicts header over 3,932 B was a 502 (GPU window
+    # U3, 0xcc/reviews/gpu_window_2026-10-24.md). 16k carries the 8,192 B default bound with room;
+    # the same controller passed 128k in the measurement. Pinned by tests/unit/test_ingress_manifest.py.
+    nginx.ingress.kubernetes.io/proxy-buffer-size: "16k"
+    nginx.ingress.kubernetes.io/proxy-read-timeout: "3600"
+    nginx.ingress.kubernetes.io/proxy-send-timeout: "3600"
+    nginx.ingress.kubernetes.io/proxy-connect-timeout: "3600"
+spec:
+  ingressClassName: public
+  rules:
+    - host: k8s-miserver.hitsai.local
+      http:
+        paths:
+          - path: /api
+            pathType: Prefix
+            backend:
+              service:
+                name: miserver-backend
+                port:
+                  number: 8000
+          - path: /v1
+            pathType: Prefix
+            backend:
+              service:
+                name: miserver-backend
+                port:
+                  number: 8000
+          - path: /docs
+            pathType: Prefix
+            backend:
+              service:
+                name: miserver-backend
+                port:
+                  number: 8000
+          - path: /redoc
+            pathType: Prefix
+            backend:
+              service:
+                name: miserver-backend
+                port:
+                  number: 8000
+          - path: /openapi.json
+            pathType: Prefix
+            backend:
+              service:
+                name: miserver-backend
+                port:
+                  number: 8000
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: miserver-frontend
+                port:
+                  number: 80
+---
+# WebSocket ingress (separate for proper upgrade handling).
+# Do NOT add configuration-snippet with Upgrade headers — it causes header duplication.
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: miserver-websocket-ingress
+  namespace: miserver
+  annotations:
+    nginx.ingress.kubernetes.io/websocket-services: "miserver-backend"
+    nginx.ingress.kubernetes.io/proxy-http-version: "1.1"
+    nginx.ingress.kubernetes.io/proxy-read-timeout: "86400"
+    nginx.ingress.kubernetes.io/proxy-send-timeout: "86400"
+    nginx.ingress.kubernetes.io/proxy-connect-timeout: "3600"
+spec:
+  ingressClassName: public
+  rules:
+    - host: k8s-miserver.hitsai.local
+      http:
+        paths:
+          - path: /socket.io
+            pathType: Prefix
+            backend:
+              service:
+                name: miserver-backend
+                port:
+                  number: 8000

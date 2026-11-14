@@ -1,0 +1,183 @@
+# miLLM's complete Python install set, every package pinned EXACTLY at its latest release (2026-10-21).
+#
+# THE ONE LOCK. The image (Dockerfile), every CI job that installs Python packages
+# (backend-tests.yml), and the dev venv all install with `-c constraints.txt`, so what CI tests is
+# what the image ships. pyproject.toml pins each DIRECT dependency exactly as well; this file adds
+# every TRANSITIVE one, which pyproject cannot pin (starlette, pydantic-core, httpx2, numpy, the
+# nvidia-* CUDA wheels ...). Before this file those floated per build: the 2026-10-21 pod ran
+# fastapi 0.158.0 while the floor said 0.115.0, and SQLAlchemy 2.1.6 compiled from source because
+# it had been published that afternoon with no Linux wheel yet.
+#
+# Guarded by tests/unit/test_dependency_lock.py (pyproject == this file, nothing unpinned, every
+# installer uses this file) and docker/check_installed_against_constraints.py, which the image
+# build RUNS: an installed distribution missing from this file, or at another version, fails the build.
+#
+# Versions (operator rule, 2026-10-21 ~22:30 ET): the LATEST release of every package, as the
+# resolver chose it, with mcp held to miStudio's pin (2.3.0 since 2026-10-21, also the latest;
+# miLLM installs mcp only to load miStudio's registry, so the two move together). A version below
+# the latest stands only for a technical cause, recorded in 0xcc/reviews/deps_sync_2026-10-21.md:
+#   mpmath 1.3.0         sympy 1.14.0 (latest; torch's dependency) requires mpmath<1.4
+#   cuda-toolkit 13.0.3 and the nvidia-* CUDA wheels
+#                        torch 2.14.1 (latest; held equal to miForge's) requires them exactly
+#
+# Regenerate (Python 3.13, the image's platform; glibc 2.41, so manylinux_2_40 - at 2_28 the
+# llama-cpp-python cu130 wheel, tagged manylinux_2_35, is invisible and an old sdist wins), with the
+# holds, --upgrade, and wheels only (a release with no Linux wheel yet is not "latest" for us: it
+# compiled SQLAlchemy 2.1.6 from source in the 2026-10-21 build). Then diff against this list, apart
+# from wheel and the extras' pins at the end, which no resolver run includes. Strip the `==` from
+# pyproject.toml first, or the resolver is bound to the current pins.
+#   echo mcp==2.3.0 > holds.txt
+#   uv pip compile pyproject.toml --extra dev --extra redis --extra gguf -c holds.txt --upgrade \
+#     --only-binary :all: --python-version 3.13 --python-platform x86_64-manylinux_2_40 \
+#     --extra-index-url https://abetlen.github.io/llama-cpp-python/whl/cu130 \
+#     --index-strategy unsafe-best-match --no-annotate --no-header
+# To move a version: change it here (and in pyproject.toml if it is direct), re-run, and run the suite.
+
+accelerate==1.15.0
+aiosqlite==0.22.1
+alembic==1.20.1
+annotated-doc==0.0.5
+annotated-types==0.8.0
+anyio==4.15.1
+apache-tvm-ffi==0.1.15.post0
+ast-serialize==0.13.1
+asyncpg==0.32.0
+attrs==26.1.0
+bidict==0.24.1
+bitsandbytes==0.50.2
+certifi==2026.10.19
+cffi==2.1.1
+charset-normalizer==3.5.2
+click==8.5.0
+coverage==7.16.2
+cryptography==50.0.2
+cuda-bindings==13.4.4
+cuda-pathfinder==1.8.3
+cuda-toolkit==13.0.3.0
+diskcache==5.6.3
+fastapi==0.159.1
+filelock==4.2.4
+fsspec==2026.9.0
+google-re2==1.1.20251105
+googleapis-common-protos==1.76.0
+greenlet==3.5.6
+h11==0.16.0
+hf-xet==1.7.0
+http-sfv==0.9.9
+httpcore==1.0.9
+httpcore2==2.16.0
+httptools==0.9.0
+httpx==0.28.1
+httpx2==2.16.0
+huggingface-hub==2.2.0
+idna==3.20
+iniconfig==2.3.1
+jinja2==3.1.6
+jsonschema==4.26.0
+jsonschema-specifications==2025.9.1
+librt==0.16.0
+llama-cpp-python==0.3.36
+mako==1.4.3
+markdown-it-py==4.2.0
+markupsafe==3.0.4
+mcp==2.3.0
+mcp-types==2.3.0
+mdurl==0.1.2
+mpmath==1.3.0
+mypy==2.4.0
+mypy-extensions==1.1.0
+networkx==3.7
+numpy==2.5.4
+nvidia-cublas==13.1.1.3
+nvidia-cuda-cupti==13.0.85
+nvidia-cuda-nvrtc==13.0.88
+nvidia-cuda-runtime==13.0.96
+nvidia-cudnn-cu13==9.24.0.43
+nvidia-cufft==12.0.0.61
+nvidia-cufile==1.15.1.6
+nvidia-curand==10.4.0.35
+nvidia-cusolver==12.0.4.66
+nvidia-cusparse==12.6.3.3
+nvidia-cusparselt-cu13==0.8.1
+nvidia-nccl-cu13==2.30.7
+nvidia-nvjitlink==13.4.92
+nvidia-nvshmem-cu13==3.4.5
+nvidia-nvtx==13.0.85
+opentelemetry-api==1.45.1
+opentelemetry-exporter-http-transport==0.66b1
+opentelemetry-exporter-otlp-common==0.66b1
+opentelemetry-exporter-otlp-proto-common==1.45.1
+opentelemetry-exporter-otlp-proto-http==1.45.1
+opentelemetry-proto==1.45.1
+opentelemetry-sdk==1.45.1
+opentelemetry-semantic-conventions==0.66b1
+packaging==26.3
+pathspec==1.1.1
+pluggy==1.7.0
+protobuf==7.36.2
+psutil==7.2.2
+pycparser==3.11
+pydantic==2.14.1
+pydantic-core==2.50.1
+pydantic-settings==2.16.1
+pygments==2.21.0
+pyjwt==2.15.1
+pytest==9.1.1
+pytest-asyncio==1.4.0
+pytest-cov==7.1.0
+pytest-mock==3.17.0
+python-dotenv==1.2.4
+python-engineio==4.14.0
+python-multipart==0.0.32
+python-socketio==5.17.0
+pyyaml==6.0.3
+redis==8.1.0
+referencing==0.37.0
+regex==2026.9.29
+requests==2.34.2
+rfc8785==0.1.4
+rich==15.0.0
+rpds-py==2026.9.1
+ruff==0.17.1
+safetensors==0.8.0
+setuptools==84.2.1
+shellingham==1.5.4
+simple-websocket==1.1.0
+sqlalchemy==2.1.6
+sse-starlette==3.5.0
+starlette==1.9.0
+structlog==26.1.0
+sympy==1.14.0
+tokenizers==0.23.3
+torch==2.14.1
+tqdm==4.70.1
+transformers==5.20.2
+triton==3.8.0
+truststore==0.10.5
+typer==0.27.3
+types-python-dateutil==2.9.0.20261021
+typing-extensions==4.16.0
+typing-inspection==0.4.4
+urllib3==2.8.0
+uvicorn==0.54.0
+uvloop==0.23.0
+wasmtime==50.0.1
+watchfiles==1.3.0
+websockets==17.3
+wsproto==1.3.2
+xgrammar==0.2.8
+
+# Not in any resolver run above:
+# - wheel: the Dockerfile upgrades it on its own line (CVE-2026-24049, fixed in 0.46.2); the pod's version.
+wheel==0.48.0
+# - the `cuda` extra, which the Dockerfile installs best-effort; both are sdist-only and have never
+#   built in the image (no nvcc). Pinned so a build that ever succeeds installs a known version.
+causal-conv1d==1.7.0
+mamba-ssm==2.3.2.post1
+# - the `perf` extra (pyproject.toml), which neither the image nor CI installs and no resolver run
+#   has ever satisfied alongside torch 2.14 (auto-gptq and autoawq are archived upstream). Pinned so
+#   pyproject and this file agree on every name; resolving the extra is recorded debt.
+flash-attn==2.8.3.post2
+auto-gptq==0.7.1
+autoawq==0.2.9
+optimum==2.3.0

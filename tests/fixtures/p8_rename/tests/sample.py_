@@ -1,0 +1,53 @@
+"""Cites oldpkg/core/config.py and oldpkg.services.svc in prose."""
+
+import logging
+import pkgutil
+
+import oldpkg  # case: import_top
+import oldpkg.core.config  # case: import_dotted
+from oldpkg.services import svc  # case: import_from
+from oldpkg import __version__  # case: import_from_pkg
+
+
+def lazy():
+    from oldpkg.core.config import settings  # case: import_lazy
+    return settings
+
+
+PATHS = oldpkg.__path__  # case: module_name
+MODS = pkgutil.walk_packages(oldpkg.__path__, "oldpkg.")  # case: package_prefix
+TARGET = "oldpkg.services.svc.helper"  # case: module_string
+APP = "oldpkg.main:app"  # case: module_attr
+CMD = "run python -m oldpkg.rules.runner_worker fetch <dir>"  # case: dash_m
+REL = "oldpkg/core/config.py"  # case: path_string
+NAME = f"oldpkg.services.{svc.__name__}"  # case: fstring
+LOG = logging.getLogger("oldpkg.rule_runner")  # case: logger
+X = 1  # see oldpkg/services/svc.py and oldpkg.core.config (case: comment_path)
+Y = 2  # prose about the bare directory oldpkg/ stays (case: comment_bare_dir)
+ONE_LINE = "import json; from oldpkg.core.config import settings"  # case: semicolon_import
+FCMD = f"python -m oldpkg.rules.runner_worker fetch {svc}"  # case: fstring_dash_m
+COPIES = ("oldpkg/", "/app/oldpkg/")  # case: app_path
+LINT = "python -m ruff check oldpkg --select E9"  # case: tool_arg
+MSG = "the oldpkg package stays a word here"  # case: prose_string
+SCRIPT = """
+import sys, os, oldpkg  # case: script_import
+from oldpkg.core import config  # case: script_from
+loaded = [m for m in sys.modules if m in ("oldpkg.rules.runner_worker",)]  # case: script_quoted
+"""
+
+BARE = "oldpkg"  # case: bare
+KW = dict(oldpkg=1)  # case: keyword
+ATTR = LOG.oldpkg  # case: attribute
+SPAN = "oldpkg.queue.wait"  # case: span
+KIND = "oldpkg.steering-set/v1"  # case: kind
+KEPT = "oldpkg.services.svc.helper"  # p8: keep (case: pragma)
+PLANT = "oldpkg.core.frozen_name"  # case: plant
+
+
+class Model:
+    oldpkg: dict  # case: field
+
+
+def local():
+    oldpkg = {"a": 1}  # case: local_bind
+    return oldpkg["a"]  # case: local

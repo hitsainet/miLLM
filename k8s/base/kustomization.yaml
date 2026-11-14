@@ -1,0 +1,27 @@
+# miServer GitOps base — deployed by the `miserver` ArgoCD Application
+# (k8s/argocd/miserver-app.yaml) from the gitops/pilot branch.
+#
+# Image tags below are the *defaults*; ArgoCD Image Updater overrides them
+# with digest pins via the parameter-override file `.argocd-source-miserver.yaml`
+# it commits to gitops/pilot. Never hand-edit that file on main. (The pre-P2
+# Application wrote its own pin file there; unread since P2, and no longer protected by the
+# sync workflow since 040 P7.)
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+resources:
+  - namespace.yaml
+  - postgres.yaml
+  - redis.yaml
+  - db-backup.yaml
+  - backend.yaml
+  - frontend.yaml
+  - ingress.yaml
+  # 040 P7 (FR-040.40) removed `../transition`: the ExternalName Service that kept the old
+  # in-cluster address answering from P2 (PD-7).
+
+images:
+  - name: hitsai/miserver-backend
+    newTag: latest
+  - name: hitsai/miserver-admin-ui
+    newTag: latest

@@ -1,0 +1,275 @@
+/**
+ * miLLM Manual — Custom Theme
+ * Teal/cyan accent matching the miLLM application UI (slate + teal palette)
+ */
+
+/* ========== Light Mode ========== */
+:root {
+  --ifm-color-primary: #0891b2;
+  --ifm-color-primary-dark: #0e7490;
+  --ifm-color-primary-darker: #155e75;
+  --ifm-color-primary-darkest: #164e63;
+  --ifm-color-primary-light: #06b6d4;
+  --ifm-color-primary-lighter: #22d3ee;
+  --ifm-color-primary-lightest: #67e8f9;
+  --ifm-code-font-size: 95%;
+  --ifm-font-family-base: 'Inter', system-ui, -apple-system, sans-serif;
+  --ifm-heading-font-weight: 700;
+  --docusaurus-highlighted-code-line-bg: rgba(6, 182, 212, 0.1);
+
+  /* Sidebar */
+  --ifm-menu-color-active: #0d9488;
+  --ifm-menu-color-background-active: rgba(6, 182, 212, 0.08);
+
+  /* Table styling */
+  --ifm-table-stripe-background: rgba(6, 182, 212, 0.04);
+  --ifm-table-border-color: #e2e8f0;
+}
+
+/* ========== Dark Mode (matches miLLM's slate-900 dark theme) ========== */
+[data-theme='dark'] {
+  --ifm-color-primary: #22d3ee;
+  --ifm-color-primary-dark: #06b6d4;
+  --ifm-color-primary-darker: #0891b2;
+  --ifm-color-primary-darkest: #0e7490;
+  --ifm-color-primary-light: #67e8f9;
+  --ifm-color-primary-lighter: #a5f3fc;
+  --ifm-color-primary-lightest: #cffafe;
+  --ifm-background-color: #0f172a;
+  --ifm-background-surface-color: #1e293b;
+  --ifm-navbar-background-color: #0f172a;
+  --ifm-footer-background-color: #020617;
+  --docusaurus-highlighted-code-line-bg: rgba(34, 211, 238, 0.15);
+
+  /* Sidebar */
+  --ifm-menu-color-active: #22d3ee;
+  --ifm-menu-color-background-active: rgba(34, 211, 238, 0.1);
+
+  /* Table styling */
+  --ifm-table-stripe-background: rgba(34, 211, 238, 0.05);
+  --ifm-table-border-color: #334155;
+}
+
+/* ========== Navbar ========== */
+.navbar {
+  border-bottom: 2px solid var(--ifm-color-primary);
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.08);
+}
+
+[data-theme='dark'] .navbar {
+  background: linear-gradient(135deg, #0f172a 0%, #164e63 100%);
+  border-bottom: 2px solid #06b6d4;
+}
+
+.navbar__title {
+  font-weight: 800;
+  letter-spacing: -0.02em;
+}
+
+[data-theme='dark'] .navbar__title {
+  color: #22d3ee;
+}
+
+/* ========== Hero / Landing Page ========== */
+.hero {
+  background: linear-gradient(135deg, #0891b2 0%, #0284c7 50%, #0369a1 100%);
+}
+
+[data-theme='dark'] .hero {
+  background: linear-gradient(135deg, #164e63 0%, #0c4a6e 50%, #0e3456 100%);
+}
+
+/* ========== Admonitions (make them pop) ========== */
+.alert--info {
+  --ifm-alert-background-color: rgba(59, 130, 246, 0.08);
+  --ifm-alert-border-color: #3b82f6;
+  border-left-width: 4px;
+}
+
+.alert--tip {
+  --ifm-alert-background-color: rgba(6, 182, 212, 0.08);
+  --ifm-alert-border-color: #06b6d4;
+  border-left-width: 4px;
+}
+
+.alert--warning {
+  --ifm-alert-background-color: rgba(245, 158, 11, 0.08);
+  --ifm-alert-border-color: #f59e0b;
+  border-left-width: 4px;
+}
+
+.alert--danger {
+  --ifm-alert-background-color: rgba(239, 68, 68, 0.08);
+  --ifm-alert-border-color: #ef4444;
+  border-left-width: 4px;
+}
+
+[data-theme='dark'] .alert--info {
+  --ifm-alert-background-color: rgba(59, 130, 246, 0.12);
+}
+
+[data-theme='dark'] .alert--tip {
+  --ifm-alert-background-color: rgba(6, 182, 212, 0.12);
+}
+
+[data-theme='dark'] .alert--warning {
+  --ifm-alert-background-color: rgba(245, 158, 11, 0.12);
+}
+
+[data-theme='dark'] .alert--danger {
+  --ifm-alert-background-color: rgba(239, 68, 68, 0.12);
+}
+
+/* ========== Tables ========== */
+table {
+  border-collapse: collapse;
+  width: 100%;
+}
+
+table thead tr {
+  background: linear-gradient(135deg, var(--ifm-color-primary) 0%, var(--ifm-color-primary-dark) 100%);
+  color: white;
+}
+
+table thead th {
+  border-color: var(--ifm-color-primary-dark) !important;
+  font-weight: 600;
+  text-transform: uppercase;
+  font-size: 0.85em;
+  letter-spacing: 0.03em;
+}
+
+table tbody tr:nth-child(even) {
+  background-color: var(--ifm-table-stripe-background);
+}
+
+table tbody tr:hover {
+  background-color: rgba(6, 182, 212, 0.08);
+}
+
+[data-theme='dark'] table tbody tr:hover {
+  background-color: rgba(34, 211, 238, 0.08);
+}
+
+/* ========== Code Blocks ========== */
+.prism-code {
+  border-radius: 8px !important;
+  border: 1px solid var(--ifm-table-border-color);
+}
+
+code {
+  border-radius: 4px;
+  padding: 2px 6px;
+  background-color: rgba(6, 182, 212, 0.08);
+  color: var(--ifm-color-primary-dark);
+}
+
+[data-theme='dark'] code {
+  background-color: rgba(34, 211, 238, 0.1);
+  color: var(--ifm-color-primary-light);
+}
+
+/* ========== Sidebar ========== */
+[data-theme='dark'] .menu {
+  background-color: #0f172a;
+}
+
+.menu__link--active:not(.menu__link--sublist) {
+  border-right: 3px solid var(--ifm-color-primary);
+  font-weight: 600;
+}
+
+[data-theme='dark'] .menu__link--active:not(.menu__link--sublist) {
+  background-color: rgba(34, 211, 238, 0.12);
+  color: #22d3ee;
+}
+
+.menu__list-item-collapsible:hover {
+  background-color: var(--ifm-menu-color-background-active);
+}
+
+[data-theme='dark'] .menu__link:hover {
+  color: #67e8f9;
+  background-color: rgba(34, 211, 238, 0.08);
+}
+
+/* ========== TOC (right sidebar) ========== */
+.table-of-contents__link--active {
+  font-weight: 600;
+  color: var(--ifm-color-primary) !important;
+}
+
+/* ========== Footer ========== */
+.footer {
+  border-top: 2px solid var(--ifm-color-primary);
+}
+
+.footer__title {
+  color: var(--ifm-color-primary-light);
+  font-weight: 700;
+  text-transform: uppercase;
+  font-size: 0.85em;
+  letter-spacing: 0.05em;
+}
+
+/* ========== Headings ========== */
+h1 {
+  background: linear-gradient(135deg, var(--ifm-color-primary) 0%, #0284c7 100%);
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+  background-clip: text;
+}
+
+h2 {
+  border-bottom: 2px solid var(--ifm-color-primary-lightest);
+  padding-bottom: 0.3em;
+}
+
+/* ========== Breadcrumbs ========== */
+.breadcrumbs__link {
+  transition: color 0.2s ease;
+}
+
+.breadcrumbs__link:hover {
+  color: var(--ifm-color-primary);
+}
+
+/* ========== Links & Accents ========== */
+[data-theme='dark'] a {
+  color: #22d3ee;
+}
+
+[data-theme='dark'] a:hover {
+  color: #67e8f9;
+}
+
+[data-theme='dark'] .pagination-nav__link {
+  border-color: #334155;
+  background: #1e293b;
+}
+
+[data-theme='dark'] .pagination-nav__link:hover {
+  border-color: #06b6d4;
+}
+
+[data-theme='dark'] .pagination-nav__sublabel {
+  color: #94a3b8;
+}
+
+/* ========== Scrollbar (dark mode) ========== */
+[data-theme='dark'] ::-webkit-scrollbar {
+  width: 8px;
+}
+
+[data-theme='dark'] ::-webkit-scrollbar-track {
+  background: #1e293b;
+}
+
+[data-theme='dark'] ::-webkit-scrollbar-thumb {
+  background: #475569;
+  border-radius: 4px;
+}
+
+[data-theme='dark'] ::-webkit-scrollbar-thumb:hover {
+  background: #64748b;
+}

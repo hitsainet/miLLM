@@ -1,0 +1,9 @@
+"""Entry point."""
+
+app = object()
+
+
+def run() -> None:
+    import uvicorn
+
+    uvicorn.run("oldpkg.main:app")

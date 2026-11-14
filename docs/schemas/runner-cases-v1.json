@@ -1,0 +1,1870 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "case_schema": {
+    "additionalProperties": false,
+    "properties": {
+      "$schema": {
+        "type": "string"
+      },
+      "case_schema": {
+        "type": "object"
+      },
+      "conformance": {
+        "items": {
+          "required": [
+            "id",
+            "doc",
+            "function",
+            "text",
+            "expect"
+          ],
+          "type": "object"
+        },
+        "type": "array"
+      },
+      "documents": {
+        "additionalProperties": {
+          "type": "object"
+        },
+        "type": "object"
+      },
+      "format": {
+        "const": "midataworks.runner-cases/v1"
+      },
+      "hash": {
+        "items": {
+          "required": [
+            "id",
+            "document",
+            "canonical_utf8",
+            "sha256"
+          ],
+          "type": "object"
+        },
+        "type": "array"
+      },
+      "hostile": {
+        "items": {
+          "required": [
+            "id",
+            "number",
+            "form",
+            "doc",
+            "function",
+            "text",
+            "expect"
+          ],
+          "type": "object"
+        },
+        "type": "array"
+      },
+      "imports": {
+        "items": {
+          "required": [
+            "id",
+            "module",
+            "doc",
+            "expect"
+          ],
+          "type": "object"
+        },
+        "type": "array"
+      },
+      "limits": {
+        "items": {
+          "required": [
+            "id",
+            "limit",
+            "doc",
+            "function",
+            "text",
+            "expect"
+          ],
+          "type": "object"
+        },
+        "type": "array"
+      }
+    },
+    "required": [
+      "format",
+      "documents",
+      "conformance",
+      "hostile",
+      "hash",
+      "imports",
+      "limits"
+    ],
+    "type": "object"
+  },
+  "conformance": [
+    {
+      "doc": "return_zero",
+      "expect": {
+        "count": 0
+      },
+      "function": "f",
+      "id": "conf.return_zero",
+      "note": "the simplest rule returns 0",
+      "params": {},
+      "text": "anything"
+    },
+    {
+      "doc": "count_tokens",
+      "expect": {
+        "count": 3
+      },
+      "function": "f",
+      "id": "conf.count_tokens",
+      "note": "whitespace tokens",
+      "params": {},
+      "text": "one two three"
+    },
+    {
+      "doc": "count_ascii_digits",
+      "expect": {
+        "count": 2
+      },
+      "function": "f",
+      "id": "conf.fullwidth_digits",
+      "note": "full-width digits are not ASCII 0-9 (no normalisation)",
+      "params": {},
+      "text": "\uff11\uff12 12"
+    },
+    {
+      "doc": "count_tokens",
+      "expect": {
+        "count": 3
+      },
+      "function": "f",
+      "id": "conf.combining_marks",
+      "note": "combining marks do not split tokens",
+      "params": {},
+      "text": "e\u0301 a\u0300 o"
+    },
+    {
+      "doc": "count_tokens",
+      "expect": {
+        "count": 3
+      },
+      "function": "f",
+      "id": "conf.emoji",
+      "note": "astral code points are single characters",
+      "params": {},
+      "text": "\ud83d\ude00 \ud83d\ude80 ok"
+    },
+    {
+      "doc": "count_ascii_digits",
+      "expect": {
+        "count": 0
+      },
+      "function": "f",
+      "id": "conf.lone_surrogate",
+      "note": "the caller replaced a lone surrogate with U+FFFD before sending",
+      "params": {},
+      "text": "pre \ud800 post"
+    },
+    {
+      "doc": "params_threshold",
+      "expect": {
+        "count": 2
+      },
+      "function": "f",
+      "id": "conf.params",
+      "note": "a parameter drives the count",
+      "params": {
+        "min": 3
+      },
+      "text": "a bb ccc dddd"
+    },
+    {
+      "doc": "two_functions",
+      "expect": {
+        "count": 3
+      },
+      "function": "a",
+      "id": "conf.two_functions_a",
+      "note": "first function of a two-function module",
+      "params": {},
+      "text": "x xy x"
+    },
+    {
+      "doc": "two_functions",
+      "expect": {
+        "count": 2
+      },
+      "function": "b",
+      "id": "conf.two_functions_b",
+      "note": "second function of a two-function module",
+      "params": {},
+      "text": "x xy y"
+    },
+    {
+      "doc": "over_cap",
+      "expect": {
+        "count": 1000
+      },
+      "function": "f",
+      "id": "conf.count_cap",
+      "note": "a count above the cap clamps to count_cap",
+      "params": {},
+      "text": "x"
+    },
+    {
+      "calls": 3,
+      "doc": "module_counter",
+      "expect": {
+        "counts": [
+          1,
+          1,
+          1
+        ]
+      },
+      "function": "f",
+      "id": "conf.fresh_instance",
+      "note": "a module-level counter is 1 on every fresh instance",
+      "params": {},
+      "text": "x"
+    },
+    {
+      "doc": "fixture2_digit_sum",
+      "expect": {
+        "count": 2
+      },
+      "function": "digit_sum",
+      "id": "conf.fuel_edge_pass",
+      "note": "fixture 2 within the floor fuel",
+      "params": {
+        "sums": [
+          3,
+          18
+        ]
+      },
+      "text": "12 99 1"
+    },
+    {
+      "doc": "raises",
+      "expect": {
+        "reason": "rule_error"
+      },
+      "function": "f",
+      "id": "conf.raises_is_error",
+      "note": "a rule that raises is rule_error, never a count",
+      "params": {},
+      "text": "x"
+    },
+    {
+      "doc": "fixture1_luhn",
+      "expect": {
+        "count": 1
+      },
+      "function": "check",
+      "id": "conf.fixture1_luhn",
+      "note": "fixture 1 (Luhn) counts digit runs that pass the Luhn check",
+      "params": {},
+      "text": "ids 000000000000 and 000000000001 end"
+    },
+    {
+      "doc": "fixture2_digit_sum",
+      "expect": {
+        "count": 3
+      },
+      "function": "digit_sum",
+      "id": "conf.fixture2_digit_sum",
+      "note": "fixture 2 counts tokens whose digit sum is in the table",
+      "params": {
+        "sums": [
+          10,
+          20,
+          30
+        ]
+      },
+      "text": "28 73 46 11"
+    },
+    {
+      "doc": "edge_call_fuel",
+      "expect": {
+        "count": 1
+      },
+      "function": "f",
+      "id": "conf.fuel_edge_at_floor",
+      "note": "Measured 2026-10-24 (Review R1) on the published snapshot at the floor: n=3125997 spends 2,147,483,333 call fuel, 315 under call_fuel; the fuel edge pair with conf.fuel_edge_past_floor (FR-018.6, FR-018.10): any change of fuel metering or of the budget a host grants turns one of the two red",
+      "params": {
+        "n": 3125997
+      },
+      "text": "x"
+    },
+    {
+      "doc": "edge_call_fuel",
+      "expect": {
+        "reason": "rule_resource_limit"
+      },
+      "function": "f",
+      "id": "conf.fuel_edge_past_floor",
+      "note": "Measured 2026-10-24 (Review R1) on the published snapshot at the floor: one more iteration (about 687 fuel) than conf.fuel_edge_at_floor exhausts call_fuel",
+      "params": {
+        "n": 3125998
+      },
+      "text": "x"
+    }
+  ],
+  "documents": {
+    "alloc_big": {
+      "derived_from": {
+        "sources": [],
+        "statement": "Reference vector; no sources."
+      },
+      "functions": [
+        {
+          "name": "f",
+          "output": {
+            "type": "count"
+          }
+        }
+      ],
+      "params_schema": {
+        "type": "object"
+      },
+      "runner_contract": "midataworks.runner/v1",
+      "source": "def f(text, params):\n    b = bytearray(200 << 20)\n    return len(b) and 0\n"
+    },
+    "count_ascii_digits": {
+      "derived_from": {
+        "sources": [],
+        "statement": "Reference vector; no sources."
+      },
+      "functions": [
+        {
+          "name": "f",
+          "output": {
+            "type": "count"
+          }
+        }
+      ],
+      "params_schema": {
+        "type": "object"
+      },
+      "runner_contract": "midataworks.runner/v1",
+      "source": "def f(text, params):\n    return sum(1 for c in text if '0' <= c <= '9')\n"
+    },
+    "count_tokens": {
+      "derived_from": {
+        "sources": [],
+        "statement": "Reference vector; no sources."
+      },
+      "functions": [
+        {
+          "name": "f",
+          "output": {
+            "type": "count"
+          }
+        }
+      ],
+      "params_schema": {
+        "type": "object"
+      },
+      "runner_contract": "midataworks.runner/v1",
+      "source": "def f(text, params):\n    return len(text.split())\n"
+    },
+    "edge_call_fuel": {
+      "derived_from": {
+        "sources": [],
+        "statement": "Reference vector; no sources."
+      },
+      "functions": [
+        {
+          "name": "f",
+          "output": {
+            "type": "count"
+          }
+        }
+      ],
+      "params_schema": {
+        "properties": {
+          "n": {
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "n"
+        ],
+        "type": "object"
+      },
+      "runner_contract": "midataworks.runner/v1",
+      "source": "def f(text, params):\n    n = params[\"n\"]\n    i = 0\n    while i < n:\n        i += 1\n    return 1\n"
+    },
+    "edge_load_exceed": {
+      "derived_from": {
+        "sources": [],
+        "statement": "Reference vector; no sources."
+      },
+      "functions": [
+        {
+          "name": "f",
+          "output": {
+            "type": "count"
+          }
+        }
+      ],
+      "params_schema": {
+        "type": "object"
+      },
+      "runner_contract": "midataworks.runner/v1",
+      "source": "n = 0\nwhile n < 17985:\n    n += 1\n\n\ndef f(text, params):\n    return 1\n"
+    },
+    "edge_load_pass": {
+      "derived_from": {
+        "sources": [],
+        "statement": "Reference vector; no sources."
+      },
+      "functions": [
+        {
+          "name": "f",
+          "output": {
+            "type": "count"
+          }
+        }
+      ],
+      "params_schema": {
+        "type": "object"
+      },
+      "runner_contract": "midataworks.runner/v1",
+      "source": "n = 0\nwhile n < 17984:\n    n += 1\n\n\ndef f(text, params):\n    return 1\n"
+    },
+    "edge_memory": {
+      "derived_from": {
+        "sources": [],
+        "statement": "Reference vector; no sources."
+      },
+      "functions": [
+        {
+          "name": "f",
+          "output": {
+            "type": "count"
+          }
+        }
+      ],
+      "params_schema": {
+        "properties": {
+          "n": {
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "n"
+        ],
+        "type": "object"
+      },
+      "runner_contract": "midataworks.runner/v1",
+      "source": "def f(text, params):\n    b = bytearray(params[\"n\"])\n    return 1\n"
+    },
+    "fixture1_luhn": {
+      "derived_from": {
+        "sources": [],
+        "statement": "Reference vector; no sources."
+      },
+      "functions": [
+        {
+          "name": "check",
+          "output": {
+            "type": "count"
+          }
+        }
+      ],
+      "params_schema": {
+        "type": "object"
+      },
+      "runner_contract": "midataworks.runner/v1",
+      "source": "def check(text, params):\n    import re\n    n = 0\n    for m in re.findall(r\"[0-9][0-9 -]{10,30}[0-9]\", text):\n        digits = [int(c) for c in m if c.isdigit()]\n        if len(digits) < 12:\n            continue\n        total, parity = 0, len(digits) % 2\n        for i, d in enumerate(digits):\n            if i % 2 == parity:\n                d *= 2\n                if d > 9:\n                    d -= 9\n            total += d\n        if total % 10 == 0:\n            n += 1\n    return n\n"
+    },
+    "fixture2_digit_sum": {
+      "derived_from": {
+        "sources": [],
+        "statement": "Reference vector; no sources."
+      },
+      "functions": [
+        {
+          "name": "digit_sum",
+          "output": {
+            "type": "count"
+          }
+        }
+      ],
+      "params_schema": {
+        "properties": {
+          "sums": {
+            "items": {
+              "type": "integer"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "sums"
+        ],
+        "type": "object"
+      },
+      "runner_contract": "midataworks.runner/v1",
+      "source": "def digit_sum(text, params):\n    table = set(params[\"sums\"])\n    n = 0\n    for token in text.split():\n        s = 0\n        for ch in token:\n            if \"0\" <= ch <= \"9\":\n                s += ord(ch) - 48\n        if s in table:\n            n += 1\n    return n\n"
+    },
+    "hash_ascii": {
+      "derived_from": {
+        "sources": [],
+        "statement": "Reference vector; no sources."
+      },
+      "functions": [
+        {
+          "name": "f",
+          "output": {
+            "type": "count"
+          }
+        }
+      ],
+      "params_schema": {
+        "type": "object"
+      },
+      "runner_contract": "midataworks.runner/v1",
+      "source": "def f(text, params):\n    return 0\n"
+    },
+    "hash_nonascii_key": {
+      "derived_from": {
+        "sources": [],
+        "statement": "Reference vector; no sources."
+      },
+      "functions": [
+        {
+          "name": "f",
+          "output": {
+            "type": "count"
+          }
+        }
+      ],
+      "params_schema": {
+        "properties": {
+          "caf\u00e9": {
+            "type": "integer"
+          },
+          "na\u00efve": {
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
+      "runner_contract": "midataworks.runner/v1",
+      "source": "def f(text, params):\n    return 0\n"
+    },
+    "hash_utf16_order": {
+      "derived_from": {
+        "sources": [],
+        "statement": "Reference vector; no sources."
+      },
+      "functions": [
+        {
+          "name": "f",
+          "output": {
+            "type": "count"
+          }
+        }
+      ],
+      "params_schema": {
+        "properties": {
+          "\uffff": {
+            "type": "integer"
+          },
+          "\ud800\udc00": {
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
+      "runner_contract": "midataworks.runner/v1",
+      "source": "def f(text, params):\n    return 0\n"
+    },
+    "import_bisect": {
+      "derived_from": {
+        "sources": [],
+        "statement": "Reference vector; no sources."
+      },
+      "functions": [
+        {
+          "name": "f",
+          "output": {
+            "type": "count"
+          }
+        }
+      ],
+      "params_schema": {
+        "type": "object"
+      },
+      "runner_contract": "midataworks.runner/v1",
+      "source": "import bisect\ndef f(text, params):\n    return bisect.bisect([1, 2, 3], 2) and 0\n"
+    },
+    "import_collections": {
+      "derived_from": {
+        "sources": [],
+        "statement": "Reference vector; no sources."
+      },
+      "functions": [
+        {
+          "name": "f",
+          "output": {
+            "type": "count"
+          }
+        }
+      ],
+      "params_schema": {
+        "type": "object"
+      },
+      "runner_contract": "midataworks.runner/v1",
+      "source": "import collections\ndef f(text, params):\n    return len(collections.Counter(text)) and 0\n"
+    },
+    "import_decimal": {
+      "derived_from": {
+        "sources": [],
+        "statement": "Reference vector; no sources."
+      },
+      "functions": [
+        {
+          "name": "f",
+          "output": {
+            "type": "count"
+          }
+        }
+      ],
+      "params_schema": {
+        "type": "object"
+      },
+      "runner_contract": "midataworks.runner/v1",
+      "source": "import decimal\ndef f(text, params):\n    return int(decimal.Decimal(1)) and 0\n"
+    },
+    "import_fractions": {
+      "derived_from": {
+        "sources": [],
+        "statement": "Reference vector; no sources."
+      },
+      "functions": [
+        {
+          "name": "f",
+          "output": {
+            "type": "count"
+          }
+        }
+      ],
+      "params_schema": {
+        "type": "object"
+      },
+      "runner_contract": "midataworks.runner/v1",
+      "source": "import fractions\ndef f(text, params):\n    return fractions.Fraction(1, 2).numerator and 0\n"
+    },
+    "import_functools": {
+      "derived_from": {
+        "sources": [],
+        "statement": "Reference vector; no sources."
+      },
+      "functions": [
+        {
+          "name": "f",
+          "output": {
+            "type": "count"
+          }
+        }
+      ],
+      "params_schema": {
+        "type": "object"
+      },
+      "runner_contract": "midataworks.runner/v1",
+      "source": "import functools\ndef f(text, params):\n    return functools.reduce(lambda a, b: a + b, [1, 1]) and 0\n"
+    },
+    "import_heapq": {
+      "derived_from": {
+        "sources": [],
+        "statement": "Reference vector; no sources."
+      },
+      "functions": [
+        {
+          "name": "f",
+          "output": {
+            "type": "count"
+          }
+        }
+      ],
+      "params_schema": {
+        "type": "object"
+      },
+      "runner_contract": "midataworks.runner/v1",
+      "source": "import heapq\ndef f(text, params):\n    return heapq.nlargest(1, [1, 2])[0] and 0\n"
+    },
+    "import_itertools": {
+      "derived_from": {
+        "sources": [],
+        "statement": "Reference vector; no sources."
+      },
+      "functions": [
+        {
+          "name": "f",
+          "output": {
+            "type": "count"
+          }
+        }
+      ],
+      "params_schema": {
+        "type": "object"
+      },
+      "runner_contract": "midataworks.runner/v1",
+      "source": "import itertools\ndef f(text, params):\n    return len(list(itertools.islice(itertools.count(), 2))) and 0\n"
+    },
+    "import_json": {
+      "derived_from": {
+        "sources": [],
+        "statement": "Reference vector; no sources."
+      },
+      "functions": [
+        {
+          "name": "f",
+          "output": {
+            "type": "count"
+          }
+        }
+      ],
+      "params_schema": {
+        "type": "object"
+      },
+      "runner_contract": "midataworks.runner/v1",
+      "source": "import json\ndef f(text, params):\n    return len(json.dumps([1])) and 0\n"
+    },
+    "import_math": {
+      "derived_from": {
+        "sources": [],
+        "statement": "Reference vector; no sources."
+      },
+      "functions": [
+        {
+          "name": "f",
+          "output": {
+            "type": "count"
+          }
+        }
+      ],
+      "params_schema": {
+        "type": "object"
+      },
+      "runner_contract": "midataworks.runner/v1",
+      "source": "import math\ndef f(text, params):\n    return int(math.sqrt(4)) and 0\n"
+    },
+    "import_operator": {
+      "derived_from": {
+        "sources": [],
+        "statement": "Reference vector; no sources."
+      },
+      "functions": [
+        {
+          "name": "f",
+          "output": {
+            "type": "count"
+          }
+        }
+      ],
+      "params_schema": {
+        "type": "object"
+      },
+      "runner_contract": "midataworks.runner/v1",
+      "source": "import operator\ndef f(text, params):\n    return operator.add(1, 1) and 0\n"
+    },
+    "import_re": {
+      "derived_from": {
+        "sources": [],
+        "statement": "Reference vector; no sources."
+      },
+      "functions": [
+        {
+          "name": "f",
+          "output": {
+            "type": "count"
+          }
+        }
+      ],
+      "params_schema": {
+        "type": "object"
+      },
+      "runner_contract": "midataworks.runner/v1",
+      "source": "import re\ndef f(text, params):\n    return len(re.findall('a', text)) and 0\n"
+    },
+    "import_statistics": {
+      "derived_from": {
+        "sources": [],
+        "statement": "Reference vector; no sources."
+      },
+      "functions": [
+        {
+          "name": "f",
+          "output": {
+            "type": "count"
+          }
+        }
+      ],
+      "params_schema": {
+        "type": "object"
+      },
+      "runner_contract": "midataworks.runner/v1",
+      "source": "import statistics\ndef f(text, params):\n    return int(statistics.mean([2, 4])) and 0\n"
+    },
+    "import_string": {
+      "derived_from": {
+        "sources": [],
+        "statement": "Reference vector; no sources."
+      },
+      "functions": [
+        {
+          "name": "f",
+          "output": {
+            "type": "count"
+          }
+        }
+      ],
+      "params_schema": {
+        "type": "object"
+      },
+      "runner_contract": "midataworks.runner/v1",
+      "source": "import string\ndef f(text, params):\n    return len(string.digits) and 0\n"
+    },
+    "import_unicodedata": {
+      "derived_from": {
+        "sources": [],
+        "statement": "Reference vector; no sources."
+      },
+      "functions": [
+        {
+          "name": "f",
+          "output": {
+            "type": "count"
+          }
+        }
+      ],
+      "params_schema": {
+        "type": "object"
+      },
+      "runner_contract": "midataworks.runner/v1",
+      "source": "import unicodedata\ndef f(text, params):\n    return len(unicodedata.normalize('NFC', text)) and 0\n"
+    },
+    "import_unlisted": {
+      "derived_from": {
+        "sources": [],
+        "statement": "Reference vector; no sources."
+      },
+      "functions": [
+        {
+          "name": "f",
+          "output": {
+            "type": "count"
+          }
+        }
+      ],
+      "params_schema": {
+        "type": "object"
+      },
+      "runner_contract": "midataworks.runner/v1",
+      "source": "import os\ndef f(text, params):\n    return 0\n"
+    },
+    "load_bomb": {
+      "derived_from": {
+        "sources": [],
+        "statement": "Reference vector; no sources."
+      },
+      "functions": [
+        {
+          "name": "f",
+          "output": {
+            "type": "count"
+          }
+        }
+      ],
+      "params_schema": {
+        "type": "object"
+      },
+      "runner_contract": "midataworks.runner/v1",
+      "source": "_x = 2 ** (1 << 24)\ndef f(text, params):\n    return 0\n"
+    },
+    "loop_forever": {
+      "derived_from": {
+        "sources": [],
+        "statement": "Reference vector; no sources."
+      },
+      "functions": [
+        {
+          "name": "f",
+          "output": {
+            "type": "count"
+          }
+        }
+      ],
+      "params_schema": {
+        "type": "object"
+      },
+      "runner_contract": "midataworks.runner/v1",
+      "source": "def f(text, params):\n    while True:\n        pass\n"
+    },
+    "module_counter": {
+      "derived_from": {
+        "sources": [],
+        "statement": "Reference vector; no sources."
+      },
+      "functions": [
+        {
+          "name": "f",
+          "output": {
+            "type": "count"
+          }
+        }
+      ],
+      "params_schema": {
+        "type": "object"
+      },
+      "runner_contract": "midataworks.runner/v1",
+      "source": "_calls = [0]\ndef f(text, params):\n    _calls[0] += 1\n    return _calls[0]\n"
+    },
+    "over_cap": {
+      "derived_from": {
+        "sources": [],
+        "statement": "Reference vector; no sources."
+      },
+      "functions": [
+        {
+          "name": "f",
+          "output": {
+            "type": "count"
+          }
+        }
+      ],
+      "params_schema": {
+        "type": "object"
+      },
+      "runner_contract": "midataworks.runner/v1",
+      "source": "def f(text, params):\n    return 10 ** 9\n"
+    },
+    "params_threshold": {
+      "derived_from": {
+        "sources": [],
+        "statement": "Reference vector; no sources."
+      },
+      "functions": [
+        {
+          "name": "f",
+          "output": {
+            "type": "count"
+          }
+        }
+      ],
+      "params_schema": {
+        "properties": {
+          "min": {
+            "type": "integer"
+          }
+        },
+        "required": [
+          "min"
+        ],
+        "type": "object"
+      },
+      "runner_contract": "midataworks.runner/v1",
+      "source": "def f(text, params):\n    return sum(1 for w in text.split() if len(w) >= params['min'])\n"
+    },
+    "print_megabyte": {
+      "derived_from": {
+        "sources": [],
+        "statement": "Reference vector; no sources."
+      },
+      "functions": [
+        {
+          "name": "f",
+          "output": {
+            "type": "count"
+          }
+        }
+      ],
+      "params_schema": {
+        "type": "object"
+      },
+      "runner_contract": "midataworks.runner/v1",
+      "source": "def f(text, params):\n    print('a' * (1 << 20))\n    return 1\n"
+    },
+    "raises": {
+      "derived_from": {
+        "sources": [],
+        "statement": "Reference vector; no sources."
+      },
+      "functions": [
+        {
+          "name": "f",
+          "output": {
+            "type": "count"
+          }
+        }
+      ],
+      "params_schema": {
+        "type": "object"
+      },
+      "runner_contract": "midataworks.runner/v1",
+      "source": "def f(text, params):\n    raise ValueError('boom')\n"
+    },
+    "re_backtrack": {
+      "derived_from": {
+        "sources": [],
+        "statement": "Reference vector; no sources."
+      },
+      "functions": [
+        {
+          "name": "f",
+          "output": {
+            "type": "count"
+          }
+        }
+      ],
+      "params_schema": {
+        "type": "object"
+      },
+      "runner_contract": "midataworks.runner/v1",
+      "source": "import re\n_P = re.compile(r'(a+)+$')\ndef f(text, params):\n    return len(_P.findall('a' * 50 + 'b'))\n"
+    },
+    "recurse": {
+      "derived_from": {
+        "sources": [],
+        "statement": "Reference vector; no sources."
+      },
+      "functions": [
+        {
+          "name": "f",
+          "output": {
+            "type": "count"
+          }
+        }
+      ],
+      "params_schema": {
+        "type": "object"
+      },
+      "runner_contract": "midataworks.runner/v1",
+      "source": "def f(text, params):\n    def g(n):\n        return g(n + 1)\n    return g(0)\n"
+    },
+    "ret_bool": {
+      "derived_from": {
+        "sources": [],
+        "statement": "Reference vector; no sources."
+      },
+      "functions": [
+        {
+          "name": "f",
+          "output": {
+            "type": "count"
+          }
+        }
+      ],
+      "params_schema": {
+        "type": "object"
+      },
+      "runner_contract": "midataworks.runner/v1",
+      "source": "def f(text, params):\n    return True\n"
+    },
+    "ret_float": {
+      "derived_from": {
+        "sources": [],
+        "statement": "Reference vector; no sources."
+      },
+      "functions": [
+        {
+          "name": "f",
+          "output": {
+            "type": "count"
+          }
+        }
+      ],
+      "params_schema": {
+        "type": "object"
+      },
+      "runner_contract": "midataworks.runner/v1",
+      "source": "def f(text, params):\n    return 1.0\n"
+    },
+    "ret_list": {
+      "derived_from": {
+        "sources": [],
+        "statement": "Reference vector; no sources."
+      },
+      "functions": [
+        {
+          "name": "f",
+          "output": {
+            "type": "count"
+          }
+        }
+      ],
+      "params_schema": {
+        "type": "object"
+      },
+      "runner_contract": "midataworks.runner/v1",
+      "source": "def f(text, params):\n    return [1]\n"
+    },
+    "ret_negative": {
+      "derived_from": {
+        "sources": [],
+        "statement": "Reference vector; no sources."
+      },
+      "functions": [
+        {
+          "name": "f",
+          "output": {
+            "type": "count"
+          }
+        }
+      ],
+      "params_schema": {
+        "type": "object"
+      },
+      "runner_contract": "midataworks.runner/v1",
+      "source": "def f(text, params):\n    return -1\n"
+    },
+    "ret_none": {
+      "derived_from": {
+        "sources": [],
+        "statement": "Reference vector; no sources."
+      },
+      "functions": [
+        {
+          "name": "f",
+          "output": {
+            "type": "count"
+          }
+        }
+      ],
+      "params_schema": {
+        "type": "object"
+      },
+      "runner_contract": "midataworks.runner/v1",
+      "source": "def f(text, params):\n    return None\n"
+    },
+    "ret_str": {
+      "derived_from": {
+        "sources": [],
+        "statement": "Reference vector; no sources."
+      },
+      "functions": [
+        {
+          "name": "f",
+          "output": {
+            "type": "count"
+          }
+        }
+      ],
+      "params_schema": {
+        "type": "object"
+      },
+      "runner_contract": "midataworks.runner/v1",
+      "source": "def f(text, params):\n    return 'x'\n"
+    },
+    "return_megabyte": {
+      "derived_from": {
+        "sources": [],
+        "statement": "Reference vector; no sources."
+      },
+      "functions": [
+        {
+          "name": "f",
+          "output": {
+            "type": "count"
+          }
+        }
+      ],
+      "params_schema": {
+        "type": "object"
+      },
+      "runner_contract": "midataworks.runner/v1",
+      "source": "def f(text, params):\n    return 'a' * (1 << 20)\n"
+    },
+    "return_text": {
+      "derived_from": {
+        "sources": [],
+        "statement": "Reference vector; no sources."
+      },
+      "functions": [
+        {
+          "name": "f",
+          "output": {
+            "type": "count"
+          }
+        }
+      ],
+      "params_schema": {
+        "type": "object"
+      },
+      "runner_contract": "midataworks.runner/v1",
+      "source": "def f(text, params):\n    return text\n"
+    },
+    "return_zero": {
+      "derived_from": {
+        "sources": [],
+        "statement": "Reference vector; no sources."
+      },
+      "functions": [
+        {
+          "name": "f",
+          "output": {
+            "type": "count"
+          }
+        }
+      ],
+      "params_schema": {
+        "type": "object"
+      },
+      "runner_contract": "midataworks.runner/v1",
+      "source": "def f(text, params):\n    return 0\n"
+    },
+    "two_functions": {
+      "derived_from": {
+        "sources": [],
+        "statement": "Reference vector; no sources."
+      },
+      "functions": [
+        {
+          "name": "a",
+          "output": {
+            "type": "count"
+          }
+        },
+        {
+          "name": "b",
+          "output": {
+            "type": "count"
+          }
+        }
+      ],
+      "params_schema": {
+        "type": "object"
+      },
+      "runner_contract": "midataworks.runner/v1",
+      "source": "def a(text, params):\n    return text.count('x')\ndef b(text, params):\n    return text.count('y')\n"
+    }
+  },
+  "format": "midataworks.runner-cases/v1",
+  "hash": [
+    {
+      "canonical_utf8": "{\"derived_from\":{\"sources\":[],\"statement\":\"Reference vector; no sources.\"},\"functions\":[{\"name\":\"f\",\"output\":{\"type\":\"count\"}}],\"params_schema\":{\"type\":\"object\"},\"runner_contract\":\"midataworks.runner/v1\",\"source\":\"def f(text, params):\\n    return 0\\n\"}",
+      "document": "hash_ascii",
+      "id": "hash.ascii",
+      "note": "code_sha256 of the document's canonical JSON",
+      "sha256": "52beed9e9d4f169d1a1c802c97a73da8a530cd75dab88f9f95bd4deda9a5a6a0"
+    },
+    {
+      "canonical_utf8": "{\"derived_from\":{\"sources\":[],\"statement\":\"Reference vector; no sources.\"},\"functions\":[{\"name\":\"f\",\"output\":{\"type\":\"count\"}}],\"params_schema\":{\"properties\":{\"caf\u00e9\":{\"type\":\"integer\"},\"na\u00efve\":{\"type\":\"string\"}},\"type\":\"object\"},\"runner_contract\":\"midataworks.runner/v1\",\"source\":\"def f(text, params):\\n    return 0\\n\"}",
+      "document": "hash_nonascii_key",
+      "id": "hash.nonascii_key",
+      "note": "code_sha256 of the document's canonical JSON",
+      "sha256": "0361f5f87893b7e41fc5f7528477a7da4403bf39a351f544f5f1a5364fd09a82"
+    },
+    {
+      "canonical_utf8": "{\"derived_from\":{\"sources\":[],\"statement\":\"Reference vector; no sources.\"},\"functions\":[{\"name\":\"f\",\"output\":{\"type\":\"count\"}}],\"params_schema\":{\"properties\":{\"\uffff\":{\"type\":\"integer\"},\"\ud800\udc00\":{\"type\":\"string\"}},\"type\":\"object\"},\"runner_contract\":\"midataworks.runner/v1\",\"source\":\"def f(text, params):\\n    return 0\\n\"}",
+      "document": "hash_utf16_order",
+      "id": "hash.utf16_order",
+      "note": "code_sha256 of the document's canonical JSON",
+      "sha256": "e3d3d0a4d2169b05e86613c7d9f09e6693c348adb49e207117c426712b4491b7"
+    }
+  ],
+  "hostile": [
+    {
+      "doc": "loop_forever",
+      "expect": {
+        "reason": "rule_resource_limit"
+      },
+      "form": "runtime",
+      "function": "f",
+      "id": "hostile.loop",
+      "note": "an infinite loop exhausts call fuel",
+      "number": 5,
+      "params": {},
+      "text": "x"
+    },
+    {
+      "doc": "alloc_big",
+      "expect": {
+        "reason": "rule_resource_limit"
+      },
+      "form": "runtime",
+      "function": "f",
+      "id": "hostile.alloc",
+      "note": "allocating past the memory cap raises MemoryError",
+      "number": 6,
+      "params": {},
+      "text": "x"
+    },
+    {
+      "doc": "return_megabyte",
+      "expect": {
+        "reason": "rule_output_invalid"
+      },
+      "form": "runtime",
+      "function": "f",
+      "id": "hostile.return_megabyte",
+      "note": "a megabyte string is not a count",
+      "number": 7,
+      "params": {},
+      "text": "x"
+    },
+    {
+      "doc": "print_megabyte",
+      "expect": {
+        "count": 1
+      },
+      "form": "runtime",
+      "function": "f",
+      "id": "hostile.print_megabyte",
+      "note": "stderr is discarded; the return value stands",
+      "number": 7,
+      "params": {},
+      "text": "x"
+    },
+    {
+      "doc": "return_text",
+      "expect": {
+        "reason": "rule_output_invalid"
+      },
+      "form": "runtime",
+      "function": "f",
+      "id": "hostile.return_text",
+      "note": "returning text is rule_output_invalid",
+      "number": 8,
+      "params": {},
+      "text": "secret text"
+    },
+    {
+      "doc": "module_counter",
+      "expect": {
+        "count": 1
+      },
+      "form": "runtime",
+      "function": "f",
+      "id": "hostile.state",
+      "note": "a fresh instance means no state carries (count 1)",
+      "number": 10,
+      "params": {},
+      "text": "x"
+    },
+    {
+      "doc": "recurse",
+      "expect": {
+        "reason": "rule_resource_limit"
+      },
+      "form": "runtime",
+      "function": "f",
+      "id": "hostile.recurse",
+      "note": "unbounded recursion exhausts the stack",
+      "number": 11,
+      "params": {},
+      "text": "x"
+    },
+    {
+      "doc": "load_bomb",
+      "expect": {
+        "reason": "rule_resource_limit"
+      },
+      "form": "runtime",
+      "function": "f",
+      "id": "hostile.load_bomb",
+      "note": "a huge constant built at import exhausts load fuel",
+      "number": 12,
+      "params": {},
+      "text": "x"
+    },
+    {
+      "doc": "ret_negative",
+      "expect": {
+        "reason": "rule_output_invalid"
+      },
+      "form": "runtime",
+      "function": "f",
+      "id": "hostile.ret_negative",
+      "note": "a negative return is invalid",
+      "number": 13,
+      "params": {},
+      "text": "x"
+    },
+    {
+      "doc": "ret_float",
+      "expect": {
+        "reason": "rule_output_invalid"
+      },
+      "form": "runtime",
+      "function": "f",
+      "id": "hostile.ret_float",
+      "note": "a float return is invalid",
+      "number": 13,
+      "params": {},
+      "text": "x"
+    },
+    {
+      "doc": "ret_bool",
+      "expect": {
+        "reason": "rule_output_invalid"
+      },
+      "form": "runtime",
+      "function": "f",
+      "id": "hostile.ret_bool",
+      "note": "a bool return is invalid (bool is not an int here)",
+      "number": 13,
+      "params": {},
+      "text": "x"
+    },
+    {
+      "doc": "ret_str",
+      "expect": {
+        "reason": "rule_output_invalid"
+      },
+      "form": "runtime",
+      "function": "f",
+      "id": "hostile.ret_str",
+      "note": "a str return is invalid",
+      "number": 13,
+      "params": {},
+      "text": "x"
+    },
+    {
+      "doc": "ret_none",
+      "expect": {
+        "reason": "rule_output_invalid"
+      },
+      "form": "runtime",
+      "function": "f",
+      "id": "hostile.ret_none",
+      "note": "a None return is invalid",
+      "number": 13,
+      "params": {},
+      "text": "x"
+    },
+    {
+      "doc": "ret_list",
+      "expect": {
+        "reason": "rule_output_invalid"
+      },
+      "form": "runtime",
+      "function": "f",
+      "id": "hostile.ret_list",
+      "note": "a structure return is invalid",
+      "number": 13,
+      "params": {},
+      "text": "x"
+    },
+    {
+      "doc": "over_cap",
+      "expect": {
+        "count": 1000
+      },
+      "form": "runtime",
+      "function": "f",
+      "id": "hostile.over_cap",
+      "note": "a count above the cap clamps",
+      "number": 14,
+      "params": {},
+      "text": "x"
+    },
+    {
+      "doc": "import_unlisted",
+      "expect": {
+        "reason": "rule_load_refused"
+      },
+      "form": "static",
+      "function": "f",
+      "id": "hostile.import_unlisted",
+      "note": "a module outside the allowed list is refused",
+      "number": 15,
+      "params": {},
+      "text": "x"
+    },
+    {
+      "doc": "re_backtrack",
+      "expect": {
+        "reason": "rule_resource_limit"
+      },
+      "form": "runtime",
+      "function": "f",
+      "id": "hostile.re_backtrack",
+      "note": "catastrophic backtracking exhausts call fuel",
+      "number": 16,
+      "params": {},
+      "text": "x"
+    }
+  ],
+  "imports": [
+    {
+      "doc": "import_bisect",
+      "expect": {
+        "count": 0
+      },
+      "id": "import.bisect",
+      "module": "bisect",
+      "note": "bisect imports and runs"
+    },
+    {
+      "doc": "import_collections",
+      "expect": {
+        "count": 0
+      },
+      "id": "import.collections",
+      "module": "collections",
+      "note": "collections imports and runs"
+    },
+    {
+      "doc": "import_decimal",
+      "expect": {
+        "count": 0
+      },
+      "id": "import.decimal",
+      "module": "decimal",
+      "note": "decimal imports and runs"
+    },
+    {
+      "doc": "import_fractions",
+      "expect": {
+        "count": 0
+      },
+      "id": "import.fractions",
+      "module": "fractions",
+      "note": "fractions imports and runs"
+    },
+    {
+      "doc": "import_functools",
+      "expect": {
+        "count": 0
+      },
+      "id": "import.functools",
+      "module": "functools",
+      "note": "functools imports and runs"
+    },
+    {
+      "doc": "import_heapq",
+      "expect": {
+        "count": 0
+      },
+      "id": "import.heapq",
+      "module": "heapq",
+      "note": "heapq imports and runs"
+    },
+    {
+      "doc": "import_itertools",
+      "expect": {
+        "count": 0
+      },
+      "id": "import.itertools",
+      "module": "itertools",
+      "note": "itertools imports and runs"
+    },
+    {
+      "doc": "import_json",
+      "expect": {
+        "count": 0
+      },
+      "id": "import.json",
+      "module": "json",
+      "note": "json imports and runs"
+    },
+    {
+      "doc": "import_math",
+      "expect": {
+        "count": 0
+      },
+      "id": "import.math",
+      "module": "math",
+      "note": "math imports and runs"
+    },
+    {
+      "doc": "import_operator",
+      "expect": {
+        "count": 0
+      },
+      "id": "import.operator",
+      "module": "operator",
+      "note": "operator imports and runs"
+    },
+    {
+      "doc": "import_re",
+      "expect": {
+        "count": 0
+      },
+      "id": "import.re",
+      "module": "re",
+      "note": "re imports and runs"
+    },
+    {
+      "doc": "import_statistics",
+      "expect": {
+        "count": 0
+      },
+      "id": "import.statistics",
+      "module": "statistics",
+      "note": "statistics imports and runs"
+    },
+    {
+      "doc": "import_string",
+      "expect": {
+        "count": 0
+      },
+      "id": "import.string",
+      "module": "string",
+      "note": "string imports and runs"
+    },
+    {
+      "doc": "import_unicodedata",
+      "expect": {
+        "count": 0
+      },
+      "id": "import.unicodedata",
+      "module": "unicodedata",
+      "note": "unicodedata imports and runs"
+    }
+  ],
+  "limits": [
+    {
+      "doc": "return_zero",
+      "expect": {
+        "count": 0
+      },
+      "function": "f",
+      "id": "limit.call_fuel.pass",
+      "limit": "call_fuel",
+      "note": "within call fuel",
+      "params": {},
+      "text": "x"
+    },
+    {
+      "doc": "loop_forever",
+      "expect": {
+        "reason": "rule_resource_limit"
+      },
+      "function": "f",
+      "id": "limit.call_fuel.exceed",
+      "limit": "call_fuel",
+      "note": "exceeds call fuel",
+      "params": {},
+      "text": "x"
+    },
+    {
+      "doc": "count_tokens",
+      "expect": {
+        "count": 2
+      },
+      "function": "f",
+      "id": "limit.load_fuel.pass",
+      "limit": "load_fuel",
+      "note": "within load fuel",
+      "params": {},
+      "text": "a b"
+    },
+    {
+      "doc": "load_bomb",
+      "expect": {
+        "reason": "rule_resource_limit"
+      },
+      "function": "f",
+      "id": "limit.load_fuel.exceed",
+      "limit": "load_fuel",
+      "note": "exceeds load fuel",
+      "params": {},
+      "text": "x"
+    },
+    {
+      "doc": "return_zero",
+      "expect": {
+        "count": 0
+      },
+      "function": "f",
+      "id": "limit.prelude_fuel.pass",
+      "limit": "prelude_fuel",
+      "note": "within prelude fuel (no deterministic over-case)",
+      "params": {},
+      "text": "x"
+    },
+    {
+      "doc": "count_tokens",
+      "expect": {
+        "count": 3
+      },
+      "function": "f",
+      "id": "limit.memory_bytes.pass",
+      "limit": "memory_bytes",
+      "note": "within the memory cap",
+      "params": {},
+      "text": "a b c"
+    },
+    {
+      "doc": "alloc_big",
+      "expect": {
+        "reason": "rule_resource_limit"
+      },
+      "function": "f",
+      "id": "limit.memory_bytes.exceed",
+      "limit": "memory_bytes",
+      "note": "exceeds the memory cap",
+      "params": {},
+      "text": "x"
+    },
+    {
+      "doc": "return_zero",
+      "expect": {
+        "count": 0
+      },
+      "function": "f",
+      "id": "limit.output_bytes.pass",
+      "limit": "output_bytes",
+      "note": "a small reply is within the output limit",
+      "params": {},
+      "text": "x"
+    },
+    {
+      "doc": "return_megabyte",
+      "expect": {
+        "reason": "rule_output_invalid"
+      },
+      "function": "f",
+      "id": "limit.output_bytes.exceed",
+      "limit": "output_bytes",
+      "note": "a megabyte reply is invalid",
+      "params": {},
+      "text": "x"
+    },
+    {
+      "doc": "return_zero",
+      "expect": {
+        "count": 0
+      },
+      "function": "f",
+      "id": "limit.wasm_stack_bytes.pass",
+      "limit": "wasm_stack_bytes",
+      "note": "no recursion",
+      "params": {},
+      "text": "x"
+    },
+    {
+      "doc": "recurse",
+      "expect": {
+        "reason": "rule_resource_limit"
+      },
+      "function": "f",
+      "id": "limit.wasm_stack_bytes.exceed",
+      "limit": "wasm_stack_bytes",
+      "note": "deep recursion exhausts the stack",
+      "params": {},
+      "text": "x"
+    },
+    {
+      "doc": "count_ascii_digits",
+      "expect": {
+        "count": 64
+      },
+      "function": "f",
+      "id": "limit.input_code_points.pass",
+      "limit": "input_code_points",
+      "note": "a short text is within the input limit",
+      "params": {},
+      "text": "1111111111111111111111111111111111111111111111111111111111111111"
+    },
+    {
+      "doc": "count_ascii_digits",
+      "expect": {
+        "reason": "rule_input_too_large"
+      },
+      "function": "f",
+      "id": "limit.input_code_points.exceed",
+      "limit": "input_code_points",
+      "note": "the runner refuses a text longer than input_code_points (host set by the runner test)",
+      "params": {},
+      "text": "OVER_LIMIT"
+    },
+    {
+      "doc": "loop_forever",
+      "expect": {
+        "reason": "rule_timeout"
+      },
+      "function": "f",
+      "id": "limit.wall_ms.timeout",
+      "limit": "wall_ms",
+      "note": "the wall-time backstop ends a stuck call",
+      "params": {},
+      "text": "x"
+    },
+    {
+      "doc": "edge_call_fuel",
+      "expect": {
+        "count": 1
+      },
+      "function": "f",
+      "id": "limit.call_fuel.edge_pass",
+      "limit": "call_fuel",
+      "note": "Measured 2026-10-24 (Review R1) on the published snapshot at the floor: 2,147,483,333 call fuel, 315 under the floor",
+      "params": {
+        "n": 3125997
+      },
+      "text": "x"
+    },
+    {
+      "doc": "edge_call_fuel",
+      "expect": {
+        "reason": "rule_resource_limit"
+      },
+      "function": "f",
+      "id": "limit.call_fuel.edge_exceed",
+      "limit": "call_fuel",
+      "note": "Measured 2026-10-24 (Review R1) on the published snapshot at the floor: one iteration past limit.call_fuel.edge_pass",
+      "params": {
+        "n": 3125998
+      },
+      "text": "x"
+    },
+    {
+      "doc": "edge_load_pass",
+      "expect": {
+        "count": 1
+      },
+      "function": "f",
+      "id": "limit.load_fuel.edge_pass",
+      "limit": "load_fuel",
+      "note": "Measured 2026-10-24 (Review R1) on the published snapshot at the floor: a module-level loop of 17,984 spends 33,553,868 load fuel, 564 under the floor",
+      "params": {},
+      "text": "x"
+    },
+    {
+      "doc": "edge_load_exceed",
+      "expect": {
+        "reason": "rule_resource_limit"
+      },
+      "function": "f",
+      "id": "limit.load_fuel.edge_exceed",
+      "limit": "load_fuel",
+      "note": "Measured 2026-10-24 (Review R1) on the published snapshot at the floor: one module-level iteration more than limit.load_fuel.edge_pass exhausts load_fuel",
+      "params": {},
+      "text": "x"
+    },
+    {
+      "doc": "edge_memory",
+      "expect": {
+        "count": 1
+      },
+      "function": "f",
+      "id": "limit.memory_bytes.edge_pass",
+      "limit": "memory_bytes",
+      "note": "Measured 2026-10-24 (Review R1) on the published snapshot at the floor: the largest bytearray that fits under memory_bytes",
+      "params": {
+        "n": 37279515
+      },
+      "text": "x"
+    },
+    {
+      "doc": "edge_memory",
+      "expect": {
+        "reason": "rule_resource_limit"
+      },
+      "function": "f",
+      "id": "limit.memory_bytes.edge_exceed",
+      "limit": "memory_bytes",
+      "note": "Measured 2026-10-24 (Review R1) on the published snapshot at the floor: one byte more than limit.memory_bytes.edge_pass does not fit",
+      "params": {
+        "n": 37279516
+      },
+      "text": "x"
+    }
+  ]
+}

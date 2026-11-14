@@ -1,0 +1,105 @@
+{
+  "body": {
+    "choices": [
+      {
+        "finish_reason": "stop",
+        "index": 0,
+        "message": {
+          "content": "w1",
+          "reasoning_content": null,
+          "role": "assistant"
+        }
+      }
+    ],
+    "created": "<created>",
+    "id": "<completion_id>",
+    "model": "tiny",
+    "object": "chat.completion",
+    "system_fingerprint": "millm:tiny@abc123:float32/FP16:transformers",
+    "usage": {
+      "completion_tokens": 1,
+      "prompt_tokens": 6,
+      "total_tokens": 7
+    }
+  },
+  "event_rows": [
+    {
+      "batch_id": null,
+      "batch_line": null,
+      "context_text": null,
+      "context_token_ids": null,
+      "created_at": "<created_at>",
+      "id": "<row_id>",
+      "n_scored_tokens": 0,
+      "not_scored_reason": "continuous_batching",
+      "origin": "live",
+      "probe_id": "<probe:probe-alpha>",
+      "provisional": false,
+      "request_id": "<completion_id>",
+      "rung": 2,
+      "score": null,
+      "scored": false,
+      "served_model": "tiny",
+      "session_id": "<session>",
+      "summary": "not scored: continuous_batching",
+      "threshold": 0.0,
+      "threshold_revision": 1,
+      "top_positions": [],
+      "turn_index": 1,
+      "verdict": null,
+      "window": "all"
+    }
+  ],
+  "events_list": [
+    {
+      "behaviour": {
+        "key": "b-alpha",
+        "name": "b alpha",
+        "version": null
+      },
+      "created_at": "<created_at>",
+      "id": "<row_id>",
+      "n_scored_tokens": 0,
+      "not_scored_reason": "continuous_batching",
+      "probe_id": "<probe:probe-alpha>",
+      "provisional": false,
+      "request_id": "<completion_id>",
+      "rung": 2,
+      "score": null,
+      "scored": false,
+      "served_model": "tiny",
+      "session_id": "<session>",
+      "summary": "not scored: continuous_batching",
+      "threshold": 0.0,
+      "threshold_revision": 1,
+      "top_positions": [],
+      "turn_index": 1,
+      "verdict": null,
+      "window": "all"
+    }
+  ],
+  "header": "\"probe-alpha\";not-scored;reason=\"continuous_batching\";rung=2;window=all",
+  "socket": [
+    {
+      "created_at": "<created_at>",
+      "id": "<row_id>",
+      "n_scored_tokens": 0,
+      "not_scored_reason": "continuous_batching",
+      "probe_id": "<probe:probe-alpha>",
+      "provisional": false,
+      "request_id": "<completion_id>",
+      "rung": 2,
+      "score": null,
+      "scored": false,
+      "served_model": "tiny",
+      "session_id": "<session>",
+      "summary": "not scored: continuous_batching",
+      "threshold": 0.0,
+      "threshold_revision": 1,
+      "top_positions": [],
+      "turn_index": 1,
+      "verdict": null,
+      "window": "all"
+    }
+  ]
+}

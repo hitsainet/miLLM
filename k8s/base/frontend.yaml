@@ -1,0 +1,35 @@
+# miServer Admin UI (nginx-served static build).
+# Image tag/digest managed by ArgoCD Image Updater — do not hand-edit.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: miserver-frontend
+  namespace: miserver
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: miserver-frontend
+  template:
+    metadata:
+      labels:
+        app: miserver-frontend
+    spec:
+      containers:
+        - name: frontend
+          image: hitsai/miserver-admin-ui:latest
+          imagePullPolicy: Always
+          ports:
+            - containerPort: 80
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: miserver-frontend
+  namespace: miserver
+spec:
+  selector:
+    app: miserver-frontend
+  ports:
+    - port: 80
+      targetPort: 80

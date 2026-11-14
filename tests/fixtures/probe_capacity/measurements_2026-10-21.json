@@ -1,0 +1,29 @@
+{
+  "source": "miLLM 0xcc/reviews/probe_scaling_2026-10-21.md (RTX 3090 GPU-247aa582-0d1b-e161-8156-983ed1fefc57), as seeded by migration 031; production measurement ids 5 and 6",
+  "measurements": [
+    {
+      "id": 5,
+      "repo_id": "LiquidAI/LFM2.5-1.2B-Instruct",
+      "quantization": "FP16",
+      "device": "cuda:GPU-247aa582-0d1b-e161-8156-983ed1fefc57",
+      "decode_ms_per_token": 6.69,
+      "prefill_ms_per_1k": null,
+      "dense": {"decode_own_ms": 0.0253, "decode_fixed_ms": 0.0496,
+                "prefill_own_ms_per_1k": 0.0569, "prefill_fixed_ms_per_1k": 0.0411},
+      "lines": null,
+      "measured_at": "2026-10-21T00:00:00+00:00"
+    },
+    {
+      "id": 6,
+      "repo_id": "meta-llama/Llama-3.1-8B-Instruct",
+      "quantization": "FP16",
+      "device": "cuda:GPU-247aa582-0d1b-e161-8156-983ed1fefc57",
+      "decode_ms_per_token": 22.68,
+      "prefill_ms_per_1k": null,
+      "dense": {"decode_own_ms": 0.0236, "decode_fixed_ms": 0.0757,
+                "prefill_own_ms_per_1k": 0.1063, "prefill_fixed_ms_per_1k": 0.0538},
+      "lines": null,
+      "measured_at": "2026-10-21T00:00:00+00:00"
+    }
+  ]
+}

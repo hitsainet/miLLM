@@ -1,0 +1,70 @@
+name: Frontend CI
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'admin-ui/**'
+      # Repository files the admin UI tests read outside admin-ui/ (derived and pinned by
+      # tests/unit/deploy/test_frontend_ci_covers_repo_reads.py; rev2 review of 040 P0).
+      - 'docs/legacy-identifiers*.md'
+      - 'docs/schemas/probe-result-v1.json'
+      - 'manual/docs/**'
+      - 'manual/docusaurus.config.ts'
+      - 'tests/fixtures/contracts/**'
+      - '.github/scripts/check_vitest_exercises.py'
+      - '.github/workflows/frontend-ci.yml'
+  # Dispatch: the recovery path when a push's run is lost. On 2026-11-11 GitHub's Actions incident left
+  # ede93a01's run queued with no jobs, and GitHub refused to re-run or cancel it. An empty commit made no
+  # run (the paths filter above), so the private-CI gate had no passing run to accept. A run dispatched on
+  # main is a run for that commit, and the gate accepts it.
+  workflow_dispatch: {}
+  pull_request:
+    branches: [main]
+    paths:
+      - 'admin-ui/**'
+      - 'docs/legacy-identifiers*.md'
+      - 'docs/schemas/probe-result-v1.json'
+      - 'manual/docs/**'
+      - 'manual/docusaurus.config.ts'
+      - 'tests/fixtures/contracts/**'
+      - '.github/scripts/check_vitest_exercises.py'
+
+permissions:
+  contents: read
+
+jobs:
+  ci:
+    runs-on: ubuntu-latest
+    env:
+      FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '26'
+          cache: 'npm'
+          cache-dependency-path: admin-ui/package-lock.json
+
+      - name: Install dependencies
+        working-directory: admin-ui
+        run: npm ci
+
+      - name: Type check
+        working-directory: admin-ui
+        run: npm run typecheck
+
+      - name: Build
+        working-directory: admin-ui
+        run: npm run build
+
+      - name: Test
+        working-directory: admin-ui
+        # The JSON report is read by the next step (rev2 review of 040 P0).
+        run: npx vitest run --reporter=default --reporter=json --outputFile.json=vitest-report.json
+
+      - name: Require every vitest exercise of the legacy-identifier export to have passed
+        run: python3 .github/scripts/check_vitest_exercises.py admin-ui/vitest-report.json docs

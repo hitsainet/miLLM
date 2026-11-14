@@ -1,0 +1,5 @@
+import logging
+
+from oldpkg.core import config
+
+logger = logging.getLogger("oldpkg.rule_runner")

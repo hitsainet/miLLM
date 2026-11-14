@@ -1,0 +1,7 @@
+Fixture tree for tests/unit/scripts/test_p8_rename_package.py (041 P12; deleted with the tool in F1).
+
+The tree is a miniature repository AFTER `git mv oldpkg newpkg`: the package already sits in newpkg/,
+and every other file still names oldpkg. The test copies it to a temporary directory, renames each
+`*.py_` file to `*.py` (so nothing here is collected, imported or scanned as Python by this repository),
+commits it to a fresh git repository and runs scripts/p8_rename_package.py --old oldpkg --new newpkg.
+A synthetic name is used so the fixture adds no hit to any census record of the real package.

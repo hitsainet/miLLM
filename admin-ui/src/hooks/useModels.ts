@@ -1,0 +1,173 @@
+import { useState } from 'react';
+import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
+import { modelApi } from '@/services/api';
+import { useServerStore } from '@/stores/serverStore';
+import { useToast } from './useToast';
+import type { ModelDownloadRequest, ModelInfo, ModelPreviewResponse } from '@/types';
+
+/**
+ * How often the model list refetches: every 2 s while a download or load runs (progress), every
+ * 10 s while any model is leased (Feature 29, FR-29.5.4 — an expired or released lease
+ * disappears without a reload), otherwise not at all.
+ */
+export function modelsRefetchInterval(models: ModelInfo[] | undefined): number | false {
+  if (models?.some((m) => m.status === 'downloading' || m.status === 'loading')) return 2000;
+  if (models?.some((m) => m.lease)) return 10_000;
+  return false;
+}
+
+export function useModels() {
+  const queryClient = useQueryClient();
+  const toast = useToast();
+  const { setModels, setLoadedModel, setModelLoading } = useServerStore();
+
+  const modelsQuery = useQuery({
+    queryKey: ['models'],
+    queryFn: async () => {
+      const models = await modelApi.list();
+      setModels(models);
+      const loaded = models.find((m) => m.status === 'loaded');
+      // ⚠ `?? null`, NOT `if (loaded)`. This used to only ever SET, so the store kept showing a
+      // model the server had already unloaded until a socket event happened to arrive. A read
+      // that can only add is not a reconciliation — this estate has shipped that exact shape
+      // before, where a stale in-memory flag outlived restarts and hid live models for months.
+      setLoadedModel(loaded ?? null);
+      return models;
+    },
+    // Prevent unnecessary refetches that could cause state issues
+    staleTime: 5000,
+    // 2 s during a download or load, 10 s while a model is leased (modelsRefetchInterval)
+    refetchInterval: (query) => modelsRefetchInterval(query.state.data),
+  });
+
+  const downloadMutation = useMutation({
+    mutationFn: (req: ModelDownloadRequest) => modelApi.download(req),
+    onSuccess: (model) => {
+      queryClient.invalidateQueries({ queryKey: ['models'] });
+      toast.info(`Downloading ${model.name}...`);
+    },
+    onError: (error: Error) => {
+      toast.error(`Download failed: ${error.message}`);
+    },
+  });
+
+  const loadMutation = useMutation({
+    mutationFn: (id: number) => {
+      setModelLoading(true);
+      // The card chosen in the GPU selector at the moment of loading. Read
+      // from the store, not captured at render, so a change just before the
+      // click is the one sent.
+      return modelApi.load(id, useServerStore.getState().loadGpu ?? 'auto');
+    },
+    onSuccess: (model) => {
+      setLoadedModel(model);
+      setModelLoading(false);
+      queryClient.invalidateQueries({ queryKey: ['models'] });
+      toast.success(`Model "${model.name}" loaded`);
+    },
+    onError: (error: Error) => {
+      setModelLoading(false);
+      toast.error(`Load failed: ${error.message}`);
+    },
+  });
+
+  const unloadMutation = useMutation({
+    mutationFn: (id: number) => modelApi.unload(id),
+    onSuccess: () => {
+      setLoadedModel(null);
+      queryClient.invalidateQueries({ queryKey: ['models'] });
+      toast.info('Model unloaded');
+    },
+    onError: (error: Error) => {
+      toast.error(`Unload failed: ${error.message}`);
+    },
+  });
+
+  const deleteMutation = useMutation({
+    mutationFn: (id: number) => modelApi.delete(id),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['models'] });
+      toast.success('Model deleted');
+    },
+    onError: (error: Error) => {
+      toast.error(`Delete failed: ${error.message}`);
+    },
+  });
+
+  const cancelMutation = useMutation({
+    mutationFn: (id: number) => modelApi.cancelDownload(id),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['models'] });
+      toast.info('Download cancelled');
+    },
+    onError: (error: Error) => {
+      toast.error(`Cancel failed: ${error.message}`);
+    },
+  });
+
+  const lockMutation = useMutation({
+    mutationFn: (id: number) => modelApi.lock(id),
+    onSuccess: (model) => {
+      queryClient.invalidateQueries({ queryKey: ['models'] });
+      toast.success(`Model "${model.name}" locked for steering`);
+    },
+    onError: (error: Error) => {
+      toast.error(`Lock failed: ${error.message}`);
+    },
+  });
+
+  const unlockMutation = useMutation({
+    mutationFn: (id: number) => modelApi.unlock(id),
+    onSuccess: (model) => {
+      queryClient.invalidateQueries({ queryKey: ['models'] });
+      toast.info(`Model "${model.name}" unlocked`);
+    },
+    onError: (error: Error) => {
+      toast.error(`Unlock failed: ${error.message}`);
+    },
+  });
+
+  const [previewData, setPreviewData] = useState<ModelPreviewResponse | null>(null);
+
+  const previewMutation = useMutation({
+    mutationFn: ({ repoId, hfToken }: { repoId: string; hfToken?: string }) =>
+      modelApi.preview(repoId, hfToken),
+    onSuccess: (data) => {
+      setPreviewData(data);
+    },
+    onError: (error: Error) => {
+      toast.error(`Preview failed: ${error.message}`);
+      setPreviewData(null);
+    },
+  });
+
+  return {
+    models: modelsQuery.data ?? [],
+    isLoading: modelsQuery.isLoading,
+    error: modelsQuery.error?.message,
+    refetch: modelsQuery.refetch,
+    download: downloadMutation.mutate,
+    downloadModel: downloadMutation.mutateAsync,
+    load: loadMutation.mutate,
+    loadModel: loadMutation.mutateAsync,
+    unload: unloadMutation.mutate,
+    unloadModel: unloadMutation.mutateAsync,
+    delete: deleteMutation.mutate,
+    cancel: cancelMutation.mutate,
+    isDownloading: downloadMutation.isPending,
+    isLoadingModel: loadMutation.isPending,
+    isUnloading: unloadMutation.isPending,
+    isDeleting: deleteMutation.isPending,
+    previewModel: (repoId: string, hfToken?: string) =>
+      previewMutation.mutateAsync({ repoId, hfToken }),
+    isPreviewingModel: previewMutation.isPending,
+    previewData,
+    clearPreview: () => setPreviewData(null),
+    lockModel: lockMutation.mutate,
+    unlockModel: unlockMutation.mutate,
+    isLocking: lockMutation.isPending,
+    isUnlockingModel: unlockMutation.isPending,
+  };
+}
+
+export default useModels;

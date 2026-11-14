@@ -1,0 +1,941 @@
+{
+ "version": 1,
+ "about": "G38 (operator, 2026-11-08): pooling skips the chat template's FIXED PREFIX, pinned for BOTH repos. The prefix is the common prefix of the SERVED ids of two content-free renders - [{role: user, content: x}] and [{role: user, content: y}], add_generation_prompt false, each tokenized by the start-of-text rule (prompt_encoding.rendered_chat_ids) - so it holds the start token, the template's preamble and the first user header, never content; it is empty when the template refuses either render or the two renders are identical. P for a row is the length of the row's served ids' common prefix with it (a row with its own system prompt skips only what it shares, G38-3), measured against the cached prefix and re-measured once against a freshly rendered one when the row does not begin with all of it (a date-stamped preamble). With aggregation.skip_template_prefix true, positions [0, P) are left out of the windows that contain them, `all`, `prompt` and `last_user` (whose span becomes [max(start, P), end)); `response` is unchanged. miWorkbench computes it in probe_monitor_render (template_prefix_ids, RenderedExample.scored_mask) and miServer in probe_turns (template_prefix_ids, template_prefix_length) and probe_scope.scored_mask; each repo runs its own code over these cases and asserts P and every window's mask, and asserts this file is byte-identical to the other repo's copy. Masks are strings over the served ids, '1' = scored. A row whose role mask is unreliable scores no last_user window.",
+ "structural": {
+  "about": "Tokenizer-free: each repo builds a WordLevel tokenizer over `vocab` with a WhitespaceSplit pre-tokenizer, unk_token [UNK], bos_token <s> and - when tokenizer_adds_bos - a TemplateProcessing post-processor single='<s> $A'. The chat template is templates[case.template]. A case may carry its own `vocab`. A case carrying `stale_cached_prefix` (token strings) has that prefix PLANTED in the repo's prefix cache before the row is measured - the state a date-stamped (strftime_now) preamble leaves after midnight, made deterministic. These ALWAYS run.",
+  "vocab": [
+   "<s>",
+   "<|user|>",
+   "<|assistant|>",
+   "<|system|>",
+   "<|end|>",
+   "cutting",
+   "knowledge",
+   "date",
+   "be",
+   "brief",
+   "a",
+   "b",
+   "x",
+   "y",
+   "first",
+   "question",
+   "an",
+   "answer",
+   "virus",
+   "spreads",
+   "fast",
+   "[UNK]"
+  ],
+  "templates": {
+   "preamble": "<s> {% if messages[0]['role'] != 'system' %}<|system|> cutting knowledge date <|end|> {% endif %}{% for m in messages %}<|{{ m['role'] }}|> {{ m['content'] }} <|end|> {% endfor %}{% if add_generation_prompt %}<|assistant|> {% endif %}",
+   "bos": "<s> {% for m in messages %}<|{{ m['role'] }}|> {{ m['content'] }} <|end|> {% endfor %}{% if add_generation_prompt %}<|assistant|> {% endif %}",
+   "no_bos": "{% for m in messages %}<|{{ m['role'] }}|> {{ m['content'] }} <|end|> {% endfor %}{% if add_generation_prompt %}<|assistant|> {% endif %}",
+   "refuses_a_lone_user_turn": "<s> {% if messages[0]['role'] != 'system' %}{{ raise_exception('a system prompt is required') }}{% endif %}{% for m in messages %}<|{{ m['role'] }}|> {{ m['content'] }} <|end|> {% endfor %}{% if add_generation_prompt %}<|assistant|> {% endif %}"
+  },
+  "cases": [
+   {
+    "name": "single user turn behind an injected preamble: start token, preamble and first user header are skipped",
+    "template": "preamble",
+    "tokenizer_adds_bos": false,
+    "messages": [
+     {
+      "role": "user",
+      "content": "virus spreads fast"
+     }
+    ],
+    "expected": {
+     "tokens": [
+      "<s>",
+      "<|system|>",
+      "cutting",
+      "knowledge",
+      "date",
+      "<|end|>",
+      "<|user|>",
+      "virus",
+      "spreads",
+      "fast",
+      "<|end|>",
+      "<|assistant|>"
+     ],
+     "template_prefix": 7,
+     "prompt_tokens": 12,
+     "masks": {
+      "all": "000000011111",
+      "prompt": "000000011111",
+      "response": "000000000000",
+      "last_user": "000000011110"
+     }
+    }
+   },
+   {
+    "name": "multi-turn: only the first turn's prefix is skipped; later headers vary with their context and are scored",
+    "template": "preamble",
+    "tokenizer_adds_bos": false,
+    "messages": [
+     {
+      "role": "user",
+      "content": "first question"
+     },
+     {
+      "role": "assistant",
+      "content": "an answer"
+     },
+     {
+      "role": "user",
+      "content": "virus spreads fast"
+     }
+    ],
+    "expected": {
+     "tokens": [
+      "<s>",
+      "<|system|>",
+      "cutting",
+      "knowledge",
+      "date",
+      "<|end|>",
+      "<|user|>",
+      "first",
+      "question",
+      "<|end|>",
+      "<|assistant|>",
+      "an",
+      "answer",
+      "<|end|>",
+      "<|user|>",
+      "virus",
+      "spreads",
+      "fast",
+      "<|end|>",
+      "<|assistant|>"
+     ],
+     "template_prefix": 7,
+     "prompt_tokens": 20,
+     "masks": {
+      "all": "00000001111111111111",
+      "prompt": "00000001111111111111",
+      "response": "00000000000000000000",
+      "last_user": "00000000000000111110"
+     }
+    }
+   },
+   {
+    "name": "a system prompt of its own: only the part it shares with the default prefix is skipped (G38-3)",
+    "template": "preamble",
+    "tokenizer_adds_bos": false,
+    "messages": [
+     {
+      "role": "system",
+      "content": "be brief"
+     },
+     {
+      "role": "user",
+      "content": "virus spreads fast"
+     }
+    ],
+    "expected": {
+     "tokens": [
+      "<s>",
+      "<|system|>",
+      "be",
+      "brief",
+      "<|end|>",
+      "<|user|>",
+      "virus",
+      "spreads",
+      "fast",
+      "<|end|>",
+      "<|assistant|>"
+     ],
+     "template_prefix": 2,
+     "prompt_tokens": 11,
+     "masks": {
+      "all": "00111111111",
+      "prompt": "00111111111",
+      "response": "00000000000",
+      "last_user": "00000111110"
+     }
+    }
+   },
+   {
+    "name": "assistant-ended: the prompt window is [P, prompt_tokens), the response window is unchanged",
+    "template": "preamble",
+    "tokenizer_adds_bos": false,
+    "messages": [
+     {
+      "role": "user",
+      "content": "virus spreads fast"
+     },
+     {
+      "role": "assistant",
+      "content": "an answer"
+     }
+    ],
+    "expected": {
+     "tokens": [
+      "<s>",
+      "<|system|>",
+      "cutting",
+      "knowledge",
+      "date",
+      "<|end|>",
+      "<|user|>",
+      "virus",
+      "spreads",
+      "fast",
+      "<|end|>",
+      "<|assistant|>",
+      "an",
+      "answer",
+      "<|end|>"
+     ],
+     "template_prefix": 7,
+     "prompt_tokens": 12,
+     "masks": {
+      "all": "000000011111111",
+      "prompt": "000000011111000",
+      "response": "000000000000111",
+      "last_user": "000000011110000"
+     }
+    }
+   },
+   {
+    "name": "preamble text typed into the content is content: the prefix stops at the first user header",
+    "template": "preamble",
+    "tokenizer_adds_bos": false,
+    "messages": [
+     {
+      "role": "user",
+      "content": "<|system|> cutting knowledge date"
+     }
+    ],
+    "expected": {
+     "tokens": [
+      "<s>",
+      "<|system|>",
+      "cutting",
+      "knowledge",
+      "date",
+      "<|end|>",
+      "<|user|>",
+      "<|system|>",
+      "cutting",
+      "knowledge",
+      "date",
+      "<|end|>",
+      "<|assistant|>"
+     ],
+     "template_prefix": 7,
+     "prompt_tokens": 13,
+     "masks": {
+      "all": "0000000111111",
+      "prompt": "0000000111111",
+      "response": "0000000000000",
+      "last_user": "0000000111110"
+     }
+    }
+   },
+   {
+    "name": "the template writes the BOS and the tokenizer would add one too: still one, and it is skipped",
+    "template": "preamble",
+    "tokenizer_adds_bos": true,
+    "messages": [
+     {
+      "role": "user",
+      "content": "virus spreads fast"
+     }
+    ],
+    "expected": {
+     "tokens": [
+      "<s>",
+      "<|system|>",
+      "cutting",
+      "knowledge",
+      "date",
+      "<|end|>",
+      "<|user|>",
+      "virus",
+      "spreads",
+      "fast",
+      "<|end|>",
+      "<|assistant|>"
+     ],
+     "template_prefix": 7,
+     "prompt_tokens": 12,
+     "masks": {
+      "all": "000000011111",
+      "prompt": "000000011111",
+      "response": "000000000000",
+      "last_user": "000000011110"
+     }
+    }
+   },
+   {
+    "name": "no preamble: the start token and the user header",
+    "template": "bos",
+    "tokenizer_adds_bos": false,
+    "messages": [
+     {
+      "role": "user",
+      "content": "virus spreads fast"
+     }
+    ],
+    "expected": {
+     "tokens": [
+      "<s>",
+      "<|user|>",
+      "virus",
+      "spreads",
+      "fast",
+      "<|end|>",
+      "<|assistant|>"
+     ],
+     "template_prefix": 2,
+     "prompt_tokens": 7,
+     "masks": {
+      "all": "0011111",
+      "prompt": "0011111",
+      "response": "0000000",
+      "last_user": "0011110"
+     }
+    }
+   },
+   {
+    "name": "a template with no BOS and a tokenizer that adds one (F1 form): the added BOS is part of the prefix",
+    "template": "no_bos",
+    "tokenizer_adds_bos": true,
+    "messages": [
+     {
+      "role": "user",
+      "content": "virus spreads fast"
+     }
+    ],
+    "expected": {
+     "tokens": [
+      "<s>",
+      "<|user|>",
+      "virus",
+      "spreads",
+      "fast",
+      "<|end|>",
+      "<|assistant|>"
+     ],
+     "template_prefix": 2,
+     "prompt_tokens": 7,
+     "masks": {
+      "all": "0011111",
+      "prompt": "0011111",
+      "response": "0000000",
+      "last_user": "0011110"
+     }
+    }
+   },
+   {
+    "name": "F1 form with a system prompt: only the shared start token is skipped",
+    "template": "no_bos",
+    "tokenizer_adds_bos": true,
+    "messages": [
+     {
+      "role": "system",
+      "content": "be brief"
+     },
+     {
+      "role": "user",
+      "content": "virus spreads fast"
+     }
+    ],
+    "expected": {
+     "tokens": [
+      "<s>",
+      "<|system|>",
+      "be",
+      "brief",
+      "<|end|>",
+      "<|user|>",
+      "virus",
+      "spreads",
+      "fast",
+      "<|end|>",
+      "<|assistant|>"
+     ],
+     "template_prefix": 1,
+     "prompt_tokens": 11,
+     "masks": {
+      "all": "01111111111",
+      "prompt": "01111111111",
+      "response": "00000000000",
+      "last_user": "00000111110"
+     }
+    }
+   },
+   {
+    "name": "no BOS anywhere: the prefix is the user header",
+    "template": "no_bos",
+    "tokenizer_adds_bos": false,
+    "messages": [
+     {
+      "role": "user",
+      "content": "virus spreads fast"
+     }
+    ],
+    "expected": {
+     "tokens": [
+      "<|user|>",
+      "virus",
+      "spreads",
+      "fast",
+      "<|end|>",
+      "<|assistant|>"
+     ],
+     "template_prefix": 1,
+     "prompt_tokens": 6,
+     "masks": {
+      "all": "011111",
+      "prompt": "011111",
+      "response": "000000",
+      "last_user": "011110"
+     }
+    }
+   },
+   {
+    "name": "no BOS anywhere and a system prompt: nothing is shared, so nothing is skipped (P = 0)",
+    "template": "no_bos",
+    "tokenizer_adds_bos": false,
+    "messages": [
+     {
+      "role": "system",
+      "content": "be brief"
+     },
+     {
+      "role": "user",
+      "content": "virus spreads fast"
+     }
+    ],
+    "expected": {
+     "tokens": [
+      "<|system|>",
+      "be",
+      "brief",
+      "<|end|>",
+      "<|user|>",
+      "virus",
+      "spreads",
+      "fast",
+      "<|end|>",
+      "<|assistant|>"
+     ],
+     "template_prefix": 0,
+     "prompt_tokens": 10,
+     "masks": {
+      "all": "1111111111",
+      "prompt": "1111111111",
+      "response": "0000000000",
+      "last_user": "0000111110"
+     }
+    }
+   },
+   {
+    "name": "a template that refuses a lone user turn has no content-free render, so no prefix is known (P = 0)",
+    "template": "refuses_a_lone_user_turn",
+    "tokenizer_adds_bos": false,
+    "messages": [
+     {
+      "role": "system",
+      "content": "be brief"
+     },
+     {
+      "role": "user",
+      "content": "virus spreads fast"
+     }
+    ],
+    "expected": {
+     "tokens": [
+      "<s>",
+      "<|system|>",
+      "be",
+      "brief",
+      "<|end|>",
+      "<|user|>",
+      "virus",
+      "spreads",
+      "fast",
+      "<|end|>",
+      "<|assistant|>"
+     ],
+     "template_prefix": 0,
+     "prompt_tokens": 11,
+     "masks": {
+      "all": "11111111111",
+      "prompt": "11111111111",
+      "response": "00000000000",
+      "last_user": "00000111110"
+     }
+    }
+   },
+   {
+    "name": "a vocabulary that cannot tell the content-free probes apart (x and y both [UNK]) renders them identically; no prefix is known and nothing is skipped (P = 0)",
+    "template": "preamble",
+    "tokenizer_adds_bos": false,
+    "vocab": [
+     "<s>",
+     "<|user|>",
+     "<|assistant|>",
+     "<|system|>",
+     "<|end|>",
+     "cutting",
+     "knowledge",
+     "date",
+     "be",
+     "brief",
+     "a",
+     "b",
+     "first",
+     "question",
+     "an",
+     "answer",
+     "virus",
+     "spreads",
+     "fast",
+     "[UNK]"
+    ],
+    "messages": [
+     {
+      "role": "user",
+      "content": "virus spreads fast"
+     }
+    ],
+    "expected": {
+     "tokens": [
+      "<s>",
+      "<|system|>",
+      "cutting",
+      "knowledge",
+      "date",
+      "<|end|>",
+      "<|user|>",
+      "virus",
+      "spreads",
+      "fast",
+      "<|end|>",
+      "<|assistant|>"
+     ],
+     "template_prefix": 0,
+     "prompt_tokens": 12,
+     "masks": {
+      "all": "111111111111",
+      "prompt": "111111111111",
+      "response": "000000000000",
+      "last_user": "000000000000"
+     }
+    }
+   },
+   {
+    "name": "a date-stamped preamble: the cache holds YESTERDAY's prefix (stale_cached_prefix), so the row does not begin with it; the prefix is re-rendered once and the whole of today's is skipped",
+    "template": "preamble",
+    "tokenizer_adds_bos": false,
+    "stale_cached_prefix": [
+     "<s>",
+     "<|system|>",
+     "cutting",
+     "knowledge",
+     "brief",
+     "<|end|>",
+     "<|user|>"
+    ],
+    "messages": [
+     {
+      "role": "user",
+      "content": "virus spreads fast"
+     }
+    ],
+    "expected": {
+     "tokens": [
+      "<s>",
+      "<|system|>",
+      "cutting",
+      "knowledge",
+      "date",
+      "<|end|>",
+      "<|user|>",
+      "virus",
+      "spreads",
+      "fast",
+      "<|end|>",
+      "<|assistant|>"
+     ],
+     "template_prefix": 7,
+     "prompt_tokens": 12,
+     "masks": {
+      "all": "000000011111",
+      "prompt": "000000011111",
+      "response": "000000000000",
+      "last_user": "000000011110"
+     }
+    }
+   }
+  ]
+ },
+ "real": {
+  "about": "Named real tokenizers, identified by the sha256 of their chat template (never by name alone). Each repo looks for them in the HuggingFace cache and its real-tokenizer path variable, and SKIPS LOUDLY when one is absent - never passes vacuously. Their masks pin all, prompt and response; the last_user span of real templates is pinned by served-render-cases.json.",
+  "tokenizers": {
+   "TinyLlama/TinyLlama-1.1B-Chat-v1.0": {
+    "chat_template_sha256": "66291cf0045c2425a3a667cf3cbb7af2b11f09e025c02f97245323ab79119362"
+   },
+   "microsoft/Phi-4-mini-instruct": {
+    "chat_template_sha256": "febf589225c9728ab791f52e8897d7607a823d45368f0a4c92fa68997b40cce9"
+   }
+  },
+  "cases": [
+   {
+    "name": "TinyLlama/TinyLlama-1.1B-Chat-v1.0: one user turn",
+    "tokenizer": "TinyLlama/TinyLlama-1.1B-Chat-v1.0",
+    "messages": [
+     {
+      "role": "user",
+      "content": "My brother lost his flat last week and I want to help him."
+     }
+    ],
+    "expected": {
+     "ids": [
+      1,
+      529,
+      29989,
+      1792,
+      29989,
+      29958,
+      13,
+      3421,
+      8099,
+      5714,
+      670,
+      12151,
+      1833,
+      4723,
+      322,
+      306,
+      864,
+      304,
+      1371,
+      1075,
+      29889,
+      2,
+      13,
+      29966,
+      29989,
+      465,
+      22137,
+      29989,
+      29958,
+      13
+     ],
+     "template_prefix": 7,
+     "prompt_tokens": 30,
+     "masks": {
+      "all": "000000011111111111111111111111",
+      "prompt": "000000011111111111111111111111",
+      "response": "000000000000000000000000000000"
+     }
+    }
+   },
+   {
+    "name": "TinyLlama/TinyLlama-1.1B-Chat-v1.0: a system prompt of its own",
+    "tokenizer": "TinyLlama/TinyLlama-1.1B-Chat-v1.0",
+    "messages": [
+     {
+      "role": "system",
+      "content": "You are a careful assistant."
+     },
+     {
+      "role": "user",
+      "content": "What should I cook tonight?"
+     }
+    ],
+    "expected": {
+     "ids": [
+      1,
+      529,
+      29989,
+      5205,
+      29989,
+      29958,
+      13,
+      3492,
+      526,
+      263,
+      16010,
+      20255,
+      29889,
+      2,
+      13,
+      29966,
+      29989,
+      1792,
+      29989,
+      29958,
+      13,
+      5618,
+      881,
+      306,
+      7984,
+      15243,
+      523,
+      29973,
+      2,
+      13,
+      29966,
+      29989,
+      465,
+      22137,
+      29989,
+      29958,
+      13
+     ],
+     "template_prefix": 3,
+     "prompt_tokens": 37,
+     "masks": {
+      "all": "0001111111111111111111111111111111111",
+      "prompt": "0001111111111111111111111111111111111",
+      "response": "0000000000000000000000000000000000000"
+     }
+    }
+   },
+   {
+    "name": "TinyLlama/TinyLlama-1.1B-Chat-v1.0: multi-turn, assistant-ended",
+    "tokenizer": "TinyLlama/TinyLlama-1.1B-Chat-v1.0",
+    "messages": [
+     {
+      "role": "user",
+      "content": "Hi there"
+     },
+     {
+      "role": "assistant",
+      "content": "Hello, how can I help?"
+     },
+     {
+      "role": "user",
+      "content": "Tell me a short joke about trains."
+     },
+     {
+      "role": "assistant",
+      "content": "I cannot do that."
+     }
+    ],
+    "expected": {
+     "ids": [
+      1,
+      529,
+      29989,
+      1792,
+      29989,
+      29958,
+      13,
+      18567,
+      727,
+      2,
+      13,
+      29966,
+      29989,
+      465,
+      22137,
+      29989,
+      29958,
+      13,
+      10994,
+      29892,
+      920,
+      508,
+      306,
+      1371,
+      29973,
+      2,
+      13,
+      29966,
+      29989,
+      1792,
+      29989,
+      29958,
+      13,
+      29911,
+      514,
+      592,
+      263,
+      3273,
+      2958,
+      446,
+      1048,
+      22983,
+      29889,
+      2,
+      13,
+      29966,
+      29989,
+      465,
+      22137,
+      29989,
+      29958,
+      13,
+      29902,
+      2609,
+      437,
+      393,
+      29889,
+      2,
+      13
+     ],
+     "template_prefix": 7,
+     "prompt_tokens": 52,
+     "masks": {
+      "all": "00000001111111111111111111111111111111111111111111111111111",
+      "prompt": "00000001111111111111111111111111111111111111111111110000000",
+      "response": "00000000000000000000000000000000000000000000000000001111111"
+     }
+    }
+   },
+   {
+    "name": "microsoft/Phi-4-mini-instruct: one user turn",
+    "tokenizer": "microsoft/Phi-4-mini-instruct",
+    "messages": [
+     {
+      "role": "user",
+      "content": "My brother lost his flat last week and I want to help him."
+     }
+    ],
+    "expected": {
+     "ids": [
+      200021,
+      5444,
+      16820,
+      8803,
+      1232,
+      12508,
+      2174,
+      2384,
+      326,
+      357,
+      1682,
+      316,
+      1652,
+      2395,
+      13,
+      200020,
+      200019
+     ],
+     "template_prefix": 1,
+     "prompt_tokens": 17,
+     "masks": {
+      "all": "01111111111111111",
+      "prompt": "01111111111111111",
+      "response": "00000000000000000"
+     }
+    }
+   },
+   {
+    "name": "microsoft/Phi-4-mini-instruct: a system prompt of its own",
+    "tokenizer": "microsoft/Phi-4-mini-instruct",
+    "messages": [
+     {
+      "role": "system",
+      "content": "You are a careful assistant."
+     },
+     {
+      "role": "user",
+      "content": "What should I cook tonight?"
+     }
+    ],
+    "expected": {
+     "ids": [
+      200022,
+      3575,
+      553,
+      261,
+      25120,
+      29186,
+      13,
+      200020,
+      200021,
+      4827,
+      1757,
+      357,
+      4947,
+      26098,
+      30,
+      200020,
+      200019
+     ],
+     "template_prefix": 0,
+     "prompt_tokens": 17,
+     "masks": {
+      "all": "11111111111111111",
+      "prompt": "11111111111111111",
+      "response": "00000000000000000"
+     }
+    }
+   },
+   {
+    "name": "microsoft/Phi-4-mini-instruct: multi-turn, assistant-ended",
+    "tokenizer": "microsoft/Phi-4-mini-instruct",
+    "messages": [
+     {
+      "role": "user",
+      "content": "Hi there"
+     },
+     {
+      "role": "assistant",
+      "content": "Hello, how can I help?"
+     },
+     {
+      "role": "user",
+      "content": "Tell me a short joke about trains."
+     },
+     {
+      "role": "assistant",
+      "content": "I cannot do that."
+     }
+    ],
+    "expected": {
+     "ids": [
+      200021,
+      12194,
+      1354,
+      200020,
+      200019,
+      13225,
+      11,
+      1495,
+      665,
+      357,
+      1652,
+      30,
+      200020,
+      200021,
+      60751,
+      668,
+      261,
+      4022,
+      41751,
+      1078,
+      46841,
+      13,
+      200020,
+      200019,
+      40,
+      6284,
+      621,
+      484,
+      13,
+      200020,
+      199999
+     ],
+     "template_prefix": 1,
+     "prompt_tokens": 24,
+     "masks": {
+      "all": "0111111111111111111111111111111",
+      "prompt": "0111111111111111111111110000000",
+      "response": "0000000000000000000000001111111"
+     }
+    }
+   }
+  ]
+ }
+}
